@@ -5072,9 +5072,94 @@ header('Content-Type: application/javascript; charset=utf-8');
         return true;
     }
 
+    function _attachSearchButton(el, searchQueries) {
+        const messageEl = el.closest('.msg-ai');
+        if (messageEl?.querySelector('.ow-search-actions-bar')) return;
+
+        // Guarda real: evita reempacotar o mesmo bloco após novos MutationObserver events
+        if (el.querySelector('.ow-search-actions-bar') || (el.previousElementSibling && el.previousElementSibling.classList.contains('ow-search-actions-bar'))) {
+            return;
+        }
+
+        // Compatibilidade com wrappers já existentes de outras UIs
+        if (el.parentElement?.classList?.contains('ow-code-wrapper') && el.parentElement.querySelector('.ow-search-actions-bar')) {
+            return;
+        }
+
+        const wrapper = document.createElement('div');
+        wrapper.className = el.tagName.toLowerCase() === 'pre' ? 'ow-code-wrapper' : '';
+        if (el.tagName.toLowerCase() !== 'pre') {
+            wrapper.style.cssText = 'display:block; background:#f8f9fa; border:1px solid #e0e0e0; border-radius:8px; margin-top:10px; overflow:hidden;';
+            el.style.fontFamily = 'monospace';
+            el.style.whiteSpace = 'pre-wrap';
+            el.style.padding = '15px';
+            el.style.overflowX = 'auto';
+        }
+
+        el.parentNode.insertBefore(wrapper, el);
+        wrapper.appendChild(el);
+
+        const actionBar = document.createElement('div');
+        actionBar.className = 'ow-search-actions-bar';
+        actionBar.style.cssText = `position:sticky;top:-20px;z-index:10;height:38px;background:#f1f3f4;
+            border-bottom:1px solid #e0e0e0;border-radius:8px 8px 0 0;
+            display:flex;justify-content:flex-end;align-items:center;padding:0 10px;gap:8px;`;
+
+        const execHTML = `<svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor" style="vertical-align:middle"><path d="M8 5v14l11-7z"/></svg> <span style="font-size:12px;font-weight:600;vertical-align:middle">Pesquisar</span>`;
+        const btnExec = document.createElement('button');
+        btnExec.innerHTML = execHTML;
+        btnExec.style.cssText = 'background:rgba(76,175,80,.1);border:1px solid rgba(76,175,80,.4);color:#2e7d32;cursor:pointer;padding:4px 10px;border-radius:4px;display:flex;align-items:center;gap:4px;transition:all .2s;';
+
+        btnExec.onclick = async () => {
+            btnExec.disabled = true;
+            btnExec.innerHTML = `<span style="font-size:12px;color:#ff9800;font-weight:bold">⏳ Pesquisando...</span>`;
+            const _owSend = document.getElementById('ow-send');
+            if (_owSend) { _owSend.disabled = true; _owSend.classList.add('stop-mode'); }
+
+            try {
+                const searchData = await executeWebSearch(searchQueries);
+                const lastUserMsg = [...state.messages].reverse().find(m => m.role === 'user')?.content || '';
+                const contextMsg  = formatSearchResultsForLLM(searchData, lastUserMsg);
+                state.messages.push({ role: 'user', content: contextMsg });
+
+                const uiNew = addAiMarkup();
+                let fullC = '';
+                await apiCallStream(PROXY_URL, 'POST', {
+                    model:    document.getElementById('ow-model-sel')?.value || '',
+                    messages: state.messages,
+                    stream:   true,
+                    chat_id:  Session.chatId  || null,
+                    url:      Session.chatUrl || null
+                }, chunk => {
+                    let c = '';
+                    if (chunk.type === 'markdown' || chunk.type === 'html') { fullC = chunk.content; c = fullC; }
+                    else if (chunk.choices?.[0]?.delta?.content) { c = chunk.choices[0].delta.content; fullC += c; }
+                    else if (chunk.type === 'finish') { const fd = chunk.content||{}; Session.setChat(fd.chat_id, fd.url, null); return; }
+                    if (c) { const mEl = document.getElementById(uiNew.mID); if (mEl) mEl.innerHTML = formatMarkdown(fullC); scroll(); }
+                }, currentAbortController?.signal);
+
+                const mEl = document.getElementById(uiNew.mID);
+                if (mEl) { mEl.classList.remove('cursor-blink'); mEl.innerHTML = formatMarkdown(fullC); }
+                if (fullC) { state.messages.push({ role: 'assistant', content: fullC }); saveLocal(); }
+
+            } catch(e) {
+                console.error('Erro pesquisa manual:', e);
+            }
+
+            btnExec.disabled = false;
+            btnExec.innerHTML = `<span style="font-size:12px;color:#2e7d32;font-weight:bold">✅ Concluído</span>`;
+            setTimeout(() => { btnExec.innerHTML = execHTML; }, 3000);
+            if (_owSend) { _owSend.disabled = false; _owSend.classList.remove('stop-mode'); }
+        };
+
+        actionBar.appendChild(btnExec);
+        wrapper.insertBefore(actionBar, wrapper.firstChild);
+    }
+
     function injectSearchButtons() {
         const container = document.getElementById('ow-messages') || document.body;
         container.querySelectorAll('pre, code, p, div, span').forEach(el => {
+            if (el.closest('.msg-ai')?.querySelector('.ow-search-actions-bar')) return;
             if (el.querySelector('.ow-search-actions-bar')) return;
             const elText = el.textContent || '';
             if (!elText.includes('"search_queries"') && !elText.includes('"pesquisa_query"')) return;
@@ -5097,68 +5182,7 @@ header('Content-Type: application/javascript; charset=utf-8');
 
             const searchQueries = extractSearchFromResponse(el.textContent, false);
             if (!searchQueries || searchQueries.length === 0) return;
-
-            // Wrapper
-            const wrapper = document.createElement('div');
-            wrapper.style.cssText = 'background:#f8f9fa;border:1px solid #e0e0e0;border-radius:8px;margin-top:10px;overflow:hidden;';
-            target.parentNode.insertBefore(wrapper, target);
-            wrapper.appendChild(target);
-
-            const actionBar = document.createElement('div');
-            actionBar.className = 'ow-search-actions-bar';
-            actionBar.style.cssText = `position:sticky;top:-20px;z-index:10;height:38px;background:#f1f3f4;
-                border-bottom:1px solid #e0e0e0;border-radius:8px 8px 0 0;
-                display:flex;justify-content:flex-end;align-items:center;padding:0 10px;gap:8px;`;
-
-            const execHTML = `<svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor" style="vertical-align:middle"><path d="M8 5v14l11-7z"/></svg> <span style="font-size:12px;font-weight:600;vertical-align:middle">Pesquisar</span>`;
-            const btnExec = document.createElement('button');
-            btnExec.innerHTML = execHTML;
-            btnExec.style.cssText = 'background:rgba(76,175,80,.1);border:1px solid rgba(76,175,80,.4);color:#2e7d32;cursor:pointer;padding:4px 10px;border-radius:4px;display:flex;align-items:center;gap:4px;transition:all .2s;';
-
-            btnExec.onclick = async () => {
-                btnExec.disabled = true;
-                btnExec.innerHTML = `<span style="font-size:12px;color:#ff9800;font-weight:bold">⏳ Pesquisando...</span>`;
-                const _owSend = document.getElementById('ow-send');
-                if (_owSend) { _owSend.disabled = true; _owSend.classList.add('stop-mode'); }
-
-                try {
-                    const searchData = await executeWebSearch(searchQueries);
-                    const lastUserMsg = [...state.messages].reverse().find(m => m.role === 'user')?.content || '';
-                    const contextMsg  = formatSearchResultsForLLM(searchData, lastUserMsg);
-                    state.messages.push({ role: 'user', content: contextMsg });
-
-                    const uiNew = addAiMarkup();
-                    let fullC = '';
-                    await apiCallStream(PROXY_URL, 'POST', {
-                        model:    document.getElementById('ow-model-sel')?.value || '',
-                        messages: state.messages,
-                        stream:   true,
-                        chat_id:  Session.chatId  || null,
-                        url:      Session.chatUrl || null
-                    }, chunk => {
-                        let c = '';
-                        if (chunk.type === 'markdown' || chunk.type === 'html') { fullC = chunk.content; c = fullC; }
-                        else if (chunk.choices?.[0]?.delta?.content) { c = chunk.choices[0].delta.content; fullC += c; }
-                        else if (chunk.type === 'finish') { const fd = chunk.content||{}; Session.setChat(fd.chat_id, fd.url, null); return; }
-                        if (c) { const mEl = document.getElementById(uiNew.mID); if (mEl) mEl.innerHTML = formatMarkdown(fullC); scroll(); }
-                    }, currentAbortController?.signal);
-
-                    const mEl = document.getElementById(uiNew.mID);
-                    if (mEl) { mEl.classList.remove('cursor-blink'); mEl.innerHTML = formatMarkdown(fullC); }
-                    if (fullC) { state.messages.push({ role: 'assistant', content: fullC }); saveLocal(); }
-
-                } catch(e) {
-                    console.error('Erro pesquisa manual:', e);
-                }
-
-                btnExec.disabled = false;
-                btnExec.innerHTML = `<span style="font-size:12px;color:#2e7d32;font-weight:bold">✅ Concluído</span>`;
-                setTimeout(() => { btnExec.innerHTML = execHTML; }, 3000);
-                if (_owSend) { _owSend.disabled = false; _owSend.classList.remove('stop-mode'); }
-            };
-
-            actionBar.appendChild(btnExec);
-            wrapper.insertBefore(actionBar, wrapper.firstChild);
+            _attachSearchButton(target, searchQueries);
         });
     }
 
