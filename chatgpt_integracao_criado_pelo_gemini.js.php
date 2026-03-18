@@ -4980,10 +4980,13 @@ header('Content-Type: application/javascript; charset=utf-8');
                     });
                 }
             }
-            context += `---[FIM_TEXTO_COLADO]\n`;
+            if (i < results.length - 1) {
+                context += `---\n\n`;
+            }
         });
 
-        context += `\nCom base nesses resultados, responda à **pergunta**:\n${originalQuestion}`;
+        context += `[FIM_TEXTO_COLADO]\n\n`;
+        context += `Com base nesses resultados, responda à **pergunta**:\n${originalQuestion}`;
         return context;
     }
 
