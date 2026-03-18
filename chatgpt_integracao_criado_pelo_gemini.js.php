@@ -5904,6 +5904,58 @@ header('Content-Type: application/javascript; charset=utf-8');
             return null;
         }
 
+        function extractLoosePairs(rawText) {
+            const compact = sanitize(String(rawText || ''))
+                .replace(/```(?:json)?/gi, '')
+                .replace(/```/g, '')
+                .replace(/\r/g, '');
+
+            const matches = [...compact.matchAll(/{[\s\S]*?"query"\s*:\s*([\s\S]*?)(?:,\s*"reason"\s*:\s*([\s\S]*?))?\s*}/gi)];
+            if (matches.length > 0) {
+                const parsed = matches
+                    .map(([, rawQuery, rawReason]) => ({
+                        query:  decodeLooseJsonString(rawQuery),
+                        reason: decodeLooseJsonString(rawReason || 'Pesquisa solicitada'),
+                    }))
+                    .filter(item => item.query);
+                if (parsed.length > 0) return parsed;
+            }
+
+            const legacy = compact.match(/"pesquisa_query"\s*:\s*([\s\S]*?)(?=,\s*"[a-z_]+\"\s*:|\s*}\s*$)/i);
+            if (legacy?.[1]) {
+                const query = decodeLooseJsonString(legacy[1]);
+                if (query) return [{ query, reason: 'Pesquisa solicitada' }];
+            }
+
+            return null;
+        }
+
+        function extractLoosePairs(rawText) {
+            const compact = sanitize(String(rawText || ''))
+                .replace(/```(?:json)?/gi, '')
+                .replace(/```/g, '')
+                .replace(/\r/g, '');
+
+            const matches = [...compact.matchAll(/{[\s\S]*?"query"\s*:\s*([\s\S]*?)(?:,\s*"reason"\s*:\s*([\s\S]*?))?\s*}/gi)];
+            if (matches.length > 0) {
+                const parsed = matches
+                    .map(([, rawQuery, rawReason]) => ({
+                        query:  decodeLooseJsonString(rawQuery),
+                        reason: decodeLooseJsonString(rawReason || 'Pesquisa solicitada'),
+                    }))
+                    .filter(item => item.query);
+                if (parsed.length > 0) return parsed;
+            }
+
+            const legacy = compact.match(/"pesquisa_query"\s*:\s*([\s\S]*?)(?=,\s*"[a-z_]+\"\s*:|\s*}\s*$)/i);
+            if (legacy?.[1]) {
+                const query = decodeLooseJsonString(legacy[1]);
+                if (query) return [{ query, reason: 'Pesquisa solicitada' }];
+            }
+
+            return null;
+        }
+
         // Regex para ambos os formatos
         const keyPattern = hasSearchQueries ? 'search_queries' : 'pesquisa_query';
 

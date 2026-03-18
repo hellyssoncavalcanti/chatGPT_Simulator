@@ -413,6 +413,30 @@ def garantir_schema_analise_compilada_paciente():
     _COLUNAS_TABELA = None
 
 
+def garantir_schema_analise_compilada_paciente():
+    """
+    Libera a própria chatgpt_atendimentos_analise para armazenar uma síntese
+    longitudinal do paciente usando apenas id_paciente como localizador.
+    """
+    ajustes = [
+        f"ALTER TABLE {TABELA} MODIFY COLUMN id_atendimento INT(10) NULL COMMENT 'FK para clinica_atendimentos.id. NULL = sintese compilada do paciente.'",
+        f"ALTER TABLE {TABELA} MODIFY COLUMN datetime_atendimento_inicio DATETIME NULL COMMENT 'Data/hora de inicio do atendimento clinico. NULL = sintese compilada do paciente.'",
+        f"ALTER TABLE {TABELA} MODIFY COLUMN id_criador VARCHAR(10) NULL COMMENT 'FK para membros.id do profissional criador. NULL = sintese compilada do paciente.'",
+        f"ALTER TABLE {TABELA} ADD INDEX idx_paciente (id_paciente)",
+    ]
+    for sql in ajustes:
+        try:
+            sql_exec(sql)
+        except RuntimeError as e:
+            msg = str(e).lower()
+            if 'duplicate key name' in msg or 'already exists' in msg:
+                continue
+            log.warning(f"⚠️  garantir_schema_analise_compilada_paciente: {e}")
+
+    global _COLUNAS_TABELA
+    _COLUNAS_TABELA = None
+
+
 def garantir_migracoes():
     """
     Aplica migrações de schema em tabelas pré-existentes.
@@ -985,6 +1009,189 @@ def salvar_resultado(idatendimento: int, resultado: dict):
     )
     log.debug(f"[salvar_resultado] {len(sets)} campos → id_atendimento={idatendimento}")
     sql_exec(sql)
+
+
+def _stringify_compact(value) -> str:
+    try:
+        parsed = json.loads(value) if isinstance(value, str) else value
+    except Exception:
+        parsed = value
+    if isinstance(parsed, list):
+        partes = []
+        for item in parsed:
+            if item in (None, "", [], {}):
+                continue
+            partes.append(json.dumps(item, ensure_ascii=False) if isinstance(item, (dict, list)) else str(item))
+        return "; ".join(partes)
+    if isinstance(parsed, dict):
+        return json.dumps(parsed, ensure_ascii=False)
+    return str(parsed or "").strip()
+
+
+def montar_texto_compilado_paciente(id_paciente: str):
+    rows = sql_exec(f"""
+        SELECT
+            id_atendimento,
+            id_paciente,
+            id_criador,
+            datetime_atendimento_inicio,
+            resumo_texto,
+            gravidade_clinica,
+            diagnosticos_citados,
+            pontos_chave,
+            mudancas_relevantes,
+            sinais_nucleares,
+            eventos_comportamentais,
+            terapias_referidas,
+            exames_citados,
+            pendencias_clinicas,
+            condutas_no_prontuario,
+            medicacoes_em_uso,
+            medicacoes_iniciadas,
+            medicacoes_suspensas,
+            condutas_especificas_sugeridas,
+            condutas_gerais_sugeridas,
+            mensagens_acompanhamento
+        FROM {TABELA}
+        WHERE id_paciente = '{esc(id_paciente)}'
+          AND status = 'concluido'
+          AND id_atendimento IS NOT NULL
+        ORDER BY datetime_atendimento_inicio DESC, id_atendimento DESC
+        LIMIT 25
+    """, reason="carregar_analises_paciente_compilado").get("data", [])
+
+    if not rows:
+        return "", None
+
+    blocos = []
+    for idx, row in enumerate(rows, start=1):
+        linhas = [
+            f"ATENDIMENTO #{idx}",
+            f"id_atendimento: {row.get('id_atendimento')}",
+            f"data_atendimento: {row.get('datetime_atendimento_inicio') or 'sem_data'}",
+        ]
+        if row.get("resumo_texto"):
+            linhas.append(f"resumo_texto: {row['resumo_texto']}")
+
+        for campo in [
+            "gravidade_clinica",
+            "diagnosticos_citados",
+            "pontos_chave",
+            "mudancas_relevantes",
+            "sinais_nucleares",
+            "eventos_comportamentais",
+            "terapias_referidas",
+            "exames_citados",
+            "pendencias_clinicas",
+            "condutas_no_prontuario",
+            "medicacoes_em_uso",
+            "medicacoes_iniciadas",
+            "medicacoes_suspensas",
+            "condutas_especificas_sugeridas",
+            "condutas_gerais_sugeridas",
+            "mensagens_acompanhamento",
+        ]:
+            val = _stringify_compact(row.get(campo))
+            if val:
+                linhas.append(f"{campo}: {val}")
+        blocos.append("\n".join(linhas))
+
+    texto = (
+        f"HISTÓRICO LONGITUDINAL COMPILADO DO PACIENTE {id_paciente}\n"
+        "Os blocos abaixo representam análises estruturadas já concluídas deste paciente.\n"
+        "Consolide o histórico completo do paciente, sintetizando padrões persistentes, mudanças relevantes, terapias, medicações, riscos, pendências e condutas, sem inventar dados.\n\n"
+        + "\n\n" + ("\n\n" + ("=" * 70) + "\n\n").join(blocos)
+    )
+    return texto, rows[0]
+
+
+def salvar_resultado_compilado_paciente(id_paciente: str, resultado: dict):
+    existente = sql_exec(f"""
+        SELECT id
+        FROM {TABELA}
+        WHERE id_paciente = '{esc(id_paciente)}'
+          AND id_atendimento IS NULL
+          AND id_criador IS NULL
+        ORDER BY id DESC
+        LIMIT 1
+    """, reason="buscar_registro_compilado_paciente").get("data", [])
+
+    if existente:
+        id_registro = int(existente[0]["id"])
+    else:
+        sql_exec(f"""
+            INSERT INTO {TABELA}
+                (id_atendimento, datetime_atendimento_inicio, datetime_ultima_atualizacao_atendimento,
+                 id_paciente, id_criador, status, erro_msg)
+            VALUES
+                (NULL, NULL, NULL, '{esc(id_paciente)}', NULL, 'processando', NULL)
+        """)
+        criado = sql_exec(f"""
+            SELECT id
+            FROM {TABELA}
+            WHERE id_paciente = '{esc(id_paciente)}'
+              AND id_atendimento IS NULL
+              AND id_criador IS NULL
+            ORDER BY id DESC
+            LIMIT 1
+        """, reason="buscar_registro_compilado_criado").get("data", [])
+        if not criado:
+            raise RuntimeError(f"Falha ao criar registro compilado do paciente {id_paciente}")
+        id_registro = int(criado[0]["id"])
+
+    sets = [
+        "id_atendimento = NULL",
+        "datetime_atendimento_inicio = NULL",
+        "datetime_ultima_atualizacao_atendimento = NULL",
+        "id_criador = NULL",
+        f"id_paciente = '{esc(id_paciente)}'",
+    ] + _montar_sets_resultado(resultado)
+
+    sql_exec(
+        f"UPDATE {TABELA} SET\n    " + ",\n    ".join(sets) + f"\nWHERE id = {id_registro}"
+    )
+
+
+def atualizar_analise_compilada_paciente(id_paciente: str):
+    enfileirados = enfileirar_atendimentos_antigos(id_paciente)
+    pendentes = contar_atendimentos_pendentes_paciente(id_paciente)
+    if pendentes > 0:
+        log.info(
+            f"⏳ Síntese compilada adiada para paciente {id_paciente}: "
+            f"{pendentes} atendimento(s) ainda pendente(s)/processando(s)"
+            + (f" ({enfileirados} recém-enfileirado(s))" if enfileirados else "")
+            + "."
+        )
+        return
+
+    texto_compilado, row_base = montar_texto_compilado_paciente(id_paciente)
+    if not texto_compilado or not row_base:
+        log.info(f"ℹ️  Sem histórico suficiente para compilar síntese do paciente {id_paciente}.")
+        return
+
+    log.info(f"🧬 Atualizando síntese compilada do paciente {id_paciente}...")
+    contexto = ""
+    try:
+        contexto = buscar_contexto_clinico({
+            "id_paciente": id_paciente,
+            "id": row_base.get("id_atendimento"),
+            "id_criador": row_base.get("id_criador"),
+        }) or ""
+    except Exception as e:
+        log.warning(f"  ⚠️ Falha ao buscar contexto do paciente compilado {id_paciente}: {e}")
+
+    resultado = analisar_prontuario(texto_compilado[:18000], contexto=contexto)
+    try:
+        resultado = executar_busca_evidencias(
+            resultado,
+            chat_url=resultado.get("_chat_url"),
+            chat_id=resultado.get("_chat_id"),
+        )
+    except Exception as e:
+        log.warning(f"  ⚠️ Enriquecimento da síntese compilada falhou (não fatal): {e}")
+
+    salvar_resultado_compilado_paciente(id_paciente, resultado)
+    log.info(f"✅ Síntese compilada do paciente {id_paciente} atualizada.")
 
 
 def _stringify_compact(value) -> str:
@@ -2263,6 +2470,15 @@ def extrair_termos_busca(resultado: dict) -> list:
                 if nd_tipo == tipo_node and nd_valor and len(nd_valor) > 2:
                     valores.append(nd_valor)
         return valores
+
+    def _compactar_termo_busca(valor, max_chars=90):
+        valor = re.sub(r"\s+", " ", str(valor or "")).strip(" ,;:-")
+        if len(valor) <= max_chars:
+            return valor
+        corte = valor.rfind(" ", 0, max_chars + 1)
+        if corte >= int(max_chars * 0.6):
+            return valor[:corte].strip(" ,;:-")
+        return valor[:max_chars].strip(" ,;:-")
 
     def _compactar_termo_busca(valor, max_chars=90):
         valor = re.sub(r"\s+", " ", str(valor or "")).strip(" ,;:-")
