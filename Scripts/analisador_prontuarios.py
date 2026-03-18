@@ -874,6 +874,25 @@ def enfileirar_atendimentos_antigos(id_paciente: str) -> int:
     return enfileirados
 
 
+def contar_atendimentos_pendentes_paciente(id_paciente: str) -> int:
+    """Conta atendimentos do paciente ainda não concluídos na tabela de análise."""
+    try:
+        resp = sql_exec(f"""
+            SELECT COUNT(*) AS total
+            FROM {TABELA}
+            WHERE id_paciente = '{esc(id_paciente)}'
+              AND id_atendimento IS NOT NULL
+              AND status IN ('pendente', 'processando')
+        """, reason="contar_atendimentos_pendentes_paciente")
+        data = resp.get("data") or []
+        if not data:
+            return 0
+        return int(data[0].get("total") or 0)
+    except Exception as e:
+        log.warning(f"  ⚠️ Erro ao contar atendimentos pendentes do paciente {id_paciente}: {e}")
+        return 0
+
+
 def marcar_processando(row: dict):
     idat = int(row["id"])
     dtp  = esc(row.get("datetime_prontuario_atual") or "")
@@ -1110,6 +1129,17 @@ def salvar_resultado_compilado_paciente(id_paciente: str, resultado: dict):
 
 
 def atualizar_analise_compilada_paciente(id_paciente: str):
+    enfileirados = enfileirar_atendimentos_antigos(id_paciente)
+    pendentes = contar_atendimentos_pendentes_paciente(id_paciente)
+    if pendentes > 0:
+        log.info(
+            f"⏳ Síntese compilada adiada para paciente {id_paciente}: "
+            f"{pendentes} atendimento(s) ainda pendente(s)/processando(s)"
+            + (f" ({enfileirados} recém-enfileirado(s))" if enfileirados else "")
+            + "."
+        )
+        return
+
     texto_compilado, row_base = montar_texto_compilado_paciente(id_paciente)
     if not texto_compilado or not row_base:
         log.info(f"ℹ️  Sem histórico suficiente para compilar síntese do paciente {id_paciente}.")
@@ -2234,6 +2264,15 @@ def extrair_termos_busca(resultado: dict) -> list:
                     valores.append(nd_valor)
         return valores
 
+    def _compactar_termo_busca(valor, max_chars=90):
+        valor = re.sub(r"\s+", " ", str(valor or "")).strip(" ,;:-")
+        if len(valor) <= max_chars:
+            return valor
+        corte = valor.rfind(" ", 0, max_chars + 1)
+        if corte >= int(max_chars * 0.6):
+            return valor[:corte].strip(" ,;:-")
+        return valor[:max_chars].strip(" ,;:-")
+
     # ── 1. Fonte primária: listas nominais ────────────────────
     diagnosticos = _ensure_list(
         resultado.get("diagnosticos_citados") or resultado.get("diagnosticos_mencionados")
@@ -2333,12 +2372,14 @@ def extrair_termos_busca(resultado: dict) -> list:
         elif meds:
             contexto_extra = f"{meds[0]} treatment"
 
-        q1 = f"{diags[0][:50]} {contexto_extra} children site:pubmed.ncbi.nlm.nih.gov".strip()
+        diag_base = _compactar_termo_busca(diags[0], max_chars=90)
+        q1 = f"{diag_base} {contexto_extra} children site:pubmed.ncbi.nlm.nih.gov".strip()
         queries.append(q1)
 
     # Query 2: segundo diagnóstico/sintoma (se existir — busca mais específica)
     if len(diags) > 1:
-        q2 = f"{diags[1][:50]} children treatment evidence site:pubmed.ncbi.nlm.nih.gov"
+        diag_sec = _compactar_termo_busca(diags[1], max_chars=90)
+        q2 = f"{diag_sec} children treatment evidence site:pubmed.ncbi.nlm.nih.gov"
         queries.append(q2)
     elif meds:
         # Se não tem segundo diagnóstico, busca sobre o medicamento
@@ -2350,10 +2391,14 @@ def extrair_termos_busca(resultado: dict) -> list:
         # Procura sintomas no grafo para uma query mais específica
         sintomas_grafo = _extrair_do_grafo(resultado, "sintoma")
         if sintomas_grafo:
-            q3 = f"{diags[0][:30]} {sintomas_grafo[0][:30]} pediatric management"
+            diag_curto = _compactar_termo_busca(diags[0], max_chars=60)
+            sintoma_curto = _compactar_termo_busca(sintomas_grafo[0], max_chars=60)
+            q3 = f"{diag_curto} {sintoma_curto} pediatric management"
             queries.append(q3)
         elif terapias_nomes:
-            q3 = f"{diags[0][:30]} {terapias_nomes[0]} effectiveness children"
+            diag_curto = _compactar_termo_busca(diags[0], max_chars=60)
+            terapia_curta = _compactar_termo_busca(terapias_nomes[0], max_chars=50)
+            q3 = f"{diag_curto} {terapia_curta} effectiveness children"
             queries.append(q3)
 
     return queries[:SEARCH_MAX_QUERIES]
