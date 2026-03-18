@@ -131,8 +131,18 @@ if((!isset($is_iframe) || empty($is_iframe)) && strpos($this_file, $_SERVER['PHP
 
 $currentFileName = basename(__FILE__);
 $user_can_edit_system = false; 
+$current_action = $_GET['action'] ?? '';
+$actions_without_login_bootstrap = [
+  'api_exec',
+  'execute_sql',
+  'proxy',
+  'ping_simulator',
+  'sync_simulator',
+  'web_search',
+  'salvar_analise_auxiliar'
+];
 
-if($is_iframe || (isset($_GET['action']) && $_GET['action'] !== 'api_exec'))
+if($is_iframe || ($current_action !== '' && !in_array($current_action, $actions_without_login_bootstrap, true)))
 {
   header("Content-Type: text/html; charset=UTF-8", true);
   date_default_timezone_set('America/Recife');
@@ -2873,6 +2883,10 @@ header('Content-Type: application/javascript; charset=utf-8');
         return document.getElementById('ow-model-sel')?.value === DIRECT_TOOL_MODEL;
     }
 
+    function isDirectToolMode() {
+        return document.getElementById('ow-model-sel')?.value === DIRECT_TOOL_MODEL;
+    }
+
     let state = { messages: [], currentChatId: null, currentChatTitle: null, currentChatUrl: null };
     let currentUserQuestion = '';
     let currentAbortController = null;
@@ -4991,6 +5005,32 @@ header('Content-Type: application/javascript; charset=utf-8');
         return lines.join('\n').trim();
     }
 
+    function escapeDirectResultText(value) {
+        return String(value ?? '')
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/'/g, '&#39;');
+    }
+
+    function buildDirectResultBoxHtml(title, plainText, accentColor = '#475569') {
+        const safeText = String(plainText || '').trim();
+        return `
+            <div style="border:1px solid #e2e8f0;border-radius:12px;overflow:hidden;background:#ffffff;box-shadow:0 1px 2px rgba(15,23,42,.05);">
+                <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;padding:10px 12px;background:${accentColor}12;border-bottom:1px solid #e2e8f0;">
+                    <strong style="font-size:13px;color:${accentColor};">${title}</strong>
+                    <button onclick="navigator.clipboard.writeText(this.dataset.txt).then(()=>apToast('Resultado copiado!'))"
+                        data-txt="${escapeDirectResultText(safeText)}"
+                        style="background:#fff;border:1px solid #cbd5e1;border-radius:6px;padding:5px 10px;font-size:11px;cursor:pointer;color:#334155;white-space:nowrap;">
+                        📋 Copiar resultado
+                    </button>
+                </div>
+                <div style="padding:12px;">
+                    <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:12px;font-family:SFMono-Regular,Consolas,Menlo,monospace;font-size:12px;line-height:1.6;color:#1e293b;white-space:pre-wrap;max-height:360px;overflow:auto;">${escapeDirectResultText(safeText)}</div>
+                </div>
+            </div>`;
+    }
+
     function formatDirectSearchResults(searchData, queries) {
         const lines = ['## 🔍 Resultado da pesquisa web', ''];
         const results = Array.isArray(searchData?.results) ? searchData.results : [];
@@ -5046,7 +5086,7 @@ header('Content-Type: application/javascript; charset=utf-8');
                 const markdown = formatDirectSqlResults(sqlResults);
                 if (mEl) {
                     mEl.classList.remove('cursor-blink');
-                    mEl.innerHTML = formatMarkdown(markdown);
+                    mEl.innerHTML = buildDirectResultBoxHtml('🐬 Resultado da execução SQL', markdown, '#0891b2');
                 }
                 state.messages.push({ role: 'assistant', content: markdown });
                 saveLocal();
@@ -5060,7 +5100,7 @@ header('Content-Type: application/javascript; charset=utf-8');
             const markdown = formatDirectSearchResults(searchData, parsed.queries);
             if (mEl) {
                 mEl.classList.remove('cursor-blink');
-                mEl.innerHTML = formatMarkdown(markdown);
+                mEl.innerHTML = buildDirectResultBoxHtml('🔍 Resultado da pesquisa web', markdown, '#16a34a');
             }
             state.messages.push({ role: 'assistant', content: markdown });
             saveLocal();
@@ -5879,6 +5919,32 @@ header('Content-Type: application/javascript; charset=utf-8');
             if (j.pesquisa_query && Array.isArray(j.pesquisa_query)) {
                 return j.pesquisa_query.map(q => typeof q === 'string' ? { query: q, reason: 'Pesquisa solicitada' } : q);
             }
+            return null;
+        }
+
+        function extractLoosePairs(rawText) {
+            const compact = sanitize(String(rawText || ''))
+                .replace(/```(?:json)?/gi, '')
+                .replace(/```/g, '')
+                .replace(/\r/g, '');
+
+            const matches = [...compact.matchAll(/{[\s\S]*?"query"\s*:\s*([\s\S]*?)(?:,\s*"reason"\s*:\s*([\s\S]*?))?\s*}/gi)];
+            if (matches.length > 0) {
+                const parsed = matches
+                    .map(([, rawQuery, rawReason]) => ({
+                        query:  decodeLooseJsonString(rawQuery),
+                        reason: decodeLooseJsonString(rawReason || 'Pesquisa solicitada'),
+                    }))
+                    .filter(item => item.query);
+                if (parsed.length > 0) return parsed;
+            }
+
+            const legacy = compact.match(/"pesquisa_query"\s*:\s*([\s\S]*?)(?=,\s*"[a-z_]+\"\s*:|\s*}\s*$)/i);
+            if (legacy?.[1]) {
+                const query = decodeLooseJsonString(legacy[1]);
+                if (query) return [{ query, reason: 'Pesquisa solicitada' }];
+            }
+
             return null;
         }
 
