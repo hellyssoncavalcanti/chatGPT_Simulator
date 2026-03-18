@@ -1207,6 +1207,7 @@ async def handle_chat_task_inner(task, page, q, stop_event: asyncio.Event, activ
     last_html   = ""
     stuck_count = 0
     loop_count  = 0
+    idle_ready_count = 0
 
     while True:
         if stop_event.is_set():
@@ -1229,6 +1230,10 @@ async def handle_chat_task_inner(task, page, q, stop_event: asyncio.Event, activ
                 if (!txt) return false;
                 const lower = txt.toLowerCase();
                 const isStatus = lower.includes('pesquisando') || lower.includes('searching') ||
+                                 lower.includes('buscando')    || lower.includes('browsing')  ||
+                                 lower.includes('procurando')  || lower.includes('checking')  ||
+                                 lower.includes('verificando') || lower.includes('consultando')||
+                                 lower.includes('navegando')   || lower.includes('looking up') ||
                                  lower.includes('thinking')    || lower.includes('pensando')  ||
                                  lower.includes('analisando')  || lower.includes('analyzing') ||
                                  lower.includes('trabalhando') || lower.includes('working')   ||
@@ -1238,17 +1243,29 @@ async def handle_chat_task_inner(task, page, q, stop_event: asyncio.Event, activ
             return el ? el.innerText.trim() : null;
         }""")
 
+        gen_state = await page.evaluate("""() => {
+            const stopBtn = document.querySelector('button[aria-label="Stop generating"], button[data-testid="stop-button"]');
+            const sendBtn = document.querySelector('button[data-testid="send-button"]');
+            const ta = document.querySelector('#prompt-textarea');
+            const stopVisible = !!(stopBtn && stopBtn.offsetParent !== null);
+            const sendDisabled = !!(sendBtn && (sendBtn.disabled || sendBtn.getAttribute('aria-disabled') === 'true'));
+            const textareaBusy = !!(ta && ta.getAttribute('aria-busy') === 'true');
+            return { stopVisible, sendDisabled, textareaBusy };
+        }""")
+
         if status_txt:
             emit_event(q, "status", status_txt)
             started     = True
             stuck_count = 0
+            idle_ready_count = 0
         elif not started and loop_count % 10 == 0:
             emit_event(q, "status", "Aguardando resposta...")
 
-        is_gen = await page.locator('button[aria-label="Stop generating"]').is_visible()
+        is_gen = bool(gen_state.get('stopVisible') or gen_state.get('sendDisabled') or gen_state.get('textareaBusy'))
         if is_gen:
             started     = True
             stuck_count = 0
+            idle_ready_count = 0
 
         responses = await page.locator("div[data-message-author-role='assistant']").all()
         curr_html = ""
@@ -1266,14 +1283,18 @@ async def handle_chat_task_inner(task, page, q, stop_event: asyncio.Event, activ
             emit_event(q, "markdown", markdown_text)
             last_html   = markdown_text
             stuck_count = 0
+            idle_ready_count = 0
         else:
             stuck_count += 1
 
         if not is_gen and not status_txt:
+            idle_ready_count += 1
             if len(last_html) > 0:
-                if stuck_count > 20: break
+                if stuck_count > 20 and idle_ready_count > 8: break
             else:
-                if time.time() - start_time > 40: break
+                if time.time() - start_time > 60 and idle_ready_count > 8: break
+        else:
+            idle_ready_count = 0
 
         if time.time() - start_time > 600: break
         await asyncio.sleep(0.3)
