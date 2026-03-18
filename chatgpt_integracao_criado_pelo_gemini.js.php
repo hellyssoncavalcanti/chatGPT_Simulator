@@ -1310,6 +1310,8 @@ REGRAS:
 • Queries curtas e objetivas
 • Nunca misturar sql_queries e search_queries no mesmo JSON
 • Após receber os resultados, responder com base neles
+• Ao citar fontes na resposta final, expor a URL explícita da fonte (em link markdown ou URL literal)
+• Nunca citar apenas o nome do site sem mostrar o respectivo URL quando ele estiver disponível nos resultados
 • Sempre citar as fontes encontradas na resposta final
 • Priorizar fontes confiáveis
 
@@ -5599,11 +5601,13 @@ header('Content-Type: application/javascript; charset=utf-8');
             '### 🔍 RESULTADOS DA PESQUISA WEB ###',
             '⚠️ IMPORTANTE: Responda APENAS em Português do Brasil.',
             'Você solicitou pesquisas na web. Aqui estão os resultados:',
+            '⚠️ Ao responder, toda fonte citada deve exibir a URL explícita (link markdown ou URL completa).',
+            '⚠️ Nunca escreva apenas "Fonte: Doctoralia" ou "Fonte: Instituto X" se o URL estiver presente abaixo.',
             '',
             sections.join('\n\n---\n\n')
         ].join('\n');
 
-        return `[INICIO_TEXTO_COLADO]\n${pastedBlock}\n[FIM_TEXTO_COLADO]\n\n[INICIO_TEXTO_COLADO]\nCom base nesses resultados, responda à **pergunta**:\n${sanitizePastedText(originalQuestion)}\n[FIM_TEXTO_COLADO]`;
+        return `[INICIO_TEXTO_COLADO]\n${pastedBlock}\n[FIM_TEXTO_COLADO]\n\n[INICIO_TEXTO_COLADO]\nCom base nesses resultados, responda à **pergunta**:\n${sanitizePastedText(originalQuestion)}\n\nNa resposta final:\n- mostre as fontes com URL explícita\n- prefira links markdown clicáveis quando possível\n- se algum resultado não tiver URL, diga claramente que veio de item sem URL fornecida\n[FIM_TEXTO_COLADO]`;
     }
 
     async function detectAndExecuteSearch(responseText, originalQuestion, ui, depth = 0) {
