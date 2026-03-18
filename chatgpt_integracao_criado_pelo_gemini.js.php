@@ -4958,36 +4958,45 @@ header('Content-Type: application/javascript; charset=utf-8');
     }
 
     function formatSearchResultsForLLM(searchData, originalQuestion) {
-        let context = `[INICIO_TEXTO_COLADO]### 🔍 RESULTADOS DA PESQUISA WEB ###\n`;
-        context += `⚠️ IMPORTANTE: Responda APENAS em Português do Brasil.\n`;
-        context += `Você solicitou pesquisas na web. Aqui estão os resultados:\n\n`;
+        const sanitizePastedText = value => String(value || '')
+            .replaceAll('[INICIO_TEXTO_COLADO]', '')
+            .replaceAll('[FIM_TEXTO_COLADO]', '')
+            .trim();
 
         const results = searchData.results || [];
-        results.forEach((r, i) => {
-            context += `**Pesquisa ${i + 1}**: ${r.query}\n\n`;
+        const sections = results.map((r, i) => {
+            const lines = [`**Pesquisa ${i + 1}**: ${sanitizePastedText(r.query)}`, ''];
+
             if (!r.success) {
-                context += `**Erro**: ${r.error}\n`;
-            } else {
-                const items = r.results || [];
-                if (items.length === 0) {
-                    context += `Nenhum resultado encontrado.\n`;
-                } else {
-                    items.forEach((item, j) => {
-                        context += `**Resultado ${j + 1}**: ${item.title}\n`;
-                        context += `URL: ${item.url}\n`;
-                        if (item.snippet) context += `Resumo: ${item.snippet}\n`;
-                        context += `\n`;
-                    });
-                }
+                lines.push(`**Erro**: ${sanitizePastedText(r.error)}`);
+                return lines.join('\n');
             }
-            if (i < results.length - 1) {
-                context += `---\n\n`;
+
+            const items = r.results || [];
+            if (items.length === 0) {
+                lines.push('Nenhum resultado encontrado.');
+                return lines.join('\n');
             }
+
+            items.forEach((item, j) => {
+                lines.push(`**Resultado ${j + 1}**: ${sanitizePastedText(item.title)}`);
+                lines.push(`URL: ${sanitizePastedText(item.url)}`);
+                if (item.snippet) lines.push(`Resumo: ${sanitizePastedText(item.snippet)}`);
+                lines.push('');
+            });
+
+            return lines.join('\n').trimEnd();
         });
 
-        context += `[FIM_TEXTO_COLADO]\n\n`;
-        context += `Com base nesses resultados, responda à **pergunta**:\n${originalQuestion}`;
-        return context;
+        const pastedBlock = [
+            '### 🔍 RESULTADOS DA PESQUISA WEB ###',
+            '⚠️ IMPORTANTE: Responda APENAS em Português do Brasil.',
+            'Você solicitou pesquisas na web. Aqui estão os resultados:',
+            '',
+            sections.join('\n\n---\n\n')
+        ].join('\n');
+
+        return `[INICIO_TEXTO_COLADO]\n${pastedBlock}\n[FIM_TEXTO_COLADO]\n\n[INICIO_TEXTO_COLADO]\nCom base nesses resultados, responda à **pergunta**:\n${sanitizePastedText(originalQuestion)}\n[FIM_TEXTO_COLADO]`;
     }
 
     async function detectAndExecuteSearch(responseText, originalQuestion, ui) {
@@ -5240,15 +5249,17 @@ header('Content-Type: application/javascript; charset=utf-8');
         return JSON.stringify(data, null, 2);
     }
     function formatSQLResultsForLLM(sqlResults, originalQuestion, originalContext) {
+        const sanitizePastedText = value => String(value || '')
+            .replaceAll('[INICIO_TEXTO_COLADO]', '')
+            .replaceAll('[FIM_TEXTO_COLADO]', '')
+            .trim();
+
         let formattedText = '[INICIO_TEXTO_COLADO]\n\n';
 
         // Se já há contexto anterior (round de DESCRIBE), inclui sem repetir o header
         if (originalContext && originalContext.trim() !== '') {
             // Remove delimitadores caso o originalContext já seja um bloco anterior
-            let cleanCtx = originalContext
-                .replace('[INICIO_TEXTO_COLADO]', '')
-                .replace('[FIM_TEXTO_COLADO]', '')
-                .trim();
+            let cleanCtx = sanitizePastedText(originalContext);
 
             // Remove o rodapé "Com base nesses resultados..." do contexto anterior
             // para não ficar duplicado (será adicionado no fim deste bloco)
@@ -5261,12 +5272,6 @@ header('Content-Type: application/javascript; charset=utf-8');
 
         // Header apenas UMA VEZ por bloco — não repete se já há contexto anterior
         if (!originalContext || originalContext.trim() === '') {
-        console.log('----------------originalQuestion------------');
-        console.log(originalQuestion);
-        console.log('----------------------------');
-        console.log('----------------originalContext------------');
-        console.log(originalContext);
-        console.log('----------------------------');
             formattedText += '### 🔍 RESULTADOS DAS CONSULTAS SQL ###\n\n';
             formattedText += '⚠️ IMPORTANTE: Responda APENAS em Português do Brasil. NUNCA use chinês, inglês ou outros idiomas.\n\n';
             formattedText += 'Você solicitou consultas ao banco de dados. Aqui estão os resultados:\n\n';
@@ -5292,9 +5297,11 @@ header('Content-Type: application/javascript; charset=utf-8');
             formattedText += '---\n\n';
         });
 
-        formattedText += 'Com base nesses resultados do banco de dados, responda à **pergunta**:\n\n';
         formattedText += '[FIM_TEXTO_COLADO]\n\n';
-        formattedText += originalQuestion;
+        formattedText += '[INICIO_TEXTO_COLADO]\n';
+        formattedText += 'Com base nesses resultados do banco de dados, responda à **pergunta**:\n\n';
+        formattedText += sanitizePastedText(originalQuestion) + '\n';
+        formattedText += '[FIM_TEXTO_COLADO]';
 
         return formattedText;
     }
