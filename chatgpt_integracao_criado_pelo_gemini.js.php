@@ -141,22 +141,26 @@ $actions_without_login_bootstrap = [
   'web_search',
   'salvar_analise_auxiliar'
 ];
+$is_direct_script_request = ($current_action === '' && basename($_SERVER['PHP_SELF'] ?? '') === $currentFileName);
+$should_bootstrap_context = ($is_iframe || ($current_action !== '' && !in_array($current_action, $actions_without_login_bootstrap, true)));
 
-if($is_iframe || ($current_action !== '' && !in_array($current_action, $actions_without_login_bootstrap, true)))
+if($should_bootstrap_context)
 {
   header("Content-Type: text/html; charset=UTF-8", true);
   date_default_timezone_set('America/Recife');
   //PREVENÇÃO DE CACHE AGRESSIVO (ESPECIALMENTE PARA SAFARI/MOBILE):
   header("Cache-Control: no-store, no-cache, must-revalidate, max-age=0");header("Cache-Control: post-check=0, pre-check=0", false);header("Pragma: no-cache");header("Expires: Wed, 11 Jan 1984 05:00:00 GMT"); // Uma data no passado, para evitar que os navegadores guardem o arquivo em cache.
   $filename = 'config/config.php';if(file_exists($filename)){@include_once($filename);}elseif(file_exists("../".$filename)){@include_once("../".$filename);}elseif(file_exists("../../".$filename)){@include_once("../../".$filename);}elseif(file_exists("../../../".$filename)){@include_once("../../../".$filename);} 
-  $filename = 'scripts/login.php';if(file_exists($filename)){@include_once($filename);}elseif(file_exists("../".$filename)){@include_once("../".$filename);}elseif(file_exists("../../".$filename)){@include_once("../../".$filename);}elseif(file_exists("../../../".$filename)){@include_once("../../../".$filename);} 
+  if (!$is_direct_script_request) {
+    $filename = 'scripts/login.php';if(file_exists($filename)){@include_once($filename);}elseif(file_exists("../".$filename)){@include_once("../".$filename);}elseif(file_exists("../../".$filename)){@include_once("../../".$filename);}elseif(file_exists("../../../".$filename)){@include_once("../../../".$filename);} 
+  }
   $filename = 'scripts/func.inc.php';if(file_exists($filename)){@include_once($filename);}elseif(file_exists("../".$filename)){@include_once("../".$filename);}elseif(file_exists("../../".$filename)){@include_once("../../".$filename);}elseif(file_exists("../../../".$filename)){@include_once("../../../".$filename);} 
 
   ini_set('display_errors', 0); 
   ini_set('log_errors', 1);
   error_reporting(E_ALL);
 
-  if(isset($row_login_atual['id']) && verifica_permissao($mysqli, $row_login_atual['id'], 'chatgpt_system_prompt', 'editar')) {
+  if(!$is_direct_script_request && isset($row_login_atual['id']) && verifica_permissao($mysqli, $row_login_atual['id'], 'chatgpt_system_prompt', 'editar')) {
       $user_can_edit_system = true;
   }
 }
