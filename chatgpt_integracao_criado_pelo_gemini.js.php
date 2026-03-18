@@ -141,22 +141,26 @@ $actions_without_login_bootstrap = [
   'web_search',
   'salvar_analise_auxiliar'
 ];
+$is_direct_script_request = ($current_action === '' && basename($_SERVER['PHP_SELF'] ?? '') === $currentFileName);
+$should_bootstrap_context = ($is_iframe || ($current_action !== '' && !in_array($current_action, $actions_without_login_bootstrap, true)));
 
-if($is_iframe || ($current_action !== '' && !in_array($current_action, $actions_without_login_bootstrap, true)))
+if($should_bootstrap_context)
 {
   header("Content-Type: text/html; charset=UTF-8", true);
   date_default_timezone_set('America/Recife');
   //PREVENÇÃO DE CACHE AGRESSIVO (ESPECIALMENTE PARA SAFARI/MOBILE):
   header("Cache-Control: no-store, no-cache, must-revalidate, max-age=0");header("Cache-Control: post-check=0, pre-check=0", false);header("Pragma: no-cache");header("Expires: Wed, 11 Jan 1984 05:00:00 GMT"); // Uma data no passado, para evitar que os navegadores guardem o arquivo em cache.
   $filename = 'config/config.php';if(file_exists($filename)){@include_once($filename);}elseif(file_exists("../".$filename)){@include_once("../".$filename);}elseif(file_exists("../../".$filename)){@include_once("../../".$filename);}elseif(file_exists("../../../".$filename)){@include_once("../../../".$filename);} 
-  $filename = 'scripts/login.php';if(file_exists($filename)){@include_once($filename);}elseif(file_exists("../".$filename)){@include_once("../".$filename);}elseif(file_exists("../../".$filename)){@include_once("../../".$filename);}elseif(file_exists("../../../".$filename)){@include_once("../../../".$filename);} 
+  if (!$is_direct_script_request) {
+    $filename = 'scripts/login.php';if(file_exists($filename)){@include_once($filename);}elseif(file_exists("../".$filename)){@include_once("../".$filename);}elseif(file_exists("../../".$filename)){@include_once("../../".$filename);}elseif(file_exists("../../../".$filename)){@include_once("../../../".$filename);} 
+  }
   $filename = 'scripts/func.inc.php';if(file_exists($filename)){@include_once($filename);}elseif(file_exists("../".$filename)){@include_once("../".$filename);}elseif(file_exists("../../".$filename)){@include_once("../../".$filename);}elseif(file_exists("../../../".$filename)){@include_once("../../../".$filename);} 
 
   ini_set('display_errors', 0); 
   ini_set('log_errors', 1);
   error_reporting(E_ALL);
 
-  if(isset($row_login_atual['id']) && verifica_permissao($mysqli, $row_login_atual['id'], 'chatgpt_system_prompt', 'editar')) {
+  if(!$is_direct_script_request && isset($row_login_atual['id']) && verifica_permissao($mysqli, $row_login_atual['id'], 'chatgpt_system_prompt', 'editar')) {
       $user_can_edit_system = true;
   }
 }
@@ -2874,6 +2878,10 @@ header('Content-Type: application/javascript; charset=utf-8');
             try { return JSON.parse(localStorage.getItem(HISTORYKEY) || '{}'); } catch(e) { return {}; }
         }
     };
+
+    function isDirectToolMode() {
+        return document.getElementById('ow-model-sel')?.value === DIRECT_TOOL_MODEL;
+    }
 
     function isDirectToolMode() {
         return document.getElementById('ow-model-sel')?.value === DIRECT_TOOL_MODEL;
@@ -5919,6 +5927,32 @@ header('Content-Type: application/javascript; charset=utf-8');
             if (j.pesquisa_query && Array.isArray(j.pesquisa_query)) {
                 return j.pesquisa_query.map(q => typeof q === 'string' ? { query: q, reason: 'Pesquisa solicitada' } : q);
             }
+            return null;
+        }
+
+        function extractLoosePairs(rawText) {
+            const compact = sanitize(String(rawText || ''))
+                .replace(/```(?:json)?/gi, '')
+                .replace(/```/g, '')
+                .replace(/\r/g, '');
+
+            const matches = [...compact.matchAll(/{[\s\S]*?"query"\s*:\s*([\s\S]*?)(?:,\s*"reason"\s*:\s*([\s\S]*?))?\s*}/gi)];
+            if (matches.length > 0) {
+                const parsed = matches
+                    .map(([, rawQuery, rawReason]) => ({
+                        query:  decodeLooseJsonString(rawQuery),
+                        reason: decodeLooseJsonString(rawReason || 'Pesquisa solicitada'),
+                    }))
+                    .filter(item => item.query);
+                if (parsed.length > 0) return parsed;
+            }
+
+            const legacy = compact.match(/"pesquisa_query"\s*:\s*([\s\S]*?)(?=,\s*"[a-z_]+\"\s*:|\s*}\s*$)/i);
+            if (legacy?.[1]) {
+                const query = decodeLooseJsonString(legacy[1]);
+                if (query) return [{ query, reason: 'Pesquisa solicitada' }];
+            }
+
             return null;
         }
 
