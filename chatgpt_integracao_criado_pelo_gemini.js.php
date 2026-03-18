@@ -3826,6 +3826,95 @@ header('Content-Type: application/javascript; charset=utf-8');
         return sql.replace(/\s+/g, ' ').trim();
     }
 
+    function parseAnalisePreviaRow(row) {
+        const jp = (col) => { try { return JSON.parse(row[col] || '[]'); } catch(e) { return []; } };
+        return {
+            status:             row.status,
+            inicio_atendimento: row.datetime_atendimento_inicio || null,
+            analisado_em:       row.datetime_analise_concluida,
+            resumo_texto:       row.resumo_texto  || '',
+            gravidade_clinica:  row.gravidade_clinica || null,
+            seguimento_sugerido: {
+                retorno_estimado: row.seguimento_retorno_estimado || null,
+                observacao:       row.seguimento_observacao       || ''
+            },
+            diagnosticos_citados:               jp('diagnosticos_citados'),
+            pontos_chave:                       jp('pontos_chave'),
+            mudancas_relevantes:                jp('mudancas_relevantes'),
+            eventos_comportamentais:            jp('eventos_comportamentais'),
+            sinais_nucleares:                   jp('sinais_nucleares'),
+            terapias_referidas:                 jp('terapias_referidas'),
+            exames_citados:                     jp('exames_citados'),
+            pendencias_clinicas:                jp('pendencias_clinicas'),
+            condutas_registradas_no_prontuario: jp('condutas_no_prontuario'),
+            medicacoes_em_uso:                  jp('medicacoes_em_uso'),
+            medicacoes_iniciadas:               jp('medicacoes_iniciadas'),
+            medicacoes_suspensas:               jp('medicacoes_suspensas'),
+            condutas_especificas_sugeridas:     jp('condutas_especificas_sugeridas'),
+            condutas_gerais_sugeridas:          jp('condutas_gerais_sugeridas'),
+            mensagens_acompanhamento:           (() => {
+                const v = row.mensagens_acompanhamento;
+                if (!v) return null;
+                try { return JSON.parse(v); } catch(e) { return null; }
+            })(),
+            dados_json: (() => { const v=row.dados_json; if(!v) return null; try{return JSON.parse(v);}catch(e){return null;} })(),
+            idade_paciente: (() => {
+                try {
+                    const dj = row.dados_json ? JSON.parse(row.dados_json) : null;
+                    if (dj?.identificacao_paciente?.idade_paciente?.valor!=null) return dj.identificacao_paciente.idade_paciente;
+                    if (dj?.identificacao_paciente?.idade!=null) return {valor:dj.identificacao_paciente.idade,unidade:'anos'};
+                    if (dj?.idade_paciente?.valor!=null) return dj.idade_paciente;
+                } catch(e) {}
+                return {valor:null,unidade:null};
+            })()
+        };
+    }
+
+    function applyAnalisePrevia(analise, row, sourceLabel) {
+        console.log('%c✅ Carregada com sucesso!', 'color: #4caf50; font-weight: bold');
+        console.log('%cOrigem:    ' + sourceLabel,                                   'color: #7b1fa2');
+        console.log('%cStatus:    ' + row.status,                                   'color: #4caf50');
+        console.log('%cAnalisado: ' + row.datetime_analise_concluida,               'color: #4caf50');
+        console.log('%cResumo:    ' + (analise.resumo_texto?.substring(0, 120) ?? ''), 'color: #666');
+        console.log(
+            `%c${analise.pontos_chave.length} pontos-chave | ` +
+            `${analise.condutas_especificas_sugeridas.length} condutas específicas | ` +
+            `${analise.condutas_gerais_sugeridas.length} condutas gerais | ` +
+            `${analise.medicacoes_em_uso.length} meds em uso`,
+            'color: #1565c0'
+        );
+
+        analiseAtendimentoCtx = JSON.stringify({ analise_clinica_previa: analise }, null, 2);
+        renderAnalisePrevia(true);
+
+        if (!window.__analiseObserver) {
+            const owMessages = document.getElementById('ow-messages');
+            if (owMessages) {
+                window.__analiseObserver = new MutationObserver(() => {
+                    if (!analiseAtendimentoCtx) return;
+                    if (document.getElementById('ow-analise-previa')) return;
+                    window.__analiseObserver.disconnect();
+                    renderAnalisePrevia();
+                    window.__analiseObserver.observe(owMessages, { childList: true });
+                });
+                window.__analiseObserver.observe(owMessages, { childList: true });
+            }
+        }
+    }
+
+    function notifyAnalisePreviaPendente(status, scopeLabel = 'atendimento') {
+        const statusNorm = String(status || '').trim().toLowerCase();
+        let msg = `Análise prévia do ${scopeLabel} ainda não está disponível.`;
+        if (statusNorm === 'pendente') {
+            msg = `Análise prévia do ${scopeLabel} ainda está pendente de processamento.`;
+        } else if (statusNorm === 'processando') {
+            msg = `Análise prévia do ${scopeLabel} ainda está sendo processada.`;
+        }
+        if (typeof window.apToast === 'function') {
+            window.apToast(msg);
+        }
+    }
+
     async function fetchAnaliseAtendimento(idAtendimento) {
         console.groupCollapsed(`%c${FILE_PREFIX} 🧠 Análise Prévia — id_atendimento=${idAtendimento}`, 'color: #9c27b0; font-weight: bold');
 
@@ -3893,90 +3982,89 @@ header('Content-Type: application/javascript; charset=utf-8');
 
             if (row.status !== 'concluido') {
                 console.log(`%cℹ️  Análise existe mas status='${row.status}' — ignorando.`, 'color: #ff9800');
+                if (row.status === 'pendente' || row.status === 'processando') {
+                    notifyAnalisePreviaPendente(row.status, 'atendimento');
+                }
+                console.groupEnd();
+                return;
+            }
+            const analise = parseAnalisePreviaRow(row);
+            applyAnalisePrevia(analise, row, 'atendimento');
+
+        } catch (e) {
+            console.error('🚨 Falha ao buscar análise:', e.message);
+        }
+
+        console.groupEnd();
+    }
+
+    async function fetchAnalisePacienteCompilada(idPaciente) {
+        console.groupCollapsed(`%c${FILE_PREFIX} 🧬 Síntese do Paciente — id_paciente=${idPaciente}`, 'color: #7b1fa2; font-weight: bold');
+
+        if (!idPaciente) {
+            console.warn('❌ id_paciente nulo/zero — abortando síntese compilada.');
+            console.groupEnd();
+            return;
+        }
+
+        try {
+            const res = await fetch("<?php echo $_SERVER['PHP_SELF']; ?>?action=execute_sql", {
+                method:  'POST',
+                headers: { 'Content-Type': 'application/json; charset=utf-8' },
+                body:    JSON.stringify({
+                    query: normalizeSQL(`
+                        SELECT
+                            status,
+                            datetime_analise_concluida,
+                            resumo_texto,
+                            gravidade_clinica,
+                            dados_json,
+                            seguimento_retorno_estimado,
+                            seguimento_observacao,
+                            diagnosticos_citados,
+                            pontos_chave,
+                            mudancas_relevantes,
+                            eventos_comportamentais,
+                            sinais_nucleares,
+                            terapias_referidas,
+                            exames_citados,
+                            pendencias_clinicas,
+                            condutas_no_prontuario,
+                            medicacoes_em_uso,
+                            medicacoes_iniciadas,
+                            medicacoes_suspensas,
+                            condutas_especificas_sugeridas,
+                            condutas_gerais_sugeridas,
+                            mensagens_acompanhamento
+                        FROM chatgpt_atendimentos_analise
+                        WHERE id_paciente = ${idPaciente}
+                          AND id_atendimento IS NULL
+                          AND id_criador IS NULL
+                        ORDER BY datetime_analise_concluida DESC, id DESC
+                        LIMIT 1
+                    `),
+                    reason: 'Busca síntese longitudinal compilada do paciente'
+                })
+            });
+
+            const data = await res.json();
+            if (!data?.success || !data.data?.length) {
+                console.log('%cℹ️  Nenhuma síntese compilada do paciente encontrada.', 'color: #9e9e9e');
                 console.groupEnd();
                 return;
             }
 
-            const jp = (col) => { try { return JSON.parse(row[col] || '[]'); } catch(e) { return []; } };
-
-            const analise = {
-                status:             row.status,
-                inicio_atendimento: row.datetime_atendimento_inicio,
-                analisado_em:       row.datetime_analise_concluida,
-                resumo_texto:       row.resumo_texto  || '',
-                gravidade_clinica:  row.gravidade_clinica || null,
-                idade_paciente: {
-                    valor:   row.idade_paciente_valor   || null,
-                    unidade: row.idade_paciente_unidade || null
-                },
-                seguimento_sugerido: {
-                    retorno_estimado: row.seguimento_retorno_estimado || null,
-                    observacao:       row.seguimento_observacao       || ''
-                },
-                diagnosticos_citados:               jp('diagnosticos_citados'),
-                pontos_chave:                       jp('pontos_chave'),
-                mudancas_relevantes:                jp('mudancas_relevantes'),
-                eventos_comportamentais:            jp('eventos_comportamentais'),
-                sinais_nucleares:                   jp('sinais_nucleares'),
-                terapias_referidas:                 jp('terapias_referidas'),
-                exames_citados:                     jp('exames_citados'),
-                pendencias_clinicas:                jp('pendencias_clinicas'),
-                condutas_registradas_no_prontuario: jp('condutas_no_prontuario'),
-                medicacoes_em_uso:                  jp('medicacoes_em_uso'),
-                medicacoes_iniciadas:               jp('medicacoes_iniciadas'),
-                medicacoes_suspensas:               jp('medicacoes_suspensas'),
-                condutas_especificas_sugeridas:     jp('condutas_especificas_sugeridas'),
-                condutas_gerais_sugeridas:          jp('condutas_gerais_sugeridas'),
-                mensagens_acompanhamento:           (() => {
-                    const v = row.mensagens_acompanhamento;
-                    if (!v) return null;
-                    try { return JSON.parse(v); } catch(e) { return null; }
-                })(),
-                dados_json: (() => { const v=row.dados_json; if(!v) return null; try{return JSON.parse(v);}catch(e){return null;} })(),
-                idade_paciente: (() => {
-                    try {
-                        const dj = row.dados_json ? JSON.parse(row.dados_json) : null;
-                        if (dj?.identificacao_paciente?.idade_paciente?.valor!=null) return dj.identificacao_paciente.idade_paciente;
-                        if (dj?.identificacao_paciente?.idade!=null) return {valor:dj.identificacao_paciente.idade,unidade:'anos'};
-                        if (dj?.idade_paciente?.valor!=null) return dj.idade_paciente;
-                    } catch(e) {}
-                    return {valor:null,unidade:null};
-                })()
-            };
-
-            console.log('%c✅ Carregada com sucesso!', 'color: #4caf50; font-weight: bold');
-            console.log('%cStatus:    ' + row.status,                                       'color: #4caf50');
-            console.log('%cAnalisado: ' + row.datetime_analise_concluida,                  'color: #4caf50');
-            console.log('%cResumo:    ' + (analise.resumo_texto?.substring(0, 120) ?? ''), 'color: #666');
-            console.log(
-                `%c${analise.pontos_chave.length} pontos-chave | ` +
-                `${analise.condutas_especificas_sugeridas.length} condutas específicas | ` +
-                `${analise.condutas_gerais_sugeridas.length} condutas gerais | ` +
-                `${analise.medicacoes_em_uso.length} meds em uso`,
-                'color: #1565c0'
-            );
-            
-            analiseAtendimentoCtx = JSON.stringify({ analise_clinica_previa: analise }, null, 2);
-
-            renderAnalisePrevia(true);
-
-            // ── Mantém o card fixo no topo após re-renders do widget ──
-            if (!window.__analiseObserver) {
-                const owMessages = document.getElementById('ow-messages');
-                if (owMessages) {
-                    window.__analiseObserver = new MutationObserver(() => {
-                        if (!analiseAtendimentoCtx) return;
-                        if (document.getElementById('ow-analise-previa')) return;
-                        window.__analiseObserver.disconnect();
-                        renderAnalisePrevia();
-                        window.__analiseObserver.observe(owMessages, { childList: true });
-                    });
-                    window.__analiseObserver.observe(owMessages, { childList: true });
-                }
+            const row = data.data[0];
+            if (row.status !== 'concluido') {
+                console.log(`%cℹ️  Síntese compilada existe mas status='${row.status}' — ignorando.`, 'color: #ff9800');
+                console.groupEnd();
+                return;
             }
 
+            const analise = parseAnalisePreviaRow(row);
+            applyAnalisePrevia(analise, row, 'paciente_compilado');
         } catch (e) {
-            console.error('🚨 Falha ao buscar análise:', e.message);
+            console.error('🚨 Falha ao buscar síntese compilada do paciente:', e.message);
         }
 
         console.groupEnd();
@@ -4807,8 +4895,12 @@ header('Content-Type: application/javascript; charset=utf-8');
         })();
         
         const _idAtendAnalise = window.PAGE_CTX?.id_atendimento ?? null;
+        const _idReceitaAnalise = window.PAGE_CTX?.id_receita ?? null;
+        const _idPacienteAnalise = window.PAGE_CTX?.id_paciente ?? window.PAGE_CTX?.id_membro ?? null;
         if (_idAtendAnalise) {
             fetchAnaliseAtendimento(_idAtendAnalise);
+        } else if (!_idReceitaAnalise && _idPacienteAnalise) {
+            fetchAnalisePacienteCompilada(_idPacienteAnalise);
         }
         
         if (typeof detectContexts === 'function') detectContexts();
@@ -5509,6 +5601,20 @@ header('Content-Type: application/javascript; charset=utf-8');
             return s.replace(/[\u2018\u2019]/g,"'").replace(/[\u201C\u201D]/g,'"').replace(/[\u00A0]/g,' ').trim();
         }
 
+        function decodeLooseJsonString(value) {
+            let v = sanitize(String(value || ''));
+            v = v.replace(/,$/, '').trim();
+            while ((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'"))) {
+                v = v.slice(1, -1).trim();
+            }
+            return v
+                .replace(/\\"/g, '"')
+                .replace(/\\n/g, '\n')
+                .replace(/\\t/g, '\t')
+                .replace(/\\\\/g, '\\')
+                .trim();
+        }
+
         // Normaliza: converte pesquisa_query (string) → search_queries (array de objetos)
         function normalizeToArray(j) {
             // Formato correto: search_queries é array
@@ -5523,6 +5629,32 @@ header('Content-Type: application/javascript; charset=utf-8');
             if (j.pesquisa_query && Array.isArray(j.pesquisa_query)) {
                 return j.pesquisa_query.map(q => typeof q === 'string' ? { query: q, reason: 'Pesquisa solicitada' } : q);
             }
+            return null;
+        }
+
+        function extractLoosePairs(rawText) {
+            const compact = sanitize(String(rawText || ''))
+                .replace(/```(?:json)?/gi, '')
+                .replace(/```/g, '')
+                .replace(/\r/g, '');
+
+            const matches = [...compact.matchAll(/{[\s\S]*?"query"\s*:\s*([\s\S]*?)(?:,\s*"reason"\s*:\s*([\s\S]*?))?\s*}/gi)];
+            if (matches.length > 0) {
+                const parsed = matches
+                    .map(([, rawQuery, rawReason]) => ({
+                        query:  decodeLooseJsonString(rawQuery),
+                        reason: decodeLooseJsonString(rawReason || 'Pesquisa solicitada'),
+                    }))
+                    .filter(item => item.query);
+                if (parsed.length > 0) return parsed;
+            }
+
+            const legacy = compact.match(/"pesquisa_query"\s*:\s*([\s\S]*?)(?=,\s*"[a-z_]+\"\s*:|\s*}\s*$)/i);
+            if (legacy?.[1]) {
+                const query = decodeLooseJsonString(legacy[1]);
+                if (query) return [{ query, reason: 'Pesquisa solicitada' }];
+            }
+
             return null;
         }
 
@@ -5553,6 +5685,9 @@ header('Content-Type: application/javascript; charset=utf-8');
                 start = text.indexOf('{', start + 1);
             }
         } catch (_) {}
+
+        const looseResult = extractLoosePairs(text);
+        if (looseResult && looseResult.length > 0) return looseResult;
         return null;
     }
 
@@ -5686,6 +5821,7 @@ header('Content-Type: application/javascript; charset=utf-8');
 
             const mEl = document.getElementById(uiNew.mID);
             if (mEl) { mEl.classList.remove('cursor-blink'); mEl.innerHTML = formatMarkdown(fullC); }
+            if (typeof injectSearchButtons === 'function') setTimeout(() => injectSearchButtons(), 0);
 
             if (fullC) {
                 const chainedSearchDetected = await detectAndExecuteSearch(fullC, originalQuestion, uiNew, depth + 1);
@@ -5776,6 +5912,7 @@ header('Content-Type: application/javascript; charset=utf-8');
 
                 const mEl = document.getElementById(uiNew.mID);
                 if (mEl) { mEl.classList.remove('cursor-blink'); mEl.innerHTML = formatMarkdown(fullC); }
+                if (typeof injectSearchButtons === 'function') setTimeout(() => injectSearchButtons(), 0);
                 if (fullC) {
                     const chainedSearchDetected = await detectAndExecuteSearch(fullC, lastUserMsg, uiNew, 1);
                     if (!chainedSearchDetected) {
@@ -6274,6 +6411,7 @@ header('Content-Type: application/javascript; charset=utf-8');
                 mEl.classList.remove('cursor-blink');
                 mEl.innerHTML = fullC.trim().startsWith(('<div>').slice(0, -1)) ? fullC : formatMarkdown(fullC);
             }
+            if (typeof injectSearchButtons === 'function') setTimeout(() => injectSearchButtons(), 0);
             if (fullT) document.getElementById(ui.tID).innerText = fullT;
             
             //só salva se houver conteúdo real:
