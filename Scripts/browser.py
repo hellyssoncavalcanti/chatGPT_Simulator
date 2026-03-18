@@ -1,0 +1,1467 @@
+# =============================================================================
+# browser.py — Controlador Playwright do ChatGPT Simulator
+# =============================================================================
+#
+# RESPONSABILIDADE:
+#   Gerencia o navegador Chromium via Playwright (assíncrono). Consome tarefas
+#   da browser_queue despachadas pelo server.py e executa as ações correspondentes
+#   no navegador: enviar mensagens ao ChatGPT, ler respostas, sincronizar
+#   histórico, gerenciar menus, realizar pesquisas no Google e controlar abas.
+#
+# RELAÇÕES:
+#   • Importa: config, shared (browser_queue), utils
+#   • Consome tarefas de: server.py (via browser_queue.put)
+#   • Produz resultados em: stream_queue por tarefa (lida pelo server.py)
+#
+# AÇÕES SUPORTADAS (campo "action" na tarefa):
+#   CHAT      — envia mensagem e retorna resposta em streaming
+#   SYNC      — scrape completo do histórico de um chat
+#   GET_MENU  — lê opções do menu de contexto de um chat
+#   EXEC_MENU — clica em uma opção do menu (ex: Excluir, Renomear)
+#   SEARCH    — abre Google, pesquisa e retorna resultados estruturados
+#   STOP      — encerra o loop principal
+#
+# MECANISMO DE PASTE:
+#   Texto entre [INICIO_TEXTO_COLADO]...[FIM_TEXTO_COLADO] é colado via
+#   clipboard (Ctrl+V) — rápido como humano. Texto fora dos marcadores
+#   é digitado caractere a caractere via type_realistic().
+# =============================================================================
+import asyncio
+import json
+import random
+import time
+import re
+import os
+import queue
+from playwright.async_api import async_playwright
+import config
+from shared import browser_queue
+from utils import log as file_log
+from markdownify import markdownify as md
+
+# Semáforo para limitar número de abas simultâneas (evita travar o PC)
+MAX_TABS = 5
+tab_semaphore = asyncio.Semaphore(MAX_TABS)
+
+def emit_log(q, msg):
+    if q: q.put(json.dumps({"type": "log", "content": f"[browser.py] {msg}"}) + "\n")
+    file_log("browser.py", msg)
+
+def emit_event(q, type_, content):
+    if q: 
+        # Cria o dicionário e garante que o dumps mantenha tudo em uma linha
+        # O \n final é estritamente o separador do stream
+        payload = json.dumps({"type": type_, "content": content}, separators=(',', ':'))
+        q.put(payload + "\n")
+
+async def smart_input(page, message, q=None, activityts=None):
+    import re
+
+    selector = "#prompt-textarea"
+    await page.wait_for_selector(selector, timeout=10000)
+    await page.click(selector)
+    await asyncio.sleep(0.3)
+
+    start_marker = "[INICIO_TEXTO_COLADO]"
+    end_marker   = "[FIM_TEXTO_COLADO]"
+
+    async def _paste_clipboard(text, label='Colando'):
+        """Cola texto via clipboard (Ctrl+V) -- rapido como um humano.
+        Usa navigator.clipboard.writeText + Ctrl+V via Playwright.
+        Normaliza \r\n -> \n antes de escrever no clipboard."""
+        text = text.replace('\r\n', '\n').replace('\r', '\n')
+        total = len(text)
+        emit_log(q, f'{label}: {total} chars via clipboard...')
+        if q:
+            emit_event(q, 'status', f'{label}... 0%')
+        if activityts:
+            activityts[0] = time.time()
+
+        # Escreve o texto no clipboard via JS
+        await page.evaluate("(t) => navigator.clipboard.writeText(t)", text)
+        await asyncio.sleep(0.1)
+
+        # Foca o textarea e simula Ctrl+V
+        ta_found = await page.evaluate("""
+            () => {
+                const ta = document.getElementById('prompt-textarea')
+                        || document.querySelector('#prompt-textarea');
+                if (!ta) return false;
+                ta.focus();
+                const sel = window.getSelection();
+                const range = document.createRange();
+                range.selectNodeContents(ta);
+                range.collapse(false);
+                sel.removeAllRanges();
+                sel.addRange(range);
+                return true;
+            }
+        """)
+        if not ta_found:
+            raise RuntimeError('prompt-textarea nao encontrado para colar')
+
+        await page.keyboard.press('Control+V')
+        await asyncio.sleep(0.3)
+
+        # Verifica se colou corretamente
+        inserted = await page.evaluate("""
+            () => {
+                const ta = document.getElementById('prompt-textarea')
+                        || document.querySelector('#prompt-textarea');
+                return ta ? (ta.innerText || ta.value || '').length : 0;
+            }
+        """)
+
+        if activityts:
+            activityts[0] = time.time()
+        if q:
+            emit_event(q, 'status', f'{label}... 100%')
+        return inserted
+
+    if start_marker in message and end_marker in message:
+        pattern = re.compile(
+            r'(\[INICIO_TEXTO_COLADO\].*?\[FIM_TEXTO_COLADO\])',
+            re.DOTALL
+        )
+        segments = pattern.split(message)
+
+        for segment in segments:
+            if not segment:
+                continue
+            is_block = segment.startswith(start_marker) and segment.endswith(end_marker)
+            if is_block:
+                inner = segment[len(start_marker):-len(end_marker)]
+                if inner.strip():
+                    emit_log(q, f'Colando bloco ({len(inner)} chars)...')
+                    try:
+                        # Tenta colar via clipboard (Ctrl+V) -- rapido como humano
+                        total = await _paste_clipboard(inner, 'Colando')
+                    except Exception as clipboard_err:
+                        # Fallback: chunks com execCommand se clipboard falhar
+                        emit_log(q, f'Clipboard falhou ({clipboard_err}), usando fallback por chunks...')
+                        CHUNK_SIZE = 300
+                        js_inject = """(text) => {
+                            const ta = document.getElementById('prompt-textarea')
+                                     || document.querySelector('#prompt-textarea');
+                            if (!ta) throw new Error('prompt-textarea nao encontrado');
+                            if (ta.isContentEditable) {
+                                ta.focus();
+                                const sel = window.getSelection();
+                                const range = document.createRange();
+                                range.selectNodeContents(ta);
+                                range.collapse(false);
+                                sel.removeAllRanges();
+                                sel.addRange(range);
+                                document.execCommand('insertText', false, text);
+                                return ta.innerText.length;
+                            }
+                            const setter = Object.getOwnPropertyDescriptor(
+                                window.HTMLTextAreaElement.prototype, 'value').set;
+                            setter.call(ta, (ta.value || '') + text);
+                            ta.dispatchEvent(new InputEvent('input', {
+                                bubbles: true, cancelable: true, inputType: 'insertText', data: text
+                            }));
+                            return ta.value.length;
+                        }"""
+                        txt = inner.replace('\r\n', '\n').replace('\r', '\n')
+                        total_chars = len(txt)
+                        inserted = 0
+                        while inserted < total_chars:
+                            chunk = txt[inserted:inserted + CHUNK_SIZE]
+                            await page.evaluate(js_inject, chunk)
+                            inserted += len(chunk)
+                            pct = int(inserted / total_chars * 100)
+                            if q: emit_event(q, 'status', f'Colando (fallback)... {pct}%')
+                            if activityts: activityts[0] = time.time()
+                            await asyncio.sleep(0.08)
+                        total = inserted
+                    if total < len(inner.replace('\r\n','\n')) * 0.9:
+                        emit_log(q, f'Aviso: colados {total} de ~{len(inner)} chars')
+                    await asyncio.sleep(0.3)
+            else:
+                if segment.strip():
+                    if activityts:
+                        activityts[0] = time.time()
+                    await type_realistic(page, segment, q)
+    else:
+        await type_realistic(page, message, q)
+
+
+async def type_realistic(page, text, q=None):
+    total = len(text)
+    last_status_time = time.time()
+    for i, char in enumerate(text):
+        if char == '\n':
+            await page.keyboard.down("Shift")
+            await page.keyboard.press("Enter")
+            await page.keyboard.up("Shift")
+            await asyncio.sleep(random.uniform(0.01, 0.05))
+        else:
+            await page.keyboard.type(char)
+            # Variabilidade ajustada: 10ms a 80ms
+            await asyncio.sleep(random.uniform(0.01, 0.08))
+            
+        # --- KEEP-ALIVE: Emite status a cada 2 segundos ---
+        current_time = time.time()
+        if q and (current_time - last_status_time) >= 2.0:
+            emit_event(q, "status", f"Digitando... {int((i+1)/total*100)}%")
+            last_status_time = current_time  # Reseta o cronômetro
+
+
+async def _clear_input(page, q=None):
+    """Limpa qualquer texto residual no input do ChatGPT antes de digitar."""
+    try:
+        cleared = await page.evaluate("""() => {
+            const ta = document.getElementById('prompt-textarea')
+                     || document.querySelector('#prompt-textarea');
+            if (!ta) return false;
+
+            if (ta.isContentEditable) {
+                if (!ta.innerText.trim()) return false; // já vazio
+                ta.focus();
+                // Seleciona tudo e deleta
+                document.execCommand('selectAll', false, null);
+                document.execCommand('delete', false, null);
+                // Fallback: limpa innerHTML diretamente se ainda sobrou algo
+                if (ta.innerText.trim()) {
+                    ta.innerHTML = '';
+                    ta.dispatchEvent(new InputEvent('input', { bubbles: true }));
+                }
+            } else {
+                if (!ta.value) return false; // já vazio
+                const setter = Object.getOwnPropertyDescriptor(
+                    window.HTMLTextAreaElement.prototype, 'value'
+                ).set;
+                setter.call(ta, '');
+                ta.dispatchEvent(new InputEvent('input', { bubbles: true }));
+            }
+            return true;
+        }""")
+        if cleared:
+            emit_log(q, "🧹 Input limpo (havia texto residual).")
+    except Exception as e:
+        emit_log(q, f"⚠️ Falha ao limpar input: {e}")
+
+
+async def wait_for_chat_ready(page, url: str, q=None, timeout: int = 30) -> bool:
+    """
+    Aguarda o ChatGPT terminar de carregar um chat existente.
+    Usa múltiplos sinais — o primeiro que confirmar encerra a espera.
+    """
+    emit_log(q, "⏳ Aguardando chat carregar completamente...")
+    deadline = asyncio.get_event_loop().time() + timeout
+
+    # 1. Textarea presente — pré-requisito mínimo
+    try:
+        await page.wait_for_selector("#prompt-textarea", timeout=10_000)
+    except Exception:
+        emit_log(q, "❌ prompt-textarea não encontrado.")
+        return False
+
+    # 2. Mensagens carregadas (histórico hidratado) — só exige se for chat com histórico
+    if "/c/" in url:
+        try:
+            await page.wait_for_selector("[data-message-author-role]", timeout=15_000)
+        except Exception:
+            try:
+                await page.wait_for_selector("article", timeout=5_000)
+            except Exception:
+                emit_log(q, "⚠️ Sem mensagens (chat novo ou vazio). Continuando...")
+
+    # 3. Poll com múltiplos sinais — o mais robusto
+    JS_CHECK = """() => {
+        // Sinal 1: textarea habilitado
+        const ta = document.querySelector('#prompt-textarea');
+        if (!ta || ta.disabled) return { ready: false, signal: 'textarea_disabled' };
+
+        // Sinal 2: send-button existe e não está disabled/aria-disabled
+        const btn = document.querySelector('button[data-testid="send-button"]');
+        if (btn) {
+            const ariaDisabled = btn.getAttribute('aria-disabled');
+            if (!btn.disabled && ariaDisabled !== 'true') {
+                return { ready: true, signal: 'send_button_enabled' };
+            }
+            return { ready: false, signal: 'send_button_disabled' };
+        }
+
+        // Sinal 3: fallback — send-button não existe no DOM mas também não há
+        // botão "Stop generating" → chat está ocioso e pronto para input
+        const stopBtn = document.querySelector(
+            'button[aria-label="Stop generating"], button[data-testid="stop-button"]'
+        );
+        if (!stopBtn) {
+            return { ready: true, signal: 'no_stop_button_fallback' };
+        }
+
+        return { ready: false, signal: 'generating' };
+    }"""
+
+    attempt = 0
+    while asyncio.get_event_loop().time() < deadline:
+        attempt += 1
+        try:
+            result = await page.evaluate(JS_CHECK)
+            if result and result.get("ready"):
+                emit_log(q, f"✅ Chat pronto (sinal: {result.get('signal')}, tentativa #{attempt})")
+                return True
+        except Exception as e:
+            emit_log(q, f"⚠️ Erro no poll #{attempt}: {e}")
+
+        await asyncio.sleep(0.4)
+
+    emit_log(q, f"⚠️ Timeout após {attempt} tentativas. Continuando mesmo assim...")
+    return False
+
+
+
+def clean_html(html_content):
+    if not html_content: return ""
+    html = html_content.replace('<span class="result-streaming-cursor"></span>', '')
+    html = re.sub(r'href="/cdn/assets/[^"]+"', 'href="#"', html)
+    html = re.sub(r'src="/cdn/assets/[^"]+"', 'src=""', html)
+    html = re.sub(r'<button.*?</button>', '', html, flags=re.DOTALL)
+    html = re.sub(r'<div class="flex gap-1.*?</div>', '', html, flags=re.DOTALL)
+    return html
+
+async def get_chat_title(page):
+    try:
+        title = await page.evaluate("""() => {
+            const active = document.querySelector('nav a.bg-token-sidebar-surface-tertiary');
+            return active ? active.innerText : document.title;
+        }""")
+        return title
+    except: return "Novo Chat"
+
+async def scrape_full_chat(page):
+    try:
+        # Tenta o seletor moderno primeiro, depois alternativas
+        try:
+            await page.wait_for_selector('[data-message-author-role]', timeout=6000)
+        except:
+            try:
+                await page.wait_for_selector('section[data-turn]', timeout=3000)
+            except:
+                try:
+                    await page.wait_for_selector('article', timeout=3000)
+                except:
+                    pass  # Continua mesmo sem encontrar — os fallbacks do JS tentam tudo
+
+        msgs = await page.evaluate("""() => {
+            // ── Estratégia 1: div[data-message-author-role] (layout 2025+) ──
+            const roleDivs = document.querySelectorAll('[data-message-author-role]');
+            if (roleDivs.length > 0) {
+                return Array.from(roleDivs).map(el => {
+                    const role = el.getAttribute('data-message-author-role') || 'user';
+
+                    let contentEl;
+                    if (role === 'assistant') {
+                        contentEl = el.querySelector('.markdown')
+                                 || el.querySelector('.prose')
+                                 || el;
+                    } else {
+                        contentEl = el.querySelector('.whitespace-pre-wrap')
+                                 || el;
+                    }
+
+                    let html = contentEl.innerHTML || '';
+                    html = html.replace(/<button[^>]*>[\\s\\S]*?<\\/button>/gi, '');
+                    return { role, content: html };
+                }).filter(m => m.content && m.content.trim().length > 0);
+            }
+
+            // ── Estratégia 2: article (layout legacy) ──
+            const articles = Array.from(document.querySelectorAll('article'));
+            if (articles.length > 0) {
+                return articles.map(art => {
+                    const roleEl = art.querySelector('[data-message-author-role]');
+                    const role   = roleEl
+                        ? roleEl.getAttribute('data-message-author-role')
+                        : (art.querySelector('.markdown') ? 'assistant' : 'user');
+
+                    let contentEl;
+                    if (role === 'assistant') {
+                        contentEl = art.querySelector('.markdown')
+                                 || art.querySelector('[data-message-author-role="assistant"]');
+                    } else {
+                        contentEl = art.querySelector('.whitespace-pre-wrap')
+                                 || art.querySelector('[data-message-author-role="user"]');
+                    }
+                    if (!contentEl) contentEl = art;
+
+                    let html = contentEl.innerHTML || '';
+                    html = html.replace(/<button[^>]*>[\\s\\S]*?<\\/button>/gi, '');
+                    return { role, content: html };
+                }).filter(m => m.content && m.content.trim().length > 0);
+            }
+
+            // ── Estratégia 3: section[data-turn] (layout ChatGPT 2025 alternativo) ──
+            const sections = document.querySelectorAll('section[data-turn]');
+            if (sections.length > 0) {
+                return Array.from(sections).map(sec => {
+                    const role = sec.getAttribute('data-turn') || 'user';
+                    let contentEl;
+                    if (role === 'assistant') {
+                        contentEl = sec.querySelector('.markdown')
+                                 || sec.querySelector('.prose')
+                                 || sec.querySelector('[data-message-author-role="assistant"]');
+                    } else {
+                        contentEl = sec.querySelector('.whitespace-pre-wrap')
+                                 || sec.querySelector('[data-message-author-role="user"]');
+                    }
+                    if (!contentEl) return null;
+                    let html = contentEl.innerHTML || '';
+                    html = html.replace(/<button[^>]*>[\\s\\S]*?<\\/button>/gi, '');
+                    return { role, content: html };
+                }).filter(m => m && m.content && m.content.trim().length > 0);
+            }
+
+            return [];
+        }""")
+        return msgs or []
+    except Exception as e:
+        emit_log(None, f"scrape_full_chat erro: {e}")
+        return []
+
+async def upload_files(page, file_paths):
+    if not file_paths: return False
+    try:
+        await page.set_input_files("input[type='file']", file_paths)
+        try: await page.wait_for_selector("button[aria-label='Remove file']", timeout=10000)
+        except: await asyncio.sleep(5)
+        return True
+    except: return False
+
+async def check_for_dialogs(page, q=None):
+    try:
+        dialog = page.locator('div[role="dialog"]').first
+        if await dialog.is_visible():
+            text = await dialog.inner_text()
+            if "Copiar link" in text or "Compartilhar" in text:
+                emit_log(q, "ℹ️ Modal detectado. Fechando...")
+                close_btn = dialog.locator('button[aria-label="Fechar"], button:has-text("Close")').first
+                if await close_btn.is_visible(): await close_btn.click()
+                else: await page.keyboard.press("Escape")
+                return True
+            return True
+    except: pass
+    return False
+
+async def open_sidebar_menu(page, url, q=None):
+    try:
+        if "/c/" not in url: return []
+        
+        # Extrai o UUID corretamente, mesmo se a URL for de projeto
+        chat_uuid = url.split("/c/")[1].split("?")[0]
+        
+        # Tiramos o "nav" do seletor para que ele ache o chat tanto na barra lateral quanto no centro da página (Projetos)
+        link_selector = f'a[href*="{chat_uuid}"]'
+        
+        if 'check_for_dialogs' in globals():
+            await check_for_dialogs(page, q)
+            
+        # Se o menu já estiver aberto na tela, pega logo e devolve
+        if await page.is_visible('div[role="menu"]'):
+            return await page.evaluate("""() => {
+                const items = Array.from(document.querySelectorAll('[role="menuitem"]'));
+                return items.map(el => el.textContent.trim()).filter(t => t.length > 0);
+            }""")
+
+        try:
+            link_locator = page.locator(link_selector).first
+            await link_locator.wait_for(state="attached", timeout=8000)
+            await link_locator.scroll_into_view_if_needed()
+            await link_locator.hover(force=True)
+            await asyncio.sleep(0.5)
+            
+            menu_btn = link_locator.locator('button[aria-haspopup="menu"]').first
+            if not await menu_btn.is_visible():
+                menu_btn = link_locator.locator("xpath=..").locator('button[aria-haspopup="menu"]').first
+            
+            if await menu_btn.count() > 0:
+                await menu_btn.click(force=True)
+                
+                emit_log(q, "Aguardando div[role='menu']...")
+                await page.wait_for_selector('div[role="menu"]', timeout=5000)
+                await asyncio.sleep(0.5) # Aguarda a animação
+                
+                # Executa o seu JS original (Aprimorado com textContent)
+                options = await page.evaluate("""() => {
+                    const items = Array.from(document.querySelectorAll('[role="menuitem"]'));
+                    return items.map(el => el.textContent.trim()).filter(t => t.length > 0);
+                }""")
+                
+                emit_log(q, f"Opções encontradas: {options}")
+                print(f"\n[DEBUG CMD] Menu lido com sucesso via JS: {options}\n")
+                return options
+        except Exception as e:
+            emit_log(q, "❌ Chat ou menu não encontrado.")
+            print(f"[DEBUG CMD] Erro ao buscar link_locator: {e}")
+            return []
+            
+        return []
+    except Exception as e:
+        emit_log(q, f"❌ Erro menu: {e}")
+        return []
+
+async def execute_menu_option(page, option_text, url, new_name=None, q=None):
+    try:
+        # 1. Encontra o link do chat ativo na tela (já foi carregado via page.goto na handle_menu_task)
+        chat_id = url.rstrip('/').split('/')[-1]
+        chat_link = page.locator(f'a[href*="{chat_id}"]').first
+        
+        await chat_link.wait_for(state="attached", timeout=10000)
+        await chat_link.scroll_into_view_if_needed()
+        await chat_link.hover(force=True)
+        await asyncio.sleep(0.5)
+
+        # 2. Abre o menu (3 pontinhos)
+        menu_btn = chat_link.locator('button[aria-haspopup="menu"]').first
+        if not await menu_btn.is_visible():
+            menu_btn = chat_link.locator("xpath=..").locator('button[aria-haspopup="menu"]').first
+            
+        if await menu_btn.count() > 0:
+            await menu_btn.click(force=True)
+            await page.wait_for_selector('div[role="menu"]', timeout=5000)
+            await asyncio.sleep(0.5)
+        else:
+            emit_log(q, "❌ Botão de menu (3 pontos) não encontrado na interface.")
+            return False
+
+        emit_log(q, f"🖱️ Executando remotamente: {option_text}")
+
+        # 3. Executa a Ação Desejada
+        if "Renomear" in option_text:
+            rename_btn = page.locator('div[role="menu"] [role="menuitem"]:has-text("Renomear"), div[role="menu"] [role="menuitem"]:has-text("Rename")').first
+            if await rename_btn.is_visible():
+                await rename_btn.click(force=True)
+                await asyncio.sleep(0.5)
+                emit_log(q, f"✏️ Renomeando para: {new_name}")
+                try:
+                    # Captura qualquer input que surgir na tela
+                    input_locator = page.locator("input[type='text']").first
+                    if await input_locator.is_visible():
+                        await input_locator.click(force=True)
+                        await page.keyboard.press("Control+A")
+                        await page.keyboard.press("Backspace")
+                        await type_realistic(page, new_name)
+                        await page.keyboard.press("Enter")
+                        emit_log(q, "✅ Renomeado com sucesso na OpenAI.")
+                        return True
+                except Exception as ex: 
+                    emit_log(q, f"❌ Erro ao digitar novo nome: {ex}")
+            else:
+                emit_log(q, "❌ Opção Renomear não visível no menu remoto.")
+
+        elif "Excluir" in option_text:
+            delete_btn = page.locator('div[role="menu"] [role="menuitem"]:has-text("Excluir"), div[role="menu"] [role="menuitem"]:has-text("Delete")').first
+            if await delete_btn.is_visible():
+                await delete_btn.click(force=True)
+                emit_log(q, "🗑️ Confirmando exclusão...")
+                
+                # Busca o botão vermelho de confirmação
+                confirm_btn = page.locator('button.btn-danger, button[data-testid="confirm-delete-chat-button"]').first
+                await confirm_btn.wait_for(timeout=3000)
+                
+                if await confirm_btn.is_visible():
+                    await confirm_btn.click(force=True)
+                    await asyncio.sleep(3)
+                    emit_log(q, "✅ Chat excluído com sucesso na OpenAI.")
+                    return True
+            else:
+                emit_log(q, "❌ Opção Excluir não visível no menu remoto.")
+
+        return False
+        
+    except Exception as e:
+        emit_log(q, f"❌ Erro exec: {e}")
+        return False
+
+# --- TAREFAS ASSÍNCRONAS ---
+
+async def handle_menu_task(context, task):
+    q = task.get('stream_queue')
+    page = await context.new_page()
+    try:
+        url = task.get('url')
+        action = task.get('action')
+        
+        if not url:
+            raise ValueError("URL do chat não fornecida.")
+            
+        emit_log(q, f"Abrindo chat diretamente: {url}")
+        await page.goto(url, wait_until="domcontentloaded")
+        
+        # --- TRAVA DE CARREGAMENTO (O SEGREDO ESTÁ AQUI) ---
+        # Extrai o ID e obriga o script a esperar o elemento existir na tela antes de continuar
+        chat_id = url.rstrip('/').split('/')[-1]
+        chat_link = page.locator(f'a[href*="{chat_id}"]').first
+        
+        emit_log(q, "Aguardando interface estabilizar...")
+        await chat_link.wait_for(state="visible", timeout=20000)
+        await asyncio.sleep(1) # Pausa extra para os scripts do ChatGPT terminarem de rodar
+        
+        # Execução das ações
+        if action == 'GET_MENU':
+            options = await open_sidebar_menu(page, url, q)
+            emit_event(q, "menu_result", {"success": True, "options": options})
+        
+        elif action == 'EXEC_MENU':
+            opt = task.get('option')
+            nn = task.get('new_name')
+            success = await execute_menu_option(page, opt, url, nn, q)
+            emit_event(q, "exec_result", {"success": success})
+            
+    except Exception as e:
+        emit_log(q, f"Erro Menu: {e}")
+        if action == 'GET_MENU': 
+            emit_event(q, "menu_result", {"success": False, "error": str(e)})
+        else: 
+            emit_event(q, "exec_result", {"success": False, "error": str(e)})
+    finally:
+        await page.close()
+        if q: q.put(None)
+
+async def handle_sync_task(context, task):
+    q       = task.get('stream_queue')
+    page    = await context.new_page()
+    try:
+        url    = task.get('url')
+        chat_id = task.get('chat_id')
+        emit_log(q, f"🔄 Sync iniciado para {url}")
+        await page.goto(url, wait_until='domcontentloaded')
+
+        # Aguarda React renderizar as mensagens
+        try:
+            await page.wait_for_selector('[data-message-author-role]', timeout=15000)
+        except:
+            try:
+                await page.wait_for_selector('section[data-turn]', timeout=5000)
+            except:
+                try:
+                    await page.wait_for_selector('article', timeout=3000)
+                except:
+                    await asyncio.sleep(3)
+
+        # Limpa rascunho residual
+        await _clear_input(page, q)
+
+        # Verifica chat deletado
+        error_banner = page.locator('div:has-text("Unable to load conversation")').first
+        if await error_banner.is_visible():
+            emit_log(q, "Chat não encontrado.")
+            emit_event(q, 'syncresult', {'success': False, 'error': 'chatnotfound'})
+            return
+
+        # ✅ Rola o CONTAINER correto do ChatGPT (não a window)
+        JS_SCROLL = """async () => {
+            // Encontra o div scrollável real do chat
+            const container = document.querySelector('main [class*="overflow-y-auto"]')
+                            || document.querySelector('main')
+                            || document.documentElement;
+
+            // Vai ao topo para forçar carga de msgs antigas
+            container.scrollTop = 0;
+            await new Promise(r => setTimeout(r, 800));
+
+            // Desce progressivamente para forçar renderização lazy
+            const step = Math.ceil(container.scrollHeight / 6);
+            for (let i = 0; i < 6; i++) {
+                container.scrollTop += step;
+                await new Promise(r => setTimeout(r, 400));
+            }
+            // Garante que chegou ao final
+            container.scrollTop = container.scrollHeight;
+            await new Promise(r => setTimeout(r, 800));
+            return container.scrollHeight;
+        }"""
+        await page.evaluate(JS_SCROLL)
+        await asyncio.sleep(1)
+
+        # Scrape principal
+        msgs = await scrape_full_chat(page)
+
+        # Fallback 1: se veio vazio, tenta mais uma vez após scroll extra
+        if not msgs:
+            emit_log(q, "⚠️ Scrape vazio — tentando scroll extra...")
+            await page.evaluate("document.documentElement.scrollTop = 999999")
+            await asyncio.sleep(2)
+            msgs = await scrape_full_chat(page)
+
+        # Fallback 2: força modo print (remove overflow:hidden, display:none, etc.)
+        if not msgs:
+            emit_log(q, "⚠️ Scrape vazio — tentando modo print...")
+            try:
+                await page.emulate_media(media='print')
+                await asyncio.sleep(1)
+                msgs = await scrape_full_chat(page)
+                # Restaura modo screen
+                await page.emulate_media(media='screen')
+            except Exception as e_print:
+                emit_log(q, f"⚠️ Fallback print falhou: {e_print}")
+
+        # Fallback 3: section[data-turn] (layout ChatGPT 2025 alternativo)
+        if not msgs:
+            emit_log(q, "⚠️ Scrape vazio — tentando section[data-turn]...")
+            try:
+                msgs = await page.evaluate("""() => {
+                    const sections = document.querySelectorAll('section[data-turn]');
+                    if (!sections.length) return [];
+                    return Array.from(sections).map(sec => {
+                        const role = sec.getAttribute('data-turn') || 'user';
+                        let contentEl;
+                        if (role === 'assistant') {
+                            contentEl = sec.querySelector('.markdown')
+                                     || sec.querySelector('.prose')
+                                     || sec.querySelector('[data-message-author-role="assistant"]');
+                        } else {
+                            contentEl = sec.querySelector('.whitespace-pre-wrap')
+                                     || sec.querySelector('[data-message-author-role="user"]');
+                        }
+                        if (!contentEl) return null;
+                        let html = contentEl.innerHTML || '';
+                        html = html.replace(/<button[^>]*>[\\s\\S]*?<\\/button>/gi, '');
+                        return { role, content: html };
+                    }).filter(m => m && m.content && m.content.trim().length > 0);
+                }""")
+                msgs = msgs or []
+                if msgs:
+                    emit_log(q, f"✅ section[data-turn] encontrou {len(msgs)} mensagens")
+            except Exception as e_sec:
+                emit_log(q, f"⚠️ Fallback section[data-turn] falhou: {e_sec}")
+
+        emit_log(q, f"✅ Encontradas {len(msgs)} mensagens.")
+
+        # Converte HTML → Markdown
+        for m in msgs:
+            clean = clean_html(m['content'])
+            if m['role'] == 'assistant':
+                m['content'] = md(clean, heading_style='ATX').strip()
+            else:
+                m['content'] = md(clean).strip()
+            m['content'] = m['content'].replace('\u200b', '').replace('\xa0', ' ')
+            m['content'] = m['content'].replace('\\_', '_').replace('\\*', '*')  # ✅ FIX — era omitido aqui
+
+        title = await get_chat_title(page)
+        emit_event(q, 'syncresult', {
+            'success': True, 'messages': msgs, 'title': title, 'chat_id': chat_id
+        })
+
+    except Exception as e:
+        emit_log(q, f"Erro Sync: {e}")
+        emit_event(q, 'syncresult', {'success': False, 'error': str(e)})
+    finally:
+        await page.close()
+        if q:
+            q.put(None)
+
+
+
+
+async def watchdog_page(page, q, stop_event: asyncio.Event,
+                        check_interval: int = 15,
+                        activity_ts: list = None):
+    while not stop_event.is_set():
+        try:
+            await asyncio.wait_for(asyncio.sleep(check_interval), timeout=check_interval + 1)
+        except (asyncio.CancelledError, asyncio.TimeoutError):
+            return
+        if stop_event.is_set():
+            return
+        if activity_ts and (time.time() - activity_ts[0]) < check_interval:
+            continue
+        try:
+            await asyncio.wait_for(page.evaluate("1"), timeout=20.0)
+        except Exception as e:
+            emit_event(q, "error", f"⏱️ Watchdog: aba não respondeu ({e}). Abortando.")
+            stop_event.set()
+            return
+
+
+
+def _parse_google_raw_html(raw_html: str, query: str = "") -> list:
+    """
+    Fallback bruto: extrai resultados do Google via regex no HTML cru.
+    Não depende de classes CSS — procura padrões estruturais que o Google
+    usa independentemente do tema/layout:
+      - <h3...>TÍTULO</h3> dentro de <a href="https://...">
+      - Snippet na div.VwiC3b mais próxima após o h3
+    Retorna lista no mesmo formato das estratégias JS.
+    """
+    from html.parser import HTMLParser
+    import html as html_mod
+
+    def _strip_tags(s):
+        """Remove tags HTML e normaliza espaços."""
+        clean = re.sub(r'<[^>]+>', ' ', s)
+        clean = html_mod.unescape(clean).strip()
+        return re.sub(r'\s+', ' ', clean)
+
+    def _is_site_name(text):
+        """Detecta se o texto é nome de site/domínio em vez de snippet real."""
+        low = text.lower()
+        if len(text) < 60 and any(x in low for x in ['.gov', '.com', '.org', '.edu', 'institutes of health', 'wikipedia']):
+            return True
+        if text.count('.') > 2 and len(text) < 80:
+            return True
+        return False
+
+    items = []
+    seen = set()
+
+    # Padrão: <a href="URL">...<h3>TÍTULO</h3>
+    pattern_h3 = re.compile(
+        r'<a[^>]+href="(https?://(?!(?:www\.)?google\.com/(?:search|url|imgres|maps))[^"]+)"[^>]*>'
+        r'[^<]*<h3[^>]*>([^<]+)</h3>',
+        re.IGNORECASE | re.DOTALL
+    )
+
+    for m in pattern_h3.finditer(raw_html):
+        url   = html_mod.unescape(m.group(1)).strip()
+        title = html_mod.unescape(m.group(2)).strip()
+
+        if not title or len(title) < 5:
+            continue
+        if url in seen:
+            continue
+        seen.add(url)
+
+        # Procura snippet na janela após o h3 (5000 chars cobre bem o gap)
+        after_h3 = raw_html[m.end():m.end() + 5000]
+        snippet = ""
+
+        # Tenta VwiC3b (classe padrão de snippet do Google)
+        snip_match = re.search(
+            r'class="VwiC3b[^"]*"[^>]*>(.*?)</div>',
+            after_h3,
+            re.DOTALL | re.IGNORECASE
+        )
+        if snip_match:
+            candidate = _strip_tags(snip_match.group(1))
+            if len(candidate) > 30 and not _is_site_name(candidate):
+                snippet = candidate[:300]
+
+        # Fallback: data-sncf="1" container
+        if not snippet:
+            snip_match2 = re.search(
+                r'data-sncf="1"[^>]*>(.*?)</div>',
+                after_h3,
+                re.DOTALL | re.IGNORECASE
+            )
+            if snip_match2:
+                candidate = _strip_tags(snip_match2.group(1))
+                if len(candidate) > 30 and not _is_site_name(candidate):
+                    snippet = candidate[:300]
+
+        # Fallback: texto longo em <span> após o h3
+        if not snippet:
+            snip_spans = re.findall(
+                r'<(?:span|em)[^>]*>([^<]{40,500})</(?:span|em)>',
+                after_h3[:3000],
+                re.IGNORECASE
+            )
+            for s in snip_spans:
+                candidate = html_mod.unescape(s).strip()
+                if len(candidate) > 40 and not _is_site_name(candidate) and 'Traduzir' not in candidate:
+                    snippet = candidate[:300]
+                    break
+
+        items.append({
+            "position": len(items) + 1,
+            "title":    title,
+            "url":      url,
+            "snippet":  snippet,
+            "type":     "organic"
+        })
+
+        if len(items) >= 10:
+            break
+
+    return items
+
+
+async def handle_search_task(context, task):
+    """
+    Ação SEARCH — abre Google, digita a query com typing realista,
+    scrapa os resultados orgânicos e retorna JSON estruturado.
+
+    Emite:
+      • log      — progresso
+      • status   — etapas ("Pesquisando...", "Aguardando resultados...")
+      • searchresult — resultado final (success, query, results[])
+    """
+    async with tab_semaphore:
+        q    = task.get('stream_queue')
+        query = (task.get('query') or '').strip()
+        page = None
+        try:
+            if not query:
+                emit_event(q, 'searchresult', {
+                    'success': False, 'query': '', 'error': 'Query vazia'
+                })
+                return
+
+            page = await context.new_page()
+            emit_log(q, f"🔍 Pesquisando no Google: {query}")
+
+            # ── 1. Abre o Google ──────────────────────────────────────
+            await page.goto('https://www.google.com', wait_until='domcontentloaded')
+            await asyncio.sleep(random.uniform(0.8, 1.5))
+
+            # ── 2. Aceita cookies/consent se aparecer ─────────────────
+            try:
+                consent_selectors = [
+                    'button#L2AGLb',                            # "Aceitar tudo" (PT/EN)
+                    'button:has-text("Aceitar tudo")',
+                    'button:has-text("Accept all")',
+                    'button:has-text("Rejeitar tudo")',         # fallback: rejeitar
+                    'button:has-text("Reject all")',
+                ]
+                for sel in consent_selectors:
+                    btn = page.locator(sel).first
+                    try:
+                        if await btn.is_visible(timeout=1500):
+                            await btn.click()
+                            await asyncio.sleep(0.5)
+                            break
+                    except:
+                        continue
+            except:
+                pass
+
+            # ── 3. Foca no campo de busca e digita ────────────────────
+            search_input = page.locator('textarea[name="q"], input[name="q"]').first
+            try:
+                await search_input.wait_for(state='visible', timeout=5000)
+            except:
+                # Fallback: tenta clicar no body e usar Tab
+                await page.click('body')
+                await asyncio.sleep(0.3)
+
+            await search_input.click()
+            await asyncio.sleep(random.uniform(0.2, 0.5))
+
+            emit_event(q, 'status', f'Digitando busca...')
+            await type_realistic(page, query, q)
+            await asyncio.sleep(random.uniform(0.3, 0.8))
+
+            # ── 4. Pressiona Enter ────────────────────────────────────
+            await page.keyboard.press('Enter')
+            emit_event(q, 'status', 'Aguardando resultados do Google...')
+
+            # ── 5. Aguarda resultados carregarem ──────────────────────
+            try:
+                await page.wait_for_selector('#search, #rso, #botstuff', timeout=15000)
+            except:
+                # Pode ser CAPTCHA ou página lenta
+                await asyncio.sleep(3)
+
+            await asyncio.sleep(random.uniform(1.0, 2.0))
+
+            # ── 6. Scrapa resultados orgânicos ────────────────────────
+            # Estratégia 1: N54PNb (layout Google 2025)
+            # Estratégia 2: h3 walk-up (fallback CSS)
+            # Estratégia 3: raw HTML regex (fallback bruto)
+            results = await page.evaluate("""() => {
+                const items = [];
+                const seen = new Set();
+
+                // Featured snippet
+                const feat = document.querySelector('.hgKElc, .IZ6rdc, [data-attrid="wa:/description"], .kno-rdesc span, .LGOjhe');
+                if (feat && feat.innerText.trim().length > 20) {
+                    items.push({
+                        position: 0,
+                        title: '★ Resposta em destaque',
+                        url: '',
+                        snippet: feat.innerText.trim().substring(0, 500),
+                        type: 'featured_snippet'
+                    });
+                }
+
+                // ── Estratégia 1: N54PNb (container Google 2025) ──
+                let pos = 1;
+                document.querySelectorAll('.N54PNb').forEach(container => {
+                    if (pos > 10) return;
+                    const h3 = container.querySelector('h3');
+                    if (!h3) return;
+                    const title = h3.innerText.trim();
+                    if (!title || title.length < 3) return;
+
+                    const linkEl = container.querySelector('a.zReHs[href], a[href^="http"]');
+                    if (!linkEl) return;
+                    const url = linkEl.href || '';
+                    if (!url || url.includes('google.com/search')) return;
+                    if (seen.has(url)) return;
+                    seen.add(url);
+
+                    let snippet = '';
+                    const snipEl = container.querySelector('.VwiC3b');
+                    if (snipEl) snippet = snipEl.innerText.trim().substring(0, 300);
+
+                    items.push({ position: pos++, title, url, snippet, type: 'organic' });
+                });
+
+                // ── Estratégia 2 (fallback CSS): h3 walk-up ──
+                if (items.filter(i => i.type === 'organic').length === 0) {
+                    pos = 1;
+                    const area = document.querySelector('#rso, #search');
+                    if (area) {
+                        area.querySelectorAll('h3').forEach(h3 => {
+                            if (pos > 10) return;
+                            const title = h3.innerText.trim();
+                            if (!title || title.length < 3) return;
+
+                            const linkEl = h3.closest('a[href^="http"]');
+                            if (!linkEl) return;
+                            const url = linkEl.href || '';
+                            if (!url || url.includes('google.com/search')) return;
+                            if (seen.has(url)) return;
+                            seen.add(url);
+
+                            let snippet = '';
+                            let walker = h3;
+                            for (let i = 0; i < 8 && walker; i++) {
+                                walker = walker.parentElement;
+                                if (!walker) break;
+                                const s = walker.querySelector('.VwiC3b');
+                                if (s) { snippet = s.innerText.trim().substring(0, 300); break; }
+                            }
+
+                            items.push({ position: pos++, title, url, snippet, type: 'organic' });
+                        });
+                    }
+                }
+
+                // People Also Ask
+                const paa = document.querySelectorAll(
+                    '[jsname="Cpkphb"] [data-q], [data-sgrd] [role="heading"], .related-question-pair'
+                );
+                if (paa.length > 0) {
+                    const qs = [];
+                    paa.forEach((el, i) => { if (i < 4) qs.push(el.getAttribute('data-q') || el.innerText.trim()); });
+                    if (qs.length) items.push({ position: 99, title: 'Perguntas relacionadas', url: '', snippet: qs.join(' | '), type: 'people_also_ask' });
+                }
+
+                return items;
+            }""")
+
+            # ── Estratégia 3 (fallback bruto): raw HTML com regex ──
+            if not results or all(r.get('type') != 'organic' for r in results):
+                emit_log(q, "⚠️ Seletores CSS não encontraram resultados — tentando fallback via raw HTML...")
+                try:
+                    raw_html = await page.content()
+                    results = _parse_google_raw_html(raw_html, query)
+                    if results:
+                        emit_log(q, f"✅ Fallback raw HTML: {len(results)} resultados extraídos")
+                except Exception as e_raw:
+                    emit_log(q, f"⚠️ Fallback raw HTML falhou: {e_raw}")
+
+            emit_log(q, f"✅ {len(results)} resultados encontrados para: {query}")
+            emit_event(q, 'searchresult', {
+                'success': True,
+                'query':   query,
+                'results': results,
+                'count':   len(results)
+            })
+
+        except Exception as e:
+            emit_log(q, f"❌ Erro na busca Google: {e}")
+            emit_event(q, 'searchresult', {
+                'success': False,
+                'query':   query,
+                'error':   str(e)
+            })
+        finally:
+            if page:
+                try:
+                    await page.close()
+                except:
+                    pass
+            if q:
+                q.put(None)
+
+
+async def handle_chat_task(context, task):
+    async with tab_semaphore:
+        q          = task.get('stream_queue')
+        stop_event = asyncio.Event()
+        activityts = [time.time()]
+        page = None
+        try:
+            page = await context.new_page()
+            watchdog_task = asyncio.create_task(
+                watchdog_page(page, q, stop_event,
+                              check_interval=15,
+                              activity_ts=activityts)  # ✅ era activityts=, corrigido para activity_ts=
+            )
+            try:
+                await asyncio.wait_for(
+                    handle_chat_task_inner(task, page, q, stop_event, activityts),
+                    timeout=660
+                )
+            except asyncio.TimeoutError:
+                emit_event(q, 'error', 'Timeout externo 660s — tarefa abortada.')
+            finally:
+                stop_event.set()
+                watchdog_task.cancel()
+                try:
+                    await watchdog_task
+                except (asyncio.CancelledError, Exception):
+                    pass
+        except Exception as e:
+            emit_log(q, f'ERRO Chat: {e}')
+            emit_event(q, 'error', f'Falha no navegador: {str(e)}')
+        finally:
+            emit_log(q, 'Finalizando tarefa.')
+            if page:
+                try:
+                    await page.close()
+                except:
+                    pass
+            if q:
+                q.put(None)
+
+
+async def handle_chat_task_inner(task, page, q, stop_event: asyncio.Event, activityts: list = None):
+    url    = task.get('url')
+    chat_id = task.get('chat_id')
+    msg    = task.get('message')
+    atts   = task.get('attachment_paths')
+
+    if url and url != 'None':
+        emit_log(q, f'Abrindo chat existente: {url}')
+        await page.goto(url, wait_until='domcontentloaded')
+    else:
+        emit_log(q, 'Iniciando nova aba de chat...')
+        await page.goto('https://chatgpt.com', wait_until='domcontentloaded')
+        await asyncio.sleep(2)
+
+    if stop_event.is_set():
+        raise RuntimeError('Watchdog sinalizou falha antes do input.')
+
+    if not url or url == 'None':
+        try:
+            project_loc = page.locator('a[href*="conexaovida"][href*="project"]').first
+            found = False
+            try:
+                await project_loc.wait_for(state='attached', timeout=5000)
+                if await project_loc.is_visible():
+                    found = True
+            except:
+                found = False
+            if found:
+                emit_log(q, "Projeto 'ConexaoVida' encontrado. Criando novo chat no projeto...")
+                await project_loc.click()
+                await page.wait_for_selector('#prompt-textarea', timeout=10000)
+                await asyncio.sleep(1)
+            else:
+                print("DICA: Projeto ConexaoVida não encontrado na barra lateral.")
+        except Exception:
+            pass
+    else:
+        await wait_for_chat_ready(page, url, q, timeout=30)
+
+    if stop_event.is_set():
+        raise RuntimeError('Watchdog sinalizou falha após carregamento da página.')
+
+    await _clear_input(page, q)
+
+    if atts:
+        emit_event(q, 'status', f'Anexando {len(atts)} arquivo(s)...')
+        await upload_files(page, atts)
+
+    emit_event(q, 'status', 'Digitando...')
+    try:
+        await page.click('#prompt-textarea', timeout=2000)
+    except:
+        pass
+
+    if msg:
+        if activityts:
+            activityts[0] = time.time()
+        await smart_input(page, msg, q, activityts=activityts)
+        if activityts:
+            activityts[0] = time.time()
+
+    await asyncio.sleep(1)
+
+    if stop_event.is_set():
+        raise RuntimeError("Watchdog sinalizou falha após digitação.")
+
+    emit_event(q, "status", "Enviando...")
+    sent = False
+    try:
+        btn = page.locator('button[data-testid="send-button"]').first
+        if await btn.is_visible() and not await btn.is_disabled():
+            await btn.click()
+            sent = True
+    except:
+        pass
+
+    if not sent:
+        await page.keyboard.press("Enter")
+
+    emit_event(q, "status", "Aguardando resposta...")
+
+    start_time  = time.time()
+    started     = False
+    last_html   = ""
+    stuck_count = 0
+    loop_count  = 0
+
+    while True:
+        if stop_event.is_set():
+            emit_event(q, "error", "⚠️ Aba travada detectada durante recepção da resposta.")
+            break
+
+        loop_count += 1
+
+        status_txt = await page.evaluate("""() => {
+            const asstMsgs = document.querySelectorAll('div[data-message-author-role="assistant"]');
+            if (asstMsgs.length > 0) {
+                const lastAsst = asstMsgs[asstMsgs.length - 1];
+                const details = lastAsst.querySelectorAll('details');
+                if (details.length > 0) return details[details.length - 1].innerText.trim();
+            }
+            const targets = Array.from(document.querySelectorAll('div, span'));
+            const bad = ["Plus","Team","Enterprise","Upgrade","GPT-4","admin","ChatGPT","Send message"];
+            const el = targets.find(t => {
+                const txt = t.innerText;
+                if (!txt) return false;
+                const lower = txt.toLowerCase();
+                const isStatus = lower.includes('pesquisando') || lower.includes('searching') ||
+                                 lower.includes('thinking')    || lower.includes('pensando')  ||
+                                 lower.includes('analisando')  || lower.includes('analyzing') ||
+                                 lower.includes('trabalhando') || lower.includes('working')   ||
+                                 lower.includes('lendo')       || lower.includes('reading');
+                return isStatus && !bad.some(b => txt.includes(b)) && t.offsetHeight > 0 && txt.length < 150;
+            });
+            return el ? el.innerText.trim() : null;
+        }""")
+
+        if status_txt:
+            emit_event(q, "status", status_txt)
+            started     = True
+            stuck_count = 0
+        elif not started and loop_count % 10 == 0:
+            emit_event(q, "status", "Aguardando resposta...")
+
+        is_gen = await page.locator('button[aria-label="Stop generating"]').is_visible()
+        if is_gen:
+            started     = True
+            stuck_count = 0
+
+        responses = await page.locator("div[data-message-author-role='assistant']").all()
+        curr_html = ""
+        if responses:
+            curr_html = await responses[-1].inner_html()
+            curr_html = clean_html(curr_html)
+
+        markdown_text = md(curr_html, heading_style="ATX").strip()
+        markdown_text = markdown_text.replace("\\_", "_").replace("\\*", "*")
+
+        if markdown_text != last_html:
+            if not started:
+                emit_event(q, "status", "Recebendo...")
+                started = True
+            emit_event(q, "markdown", markdown_text)
+            last_html   = markdown_text
+            stuck_count = 0
+        else:
+            stuck_count += 1
+
+        if not is_gen and not status_txt:
+            if len(last_html) > 0:
+                if stuck_count > 20: break
+            else:
+                if time.time() - start_time > 40: break
+
+        if time.time() - start_time > 600: break
+        await asyncio.sleep(0.3)
+
+    final_title = await get_chat_title(page)
+    final_url   = page.url
+    emit_event(q, "finish", {"chat_id": chat_id, "title": final_title, "url": final_url})  # ✅ era chat_id, corrigido para chat_id
+
+# --- LOOP PRINCIPAL ASYNC ---
+async def browser_loop_async():
+    file_log("browser.py", "⚡ Iniciando Loop Async (Playwright)...")
+    async with async_playwright() as p:
+        
+        # Função interna para iniciar o browser evitando repetição de código
+        async def start_browser():
+            b = await p.chromium.launch_persistent_context(
+                config.DIRS["profile"],
+                headless=False,
+                args=["--start-maximized", "--disable-blink-features=AutomationControlled", "--disable-infobars"],
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+                viewport=None
+            )
+            try:
+                dp = await b.new_page()
+                await dp.goto("https://chatgpt.com")
+            except: pass
+            return b
+
+        # Inicia pela primeira vez
+        browser = await start_browser()
+        file_log("browser.py", "🟢 Async Worker Online. Aguardando tarefas...")
+
+        while True:
+            try:
+                loop = asyncio.get_running_loop()
+                task = await loop.run_in_executor(None, browser_queue.get)
+                
+                if task.get('action') == 'STOP': break
+                
+                # =======================================================
+                # AUTO-RECOVERY: TESTA SE O BROWSER AINDA ESTÁ VIVO
+                # =======================================================
+                try:
+                    # 1. Se o usuário fechou todas as abas, consideramos fechado
+                    if len(browser.pages) == 0:
+                        raise Exception("Sem abas")
+                    
+                    # 2. Faz um "Ping" real no Chromium. Se ele foi fechado no X, isso vai dar erro na hora!
+                    await browser.pages[0].evaluate("1")
+                    
+                except Exception:
+                    file_log("browser.py", "⚠️ Navegador fechado ou desconectado detectado! Recriando...")
+                    try: await browser.close()
+                    except: pass
+                    
+                    # Reabre o navegador usando a função interna
+                    browser = await start_browser()
+                    file_log("browser.py", "✅ Navegador reaberto com sucesso!")
+                # =======================================================
+
+                action = task.get('action', 'CHAT')
+                
+                if action in ['GET_MENU', 'EXEC_MENU']:
+                    asyncio.create_task(handle_menu_task(browser, task))
+                elif action == 'SYNC':
+                    asyncio.create_task(handle_sync_task(browser, task))
+                elif action == 'SEARCH':
+                    asyncio.create_task(handle_search_task(browser, task))
+                else: 
+                    asyncio.create_task(handle_chat_task(browser, task))
+                    
+            except Exception as e:
+                print(f"Erro no loop principal: {e}")
+                await asyncio.sleep(1)
+
+def browser_loop():
+    # Wrapper para rodar o loop async dentro da Thread do main.py
+    asyncio.run(browser_loop_async())
+
+
+# =============================================================================
+# MODO STANDALONE — python browser.py search "query aqui"
+# =============================================================================
+# Permite testar a busca Google (e futuramente outras ações) sem precisar
+# subir o server.py. Abre o Playwright com o mesmo perfil persistente,
+# executa a ação e imprime o resultado no terminal.
+# =============================================================================
+
+async def _standalone_search(queries: list):
+    """Executa buscas Google standalone (sem server.py)."""
+    async with async_playwright() as p:
+        browser = await p.chromium.launch_persistent_context(
+            config.DIRS["profile"],
+            headless=False,
+            args=["--start-maximized", "--disable-blink-features=AutomationControlled", "--disable-infobars"],
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+            viewport=None,
+        )
+        try:
+            for i, query_str in enumerate(queries):
+                q = queue.Queue()
+                task = {'action': 'SEARCH', 'query': query_str, 'stream_queue': q}
+
+                print(f"\n{'─' * 60}")
+                print(f"🔍 [{i+1}/{len(queries)}] {query_str}")
+                print(f"{'─' * 60}")
+
+                await handle_search_task(browser, task)
+
+                # Drena a fila e exibe resultado
+                result_data = None
+                while True:
+                    try:
+                        raw = q.get_nowait()
+                    except queue.Empty:
+                        break
+                    if raw is None:
+                        break
+                    try:
+                        msg = json.loads(raw)
+                    except:
+                        continue
+
+                    t = msg.get('type')
+                    if t == 'log':
+                        print(f"  📋 {msg.get('content', '')}")
+                    elif t == 'status':
+                        print(f"  ⏳ {msg.get('content', '')}")
+                    elif t == 'searchresult':
+                        result_data = msg.get('content', {})
+
+                if not result_data:
+                    print("  ❌ Nenhum resultado retornado.")
+                    continue
+
+                if not result_data.get('success'):
+                    print(f"  ❌ Erro: {result_data.get('error')}")
+                    continue
+
+                items = result_data.get('results', [])
+                print(f"\n  ✅ {len(items)} resultado(s):\n")
+                for item in items:
+                    tipo = item.get('type', 'organic')
+                    pos  = item.get('position', '?')
+                    if tipo == 'featured_snippet':
+                        print(f"  ★ DESTAQUE")
+                        print(f"    {item['snippet'][:250]}")
+                    elif tipo == 'people_also_ask':
+                        print(f"  ❓ Perguntas relacionadas")
+                        print(f"    {item['snippet'][:250]}")
+                    else:
+                        print(f"  [{pos}] {item['title']}")
+                        print(f"      {item['url']}")
+                        if item.get('snippet'):
+                            print(f"      {item['snippet'][:180]}")
+                    print()
+
+                if i < len(queries) - 1:
+                    await asyncio.sleep(random.uniform(2, 4))
+        finally:
+            await browser.close()
+
+
+def _cli():
+    """Ponto de entrada CLI — executa ações standalone."""
+    import sys
+
+    usage = (
+        "Uso:\n"
+        "  python browser.py search \"metilfenidato efeitos adversos\"\n"
+        "  python browser.py search \"query 1\" \"query 2\" \"query 3\"\n"
+    )
+
+    if len(sys.argv) < 3:
+        print(usage)
+        sys.exit(1)
+
+    action = sys.argv[1].lower()
+
+    if action == 'search':
+        queries = sys.argv[2:]
+        print(f"🌐 Modo standalone — {len(queries)} busca(s) no Google")
+        asyncio.run(_standalone_search(queries))
+    else:
+        print(f"Ação desconhecida: '{action}'\n")
+        print(usage)
+        sys.exit(1)
+
+
+if __name__ == '__main__':
+    _cli()

@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="app-version" content="6.2">
+    <title>ChatGPT Simulator</title>
+    <style>
+        :root { --bg-body: #343541; --bg-sidebar: #202123; --text: #ececf1; --bg-user: #343541; --bg-gpt: #444654; }
+        body { margin: 0; font-family: 'Segoe UI', sans-serif; background: var(--bg-body); color: var(--text); display: flex; height: 100vh; overflow: hidden; }
+        
+        .sidebar { width: 260px; background: var(--bg-sidebar); border-right: 1px solid #4d4d4f; display: flex; flex-direction: column; }
+        .chat-list { flex: 1; overflow-y: auto; padding: 10px; }
+        .chat-item { padding: 10px; margin: 5px 0; border-radius: 5px; cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: #ececf1; transition: 0.2s; }
+        .chat-item:hover { background: #2a2b32; }
+        .chat-item.active { background: #343541; border: 1px solid #555; }
+        
+        .main { flex: 1; display: flex; flex-direction: column; position: relative; }
+        .chat-area { flex: 1; overflow-y: auto; padding-bottom: 150px; }
+        
+        .message-row { padding: 24px; border-bottom: 1px solid rgba(0,0,0,0.1); display: flex; justify-content: center; }
+        .message-row.gpt { background: var(--bg-gpt); border-bottom: 1px solid rgba(0,0,0,0.3); }
+        
+        /* Destaque para mensagens sincronizadas novas */
+        .message-row.new-message { border-left: 4px solid #19c37d; animation: flash 2s; }
+        @keyframes flash { 0% { background-color: #1a3a2a; } 100% { background-color: inherit; } }
+
+        .message-content { width: 100%; max-width: 800px; display: flex; gap: 20px; font-size: 1rem; line-height: 1.6; }
+        .avatar { width: 30px; height: 30px; border-radius: 2px; flex-shrink: 0; display: flex; align-items: center; justify-content: center; font-weight: bold; }
+        .avatar.user { background: #5436DA; }
+        .avatar.gpt { background: #19c37d; }
+        .text-block { flex: 1; overflow-x: hidden; }
+        
+        /* Estilos do Conteúdo */
+        .text-block p { margin-bottom: 1rem; }
+        .text-block pre { background: #000; padding: 15px; border-radius: 6px; overflow-x: auto; }
+        .text-block code { background: rgba(0,0,0,0.3); padding: 2px 4px; border-radius: 3px; font-family: monospace; }
+        
+        .status-float { position: absolute; bottom: 120px; left: 50%; transform: translateX(-50%); background: #19c37d; color: white; padding: 8px 16px; border-radius: 20px; font-size: 0.9rem; opacity: 0; transition: opacity 0.3s; display: flex; align-items: center; gap: 8px; pointer-events: none; }
+        .status-float.visible { opacity: 1; }
+        .spinner { width: 14px; height: 14px; border: 2px solid white; border-top-color: transparent; border-radius: 50%; animation: spin 1s infinite linear; }
+        @keyframes spin { to { transform: rotate(360deg); } }
+
+        .input-container { position: absolute; bottom: 0; width: 100%; background: linear-gradient(180deg, transparent, #343541 20%); padding: 30px 0 50px; display: flex; justify-content: center; }
+        .input-box { width: 100%; max-width: 800px; position: relative; background: #40414f; border: 1px solid #565869; border-radius: 6px; }
+        textarea { width: 100%; padding: 16px 50px 16px 16px; background: transparent; border: none; color: white; resize: none; outline: none; font-family: inherit; font-size: 1rem; box-sizing: border-box; }
+        .send-btn { position: absolute; right: 10px; bottom: 10px; background: #19c37d; border: none; padding: 5px 10px; border-radius: 4px; color: white; cursor: pointer; }
+    </style>
+</head>
+<body>
+    <div class="sidebar">
+        <div style="padding:15px; font-weight:bold; border-bottom:1px solid #444">Histórico</div>
+        <div class="chat-list" id="chatList"></div>
+    </div>
+    <div class="main">
+        <div class="chat-area" id="chatArea">
+            <div class="message-row gpt"><div class="message-content"><div class="avatar gpt">G</div><div class="text-block">Pronto.</div></div></div>
+        </div>
+        <div class="status-float" id="statusFloat"><div class="spinner"></div> <span id="statusText">...</span></div>
+        <div class="input-container">
+            <div class="input-box">
+                <textarea id="userInput" rows="1" placeholder="Envie uma mensagem..." onkeydown="if(event.key==='Enter' && !event.shiftKey) { event.preventDefault(); sendMsg(); }"></textarea>
+                <button class="send-btn" id="sendBtn" onclick="sendMsg()">➤</button>
+            </div>
+        </div>
+    </div>
+    <script>
+        const API_KEY = "CVAPI_2b9c80c2abf94a76baf8b3e68d89cb7e";
+        let currentChatId = null;
+
+        const ConsoleLog = {
+            group: (t) => console.group(`%c🚀 ${t}`, "color: #00e676; font-size: 12px;"),
+            info: (m) => console.log(`%c[INFO] %c${m}`, "color: orange;", "color: #ccc;"),
+            browser: (m) => console.log(`%c[BROWSER] %c${m}`, "color: #29b6f6;", "color: #e1f5fe;"),
+            status: (m) => console.log(`%c[STATUS] %c${m}`, "color: #00e676;", "color: #fff;"),
+            end: () => console.groupEnd()
+        };
+
+        function setStatus(text) {
+            const el = document.getElementById('statusFloat');
+            if(text && text !== "Plus") { // Filtro Extra no Frontend
+                document.getElementById('statusText').innerText = text;
+                el.classList.add('visible');
+                ConsoleLog.status(text);
+            } else {
+                el.classList.remove('visible');
+            }
+        }
+
+        async function loadChats() {
+            try {
+                const res = await fetch('/api/history');
+                const data = await res.json();
+                const list = document.getElementById('chatList');
+                list.innerHTML = '<div class="chat-item" onclick="selectChat(null)">+ Novo Chat</div>';
+                Object.keys(data).sort((a,b) => new Date(data[b].updated_at) - new Date(data[a].updated_at)).forEach(id => {
+                    const div = document.createElement('div');
+                    div.className = `chat-item ${currentChatId === id ? 'active' : ''}`;
+                    div.innerText = data[id].title;
+                    div.onclick = () => selectChat(id);
+                    list.appendChild(div);
+                });
+            } catch(e) {}
+        }
+
+        async function selectChat(id) {
+            currentChatId = id;
+            loadChats(); // Atualiza active state
+            const area = document.getElementById('chatArea');
+            area.innerHTML = '';
+            
+            if(!id) {
+                 area.innerHTML = `<div class="message-row gpt"><div class="message-content"><div class="avatar gpt">G</div><div class="text-block">Novo chat iniciado.</div></div></div>`;
+                 return;
+            }
+
+            // 1. Carrega histórico local
+            const res = await fetch('/api/history');
+            const data = await res.json();
+            const chat = data[id];
+            
+            chat.messages.forEach(msg => appendMessage(msg.role, msg.content, true));
+            area.scrollTop = area.scrollHeight;
+
+            // 2. Aciona Sincronização em Background (Verifica se há novos no ChatGPT)
+            if(chat.url) {
+                setStatus("Sincronizando...");
+                syncChat(id, chat.url);
+            }
+        }
+
+        async function syncChat(id, url) {
+            try {
+                const res = await fetch('/api/sync', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ api_key: API_KEY, chat_id: id, url: url })
+                });
+                const data = await res.json();
+                
+                if(data.new_messages && data.new_messages.length > 0) {
+                    ConsoleLog.info(`Sincronizados ${data.new_messages.length} novos itens.`);
+                    data.new_messages.forEach(msg => {
+                        const el = appendMessage(msg.role, msg.content, true);
+                        el.closest('.message-row').classList.add('new-message'); // Destaca novos
+                    });
+                    document.getElementById('chatArea').scrollTop = document.getElementById('chatArea').scrollHeight;
+                }
+                setStatus(null);
+            } catch(e) { setStatus(null); }
+        }
+
+        function appendMessage(role, content, isHtml=false) {
+            const area = document.getElementById('chatArea');
+            const div = document.createElement('div');
+            div.className = `message-row ${role}`;
+            const avatar = role === 'user' ? '<div class="avatar user">U</div>' : '<div class="avatar gpt">G</div>';
+            const html = isHtml ? content : content.replace(/\n/g, '<br>');
+            div.innerHTML = `<div class="message-content">${avatar}<div class="text-block">${html}</div></div>`;
+            area.appendChild(div);
+            return div.querySelector('.text-block');
+        }
+
+        async function sendMsg() {
+            const input = document.getElementById('userInput');
+            const txt = input.value;
+            if(!txt.trim()) return;
+            
+            appendMessage('user', txt);
+            input.value = ''; input.disabled = true;
+            
+            const gptBlock = appendMessage('assistant', '', true);
+            ConsoleLog.group(`Enviando: ${txt}`); // Log Completo
+            setStatus("Enviando...");
+
+            try {
+                const response = await fetch('/api/chat', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ api_key: API_KEY, chat_id: currentChatId, message: txt })
+                });
+                
+                const reader = response.body.getReader();
+                const decoder = new TextDecoder();
+                
+                while(true) {
+                    const {done, value} = await reader.read();
+                    if(done) break;
+                    const chunk = decoder.decode(value, {stream: true});
+                    const lines = chunk.split('\n');
+                    
+                    for(const line of lines) {
+                        if(!line.trim()) continue;
+                        try {
+                            const data = JSON.parse(line);
+                            if(data.type === 'html') {
+                                gptBlock.innerHTML = data.content;
+                                document.getElementById('chatArea').scrollTop = document.getElementById('chatArea').scrollHeight;
+                            } else if (data.type === 'status') {
+                                setStatus(data.content);
+                            } else if (data.type === 'log') {
+                                ConsoleLog.browser(data.content.replace('[SERVER] [browser.py] ', ''));
+                            } else if (data.type === 'finish') {
+                                currentChatId = data.chat_id || currentChatId;
+                                ConsoleLog.info("Finalizado.");
+                                loadChats(); // Atualiza título na sidebar
+                            }
+                        } catch(e) {}
+                    }
+                }
+            } catch(e) { alert('Erro: ' + e); }
+            
+            setStatus(null);
+            ConsoleLog.end();
+            input.disabled = false; input.focus();
+        }
+        loadChats();
+    </script>
+</body>
+</html>
