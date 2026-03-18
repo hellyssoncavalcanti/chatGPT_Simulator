@@ -1360,6 +1360,8 @@ REGRAS:
 • Queries curtas e objetivas (como se digitasse no Google)
 • Nunca misturar sql_queries e search_queries no mesmo JSON
 • Após receber os resultados, responder com base neles
+• Se os resultados ainda forem insuficientes, incompletos ou apontarem limitações pesquisáveis, solicitar NOVA search_queries por conta própria antes de responder
+• Não encerrar com "limitações" se ainda houver busca online óbvia que possa resolver a lacuna
 • Sempre citar as fontes encontradas na resposta final
 
 EXEMPLOS DE QUANDO USAR:
@@ -4999,13 +5001,18 @@ header('Content-Type: application/javascript; charset=utf-8');
         return `[INICIO_TEXTO_COLADO]\n${pastedBlock}\n[FIM_TEXTO_COLADO]\n\n[INICIO_TEXTO_COLADO]\nCom base nesses resultados, responda à **pergunta**:\n${sanitizePastedText(originalQuestion)}\n[FIM_TEXTO_COLADO]`;
     }
 
-    async function detectAndExecuteSearch(responseText, originalQuestion, ui) {
+    async function detectAndExecuteSearch(responseText, originalQuestion, ui, depth = 0) {
+        const MAX_SEARCH_CHAIN_DEPTH = 3;
         if (responseText.includes('<') && responseText.includes('>')) {
             responseText = responseText.replace(/<br\s*\/?>/gi, '\n').replace(/<\/p>/gi, '\n').replace(/<[^>]+>/g, '');
         }
 
         const searchQueries = extractSearchFromResponse(responseText, true);
         if (!searchQueries || searchQueries.length === 0) return false;
+        if (depth >= MAX_SEARCH_CHAIN_DEPTH) {
+            console.warn(`${FILE_PREFIX} Limite de encadeamento de pesquisas atingido (${MAX_SEARCH_CHAIN_DEPTH}).`);
+            return false;
+        }
 
         const _sendBtn = document.getElementById('ow-send');
         if (_sendBtn) { _sendBtn.disabled = true; _sendBtn.classList.add('stop-mode'); }
@@ -5070,7 +5077,15 @@ header('Content-Type: application/javascript; charset=utf-8');
 
             const mEl = document.getElementById(uiNew.mID);
             if (mEl) { mEl.classList.remove('cursor-blink'); mEl.innerHTML = formatMarkdown(fullC); }
-            if (fullC) { state.messages.push({ role: 'assistant', content: fullC }); saveLocal(); saveChatMetaToDatabase(); }
+
+            if (fullC) {
+                const chainedSearchDetected = await detectAndExecuteSearch(fullC, originalQuestion, uiNew, depth + 1);
+                if (chainedSearchDetected) return true;
+
+                state.messages.push({ role: 'assistant', content: fullC });
+                saveLocal();
+                saveChatMetaToDatabase();
+            }
 
         } catch(e) {
             console.error('Erro na pesquisa web:', e);
@@ -5152,7 +5167,13 @@ header('Content-Type: application/javascript; charset=utf-8');
 
                 const mEl = document.getElementById(uiNew.mID);
                 if (mEl) { mEl.classList.remove('cursor-blink'); mEl.innerHTML = formatMarkdown(fullC); }
-                if (fullC) { state.messages.push({ role: 'assistant', content: fullC }); saveLocal(); }
+                if (fullC) {
+                    const chainedSearchDetected = await detectAndExecuteSearch(fullC, lastUserMsg, uiNew, 1);
+                    if (!chainedSearchDetected) {
+                        state.messages.push({ role: 'assistant', content: fullC });
+                        saveLocal();
+                    }
+                }
 
             } catch(e) {
                 console.error('Erro pesquisa manual:', e);
