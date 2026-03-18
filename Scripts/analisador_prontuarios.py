@@ -219,16 +219,16 @@ def garantir_tabela():
             CREATE TABLE IF NOT EXISTS {TABELA} (
                 id                                      INT UNSIGNED AUTO_INCREMENT PRIMARY KEY
                                                         COMMENT 'Chave primaria interna da tabela de analises.',
-                id_atendimento                          INT(10) NOT NULL
-                                                        COMMENT 'FK para clinica_atendimentos.id.',
-                datetime_atendimento_inicio             DATETIME NOT NULL
-                                                        COMMENT 'Data/hora de inicio do atendimento clinico.',
+                id_atendimento                          INT(10) NULL
+                                                        COMMENT 'FK para clinica_atendimentos.id. NULL = sintese compilada do paciente.',
+                datetime_atendimento_inicio             DATETIME NULL
+                                                        COMMENT 'Data/hora de inicio do atendimento clinico. NULL = sintese compilada do paciente.',
                 datetime_ultima_atualizacao_atendimento DATETIME NULL
                                                         COMMENT 'COALESCE(datetime_atualizacao, datetime_consulta_fim) no momento da analise.',
                 id_paciente                             VARCHAR(800) NOT NULL
                                                         COMMENT 'FK para membros.id do paciente.',
-                id_criador                              VARCHAR(10) NOT NULL
-                                                        COMMENT 'FK para membros.id do profissional criador.',
+                id_criador                              VARCHAR(10) NULL
+                                                        COMMENT 'FK para membros.id do profissional criador. NULL = sintese compilada do paciente.',
                 datetime_analise_criacao                DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
                                                         COMMENT 'Data/hora de insercao do registro.',
                 datetime_analise_concluida              DATETIME NULL
@@ -305,6 +305,7 @@ def garantir_tabela():
                 casos_semelhantes                       LONGTEXT NULL
                                                         COMMENT 'JSON array com IDs de atendimentos clinicamente semelhantes identificados via busca semantica.',
                 INDEX  idx_atendimento (id_atendimento),
+                INDEX  idx_paciente    (id_paciente),
                 INDEX  idx_status      (status),
                 INDEX  idx_hash        (hash_prontuario),
                 UNIQUE KEY uq_atendimento (id_atendimento)
@@ -385,6 +386,30 @@ def garantir_colunas_v16():
             log.warning(f"\u26a0\ufe0f  garantir_colunas_v16: {err}")
     else:
         log.info("\u2705 Colunas V16 (CDSS/RAG) verificadas/criadas.")
+    _COLUNAS_TABELA = None
+
+
+def garantir_schema_analise_compilada_paciente():
+    """
+    Libera a própria chatgpt_atendimentos_analise para armazenar uma síntese
+    longitudinal do paciente usando apenas id_paciente como localizador.
+    """
+    ajustes = [
+        f"ALTER TABLE {TABELA} MODIFY COLUMN id_atendimento INT(10) NULL COMMENT 'FK para clinica_atendimentos.id. NULL = sintese compilada do paciente.'",
+        f"ALTER TABLE {TABELA} MODIFY COLUMN datetime_atendimento_inicio DATETIME NULL COMMENT 'Data/hora de inicio do atendimento clinico. NULL = sintese compilada do paciente.'",
+        f"ALTER TABLE {TABELA} MODIFY COLUMN id_criador VARCHAR(10) NULL COMMENT 'FK para membros.id do profissional criador. NULL = sintese compilada do paciente.'",
+        f"ALTER TABLE {TABELA} ADD INDEX idx_paciente (id_paciente)",
+    ]
+    for sql in ajustes:
+        try:
+            sql_exec(sql)
+        except RuntimeError as e:
+            msg = str(e).lower()
+            if 'duplicate key name' in msg or 'already exists' in msg:
+                continue
+            log.warning(f"⚠️  garantir_schema_analise_compilada_paciente: {e}")
+
+    global _COLUNAS_TABELA
     _COLUNAS_TABELA = None
 
 
@@ -567,19 +592,24 @@ def salvar_casos_semelhantes(id_atendimento: int, id_paciente: str, casos: list)
     if not casos:
         return
 
-    # 1. Tabela auxiliar — INSERT IGNORE (UNIQUE KEY evita duplicatas)
+    # 1. Tabela auxiliar — UPSERT compatível com o parser de segurança do PHP
     for caso in casos:
         id_dest   = int(caso["id_atendimento_semelhante"])
         id_pc_dst = esc(caso.get("id_paciente") or "")
         score     = float(caso["score_similaridade"])
         try:
             sql_exec(f"""
-                INSERT IGNORE INTO chatgpt_casos_semelhantes
+                INSERT INTO chatgpt_casos_semelhantes
                     (id_atendimento_origem, id_paciente_origem, id_atendimento_destino,
                      id_paciente_destino, embedding_model, score_similaridade, datetime_calculo)
                 VALUES
                     ({int(id_atendimento)}, _utf8mb4'{esc(id_paciente)}', {id_dest},
                      _utf8mb4'{id_pc_dst}', _utf8mb4'{esc(EMBEDDING_MODEL_NAME)}', {score}, NOW())
+                ON DUPLICATE KEY UPDATE
+                    id_paciente_destino = VALUES(id_paciente_destino),
+                    embedding_model = VALUES(embedding_model),
+                    score_similaridade = VALUES(score_similaridade),
+                    datetime_calculo = VALUES(datetime_calculo)
             """)
         except Exception as e:
             log.warning(f"  ⚠️ Erro ao salvar caso semelhante (dest={id_dest}): {e}")
@@ -849,6 +879,25 @@ def enfileirar_atendimentos_antigos(id_paciente: str) -> int:
     return enfileirados
 
 
+def contar_atendimentos_pendentes_paciente(id_paciente: str) -> int:
+    """Conta atendimentos do paciente ainda não concluídos na tabela de análise."""
+    try:
+        resp = sql_exec(f"""
+            SELECT COUNT(*) AS total
+            FROM {TABELA}
+            WHERE id_paciente = '{esc(id_paciente)}'
+              AND id_atendimento IS NOT NULL
+              AND status IN ('pendente', 'processando')
+        """, reason="contar_atendimentos_pendentes_paciente")
+        data = resp.get("data") or []
+        if not data:
+            return 0
+        return int(data[0].get("total") or 0)
+    except Exception as e:
+        log.warning(f"  ⚠️ Erro ao contar atendimentos pendentes do paciente {id_paciente}: {e}")
+        return 0
+
+
 def marcar_processando(row: dict):
     idat = int(row["id"])
     dtp  = esc(row.get("datetime_prontuario_atual") or "")
@@ -889,24 +938,12 @@ def resetar_travados():
     return afetados
 
 
-def salvar_resultado(idatendimento: int, resultado: dict):
-    """
-    Persiste o resultado da análise no banco de forma dinâmica:
-
-    1. Consulta as colunas reais da tabela (com cache em memória).
-    2. Para cada chave do JSON recebido:
-       a. Se a chave estiver em _EXPANSAO_CAMPOS → expande em sub-colunas.
-       b. Se a chave tiver alias em _ALIAS_JSON_PARA_COLUNA → usa o nome real.
-       c. Se a coluna correspondente existir na tabela → inclui no SET.
-       d. Se a coluna não existir → ignora silenciosamente (sem erro de SQL).
-    3. Salva o JSON completo (sem metadados internos) em dados_json.
-    """
+def _montar_sets_resultado(resultado: dict) -> list:
     colunas  = _get_colunas_tabela()
     chat_id  = esc(resultado.get("_chat_id")  or "")
     chat_url = esc(resultado.get("_chat_url") or "")
     now      = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    # ── 1. Campos de controle fixos (sempre presentes) ────────────────
     sets = [
         f"status                    = 'concluido'",
         f"datetime_analise_concluida = '{now}'",
@@ -915,40 +952,37 @@ def salvar_resultado(idatendimento: int, resultado: dict):
         f"chat_url                   = '{chat_url}'",
     ]
 
-    # ── 2. JSON completo como backup ──────────────────────────────────
     if "dados_json" in colunas:
         dados_publicos = {k: v for k, v in resultado.items() if not k.startswith("_")}
         sets.append(
             f"dados_json = _utf8mb4'{esc(json.dumps(dados_publicos, ensure_ascii=False))}'"
         )
 
-    # ── 3. Mapeamento dinâmico: JSON → colunas da tabela ─────────────
     for chave_json, valor in resultado.items():
-
-        # Ignora metadados internos (_chat_id, _chat_url, _chat_title)
         if chave_json.startswith("_"):
             continue
 
-        # 3a. Campos que se expandem em múltiplas sub-colunas
         if chave_json in _EXPANSAO_CAMPOS:
             for coluna_dest, extrator in _EXPANSAO_CAMPOS[chave_json]:
                 if coluna_dest in colunas:
                     sets.append(f"{coluna_dest} = {_val_para_sql(extrator(valor))}")
                 else:
                     log.debug(f"  ↷ expansão ignorada: '{coluna_dest}' não existe.")
-            continue  # não tenta salvar o objeto inteiro na coluna-pai
+            continue
 
-        # 3b. Resolve alias (nome JSON ≠ nome coluna)
         coluna = _ALIAS_JSON_PARA_COLUNA.get(chave_json, chave_json)
-
-        # 3c. Só inclui se a coluna realmente existir na tabela
         if coluna not in colunas:
             log.debug(f"  ↷ ignorado: coluna '{coluna}' não existe (chave: {chave_json})")
             continue
 
         sets.append(f"{coluna} = {_val_para_sql(valor)}")
 
-    # ── 4. Executa o UPDATE ────────────────────────────────────────────
+    return sets
+
+
+def salvar_resultado(idatendimento: int, resultado: dict):
+    """Persiste o resultado da análise unitária do atendimento."""
+    sets = _montar_sets_resultado(resultado)
     sql = (
         f"UPDATE {TABELA} SET\n    "
         + ",\n    ".join(sets)
@@ -956,6 +990,189 @@ def salvar_resultado(idatendimento: int, resultado: dict):
     )
     log.debug(f"[salvar_resultado] {len(sets)} campos → id_atendimento={idatendimento}")
     sql_exec(sql)
+
+
+def _stringify_compact(value) -> str:
+    try:
+        parsed = json.loads(value) if isinstance(value, str) else value
+    except Exception:
+        parsed = value
+    if isinstance(parsed, list):
+        partes = []
+        for item in parsed:
+            if item in (None, "", [], {}):
+                continue
+            partes.append(json.dumps(item, ensure_ascii=False) if isinstance(item, (dict, list)) else str(item))
+        return "; ".join(partes)
+    if isinstance(parsed, dict):
+        return json.dumps(parsed, ensure_ascii=False)
+    return str(parsed or "").strip()
+
+
+def montar_texto_compilado_paciente(id_paciente: str):
+    rows = sql_exec(f"""
+        SELECT
+            id_atendimento,
+            id_paciente,
+            id_criador,
+            datetime_atendimento_inicio,
+            resumo_texto,
+            gravidade_clinica,
+            diagnosticos_citados,
+            pontos_chave,
+            mudancas_relevantes,
+            sinais_nucleares,
+            eventos_comportamentais,
+            terapias_referidas,
+            exames_citados,
+            pendencias_clinicas,
+            condutas_no_prontuario,
+            medicacoes_em_uso,
+            medicacoes_iniciadas,
+            medicacoes_suspensas,
+            condutas_especificas_sugeridas,
+            condutas_gerais_sugeridas,
+            mensagens_acompanhamento
+        FROM {TABELA}
+        WHERE id_paciente = '{esc(id_paciente)}'
+          AND status = 'concluido'
+          AND id_atendimento IS NOT NULL
+        ORDER BY datetime_atendimento_inicio DESC, id_atendimento DESC
+        LIMIT 25
+    """, reason="carregar_analises_paciente_compilado").get("data", [])
+
+    if not rows:
+        return "", None
+
+    blocos = []
+    for idx, row in enumerate(rows, start=1):
+        linhas = [
+            f"ATENDIMENTO #{idx}",
+            f"id_atendimento: {row.get('id_atendimento')}",
+            f"data_atendimento: {row.get('datetime_atendimento_inicio') or 'sem_data'}",
+        ]
+        if row.get("resumo_texto"):
+            linhas.append(f"resumo_texto: {row['resumo_texto']}")
+
+        for campo in [
+            "gravidade_clinica",
+            "diagnosticos_citados",
+            "pontos_chave",
+            "mudancas_relevantes",
+            "sinais_nucleares",
+            "eventos_comportamentais",
+            "terapias_referidas",
+            "exames_citados",
+            "pendencias_clinicas",
+            "condutas_no_prontuario",
+            "medicacoes_em_uso",
+            "medicacoes_iniciadas",
+            "medicacoes_suspensas",
+            "condutas_especificas_sugeridas",
+            "condutas_gerais_sugeridas",
+            "mensagens_acompanhamento",
+        ]:
+            val = _stringify_compact(row.get(campo))
+            if val:
+                linhas.append(f"{campo}: {val}")
+        blocos.append("\n".join(linhas))
+
+    texto = (
+        f"HISTÓRICO LONGITUDINAL COMPILADO DO PACIENTE {id_paciente}\n"
+        "Os blocos abaixo representam análises estruturadas já concluídas deste paciente.\n"
+        "Consolide o histórico completo do paciente, sintetizando padrões persistentes, mudanças relevantes, terapias, medicações, riscos, pendências e condutas, sem inventar dados.\n\n"
+        + "\n\n" + ("\n\n" + ("=" * 70) + "\n\n").join(blocos)
+    )
+    return texto, rows[0]
+
+
+def salvar_resultado_compilado_paciente(id_paciente: str, resultado: dict):
+    existente = sql_exec(f"""
+        SELECT id
+        FROM {TABELA}
+        WHERE id_paciente = '{esc(id_paciente)}'
+          AND id_atendimento IS NULL
+          AND id_criador IS NULL
+        ORDER BY id DESC
+        LIMIT 1
+    """, reason="buscar_registro_compilado_paciente").get("data", [])
+
+    if existente:
+        id_registro = int(existente[0]["id"])
+    else:
+        sql_exec(f"""
+            INSERT INTO {TABELA}
+                (id_atendimento, datetime_atendimento_inicio, datetime_ultima_atualizacao_atendimento,
+                 id_paciente, id_criador, status, erro_msg)
+            VALUES
+                (NULL, NULL, NULL, '{esc(id_paciente)}', NULL, 'processando', NULL)
+        """)
+        criado = sql_exec(f"""
+            SELECT id
+            FROM {TABELA}
+            WHERE id_paciente = '{esc(id_paciente)}'
+              AND id_atendimento IS NULL
+              AND id_criador IS NULL
+            ORDER BY id DESC
+            LIMIT 1
+        """, reason="buscar_registro_compilado_criado").get("data", [])
+        if not criado:
+            raise RuntimeError(f"Falha ao criar registro compilado do paciente {id_paciente}")
+        id_registro = int(criado[0]["id"])
+
+    sets = [
+        "id_atendimento = NULL",
+        "datetime_atendimento_inicio = NULL",
+        "datetime_ultima_atualizacao_atendimento = NULL",
+        "id_criador = NULL",
+        f"id_paciente = '{esc(id_paciente)}'",
+    ] + _montar_sets_resultado(resultado)
+
+    sql_exec(
+        f"UPDATE {TABELA} SET\n    " + ",\n    ".join(sets) + f"\nWHERE id = {id_registro}"
+    )
+
+
+def atualizar_analise_compilada_paciente(id_paciente: str):
+    enfileirados = enfileirar_atendimentos_antigos(id_paciente)
+    pendentes = contar_atendimentos_pendentes_paciente(id_paciente)
+    if pendentes > 0:
+        log.info(
+            f"⏳ Síntese compilada adiada para paciente {id_paciente}: "
+            f"{pendentes} atendimento(s) ainda pendente(s)/processando(s)"
+            + (f" ({enfileirados} recém-enfileirado(s))" if enfileirados else "")
+            + "."
+        )
+        return
+
+    texto_compilado, row_base = montar_texto_compilado_paciente(id_paciente)
+    if not texto_compilado or not row_base:
+        log.info(f"ℹ️  Sem histórico suficiente para compilar síntese do paciente {id_paciente}.")
+        return
+
+    log.info(f"🧬 Atualizando síntese compilada do paciente {id_paciente}...")
+    contexto = ""
+    try:
+        contexto = buscar_contexto_clinico({
+            "id_paciente": id_paciente,
+            "id": row_base.get("id_atendimento"),
+            "id_criador": row_base.get("id_criador"),
+        }) or ""
+    except Exception as e:
+        log.warning(f"  ⚠️ Falha ao buscar contexto do paciente compilado {id_paciente}: {e}")
+
+    resultado = analisar_prontuario(texto_compilado[:18000], contexto=contexto)
+    try:
+        resultado = executar_busca_evidencias(
+            resultado,
+            chat_url=resultado.get("_chat_url"),
+            chat_id=resultado.get("_chat_id"),
+        )
+    except Exception as e:
+        log.warning(f"  ⚠️ Enriquecimento da síntese compilada falhou (não fatal): {e}")
+
+    salvar_resultado_compilado_paciente(id_paciente, resultado)
+    log.info(f"✅ Síntese compilada do paciente {id_paciente} atualizada.")
 
 
 
@@ -2052,6 +2269,15 @@ def extrair_termos_busca(resultado: dict) -> list:
                     valores.append(nd_valor)
         return valores
 
+    def _compactar_termo_busca(valor, max_chars=90):
+        valor = re.sub(r"\s+", " ", str(valor or "")).strip(" ,;:-")
+        if len(valor) <= max_chars:
+            return valor
+        corte = valor.rfind(" ", 0, max_chars + 1)
+        if corte >= int(max_chars * 0.6):
+            return valor[:corte].strip(" ,;:-")
+        return valor[:max_chars].strip(" ,;:-")
+
     # ── 1. Fonte primária: listas nominais ────────────────────
     diagnosticos = _ensure_list(
         resultado.get("diagnosticos_citados") or resultado.get("diagnosticos_mencionados")
@@ -2151,12 +2377,14 @@ def extrair_termos_busca(resultado: dict) -> list:
         elif meds:
             contexto_extra = f"{meds[0]} treatment"
 
-        q1 = f"{diags[0][:50]} {contexto_extra} children site:pubmed.ncbi.nlm.nih.gov".strip()
+        diag_base = _compactar_termo_busca(diags[0], max_chars=90)
+        q1 = f"{diag_base} {contexto_extra} children site:pubmed.ncbi.nlm.nih.gov".strip()
         queries.append(q1)
 
     # Query 2: segundo diagnóstico/sintoma (se existir — busca mais específica)
     if len(diags) > 1:
-        q2 = f"{diags[1][:50]} children treatment evidence site:pubmed.ncbi.nlm.nih.gov"
+        diag_sec = _compactar_termo_busca(diags[1], max_chars=90)
+        q2 = f"{diag_sec} children treatment evidence site:pubmed.ncbi.nlm.nih.gov"
         queries.append(q2)
     elif meds:
         # Se não tem segundo diagnóstico, busca sobre o medicamento
@@ -2168,10 +2396,14 @@ def extrair_termos_busca(resultado: dict) -> list:
         # Procura sintomas no grafo para uma query mais específica
         sintomas_grafo = _extrair_do_grafo(resultado, "sintoma")
         if sintomas_grafo:
-            q3 = f"{diags[0][:30]} {sintomas_grafo[0][:30]} pediatric management"
+            diag_curto = _compactar_termo_busca(diags[0], max_chars=60)
+            sintoma_curto = _compactar_termo_busca(sintomas_grafo[0], max_chars=60)
+            q3 = f"{diag_curto} {sintoma_curto} pediatric management"
             queries.append(q3)
         elif terapias_nomes:
-            q3 = f"{diags[0][:30]} {terapias_nomes[0]} effectiveness children"
+            diag_curto = _compactar_termo_busca(diags[0], max_chars=60)
+            terapia_curta = _compactar_termo_busca(terapias_nomes[0], max_chars=50)
+            q3 = f"{diag_curto} {terapia_curta} effectiveness children"
             queries.append(q3)
 
     return queries[:SEARCH_MAX_QUERIES]
@@ -2528,6 +2760,11 @@ def processar_lote(pendentes: list):
             except Exception as e:
                 log.warning(f"  ⚠️ Embedding/similaridade falhou (não fatal): {e}")
 
+            try:
+                atualizar_analise_compilada_paciente(row["id_paciente"])
+            except Exception as e:
+                log.warning(f"  ⚠️ Síntese compilada do paciente falhou (não fatal): {e}")
+
         except Exception as e:
             salvar_erro(idat, str(e))
             log.error(f"  ❌ ID={idat} erro: {e}")
@@ -2576,6 +2813,7 @@ def main():
     garantir_coluna_dados_json()                 # garante dados_json em tabelas pré-existentes
     garantir_coluna_mensagens_acompanhamento()   # garante mensagens_acompanhamento em tabelas pré-existentes
     garantir_colunas_v16()                       # garante colunas CDSS/RAG da V16 (modelo_llm, hash_prontuario, score_risco, etc.)
+    garantir_schema_analise_compilada_paciente() # permite síntese longitudinal por id_paciente sem id_atendimento
     garantir_migracoes()                         # corrige tipos de colunas em tabelas pré-existentes
     garantir_tabela_embeddings()                 # garante tabelas de embeddings + casos semelhantes
 
