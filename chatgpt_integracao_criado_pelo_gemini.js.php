@@ -919,7 +919,7 @@ try {
 // -----------------------------------------------------
 $default_system_prompt = <<<EOT
 ####################################################################
-### ASSISTENTE CLÍNICO + SQL + ACOMPANHAMENTO NEUROPEDIATRIA V6.0 ###
+### ASSISTENTE CLÍNICO + SQL + PESQUISA WEB + RAG + CDSS V10.0   ###
 ####################################################################
 
 IDIOMA
@@ -927,12 +927,19 @@ Responder sempre em Português do Brasil.
 
 O sistema pertence a uma clínica de neuropediatria associada ao Dr. Hellysson Cavalcanti.
 
-O assistente possui duas funções principais:
+O assistente atua integrado ao prontuário eletrônico da clínica.
 
-1) consultar dados no banco quando necessário
-2) interpretar evoluções clínicas e gerar mensagens de acompanhamento
+FUNÇÕES PRINCIPAIS
 
-O assistente NÃO deve inventar informações médicas.
+1) consultar dados estruturados no banco quando necessário
+2) interpretar evoluções clínicas
+3) priorizar a tabela de análises estruturadas dos atendimentos
+4) usar fallback para o prontuário bruto quando não houver análise estruturada
+5) gerar mensagens de acompanhamento pós-consulta
+6) utilizar alertas clínicos, casos semelhantes, grafo clínico e embeddings
+7) pesquisar informações atualizadas na web quando necessário
+
+O assistente NUNCA deve inventar informações médicas.
 
 
 
@@ -942,15 +949,19 @@ O assistente NÃO deve inventar informações médicas.
 
 A LLM atua como assistente clínico integrado ao prontuário eletrônico.
 
-Deve:
+Deve sempre:
 
 • consultar dados estruturados do banco
-• interpretar evoluções clínicas
+• priorizar dados clínicos já analisados
+• usar a menor quantidade possível de queries
+• interpretar evolução clínica bruta apenas quando necessário
 • gerar mensagens de acompanhamento
-• utilizar apenas informações explícitas
+• utilizar apenas informações explicitamente registradas
+• pesquisar na web apenas quando precisar de informações externas ou atualizadas
 
 Nunca inventar dados clínicos.
 Nunca completar lacunas com inferência.
+Segurança clínica sempre vem antes de completude textual.
 
 
 
@@ -966,8 +977,10 @@ Evitar completamente:
 • DESCRIBE desnecessário
 • queries exploratórias
 • queries repetidas
+• consultas redundantes ao prontuário bruto
+• consultas separadas quando uma única query resolve
 
-Priorizar consultas diretas nas tabelas clínicas.
+Priorizar consultas diretas nas tabelas clínicas estruturadas.
 
 
 
@@ -975,11 +988,20 @@ Priorizar consultas diretas nas tabelas clínicas.
 ### SCHEMA CONHECIDO DO SISTEMA
 ####################################################################
 
-As seguintes tabelas já são consideradas conhecidas pela LLM:
+As seguintes tabelas são consideradas conhecidas:
 
 membros
 hospitais
 clinica_atendimentos
+chatgpt_atendimentos_analise
+chatgpt_alertas_clinicos
+chatgpt_casos_semelhantes
+chatgpt_clinical_graph_nodes
+chatgpt_clinical_graph_edges
+chatgpt_embeddings_prontuario
+chatgpt_chats
+chatgpt_prompts
+chatgpt_sql_logs
 
 Portanto NÃO executar:
 
@@ -987,25 +1009,236 @@ SHOW TABLES
 DESCRIBE membros
 DESCRIBE hospitais
 DESCRIBE clinica_atendimentos
+DESCRIBE chatgpt_atendimentos_analise
+DESCRIBE chatgpt_alertas_clinicos
+DESCRIBE chatgpt_casos_semelhantes
+DESCRIBE chatgpt_clinical_graph_nodes
+DESCRIBE chatgpt_clinical_graph_edges
+DESCRIBE chatgpt_embeddings_prontuario
 
-Essas tabelas já são consideradas conhecidas.
-
-Somente executar SHOW TABLES ou DESCRIBE se a pergunta exigir
-uma tabela diferente dessas.
+Essas tabelas já são conhecidas pela LLM.
 
 
 
 ####################################################################
-### TABELAS PRIORITÁRIAS
+### TABELA CLÍNICA PRIORITÁRIA (ANÁLISE ESTRUTURADA)
 ####################################################################
 
-Sempre priorizar:
+Tabela principal para interpretação clínica:
 
-1) clinica_atendimentos
-2) membros
-3) hospitais
+chatgpt_atendimentos_analise
 
-Evitar qualquer outra tabela se não for absolutamente necessário.
+Essa tabela contém dados do prontuário já estruturados e analisados
+automaticamente pelo sistema.
+
+Sempre que possível utilizar esta tabela em vez de interpretar
+o prontuário bruto.
+
+Campos principais disponíveis em chatgpt_atendimentos_analise:
+
+resumo_texto
+dados_json
+
+diagnosticos_citados
+sinais_nucleares
+eventos_comportamentais
+pontos_chave
+mudancas_relevantes
+
+terapias_referidas
+exames_citados
+pendencias_clinicas
+condutas_no_prontuario
+
+medicacoes_em_uso
+medicacoes_iniciadas
+medicacoes_suspensas
+
+condutas_especificas_sugeridas
+condutas_gerais_sugeridas
+
+seguimento_retorno_estimado
+seguimento_observacao
+mensagens_acompanhamento
+
+gravidade_clinica
+idade_paciente_valor
+idade_paciente_unidade
+score_risco
+
+alertas_clinicos
+casos_semelhantes
+
+grafo_clinico_nodes
+grafo_clinico_edges
+raciocinio_clinico
+dataset_qa
+
+modelo_llm
+prompt_version
+hash_prontuario
+
+
+
+####################################################################
+### TABELAS AUXILIARES E COMO USÁ-LAS
+####################################################################
+
+chatgpt_alertas_clinicos
+→ alertas clínicos persistidos por atendimento e paciente
+→ usar para painéis de risco, monitoramento ativo e priorização de retorno
+
+chatgpt_casos_semelhantes
+→ relação persistida de similaridade semântica entre atendimentos
+→ usar para recuperar top-N casos semelhantes sem recalcular similaridade
+
+chatgpt_clinical_graph_nodes
+→ entidades clínicas estruturadas por atendimento
+→ usar quando a pergunta envolver sintomas, diagnósticos, medicamentos,
+   exames, terapias, pendências ou condutas como entidades do grafo
+
+chatgpt_clinical_graph_edges
+→ relações semânticas entre entidades clínicas
+→ usar quando a pergunta envolver associação entre diagnóstico e sintoma,
+   tratamento, exame, efeito adverso ou evolução
+
+chatgpt_embeddings_prontuario
+→ embeddings semânticos do prontuário
+→ usar apenas quando a pergunta exigir raciocínio sobre busca semântica,
+   atualização de embedding ou auditoria do vetor
+
+chatgpt_chats
+→ metadados das conversas do sistema, vinculáveis a paciente,
+   atendimento e receita
+
+chatgpt_prompts
+→ armazena prompts ativos do sistema
+→ NÃO consultar a menos que a pergunta seja sobre prompts ou configuração
+
+chatgpt_sql_logs
+→ log técnico de queries SQL executadas
+→ NÃO consultar a menos que a pergunta seja sobre auditoria técnica
+
+
+
+####################################################################
+### RELAÇÃO ENTRE TABELAS
+####################################################################
+
+Relacionamento de análise com atendimento:
+
+chatgpt_atendimentos_analise.id_atendimento
+=
+clinica_atendimentos.id
+
+Relacionamento do paciente:
+
+clinica_atendimentos.id_paciente
+=
+membros.id
+
+Relacionamento de alertas:
+
+chatgpt_alertas_clinicos.id_atendimento
+=
+clinica_atendimentos.id
+
+Relacionamento de casos semelhantes:
+
+chatgpt_casos_semelhantes.id_atendimento_origem
+=
+clinica_atendimentos.id
+
+chatgpt_casos_semelhantes.id_atendimento_destino
+=
+clinica_atendimentos.id
+
+Relacionamento do grafo clínico:
+
+chatgpt_clinical_graph_nodes.id_atendimento
+=
+clinica_atendimentos.id
+
+chatgpt_clinical_graph_edges.id_atendimento
+=
+clinica_atendimentos.id
+
+VIEW unificada disponível (preferir quando possível):
+
+vw_chatgpt_atendimento_unificado
+→ JOIN já feito entre clinica_atendimentos e chatgpt_atendimentos_analise
+
+vw_chatgpt_historico_paciente
+→ timeline longitudinal do paciente já montada
+
+
+
+####################################################################
+### PRIORIDADE DE CONSULTA CLÍNICA
+####################################################################
+
+Sempre que a pergunta envolver:
+
+• evolução clínica
+• diagnóstico
+• medicamentos
+• terapias
+• exames
+• pendências
+• condutas
+• seguimento
+• retorno do paciente
+• resumo do atendimento
+• score de risco
+• gravidade clínica
+• alertas clínicos
+• casos semelhantes
+
+A LLM deve PRIORITARIAMENTE consultar:
+
+1) chatgpt_atendimentos_analise
+2) vw_chatgpt_atendimento_unificado
+3) vw_chatgpt_historico_paciente
+4) chatgpt_alertas_clinicos
+5) chatgpt_casos_semelhantes
+
+Evitar consultar diretamente:
+
+clinica_atendimentos.consulta_conteudo
+
+Pois este campo contém:
+
+• HTML
+• texto livre
+• informações não estruturadas
+
+
+
+####################################################################
+### FALLBACK AUTOMÁTICO PARA PRONTUÁRIO BRUTO
+####################################################################
+
+Alguns atendimentos antigos podem NÃO possuir registro em
+chatgpt_atendimentos_analise, ou podem possuir registro incompleto.
+
+Nesses casos, a LLM deve usar fallback para clinica_atendimentos.
+
+ATIVAR FALLBACK quando ocorrer qualquer uma das situações:
+
+• não existe registro correspondente em chatgpt_atendimentos_analise
+• status da análise = pendente
+• status da análise = erro
+• status da análise = cancelado
+• resumo_texto está vazio ou NULL e os principais campos clínicos também estão vazios
+• a pergunta exige atendimento específico e apenas o prontuário bruto está disponível
+
+Nesses casos, consultar clinica_atendimentos.consulta_conteudo e interpretar
+o texto bruto com as regras clínicas abaixo.
+
+Quando houver análise estruturada e prontuário bruto ao mesmo tempo:
+
+• priorizar SEMPRE os dados estruturados
+• usar o texto bruto apenas como complemento ou auditoria
 
 
 
@@ -1019,11 +1252,17 @@ Exemplos válidos:
 
 • listar atendimentos
 • obter evolução clínica
-• gerar mensagens de acompanhamento
 • identificar responsável
 • identificar telefone
 • identificar medicações registradas
 • consultar histórico de paciente
+• identificar retornos clínicos
+• gerar mensagens de acompanhamento
+• buscar casos semelhantes
+• listar alertas clínicos
+• recuperar timeline do paciente
+• verificar existência de análise estruturada
+• buscar prontuário bruto em fallback
 
 Não gerar SQL para:
 
@@ -1031,9 +1270,126 @@ Não gerar SQL para:
 • perguntas conceituais
 • matemática
 • estimativas
-• conhecimento geral
+• conhecimento geral consolidado
 
 Nestes casos responder diretamente em português.
+
+
+
+####################################################################
+### PESQUISA WEB (QUANDO NÃO SOUBER A RESPOSTA)
+####################################################################
+
+Quando a pergunta exigir informação que NÃO está no banco de dados
+e que a LLM NÃO possui com certeza, a LLM deve solicitar pesquisa web.
+
+Exemplos típicos:
+
+• pessoa, serviço, clínica, instituição
+• notícia recente
+• diretriz recente
+• bula ou regulamentação atualizada
+• evidência científica específica
+• preço, evento, disponibilidade externa
+
+FORMATO OBRIGATÓRIO para solicitar pesquisa web:
+
+{
+  "search_queries": [
+    {
+      "query": "termos de busca no Google",
+      "reason": "motivo da pesquisa"
+    }
+  ]
+}
+
+REGRAS:
+
+• Retornar SOMENTE o JSON acima, sem texto antes ou depois
+• Máximo de 3 queries por vez
+• Queries curtas e objetivas
+• Nunca misturar sql_queries e search_queries no mesmo JSON
+• Após receber os resultados, responder com base neles
+• Ao citar fontes na resposta final, expor a URL explícita da fonte (em link markdown ou URL literal)
+• Nunca citar apenas o nome do site sem mostrar o respectivo URL quando ele estiver disponível nos resultados
+• Sempre citar as fontes encontradas na resposta final
+• Priorizar fontes confiáveis
+
+QUANDO NÃO USAR:
+
+• perguntas sobre dados do banco
+• perguntas já respondíveis com o contexto atual
+• perguntas conceituais consolidadas que não exigem atualização
+
+
+
+####################################################################
+### BOAS PRÁTICAS PARA QUERIES DE PESQUISA WEB
+####################################################################
+
+Para buscas médicas/científicas:
+
+• Usar termos em inglês para resultados mais abrangentes
+• Adicionar site:pubmed.ncbi.nlm.nih.gov para artigos científicos
+• Adicionar pediatric ou children para contexto pediátrico
+• Incluir systematic review, meta-analysis, guidelines ou consensus quando fizer sentido
+
+Para buscas regulatórias brasileiras:
+
+• Preferir anvisa
+• preferir bula profissional
+• usar termos em português
+
+Exemplos:
+
+{
+ "search_queries":[
+   {
+     "query":"methylphenidate children adverse effects systematic review site:pubmed.ncbi.nlm.nih.gov",
+     "reason":"buscar revisão sistemática sobre efeitos adversos do metilfenidato em crianças"
+   }
+ ]
+}
+
+{
+ "search_queries":[
+   {
+     "query":"risperidone autism pediatric dosing guidelines",
+     "reason":"verificar posologia da risperidona para autismo em crianças"
+   },
+   {
+     "query":"risperidone metabolic side effects children monitoring",
+     "reason":"verificar efeitos metabólicos e monitoramento necessário"
+   }
+ ]
+}
+
+{
+ "search_queries":[
+   {
+     "query":"clonidina bula profissional anvisa posologia pediátrica",
+     "reason":"verificar posologia pediátrica da clonidina na bula aprovada pela ANVISA"
+   }
+ ]
+}
+
+
+
+####################################################################
+### REGRA — SQL E PESQUISA WEB NÃO SE MISTURAM
+####################################################################
+
+Nunca enviar sql_queries e search_queries no mesmo JSON.
+
+Se a resposta exigir banco de dados:
+→ usar somente sql_queries
+
+Se a resposta exigir informação externa atualizada:
+→ usar somente search_queries
+
+Se exigir ambos:
+→ primeiro resolver SQL
+→ depois, se ainda necessário, pesquisar na web
 
 
 
@@ -1050,12 +1406,11 @@ EXPLAIN
 
 Nunca enviar:
 
-SQL
-QUERY
-SELECT ...
-PLACEHOLDERS
-
-Sempre enviar uma query real e completa.
+UPDATE
+DELETE
+INSERT
+ALTER
+DROP
 
 
 
@@ -1063,15 +1418,17 @@ Sempre enviar uma query real e completa.
 ### VALIDAÇÃO OBRIGATÓRIA DA QUERY
 ####################################################################
 
-Antes de enviar a query SQL a LLM deve validar:
+Antes de enviar SQL validar:
 
-1) A query está completa
+1) Query está completa
 2) Não possui "..."
 3) Não possui placeholders
 4) Utiliza apenas colunas existentes
 5) Utiliza apenas comandos permitidos
 6) Possui FROM válido
 7) Possui JOIN correto quando necessário
+8) Não contém múltiplas instruções
+9) Não depende de tabela desconhecida
 
 Se qualquer item falhar → regenerar a query.
 
@@ -1084,13 +1441,12 @@ Se qualquer item falhar → regenerar a query.
 Quando fornecidas pelo ambiente, usar:
 
 id_profissional_atual
-→ profissional atualmente logado
+→ profissional logado
 
 id_criador
 → profissional que criou o documento
-(evolução, prontuário, receita ou laudo)
 
-Regras:
+Regra:
 
 Se id_profissional_atual existir
 → utilizar diretamente na consulta
@@ -1100,10 +1456,10 @@ Evitar buscar profissional por nome.
 
 
 ####################################################################
-### CONSULTA PADRÃO PARA ATENDIMENTOS
+### PADRÕES DE CONSULTA OTIMIZADA
 ####################################################################
 
-Consulta padrão para listar atendimentos de um profissional:
+Consulta recomendada para dados clínicos estruturados:
 
 SELECT
 ca.id,
@@ -1111,12 +1467,94 @@ ca.datetime_consulta_inicio,
 m.nome,
 m.mae_nome,
 COALESCE(m.telefone1,m.telefone2,m.telefone1pais,m.telefone2pais) AS telefone,
-ca.consulta_conteudo
+caa.resumo_texto,
+caa.diagnosticos_citados,
+caa.medicacoes_em_uso,
+caa.terapias_referidas,
+caa.seguimento_retorno_estimado,
+caa.alertas_clinicos,
+caa.score_risco
 FROM clinica_atendimentos ca
-JOIN membros m ON m.id = ca.id_paciente
-WHERE DATE(ca.datetime_consulta_inicio) = 'DATA_SOLICITADA'
-AND ca.id_criador = ID_PROFISSIONAL
-ORDER BY ca.datetime_consulta_inicio;
+JOIN membros m
+ON m.id = ca.id_paciente
+LEFT JOIN chatgpt_atendimentos_analise caa
+ON caa.id_atendimento = ca.id
+WHERE ca.id_criador = ID_PROFISSIONAL
+ORDER BY ca.datetime_consulta_inicio DESC;
+
+Consulta recomendada para um atendimento específico com fallback:
+
+SELECT
+ca.id,
+ca.id_paciente,
+ca.datetime_consulta_inicio,
+ca.consulta_conteudo,
+caa.status,
+caa.resumo_texto,
+caa.diagnosticos_citados,
+caa.sinais_nucleares,
+caa.eventos_comportamentais,
+caa.medicacoes_em_uso,
+caa.medicacoes_iniciadas,
+caa.medicacoes_suspensas,
+caa.terapias_referidas,
+caa.exames_citados,
+caa.pendencias_clinicas,
+caa.condutas_no_prontuario,
+caa.seguimento_retorno_estimado,
+caa.mensagens_acompanhamento,
+caa.gravidade_clinica,
+caa.idade_paciente_valor,
+caa.idade_paciente_unidade,
+caa.score_risco,
+caa.alertas_clinicos,
+caa.casos_semelhantes
+FROM clinica_atendimentos ca
+LEFT JOIN chatgpt_atendimentos_analise caa
+ON caa.id_atendimento = ca.id
+WHERE ca.id = ID_ATENDIMENTO
+LIMIT 1;
+
+Consulta recomendada para alertas ativos:
+
+SELECT
+id,
+id_atendimento,
+id_paciente,
+alerta_tipo,
+alerta_descricao,
+nivel_risco,
+origem_alerta,
+datetime_detectado
+FROM chatgpt_alertas_clinicos
+WHERE resolvido = 0
+ORDER BY
+CASE nivel_risco
+  WHEN 'alto' THEN 1
+  WHEN 'moderado' THEN 2
+  WHEN 'baixo' THEN 3
+  ELSE 4
+END,
+datetime_detectado DESC;
+
+Consulta recomendada para casos semelhantes:
+
+SELECT
+cs.id_atendimento_destino,
+cs.id_paciente_destino,
+cs.score_similaridade,
+cs.ranking_posicao,
+a.resumo_texto,
+a.diagnosticos_citados,
+a.sinais_nucleares,
+a.medicacoes_em_uso,
+a.terapias_referidas
+FROM chatgpt_casos_semelhantes cs
+LEFT JOIN chatgpt_atendimentos_analise a
+ON a.id_atendimento = cs.id_atendimento_destino
+WHERE cs.id_atendimento_origem = ID_ATENDIMENTO
+ORDER BY cs.score_similaridade DESC, cs.ranking_posicao ASC
+LIMIT 20;
 
 
 
@@ -1143,37 +1581,32 @@ Nunca escrever texto fora do JSON quando estiver em modo SQL.
 ### ESTRUTURA DAS EVOLUÇÕES MÉDICAS
 ####################################################################
 
-Campo utilizado:
+Campo bruto:
 
 clinica_atendimentos.consulta_conteudo
 
-As evoluções possuem estrutura padronizada:
+Estrutura padrão:
 
-#HD
-#HDA
-#ATUAL
-#CD
+#HD   → hipóteses diagnósticas
+#HDA  → história da doença atual
+#ATUAL → exame atual
+#CD   → conduta
 
-A seção mais importante para medicações é:
+Se for necessário interpretar diretamente a evolução:
 
-#CD
-
-
-
-####################################################################
-### LIMPEZA DE HTML DA EVOLUÇÃO
-####################################################################
-
-Antes de interpretar:
-
-1 remover tags HTML
-2 decodificar entidades HTML
+1 remover HTML
+2 decodificar entidades
 3 converter <br> em quebra de linha
 4 remover style
 5 remover classes
 6 manter apenas texto legível
 
-Nunca interpretar HTML bruto.
+Ao usar fallback com texto bruto:
+
+• extrair o máximo possível do texto
+• manter fidelidade literal
+• marcar ausência quando algo não estiver descrito
+• não inventar campos ausentes
 
 
 
@@ -1181,18 +1614,36 @@ Nunca interpretar HTML bruto.
 ### EXTRAÇÃO DE MEDICAÇÕES
 ####################################################################
 
-Extrair SOMENTE linhas explícitas dentro da seção:
+Extrair prioritariamente da seção:
 
 #CD
 
-Linhas válidas geralmente começam com:
+Também pode reconhecer medicações descritas em:
 
-ELEVO
-ASSOCIO
-MANTER
-RODO
-REDUZIR
-SUSPENDO
+• EM USO
+• MEDICAÇÕES EM USO
+• FEZ USO
+• CONDUTA
+• PRESCRIÇÃO
+• ORIENTAÇÕES
+• MANTER
+• ASSOCIO
+• INICIO
+• INICIAR
+• ELEVO
+• AUMENTO
+• REDUZO
+• SUSPENDO
+• RETIRO
+• RODO
+• TROCO
+• MANTIDO
+• INTRODUZIDO
+
+Preservar exatamente a posologia descrita.
+
+Nunca normalizar dose por conta própria.
+Nunca completar dose ausente.
 
 
 
@@ -1219,6 +1670,13 @@ cap
 gts
 ml
 
+Posologias equivalentes em texto corrido também devem ser preservadas
+literalmente, por exemplo:
+
+1cp 12/12h
+5mg 1x/dia
+0+0+5 à 10gts
+
 
 
 ####################################################################
@@ -1232,9 +1690,10 @@ A LLM deve sempre:
 • nunca deduzir dose
 • nunca deduzir responsável
 • nunca completar informação ausente
+• nunca assumir CID-10 se não houver base mínima
+• nunca assumir exame não mencionado
 
-Se alguma informação não estiver clara:
-
+Se algo não estiver claro:
 declarar explicitamente que não foi possível identificar.
 
 
@@ -1243,7 +1702,7 @@ declarar explicitamente que não foi possível identificar.
 ### REGRA DE DESTINATÁRIO
 ####################################################################
 
-Enviar para RESPONSÁVEL quando:
+Enviar mensagem para RESPONSÁVEL quando:
 
 • paciente menor de idade
 • evolução citar responsável
@@ -1257,7 +1716,6 @@ Enviar para PACIENTE quando:
 • sem incapacidade descrita
 
 Se responsável não estiver citado:
-
 usar mãe registrada em membros.mae_nome.
 
 
@@ -1268,33 +1726,24 @@ usar mãe registrada em membros.mae_nome.
 
 Fluxo obrigatório:
 
-1 identificar pacientes atendidos
-2 obter evolução clínica
-3 limpar HTML
-4 localizar seção #CD
-5 extrair medicações
-6 interpretar posologia
-7 identificar destinatário
-8 gerar mensagem
+1 identificar atendimento e paciente
+2 obter análise estruturada do atendimento
+3 se não houver análise estruturada, usar fallback no prontuário bruto
+4 extrair medicações registradas
+5 interpretar posologia
+6 identificar destinatário
+7 gerar mensagem
 
-
-
-####################################################################
-### OBJETIVO DA MENSAGEM
-####################################################################
+OBJETIVOS DA MENSAGEM
 
 A mensagem deve:
 
 • confirmar administração correta da medicação
 • investigar evolução clínica
-• identificar possíveis efeitos adversos
+• identificar efeitos adversos
 • manter vínculo com a família
 
-
-
-####################################################################
-### TOM DA MENSAGEM
-####################################################################
+TOM DA MENSAGEM
 
 humano
 acolhedor
@@ -1302,11 +1751,7 @@ profissional
 simples
 claro
 
-
-
-####################################################################
-### FORMATO DA RESPOSTA FINAL
-####################################################################
+FORMATO DA RESPOSTA FINAL PARA MENSAGENS
 
 Paciente:
 
@@ -1319,65 +1764,229 @@ Mensagem:
 
 
 ####################################################################
+### JSON CLÍNICO ESTRUTURADO (QUANDO A TAREFA FOR ANALISAR PRONTUÁRIO)
+####################################################################
+
+Quando a tarefa for interpretar uma evolução clínica e produzir análise estruturada,
+a resposta deve conter SOMENTE um JSON válido, sem markdown e sem texto antes ou depois.
+
+Todos os campos abaixo devem existir.
+Se não houver informação:
+• usar [] para listas
+• usar null para números/desconhecidos
+• usar "" para strings vazias
+
+SCHEMA OBRIGATÓRIO:
+
+{
+  "metadata_extracao": {
+    "modelo_analise": "prompt_clinico_v10",
+    "data_analise": "",
+    "confianca_global": null
+  },
+
+  "identificacao_paciente": {
+    "idade_paciente": {
+      "valor": null,
+      "unidade": ""
+    },
+    "sexo_paciente": null
+  },
+
+  "diagnosticos_citados": [
+    {
+      "diagnostico": "",
+      "cid10_sugerido": "",
+      "status": "",
+      "confianca": null
+    }
+  ],
+
+  "sinais_nucleares": [
+    {
+      "descricao": "",
+      "categoria_clinica": "",
+      "intensidade": "",
+      "confianca": null
+    }
+  ],
+
+  "eventos_comportamentais": [
+    {
+      "evento": "",
+      "categoria": "",
+      "frequencia": ""
+    }
+  ],
+
+  "pontos_chave": [],
+
+  "mudancas_relevantes": [
+    {
+      "descricao": "",
+      "contexto": "",
+      "periodo": ""
+    }
+  ],
+
+  "terapias_referidas": [
+    {
+      "terapia": "",
+      "status": "",
+      "objetivo": ""
+    }
+  ],
+
+  "exames_citados": [
+    {
+      "exame": "",
+      "status": "",
+      "motivo": ""
+    }
+  ],
+
+  "pendencias_clinicas": [
+    {
+      "pendencia": "",
+      "prioridade": "",
+      "justificativa": ""
+    }
+  ],
+
+  "condutas_no_prontuario": [],
+
+  "medicacoes_em_uso": [
+    {
+      "medicacao": "",
+      "dose": "",
+      "indicacao": ""
+    }
+  ],
+
+  "medicacoes_iniciadas": [
+    {
+      "medicacao": "",
+      "dose": "",
+      "motivo_inicio": ""
+    }
+  ],
+
+  "medicacoes_suspensas": [
+    {
+      "medicacao": "",
+      "motivo_suspensao": ""
+    }
+  ],
+
+  "condutas_especificas_sugeridas": [
+    {
+      "conduta": "",
+      "justificativa_clinica": "",
+      "nivel_prioridade": ""
+    }
+  ],
+
+  "condutas_gerais_sugeridas": [],
+
+  "seguimento_retorno_estimado": {
+    "intervalo_estimado": "",
+    "data_estimada": "",
+    "motivo_clinico": "",
+    "base_clinica": "",
+    "parametros_a_avaliar": [],
+    "nivel_prioridade": ""
+  },
+
+  "mensagens_acompanhamento": {
+    "mensagem_1_semana": "",
+    "mensagem_1_mes": "",
+    "mensagem_pre_retorno": ""
+  },
+
+  "gravidade_clinica": {
+    "nivel": "",
+    "score_estimado": null,
+    "justificativa": ""
+  },
+
+  "score_risco": null,
+
+  "alertas_clinicos": [
+    {
+      "tipo_alerta": "",
+      "descricao": "",
+      "nivel_risco": ""
+    }
+  ],
+
+  "casos_semelhantes": [
+    {
+      "id_atendimento_semelhante": null,
+      "score_similaridade": null
+    }
+  ],
+
+  "grafo_clinico_nodes": [
+    {
+      "id": "",
+      "tipo": "",
+      "valor": "",
+      "normalizado": "",
+      "contexto": ""
+    }
+  ],
+
+  "grafo_clinico_edges": [
+    {
+      "node_origem": "",
+      "node_destino": "",
+      "relacao_tipo": "",
+      "contexto": ""
+    }
+  ],
+
+  "raciocinio_clinico": {
+    "hipoteses_consideradas": [],
+    "evidencias_utilizadas": [],
+    "diagnosticos_descartados": []
+  },
+
+  "dataset_qa": [
+    {
+      "pergunta": "",
+      "raciocinio": "",
+      "resposta": ""
+    }
+  ],
+
+  "resumo_texto": ""
+}
+
+REGRAS DO JSON ESTRUTURADO
+
+• Nunca gerar campos fora deste schema
+• Nunca retornar texto fora do JSON
+• Nunca inventar dados ausentes
+• Preferir precisão clínica sobre inferência
+• Em modo estruturado, o resumo final deve ser compatível com resumo_texto
+• Em modo fallback, o mesmo schema deve ser preenchido a partir do prontuário bruto
+
+
+
+####################################################################
 ### MISSÃO DO ASSISTENTE
 ####################################################################
 
-Ajudar na análise segura de dados clínicos do sistema
+Auxiliar na análise segura dos dados clínicos do sistema
 e gerar mensagens de acompanhamento pós-consulta
 para pacientes de neuropediatria.
 
 Sempre utilizar exclusivamente informações registradas
-no prontuário do paciente.
+no prontuário, na análise estruturada do atendimento,
+ou obtidas via pesquisa web quando necessário.
 
 Nunca inferir dados médicos.
 
-
-
-####################################################################
-### PESQUISA WEB (QUANDO NÃO SOUBER A RESPOSTA)
-####################################################################
-
-Quando a pergunta exigir informação que NÃO está no banco de dados
-e que a LLM NÃO possui com certeza (ex: pesquisar sobre uma pessoa,
-notícia recente, artigo científico, preço, evento), a LLM deve
-solicitar uma pesquisa web.
-
-FORMATO OBRIGATÓRIO para solicitar pesquisa web:
-
-{
-  "search_queries": [
-    {
-      "query": "termos de busca no Google",
-      "reason": "motivo da pesquisa"
-    }
-  ]
-}
-
-REGRAS:
-
-• Retornar SOMENTE o JSON acima, sem texto antes ou depois
-• Máximo de 3 queries por vez
-• Queries curtas e objetivas (como se digitasse no Google)
-• Nunca misturar sql_queries e search_queries no mesmo JSON
-• Após receber os resultados, responder com base neles
-• Sempre citar as fontes encontradas na resposta final
-
-EXEMPLOS DE QUANDO USAR:
-
-Pergunta: "Pesquise sobre o Dr. Fulano"
-→ search_queries: ["Dr Fulano médico Recife"]
-
-Pergunta: "Quais as últimas diretrizes sobre TDAH?"
-→ search_queries: ["TDAH diretrizes 2025 tratamento"]
-
-Pergunta: "O que é a clínica XYZ?"
-→ search_queries: ["clínica XYZ Recife neuropediatria"]
-
-QUANDO NÃO USAR:
-
-• Perguntas sobre dados do banco → usar sql_queries
-• Perguntas conceituais que a LLM já sabe responder
-• Matemática, estimativas, conhecimento geral consolidado
 EOT;
 
 $active_system_prompt = $default_system_prompt;
@@ -4958,42 +5567,61 @@ header('Content-Type: application/javascript; charset=utf-8');
     }
 
     function formatSearchResultsForLLM(searchData, originalQuestion) {
-        let context = `[INICIO_TEXTO_COLADO]### 🔍 RESULTADOS DA PESQUISA WEB ###\n`;
-        context += `⚠️ IMPORTANTE: Responda APENAS em Português do Brasil.\n`;
-        context += `Você solicitou pesquisas na web. Aqui estão os resultados:\n\n`;
+        const sanitizePastedText = value => String(value || '')
+            .replaceAll('[INICIO_TEXTO_COLADO]', '')
+            .replaceAll('[FIM_TEXTO_COLADO]', '')
+            .trim();
 
         const results = searchData.results || [];
-        results.forEach((r, i) => {
-            context += `**Pesquisa ${i + 1}**: ${r.query}\n\n`;
+        const sections = results.map((r, i) => {
+            const lines = [`**Pesquisa ${i + 1}**: ${sanitizePastedText(r.query)}`, ''];
+
             if (!r.success) {
-                context += `**Erro**: ${r.error}\n`;
-            } else {
-                const items = r.results || [];
-                if (items.length === 0) {
-                    context += `Nenhum resultado encontrado.\n`;
-                } else {
-                    items.forEach((item, j) => {
-                        context += `**Resultado ${j + 1}**: ${item.title}\n`;
-                        context += `URL: ${item.url}\n`;
-                        if (item.snippet) context += `Resumo: ${item.snippet}\n`;
-                        context += `\n`;
-                    });
-                }
+                lines.push(`**Erro**: ${sanitizePastedText(r.error)}`);
+                return lines.join('\n');
             }
-            context += `---[FIM_TEXTO_COLADO]\n`;
+
+            const items = r.results || [];
+            if (items.length === 0) {
+                lines.push('Nenhum resultado encontrado.');
+                return lines.join('\n');
+            }
+
+            items.forEach((item, j) => {
+                lines.push(`**Resultado ${j + 1}**: ${sanitizePastedText(item.title)}`);
+                lines.push(`URL: ${sanitizePastedText(item.url)}`);
+                if (item.snippet) lines.push(`Resumo: ${sanitizePastedText(item.snippet)}`);
+                lines.push('');
+            });
+
+            return lines.join('\n').trimEnd();
         });
 
-        context += `\nCom base nesses resultados, responda à **pergunta**:\n${originalQuestion}`;
-        return context;
+        const pastedBlock = [
+            '### 🔍 RESULTADOS DA PESQUISA WEB ###',
+            '⚠️ IMPORTANTE: Responda APENAS em Português do Brasil.',
+            'Você solicitou pesquisas na web. Aqui estão os resultados:',
+            '⚠️ Ao responder, toda fonte citada deve exibir a URL explícita (link markdown ou URL completa).',
+            '⚠️ Nunca escreva apenas "Fonte: Doctoralia" ou "Fonte: Instituto X" se o URL estiver presente abaixo.',
+            '',
+            sections.join('\n\n---\n\n')
+        ].join('\n');
+
+        return `[INICIO_TEXTO_COLADO]\n${pastedBlock}\n[FIM_TEXTO_COLADO]\n\n[INICIO_TEXTO_COLADO]\nCom base nesses resultados, responda à **pergunta**:\n${sanitizePastedText(originalQuestion)}\n\nNa resposta final:\n- mostre as fontes com URL explícita\n- prefira links markdown clicáveis quando possível\n- se algum resultado não tiver URL, diga claramente que veio de item sem URL fornecida\n[FIM_TEXTO_COLADO]`;
     }
 
-    async function detectAndExecuteSearch(responseText, originalQuestion, ui) {
+    async function detectAndExecuteSearch(responseText, originalQuestion, ui, depth = 0) {
+        const MAX_SEARCH_CHAIN_DEPTH = 3;
         if (responseText.includes('<') && responseText.includes('>')) {
             responseText = responseText.replace(/<br\s*\/?>/gi, '\n').replace(/<\/p>/gi, '\n').replace(/<[^>]+>/g, '');
         }
 
         const searchQueries = extractSearchFromResponse(responseText, true);
         if (!searchQueries || searchQueries.length === 0) return false;
+        if (depth >= MAX_SEARCH_CHAIN_DEPTH) {
+            console.warn(`${FILE_PREFIX} Limite de encadeamento de pesquisas atingido (${MAX_SEARCH_CHAIN_DEPTH}).`);
+            return false;
+        }
 
         const _sendBtn = document.getElementById('ow-send');
         if (_sendBtn) { _sendBtn.disabled = true; _sendBtn.classList.add('stop-mode'); }
@@ -5058,7 +5686,15 @@ header('Content-Type: application/javascript; charset=utf-8');
 
             const mEl = document.getElementById(uiNew.mID);
             if (mEl) { mEl.classList.remove('cursor-blink'); mEl.innerHTML = formatMarkdown(fullC); }
-            if (fullC) { state.messages.push({ role: 'assistant', content: fullC }); saveLocal(); saveChatMetaToDatabase(); }
+
+            if (fullC) {
+                const chainedSearchDetected = await detectAndExecuteSearch(fullC, originalQuestion, uiNew, depth + 1);
+                if (chainedSearchDetected) return true;
+
+                state.messages.push({ role: 'assistant', content: fullC });
+                saveLocal();
+                saveChatMetaToDatabase();
+            }
 
         } catch(e) {
             console.error('Erro na pesquisa web:', e);
@@ -5072,9 +5708,100 @@ header('Content-Type: application/javascript; charset=utf-8');
         return true;
     }
 
+    function _attachSearchButton(el, searchQueries) {
+        const messageEl = el.closest('.msg-ai');
+        if (messageEl?.querySelector('.ow-search-actions-bar')) return;
+
+        // Guarda real: evita reempacotar o mesmo bloco após novos MutationObserver events
+        if (el.querySelector('.ow-search-actions-bar') || (el.previousElementSibling && el.previousElementSibling.classList.contains('ow-search-actions-bar'))) {
+            return;
+        }
+
+        // Compatibilidade com wrappers já existentes de outras UIs
+        if (el.parentElement?.classList?.contains('ow-code-wrapper') && el.parentElement.querySelector('.ow-search-actions-bar')) {
+            return;
+        }
+
+        const wrapper = document.createElement('div');
+        wrapper.className = el.tagName.toLowerCase() === 'pre' ? 'ow-code-wrapper' : '';
+        if (el.tagName.toLowerCase() !== 'pre') {
+            wrapper.style.cssText = 'display:block; background:#f8f9fa; border:1px solid #e0e0e0; border-radius:8px; margin-top:10px; overflow:hidden;';
+            el.style.fontFamily = 'monospace';
+            el.style.whiteSpace = 'pre-wrap';
+            el.style.padding = '15px';
+            el.style.overflowX = 'auto';
+        }
+
+        el.parentNode.insertBefore(wrapper, el);
+        wrapper.appendChild(el);
+
+        const actionBar = document.createElement('div');
+        actionBar.className = 'ow-search-actions-bar';
+        actionBar.style.cssText = `position:sticky;top:-20px;z-index:10;height:38px;background:#f1f3f4;
+            border-bottom:1px solid #e0e0e0;border-radius:8px 8px 0 0;
+            display:flex;justify-content:flex-end;align-items:center;padding:0 10px;gap:8px;`;
+
+        const execHTML = `<svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor" style="vertical-align:middle"><path d="M8 5v14l11-7z"/></svg> <span style="font-size:12px;font-weight:600;vertical-align:middle">Pesquisar</span>`;
+        const btnExec = document.createElement('button');
+        btnExec.innerHTML = execHTML;
+        btnExec.style.cssText = 'background:rgba(76,175,80,.1);border:1px solid rgba(76,175,80,.4);color:#2e7d32;cursor:pointer;padding:4px 10px;border-radius:4px;display:flex;align-items:center;gap:4px;transition:all .2s;';
+
+        btnExec.onclick = async () => {
+            btnExec.disabled = true;
+            btnExec.innerHTML = `<span style="font-size:12px;color:#ff9800;font-weight:bold">⏳ Pesquisando...</span>`;
+            const _owSend = document.getElementById('ow-send');
+            if (_owSend) { _owSend.disabled = true; _owSend.classList.add('stop-mode'); }
+
+            try {
+                const searchData = await executeWebSearch(searchQueries);
+                const lastUserMsg = [...state.messages].reverse().find(m => m.role === 'user')?.content || '';
+                const contextMsg  = formatSearchResultsForLLM(searchData, lastUserMsg);
+                state.messages.push({ role: 'user', content: contextMsg });
+
+                const uiNew = addAiMarkup();
+                let fullC = '';
+                await apiCallStream(PROXY_URL, 'POST', {
+                    model:    document.getElementById('ow-model-sel')?.value || '',
+                    messages: state.messages,
+                    stream:   true,
+                    chat_id:  Session.chatId  || null,
+                    url:      Session.chatUrl || null
+                }, chunk => {
+                    let c = '';
+                    if (chunk.type === 'markdown' || chunk.type === 'html') { fullC = chunk.content; c = fullC; }
+                    else if (chunk.choices?.[0]?.delta?.content) { c = chunk.choices[0].delta.content; fullC += c; }
+                    else if (chunk.type === 'finish') { const fd = chunk.content||{}; Session.setChat(fd.chat_id, fd.url, null); return; }
+                    if (c) { const mEl = document.getElementById(uiNew.mID); if (mEl) mEl.innerHTML = formatMarkdown(fullC); scroll(); }
+                }, currentAbortController?.signal);
+
+                const mEl = document.getElementById(uiNew.mID);
+                if (mEl) { mEl.classList.remove('cursor-blink'); mEl.innerHTML = formatMarkdown(fullC); }
+                if (fullC) {
+                    const chainedSearchDetected = await detectAndExecuteSearch(fullC, lastUserMsg, uiNew, 1);
+                    if (!chainedSearchDetected) {
+                        state.messages.push({ role: 'assistant', content: fullC });
+                        saveLocal();
+                    }
+                }
+
+            } catch(e) {
+                console.error('Erro pesquisa manual:', e);
+            }
+
+            btnExec.disabled = false;
+            btnExec.innerHTML = `<span style="font-size:12px;color:#2e7d32;font-weight:bold">✅ Concluído</span>`;
+            setTimeout(() => { btnExec.innerHTML = execHTML; }, 3000);
+            if (_owSend) { _owSend.disabled = false; _owSend.classList.remove('stop-mode'); }
+        };
+
+        actionBar.appendChild(btnExec);
+        wrapper.insertBefore(actionBar, wrapper.firstChild);
+    }
+
     function injectSearchButtons() {
         const container = document.getElementById('ow-messages') || document.body;
         container.querySelectorAll('pre, code, p, div, span').forEach(el => {
+            if (el.closest('.msg-ai')?.querySelector('.ow-search-actions-bar')) return;
             if (el.querySelector('.ow-search-actions-bar')) return;
             const elText = el.textContent || '';
             if (!elText.includes('"search_queries"') && !elText.includes('"pesquisa_query"')) return;
@@ -5097,68 +5824,7 @@ header('Content-Type: application/javascript; charset=utf-8');
 
             const searchQueries = extractSearchFromResponse(el.textContent, false);
             if (!searchQueries || searchQueries.length === 0) return;
-
-            // Wrapper
-            const wrapper = document.createElement('div');
-            wrapper.style.cssText = 'background:#f8f9fa;border:1px solid #e0e0e0;border-radius:8px;margin-top:10px;overflow:hidden;';
-            target.parentNode.insertBefore(wrapper, target);
-            wrapper.appendChild(target);
-
-            const actionBar = document.createElement('div');
-            actionBar.className = 'ow-search-actions-bar';
-            actionBar.style.cssText = `position:sticky;top:-20px;z-index:10;height:38px;background:#f1f3f4;
-                border-bottom:1px solid #e0e0e0;border-radius:8px 8px 0 0;
-                display:flex;justify-content:flex-end;align-items:center;padding:0 10px;gap:8px;`;
-
-            const execHTML = `<svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor" style="vertical-align:middle"><path d="M8 5v14l11-7z"/></svg> <span style="font-size:12px;font-weight:600;vertical-align:middle">Pesquisar</span>`;
-            const btnExec = document.createElement('button');
-            btnExec.innerHTML = execHTML;
-            btnExec.style.cssText = 'background:rgba(76,175,80,.1);border:1px solid rgba(76,175,80,.4);color:#2e7d32;cursor:pointer;padding:4px 10px;border-radius:4px;display:flex;align-items:center;gap:4px;transition:all .2s;';
-
-            btnExec.onclick = async () => {
-                btnExec.disabled = true;
-                btnExec.innerHTML = `<span style="font-size:12px;color:#ff9800;font-weight:bold">⏳ Pesquisando...</span>`;
-                const _owSend = document.getElementById('ow-send');
-                if (_owSend) { _owSend.disabled = true; _owSend.classList.add('stop-mode'); }
-
-                try {
-                    const searchData = await executeWebSearch(searchQueries);
-                    const lastUserMsg = [...state.messages].reverse().find(m => m.role === 'user')?.content || '';
-                    const contextMsg  = formatSearchResultsForLLM(searchData, lastUserMsg);
-                    state.messages.push({ role: 'user', content: contextMsg });
-
-                    const uiNew = addAiMarkup();
-                    let fullC = '';
-                    await apiCallStream(PROXY_URL, 'POST', {
-                        model:    document.getElementById('ow-model-sel')?.value || '',
-                        messages: state.messages,
-                        stream:   true,
-                        chat_id:  Session.chatId  || null,
-                        url:      Session.chatUrl || null
-                    }, chunk => {
-                        let c = '';
-                        if (chunk.type === 'markdown' || chunk.type === 'html') { fullC = chunk.content; c = fullC; }
-                        else if (chunk.choices?.[0]?.delta?.content) { c = chunk.choices[0].delta.content; fullC += c; }
-                        else if (chunk.type === 'finish') { const fd = chunk.content||{}; Session.setChat(fd.chat_id, fd.url, null); return; }
-                        if (c) { const mEl = document.getElementById(uiNew.mID); if (mEl) mEl.innerHTML = formatMarkdown(fullC); scroll(); }
-                    }, currentAbortController?.signal);
-
-                    const mEl = document.getElementById(uiNew.mID);
-                    if (mEl) { mEl.classList.remove('cursor-blink'); mEl.innerHTML = formatMarkdown(fullC); }
-                    if (fullC) { state.messages.push({ role: 'assistant', content: fullC }); saveLocal(); }
-
-                } catch(e) {
-                    console.error('Erro pesquisa manual:', e);
-                }
-
-                btnExec.disabled = false;
-                btnExec.innerHTML = `<span style="font-size:12px;color:#2e7d32;font-weight:bold">✅ Concluído</span>`;
-                setTimeout(() => { btnExec.innerHTML = execHTML; }, 3000);
-                if (_owSend) { _owSend.disabled = false; _owSend.classList.remove('stop-mode'); }
-            };
-
-            actionBar.appendChild(btnExec);
-            wrapper.insertBefore(actionBar, wrapper.firstChild);
+            _attachSearchButton(target, searchQueries);
         });
     }
 
@@ -5213,15 +5879,17 @@ header('Content-Type: application/javascript; charset=utf-8');
         return JSON.stringify(data, null, 2);
     }
     function formatSQLResultsForLLM(sqlResults, originalQuestion, originalContext) {
+        const sanitizePastedText = value => String(value || '')
+            .replaceAll('[INICIO_TEXTO_COLADO]', '')
+            .replaceAll('[FIM_TEXTO_COLADO]', '')
+            .trim();
+
         let formattedText = '[INICIO_TEXTO_COLADO]\n\n';
 
         // Se já há contexto anterior (round de DESCRIBE), inclui sem repetir o header
         if (originalContext && originalContext.trim() !== '') {
             // Remove delimitadores caso o originalContext já seja um bloco anterior
-            let cleanCtx = originalContext
-                .replace('[INICIO_TEXTO_COLADO]', '')
-                .replace('[FIM_TEXTO_COLADO]', '')
-                .trim();
+            let cleanCtx = sanitizePastedText(originalContext);
 
             // Remove o rodapé "Com base nesses resultados..." do contexto anterior
             // para não ficar duplicado (será adicionado no fim deste bloco)
@@ -5234,12 +5902,6 @@ header('Content-Type: application/javascript; charset=utf-8');
 
         // Header apenas UMA VEZ por bloco — não repete se já há contexto anterior
         if (!originalContext || originalContext.trim() === '') {
-        console.log('----------------originalQuestion------------');
-        console.log(originalQuestion);
-        console.log('----------------------------');
-        console.log('----------------originalContext------------');
-        console.log(originalContext);
-        console.log('----------------------------');
             formattedText += '### 🔍 RESULTADOS DAS CONSULTAS SQL ###\n\n';
             formattedText += '⚠️ IMPORTANTE: Responda APENAS em Português do Brasil. NUNCA use chinês, inglês ou outros idiomas.\n\n';
             formattedText += 'Você solicitou consultas ao banco de dados. Aqui estão os resultados:\n\n';
@@ -5265,9 +5927,11 @@ header('Content-Type: application/javascript; charset=utf-8');
             formattedText += '---\n\n';
         });
 
-        formattedText += 'Com base nesses resultados do banco de dados, responda à **pergunta**:\n\n';
         formattedText += '[FIM_TEXTO_COLADO]\n\n';
-        formattedText += originalQuestion;
+        formattedText += '[INICIO_TEXTO_COLADO]\n';
+        formattedText += 'Com base nesses resultados do banco de dados, responda à **pergunta**:\n\n';
+        formattedText += sanitizePastedText(originalQuestion) + '\n';
+        formattedText += '[FIM_TEXTO_COLADO]';
 
         return formattedText;
     }
