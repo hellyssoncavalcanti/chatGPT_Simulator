@@ -187,9 +187,9 @@ def sql_exec(query: str, reason: str = "analisador_prontuarios") -> dict:
         data = json.loads(match.group())
 
     if data.get("status") == "error":
-        raise RuntimeError(f"{action} recusou: {data.get('message')} | SQL: {query[:120]}")
+        raise RuntimeError(f"{action} recusou: {data.get('message')} | SQL completo:\n{query}")
     if not data.get("success", True) and data.get("error"):
-        raise RuntimeError(f"{action} recusou: {data.get('error')} | SQL: {query[:120]}")
+        raise RuntimeError(f"{action} recusou: {data.get('error')} | SQL completo:\n{query}")
 
     log.debug(f"sql_exec OK [{action}] rows={data.get('num_rows', data.get('count', data.get('affected_rows', '?')))}")
     return data
@@ -967,10 +967,12 @@ def enfileirar_atendimentos_antigos(id_paciente: str) -> int:
 
     try:
         resultado_insert = sql_exec(f"""
-            INSERT IGNORE INTO {TABELA}
+            INSERT INTO {TABELA}
                 (id_atendimento, id_paciente, id_criador, datetime_atendimento_inicio, status)
             VALUES
                 {", ".join(valores_sql)}
+            ON DUPLICATE KEY UPDATE
+                id_atendimento = id_atendimento
         """)
     except Exception as e:
         log.warning(f"  ⚠️ Erro ao salvar atendimentos antigos do paciente {id_paciente}: {e}")
@@ -3321,6 +3323,149 @@ def formatar_resultados_busca(resultados_web: list) -> str:
     return "\n".join(blocos)
 
 
+PROMPT_GERAR_PESQUISA = """Com base no caso clínico estruturado abaixo, gere queries de pesquisa web realmente pensadas para ESTE paciente específico.
+
+OBJETIVO:
+- produzir até 3 queries de alta utilidade clínica para apoiar condutas, seguimento, monitorização, terapias e/ou segurança medicamentosa;
+- considerar o perfil do paciente, gravidade, diagnóstico principal, comorbidades, genética, medicações, ausência de fala funcional, terapias e pendências;
+- priorizar evidência científica e diretrizes realmente úteis para o caso concreto.
+
+FORMATO OBRIGATÓRIO:
+{
+  "search_queries": [
+    {
+      "query": "consulta para Google/PubMed",
+      "reason": "por que esta busca é útil para este paciente"
+    }
+  ]
+}
+
+REGRAS:
+- Responder SOMENTE com JSON válido.
+- Máximo de 3 queries.
+- Preferir inglês quando isso melhorar a busca científica.
+- Quando fizer sentido, usar PubMed, diretrizes pediátricas, systematic review, guideline, consensus.
+- Não inventar fatos que não estejam explícitos no caso.
+- Não repetir queries redundantes.
+"""
+
+
+def gerar_queries_pesquisa_llm(resultado: dict, chat_url: str = None, chat_id: str = None) -> list:
+    """
+    Pede à própria LLM que proponha as queries/tópicos de pesquisa mais úteis
+    para o paciente específico analisado.
+    """
+    contexto_pesquisa = {
+        chave: valor
+        for chave, valor in {
+            "resumo_texto": resultado.get("resumo_texto"),
+            "gravidade_clinica": resultado.get("gravidade_clinica"),
+            "diagnosticos_citados": resultado.get("diagnosticos_citados"),
+            "pontos_chave": resultado.get("pontos_chave"),
+            "mudancas_relevantes": resultado.get("mudancas_relevantes"),
+            "eventos_comportamentais": resultado.get("eventos_comportamentais"),
+            "sinais_nucleares": resultado.get("sinais_nucleares"),
+            "medicacoes_em_uso": resultado.get("medicacoes_em_uso"),
+            "medicacoes_iniciadas": resultado.get("medicacoes_iniciadas"),
+            "medicacoes_suspensas": resultado.get("medicacoes_suspensas"),
+            "terapias_referidas": resultado.get("terapias_referidas"),
+            "pendencias_clinicas": resultado.get("pendencias_clinicas"),
+            "seguimento_retorno_estimado": resultado.get("seguimento_retorno_estimado"),
+            "condutas_especificas_sugeridas": resultado.get("condutas_especificas_sugeridas"),
+            "condutas_gerais_sugeridas": resultado.get("condutas_gerais_sugeridas"),
+        }.items()
+        if valor not in (None, "", [], {})
+    }
+
+    if not contexto_pesquisa:
+        return []
+
+    user_content = (
+        f"[INICIO_TEXTO_COLADO]\n"
+        f"{PROMPT_GERAR_PESQUISA}\n\n"
+        f"CASO CLÍNICO ESTRUTURADO (JSON):\n"
+        f"{json.dumps(contexto_pesquisa, ensure_ascii=False, indent=2)}\n"
+        f"[FIM_TEXTO_COLADO]"
+    )
+
+    payload = {
+        "model": LLM_MODEL,
+        "stream": True,
+        "messages": [
+            {"role": "user", "content": user_content},
+        ],
+    }
+
+    if chat_url:
+        payload["url"] = chat_url
+    if chat_id:
+        payload["chatid"] = chat_id
+
+    try:
+        resp = requests.post(
+            LLM_URL,
+            json=payload,
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {API_KEY}",
+            },
+            stream=True,
+            timeout=300,
+        )
+        resp.raise_for_status()
+
+        markdown = ""
+        for raw_line in resp.iter_lines():
+            if not raw_line:
+                continue
+            try:
+                obj = json.loads(raw_line)
+            except json.JSONDecodeError:
+                continue
+            t = obj.get("type")
+            if t == "markdown":
+                markdown = obj.get("content", "")
+            elif t == "error":
+                log.warning(f"  ⚠️ Planejamento de pesquisa: LLM retornou erro: {obj.get('content')}")
+                return []
+
+        if not markdown:
+            log.warning("  ⚠️ Planejamento de pesquisa: LLM não retornou conteúdo.")
+            return []
+
+        match = re.search(r'\{[\s\S]*\}', markdown)
+        if not match:
+            log.warning("  ⚠️ Planejamento de pesquisa: LLM não retornou JSON válido.")
+            return []
+
+        planejado = json.loads(match.group())
+        itens = planejado.get("search_queries") or []
+        queries = []
+        query_labels = set()
+        for item in itens[:SEARCH_MAX_QUERIES]:
+            if not isinstance(item, dict):
+                continue
+            query = re.sub(r"\s+", " ", str(item.get("query") or "")).strip()
+            reason = re.sub(r"\s+", " ", str(item.get("reason") or "")).strip()
+            if not query:
+                continue
+            key = query.lower()
+            if key in query_labels:
+                continue
+            query_labels.add(key)
+            queries.append(query)
+            log.info(f"     🧠 {query}" + (f" | motivo: {reason}" if reason else ""))
+
+        if queries:
+            log.info(f"  🧠 LLM planejou {len(queries)} query(s) de pesquisa específicas para o paciente.")
+
+        return queries[:SEARCH_MAX_QUERIES]
+
+    except Exception as e:
+        log.warning(f"  ⚠️ Planejamento de pesquisa via LLM falhou: {e}")
+        return []
+
+
 PROMPT_ENRIQUECIMENTO = """Com base nos resultados de busca em literatura médica fornecidos abaixo, enriqueça as condutas clínicas sugeridas com referências reais.
 
 REGRAS:
@@ -3505,8 +3650,11 @@ def executar_busca_evidencias(resultado: dict, chat_url: str = None, chat_id: st
     if not SEARCH_HABILITADA:
         return resultado
 
-    # 1. Extrai termos de busca
-    queries = extrair_termos_busca(resultado)
+    # 1. Pede à LLM para planejar queries específicas do paciente
+    queries = gerar_queries_pesquisa_llm(resultado, chat_url=chat_url, chat_id=chat_id)
+    if not queries:
+        log.info("  🔄 Fallback: usando extração heurística de termos para montar as queries.")
+        queries = extrair_termos_busca(resultado)
     if not queries:
         log.info("  🔍 Nenhum termo clínico para busca — pulando enriquecimento.")
         return resultado
