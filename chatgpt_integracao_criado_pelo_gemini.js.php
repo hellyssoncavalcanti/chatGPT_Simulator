@@ -7282,35 +7282,38 @@ header('Content-Type: application/javascript; charset=utf-8');
                 let where = '';
                 const idPacOuMembro = ctx.id_paciente || ctx.id_membro || null;
                 const currentModeSql = (state.chatMode || getCurrentChatMode()) === CHAT_MODE_DIRECT ? 'direct' : 'assistant';
+                const isDirectMode = currentModeSql === 'direct';
                 if      (ctx.id_atendimento) where = `id_atendimento = ${ctx.id_atendimento} AND chat_mode = '${currentModeSql}'`;
                 else if (ctx.id_receita)     where = `id_receita = ${ctx.id_receita} AND id_atendimento IS NULL AND chat_mode = '${currentModeSql}'`;
                 else if (idPacOuMembro)      where = `id_paciente = ${idPacOuMembro} AND id_atendimento IS NULL AND id_receita IS NULL AND chat_mode = '${currentModeSql}'`;
                 else if (idCriador)          where = `id_criador = ${idCriador} AND id_atendimento IS NULL AND id_receita IS NULL AND id_paciente IS NULL AND chat_mode = '${currentModeSql}'`;
 
-                if (!where) {
+                if (!where && !isDirectMode) {
                     alert('Não foi possível identificar o chat a excluir (usuário não autenticado).');
                     return;
                 }
 
-                let deletou = false;
-                try {
-                    const res = await fetch(`<?php echo $_SERVER['PHP_SELF']; ?>?action=execute_sql`, {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({
-                            query:  `DELETE FROM chatgpt_chats WHERE ${where}`,
-                            reason: 'Limpeza de histórico solicitada pelo usuário'
-                        })
-                    });
-                    const d = await res.json();
-                    if (d.success || d.affected_rows >= 0) {
-                        deletou = true;
-                        alert(`✅ Chat excluído do banco de dados.`);
-                    } else {
-                        alert(`⚠️ Não foi possível excluir o chat do banco:\n${d.error || JSON.stringify(d)}`);
+                let deletou = isDirectMode;
+                if (!isDirectMode) {
+                    try {
+                        const res = await fetch(`<?php echo $_SERVER['PHP_SELF']; ?>?action=execute_sql`, {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({
+                                query:  `DELETE FROM chatgpt_chats WHERE ${where}`,
+                                reason: 'Limpeza de histórico solicitada pelo usuário'
+                            })
+                        });
+                        const d = await res.json();
+                        if (d.success || d.affected_rows >= 0) {
+                            deletou = true;
+                            alert(`✅ Chat excluído do banco de dados.`);
+                        } else {
+                            alert(`⚠️ Não foi possível excluir o chat do banco:\n${d.error || JSON.stringify(d)}`);
+                        }
+                    } catch(e) {
+                        alert(`⚠️ Erro de rede ao excluir chat do banco:\n${e.message}`);
                     }
-                } catch(e) {
-                    alert(`⚠️ Erro de rede ao excluir chat do banco:\n${e.message}`);
                 }
 
                 if (!deletou) return; // Aborta limpeza visual se exclusão falhou
@@ -7318,11 +7321,16 @@ header('Content-Type: application/javascript; charset=utf-8');
                 document.getElementById('ow-messages').innerHTML = ''; 
                 state.messages = []; 
                 state.currentChatId = null;
-                state.currentChatTitle = null;
+                state.currentChatTitle = buildDefaultChatTitle(currentModeSql);
                 state.currentChatUrl = null;
-                localStorage.removeItem(getHistoryKey(state.chatMode || getCurrentChatMode())); 
+                currentUserQuestion = '';
+                localStorage.removeItem(getHistoryKey(currentModeSql)); 
                 updateTitleUI();
                 renderAnalisePrevia();  // ← Renderiza a analise prévia da LLM diretamente no chat, para o usuário ver, como ele limpou/zerou o chat.
+                if (isDirectMode) {
+                    ensureDirectToolIntro(true);
+                    apToast('🧹 Histórico local do chat de execução limpo.');
+                }
             } 
         };
         document.getElementById('ow-btn-close').onclick = () => document.getElementById('ow-window').style.display = 'none';
