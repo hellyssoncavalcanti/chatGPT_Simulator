@@ -4423,6 +4423,13 @@ header('Content-Type: application/javascript; charset=utf-8');
         
         renderChatMessages();
 
+        if (targetMode === CHAT_MODE_DIRECT) {
+            if (showDirectIntro && !state.messages.length) {
+                ensureDirectToolIntro(true);
+            }
+            return;
+        }
+
         // ------------------------------------------------------------------
         // 👉 NOVO: 2. Buscar metadados oficias do MySQL antes do Sync Remoto
         // ------------------------------------------------------------------
@@ -4542,9 +4549,7 @@ header('Content-Type: application/javascript; charset=utf-8');
             }
         }
 
-        if (targetMode === CHAT_MODE_DIRECT && showDirectIntro && !state.messages.length) {
-            ensureDirectToolIntro(true);
-        }
+        if (targetMode === CHAT_MODE_DIRECT && showDirectIntro && !state.messages.length) ensureDirectToolIntro(true);
     }
     
     function renderChatMessages() {
@@ -4553,7 +4558,10 @@ header('Content-Type: application/javascript; charset=utf-8');
         box.innerHTML = '';
         state.messages.forEach(m => {
             if (m.role === 'assistant') {
-                if (m.content.includes('</think>')) {
+                const directResultMeta = getDirectResultMeta(m.content);
+                if (directResultMeta) {
+                    appendDirectResultMessage(directResultMeta);
+                } else if (m.content.includes('</think>')) {
                     const parts = m.content.split('</think>');
                     const ui = addAiMarkup();
                     document.getElementById(ui.tID).parentElement.style.display = 'block';
@@ -5253,6 +5261,29 @@ header('Content-Type: application/javascript; charset=utf-8');
             </div>`;
     }
 
+    function getDirectResultMeta(content) {
+        const text = String(content || '').trim();
+        if (!text || text === DIRECT_TOOL_INTRO_MD) return null;
+        if (text.startsWith('## 🐬 Resultado da execução SQL')) {
+            return { title: '🐬 Resultado da execução SQL', accentColor: '#0891b2', plainText: text };
+        }
+        if (text.startsWith('## 🔍 Resultado da pesquisa web')) {
+            return { title: '🔍 Resultado da pesquisa web', accentColor: '#16a34a', plainText: text };
+        }
+        return null;
+    }
+
+    function appendDirectResultMessage(meta) {
+        const b = document.getElementById('ow-messages');
+        if (!b || !meta) return;
+        const wrap = document.createElement('div');
+        wrap.className = 'msg msg-ai';
+        wrap.style.background = 'transparent';
+        wrap.style.padding = '0';
+        wrap.innerHTML = buildDirectResultBoxHtml(meta.title, meta.plainText, meta.accentColor);
+        b.appendChild(wrap);
+    }
+
     function formatDirectSearchResults(searchData, queries) {
         const lines = ['## 🔍 Resultado da pesquisa web', ''];
         const results = Array.isArray(searchData?.results) ? searchData.results : [];
@@ -5389,7 +5420,7 @@ header('Content-Type: application/javascript; charset=utf-8');
         }
         
         if (typeof detectContexts === 'function') detectContexts();
-        if (typeof loadLocal === 'function') loadLocal({ chatMode: getCurrentChatMode(), showDirectIntro: false });
+        if (typeof loadLocal === 'function') loadLocal({ chatMode: getCurrentChatMode(), showDirectIntro: getCurrentChatMode() === CHAT_MODE_DIRECT });
         if (typeof initPrompts === 'function') initPrompts(); 
         
         // SETUP DO MICROFONE
