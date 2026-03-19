@@ -79,7 +79,7 @@ _ensure("numpy")
 # ─────────────────────────────────────────────────────────────
 # IMPORTS NORMAIS
 # ─────────────────────────────────────────────────────────────
-import time, json, logging, re, html as html_mod, requests, hashlib
+import time, json, logging, re, html as html_mod, requests, hashlib, shutil, textwrap
 from html.parser import HTMLParser
 from datetime import datetime
 
@@ -971,6 +971,48 @@ def enfileirar_atendimentos_antigos(id_paciente: str) -> int:
 
     if enfileirados:
         log.info(f"  📥 {enfileirados} atendimento(s) antigo(s) do paciente {id_paciente} enfileirado(s) para análise")
+
+    return enfileirados
+
+
+def enfileirar_atendimentos_antigos_globais(limit: int = 500) -> int:
+    """
+    Materializa na tabela de análise os atendimentos antigos que ainda existem
+    apenas em clinica_atendimentos.
+
+    Isso cobre pacientes que ainda não têm nenhum registro prévio em
+    chatgpt_atendimentos_analise — cenário em que a versão anterior nunca
+    chamava enfileirar_atendimentos_antigos(id_paciente) porque não havia
+    nenhum item daquele paciente entrando no lote.
+    """
+    limit_sql = f"LIMIT {int(limit)}" if limit and int(limit) > 0 else ""
+
+    try:
+        resultado = sql_exec(f"""
+            INSERT IGNORE INTO {TABELA}
+                (id_atendimento, id_paciente, id_criador, datetime_atendimento_inicio, status)
+            SELECT
+                ca.id,
+                ca.id_paciente,
+                ca.id_criador,
+                ca.datetime_consulta_inicio,
+                'pendente'
+            FROM clinica_atendimentos ca
+            LEFT JOIN {TABELA} la ON la.id_atendimento = ca.id
+            WHERE la.id IS NULL
+              AND ca.consulta_tipo_arquivo = 'texto'
+              AND ca.consulta_conteudo IS NOT NULL
+              AND LENGTH(ca.consulta_conteudo) > {MIN_CHARS}
+            ORDER BY ca.datetime_consulta_inicio ASC
+            {limit_sql}
+        """, reason="enfileirar_antigos_global")
+    except Exception as e:
+        log.warning(f"⚠️  Erro ao enfileirar atendimentos antigos globais: {e}")
+        return 0
+
+    enfileirados = int(resultado.get("affected_rows") or 0)
+    if enfileirados:
+        log.info(f"📥 {enfileirados} atendimento(s) antigo(s) sem registro prévio foram inseridos na fila de análise.")
 
     return enfileirados
 
@@ -2891,6 +2933,28 @@ def analisar_prontuario(texto: str, chat_url: str = None, chat_id: str = None, c
         sys.stdout.write('\n')
         sys.stdout.flush()
 
+    def _log_wrapped(prefixo: str, msg: str):
+        """
+        Loga mensagens longas em múltiplas linhas reais para evitar que o
+        próximo progresso inline (\r) sobrescreva o trecho final quando o
+        terminal fizer quebra visual automática.
+        """
+        texto = re.sub(r"\s+", " ", str(msg or "")).strip()
+        if not texto:
+            return
+
+        largura_terminal = shutil.get_terminal_size((140, 20)).columns
+        largura_util = max(50, largura_terminal - 36)  # reserva espaço do timestamp/logger
+        linhas = textwrap.wrap(
+            texto,
+            width=largura_util,
+            break_long_words=False,
+            break_on_hyphens=False,
+        ) or [texto]
+
+        for linha in linhas:
+            log.info(f"  {prefixo} {linha}")
+
     last_status = ""
     inline_active = False  # True quando ha uma linha inline aberta
     for raw_line in resp.iter_lines():
@@ -2917,7 +2981,7 @@ def analisar_prontuario(texto: str, chat_url: str = None, chat_id: str = None, c
                 if inline_active:
                     _newline()
                     inline_active = False
-                log.info(f'  ⏳ {msg}')
+                _log_wrapped('⏳', msg)
 
         elif t == "log":
             if inline_active:
@@ -3673,6 +3737,7 @@ def main():
 
             # ── Ciclo normal ──────────────────────────────────────────
             resetar_travados()
+            enfileirar_atendimentos_antigos_globais()
             resultado = buscar_pendentes()
             pendentes = resultado["pendentes"]
 

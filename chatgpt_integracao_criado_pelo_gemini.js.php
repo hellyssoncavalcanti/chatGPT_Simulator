@@ -3034,7 +3034,9 @@ header('Content-Type: application/javascript; charset=utf-8');
         #ow-analise-previa .ia-conduta.is-open .ia-toggle{transform:rotate(180deg)}
         #ow-analise-previa .ia-conduta-body{display:none;padding:10px 12px;border-top:1px dashed #e2e8f0;font-size:13px;color:#334155}
         #ow-analise-previa .ia-conduta.is-open .ia-conduta-body{display:block}
-        #ow-analise-previa .ia-ref{margin-top:6px;font-size:12px;color:#64748b;display:flex;gap:6px;align-items:center;flex-wrap:wrap}
+        #ow-analise-previa .ia-ref{margin-top:6px;font-size:12px;color:#64748b;display:flex;gap:6px;align-items:flex-start;flex-wrap:wrap;max-width:100%;min-width:0}
+        #ow-analise-previa .ia-ref span{flex:1 1 220px;min-width:0;overflow-wrap:anywhere;word-break:break-word}
+        #ow-analise-previa .ia-ref .ia-mini-btn{flex:0 0 auto}
         #ow-analise-previa .ia-mini-btn{font-size:12px;padding:3px 6px;border:1px solid #cbd5e1;border-radius:5px;background:#fff;cursor:pointer}
         #ow-analise-previa .ia-mini-btn:hover{background:#f1f5f9}
         #ow-analise-previa .ia-timeline{padding:10px 16px}
@@ -4651,7 +4653,7 @@ header('Content-Type: application/javascript; charset=utf-8');
             const refTxt  = esc([c.referencia, c.fonte].filter(Boolean).join(' | '));
             const refCopy = esc([c.referencia, c.fonte].filter(Boolean).join(' | '));
             return `
-            <div class="ia-conduta${i === 0 ? ' is-open' : ''}">
+            <div class="ia-conduta">
                 <button class="ia-conduta-header" onclick="apToggleConduta(this)">
                     <span>${esc(c.conduta)}</span><span class="ia-toggle">⌄</span>
                 </button>
