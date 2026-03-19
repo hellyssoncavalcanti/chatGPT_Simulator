@@ -2959,6 +2959,7 @@ header('Content-Type: application/javascript; charset=utf-8');
     
     // Análise clínica pré-carregada em background
     let analiseAtendimentoCtx = null;
+    let pendingAnaliseCtx = { atendimento: null, paciente_compilado: null };
 
     let recognition = null;
     let isRecording = false;
@@ -3056,6 +3057,18 @@ header('Content-Type: application/javascript; charset=utf-8');
         #ow-analise-previa .ia-prio{font-size:11px;font-weight:700;padding:2px 9px;border-radius:999px;color:#fff}
         #iap-toast{position:fixed;bottom:20px;right:20px;background:#0f172a;color:#fff;padding:8px 12px;border-radius:8px;font-size:13px;opacity:0;transform:translateY(10px);transition:0.2s;z-index:9999}
         #iap-toast.show{opacity:1;transform:translateY(0)}
+        #ow-analise-pendente{font-family:Inter,system-ui,-apple-system,Segoe UI,Roboto,sans-serif;border:1px solid #fde68a;border-radius:14px;background:linear-gradient(135deg,#fffdf5 0%,#fff7db 100%);box-shadow:0 8px 24px rgba(180,83,9,.08);margin:10px 0;overflow:hidden;width:100%;box-sizing:border-box}
+        #ow-analise-pendente .iap-header{display:flex;align-items:flex-start;justify-content:space-between;padding:14px 16px;border-bottom:1px solid #fde68a;background:rgba(255,251,235,.9);gap:8px;flex-wrap:wrap}
+        #ow-analise-pendente .iap-title{font-weight:700;font-size:15px;color:#92400e}
+        #ow-analise-pendente .iap-subtitle{font-size:12px;color:#b45309;margin-top:3px}
+        #ow-analise-pendente .iap-list{padding:14px 16px;display:flex;flex-direction:column;gap:10px}
+        #ow-analise-pendente .iap-item{border:1px solid #fcd34d;border-radius:10px;background:#fff;padding:12px 13px}
+        #ow-analise-pendente .iap-item-head{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap}
+        #ow-analise-pendente .iap-item-title{font-size:13px;font-weight:700;color:#78350f}
+        #ow-analise-pendente .iap-badge{font-size:11px;font-weight:800;padding:4px 10px;border-radius:999px;color:#fff}
+        #ow-analise-pendente .iap-badge.pendente{background:#d97706}
+        #ow-analise-pendente .iap-badge.processando{background:#2563eb}
+        #ow-analise-pendente .iap-item-text{font-size:12px;line-height:1.5;color:#7c5a10;margin-top:7px}
         /* === ANÁLISE PRÉVIA DA LLM EXPOSTA NO CHAT — DESIGN SYSTEM = FIM === */
         
         @keyframes pulseRed { 0% { box-shadow: 0 0 0 0 rgba(211, 47, 47, 0.4); } 70% { box-shadow: 0 0 0 10px rgba(211, 47, 47, 0); } 100% { box-shadow: 0 0 0 0 rgba(211, 47, 47, 0); } }
@@ -4076,6 +4089,82 @@ header('Content-Type: application/javascript; charset=utf-8');
         }
     }
 
+    function setPendingAnaliseNotice(scopeKey, status, row = {}) {
+        const statusNorm = String(status || '').trim().toLowerCase();
+        if (!['pendente', 'processando'].includes(statusNorm)) {
+            pendingAnaliseCtx[scopeKey] = null;
+            renderPendingAnaliseNotice();
+            return;
+        }
+        pendingAnaliseCtx[scopeKey] = { status: statusNorm, row: row || {} };
+        renderPendingAnaliseNotice();
+    }
+
+    function clearPendingAnaliseNotice(scopeKey) {
+        if (scopeKey) pendingAnaliseCtx[scopeKey] = null;
+        else pendingAnaliseCtx = { atendimento: null, paciente_compilado: null };
+        renderPendingAnaliseNotice();
+    }
+
+    function renderPendingAnaliseNotice() {
+        const container = document.getElementById('ow-messages');
+        if (!container) return;
+
+        const anterior = document.getElementById('ow-analise-pendente');
+        if (anterior) anterior.remove();
+
+        const notices = Object.entries(pendingAnaliseCtx).filter(([, cfg]) => cfg && ['pendente', 'processando'].includes(cfg.status));
+        if (!notices.length) return;
+
+        const meta = {
+            atendimento: {
+                titulo: 'Atendimento atual',
+                descricao: {
+                    pendente: 'A análise estruturada deste atendimento ainda está na fila do processador clínico.',
+                    processando: 'A análise estruturada deste atendimento está sendo processada agora.'
+                }
+            },
+            paciente_compilado: {
+                titulo: 'Síntese longitudinal do paciente',
+                descricao: {
+                    pendente: 'A síntese compilada do paciente ainda está pendente e será exibida aqui assim que for concluída.',
+                    processando: 'A síntese compilada do paciente está em processamento neste momento.'
+                }
+            }
+        };
+
+        const html = `
+            <div id="ow-analise-pendente">
+                <div class="iap-header">
+                    <div>
+                        <div class="iap-title">⏳ Análise clínica pendente</div>
+                        <div class="iap-subtitle">Aviso contextual da fila de processamento — não entra no histórico do chat.</div>
+                    </div>
+                </div>
+                <div class="iap-list">
+                    ${notices.map(([scopeKey, cfg]) => {
+                        const scopeMeta = meta[scopeKey] || meta.atendimento;
+                        const statusLabel = cfg.status === 'processando' ? 'PROCESSANDO' : 'PENDENTE';
+                        const statusText = scopeMeta.descricao[cfg.status] || 'A análise ainda não está disponível.';
+                        return `
+                            <div class="iap-item">
+                                <div class="iap-item-head">
+                                    <div class="iap-item-title">${scopeMeta.titulo}</div>
+                                    <span class="iap-badge ${cfg.status}">${statusLabel}</span>
+                                </div>
+                                <div class="iap-item-text">${statusText}</div>
+                            </div>
+                        `;
+                    }).join('')}
+                </div>
+            </div>
+        `;
+
+        const analisePrevia = document.getElementById('ow-analise-previa');
+        if (analisePrevia) analisePrevia.insertAdjacentHTML('afterend', html);
+        else container.insertAdjacentHTML('afterbegin', html);
+    }
+
     async function fetchAnaliseAtendimento(idAtendimento) {
         console.groupCollapsed(`%c${FILE_PREFIX} 🧠 Análise Prévia — id_atendimento=${idAtendimento}`, 'color: #9c27b0; font-weight: bold');
 
@@ -4128,6 +4217,7 @@ header('Content-Type: application/javascript; charset=utf-8');
             const data = await res.json();
 
             if (!data?.success || !data.data?.length) {
+                clearPendingAnaliseNotice('atendimento');
                 // diagnóstico: mostra o que o PHP realmente retornou
                 console.warn('⚠️  Resposta do execute_sql:', data);
                 if (!data?.success) {
@@ -4144,11 +4234,15 @@ header('Content-Type: application/javascript; charset=utf-8');
             if (row.status !== 'concluido') {
                 console.log(`%cℹ️  Análise existe mas status='${row.status}' — ignorando.`, 'color: #ff9800');
                 if (row.status === 'pendente' || row.status === 'processando') {
+                    setPendingAnaliseNotice('atendimento', row.status, row);
                     notifyAnalisePreviaPendente(row.status, 'atendimento');
+                } else {
+                    clearPendingAnaliseNotice('atendimento');
                 }
                 console.groupEnd();
                 return;
             }
+            clearPendingAnaliseNotice('atendimento');
             const analise = parseAnalisePreviaRow(row);
             applyAnalisePrevia(analise, row, 'atendimento');
 
@@ -4210,6 +4304,7 @@ header('Content-Type: application/javascript; charset=utf-8');
 
             const data = await res.json();
             if (!data?.success || !data.data?.length) {
+                clearPendingAnaliseNotice('paciente_compilado');
                 console.log('%cℹ️  Nenhuma síntese compilada do paciente encontrada.', 'color: #9e9e9e');
                 console.groupEnd();
                 return;
@@ -4218,10 +4313,17 @@ header('Content-Type: application/javascript; charset=utf-8');
             const row = data.data[0];
             if (row.status !== 'concluido') {
                 console.log(`%cℹ️  Síntese compilada existe mas status='${row.status}' — ignorando.`, 'color: #ff9800');
+                if (row.status === 'pendente' || row.status === 'processando') {
+                    setPendingAnaliseNotice('paciente_compilado', row.status, row);
+                    notifyAnalisePreviaPendente(row.status, 'síntese do paciente');
+                } else {
+                    clearPendingAnaliseNotice('paciente_compilado');
+                }
                 console.groupEnd();
                 return;
             }
 
+            clearPendingAnaliseNotice('paciente_compilado');
             const analise = parseAnalisePreviaRow(row);
             applyAnalisePrevia(analise, row, 'paciente_compilado');
         } catch (e) {
@@ -4486,6 +4588,7 @@ header('Content-Type: application/javascript; charset=utf-8');
                 addSimpleMsg('user', display.trim());
             }
         });
+        renderPendingAnaliseNotice();
         scroll(true);
     }
     // ===================== INICIO =====================
