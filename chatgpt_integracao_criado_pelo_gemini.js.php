@@ -5243,14 +5243,34 @@ header('Content-Type: application/javascript; charset=utf-8');
             .replace(/'/g, '&#39;');
     }
 
+    function escapeHtmlAttr(value) {
+        return String(value ?? '')
+            .replace(/&/g, '&amp;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#39;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;');
+    }
+
+    function encodeDirectResultPayload(value) {
+        return encodeURIComponent(String(value ?? ''));
+    }
+
+    window.copyDirectResult = function(btn) {
+        const encoded = btn?.dataset?.txt || '';
+        const decoded = decodeURIComponent(encoded);
+        navigator.clipboard.writeText(decoded).then(() => apToast('Resultado copiado!'));
+    };
+
     function buildDirectResultBoxHtml(title, plainText, accentColor = '#475569') {
         const safeText = String(plainText || '').trim();
+        const encodedText = escapeHtmlAttr(encodeDirectResultPayload(safeText));
         return `
             <div style="border:1px solid #e2e8f0;border-radius:12px;overflow:hidden;background:#ffffff;box-shadow:0 1px 2px rgba(15,23,42,.05);">
                 <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;padding:10px 12px;background:${accentColor}12;border-bottom:1px solid #e2e8f0;">
                     <strong style="font-size:13px;color:${accentColor};">${title}</strong>
-                    <button onclick="navigator.clipboard.writeText(this.dataset.txt).then(()=>apToast('Resultado copiado!'))"
-                        data-txt="${escapeDirectResultText(safeText)}"
+                    <button onclick="copyDirectResult(this)"
+                        data-txt="${encodedText}"
                         style="background:#fff;border:1px solid #cbd5e1;border-radius:6px;padding:5px 10px;font-size:11px;cursor:pointer;color:#334155;white-space:nowrap;">
                         📋 Copiar resultado
                     </button>
