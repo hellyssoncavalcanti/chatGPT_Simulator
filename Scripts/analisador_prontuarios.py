@@ -752,6 +752,129 @@ def _extrair_queries_pesquisa_fallback(markdown: str) -> list:
     return queries
 
 
+def _strip_code_fences(texto: str) -> str:
+    """Remove cercas Markdown ```...``` mantendo apenas o conteúdo interno."""
+    texto = (texto or "").strip()
+    if texto.startswith("```"):
+        texto = re.sub(r"^```(?:json)?\s*", "", texto, flags=re.IGNORECASE)
+        texto = re.sub(r"\s*```$", "", texto)
+    return texto.strip()
+
+
+def _extrair_bloco_json(texto: str) -> str:
+    """Extrai o primeiro objeto JSON aparente do texto retornado pela LLM."""
+    texto = _strip_code_fences(texto)
+    match = re.search(r'\{[\s\S]*\}', texto)
+    return match.group().strip() if match else ""
+
+
+def _normalizar_json_llm(raw_json: str) -> str:
+    """
+    Corrige problemas comuns de JSON quase-válido retornado por LLMs:
+    - aspas tipográficas;
+    - vírgulas faltando entre pares chave/valor consecutivos;
+    - vírgulas faltando entre objetos de uma lista;
+    - vírgulas sobrando antes de ] ou }.
+    """
+    texto = (raw_json or "").strip()
+    if not texto:
+        return ""
+
+    texto = (
+        texto
+        .replace("“", '"')
+        .replace("”", '"')
+        .replace("’", "'")
+        .replace("‘", "'")
+        .replace("`", '"')
+    )
+
+    # Ex.: "query": "..."   "reason": "..."
+    texto = re.sub(r'("(?:(?:\\.|[^"\\])*)")(\s*)"([A-Za-z0-9_\-]+)"\s*:', r'\1,\2"\3":', texto)
+    # Ex.: } {   ou   ] {
+    texto = re.sub(r'([}\]])(\s*)(\{)', r'\1,\2', texto)
+    # Ex.: } "outra_chave":
+    texto = re.sub(r'([}\]])(\s*)"([A-Za-z0-9_\-]+)"\s*:', r'\1,\2"\3":', texto)
+    # Remove trailing commas antes de fechar objeto/lista
+    texto = re.sub(r',(\s*[}\]])', r'\1', texto)
+    return texto
+
+
+def _parse_json_llm(texto: str) -> dict:
+    """
+    Faz o parse de um objeto JSON retornado pela LLM com pequenas correções
+    tolerantes a formatação imperfeita.
+    """
+    candidato = _extrair_bloco_json(texto)
+    if not candidato:
+        raise ValueError("LLM não retornou bloco JSON.")
+
+    try:
+        return json.loads(candidato)
+    except json.JSONDecodeError:
+        candidato_normalizado = _normalizar_json_llm(candidato)
+        return json.loads(candidato_normalizado)
+
+
+def _decode_json_string_fragment(value: str) -> str:
+    """Decodifica um fragmento de string JSON sem perder caracteres UTF-8."""
+    try:
+        return json.loads(f'"{value}"')
+    except json.JSONDecodeError:
+        return value.replace('\\"', '"').replace("\\n", "\n").replace("\\t", "\t")
+
+
+def _extrair_queries_pesquisa_fallback(markdown: str) -> list:
+    """
+    Extrai queries manualmente quando a LLM não entrega JSON estrito.
+    Aceita objetos quase-JSON e listas em texto contendo campos query/reason.
+    """
+    texto = _strip_code_fences(markdown)
+    if not texto:
+        return []
+
+    queries = []
+    vistos = set()
+
+    # Tenta localizar pares query/reason mesmo quando o JSON veio truncado ou sem vírgulas.
+    pair_pattern = re.compile(
+        r'"query"\s*:\s*"(?P<query>(?:\\.|[^"\\])*)"\s*,?\s*"reason"\s*:\s*"(?P<reason>(?:\\.|[^"\\])*)"',
+        re.IGNORECASE | re.DOTALL,
+    )
+    for match in pair_pattern.finditer(texto):
+        query = re.sub(r"\s+", " ", _decode_json_string_fragment(match.group("query"))).strip()
+        reason = re.sub(r"\s+", " ", _decode_json_string_fragment(match.group("reason"))).strip()
+        if not query:
+            continue
+        chave = query.lower()
+        if chave in vistos:
+            continue
+        vistos.add(chave)
+        queries.append({"query": query, "reason": reason})
+        if len(queries) >= SEARCH_MAX_QUERIES:
+            return queries
+
+    # Fallback mais simples: linhas em lista com query e motivo.
+    line_pattern = re.compile(
+        r'^\s*(?:[-*]|\d+[.)])\s*(?P<query>.+?)(?:\s+[—-]\s+|\s+\|\s+motivo:\s+)(?P<reason>.+?)\s*$',
+        re.IGNORECASE | re.MULTILINE,
+    )
+    for match in line_pattern.finditer(texto):
+        query = re.sub(r"\s+", " ", match.group("query")).strip(' "\'')
+        reason = re.sub(r"\s+", " ", match.group("reason")).strip(' "\'')
+        if not query:
+            continue
+        chave = query.lower()
+        if chave in vistos:
+            continue
+        vistos.add(chave)
+        queries.append({"query": query, "reason": reason})
+        if len(queries) >= SEARCH_MAX_QUERIES:
+            break
+
+    return queries
+
+
 
 # ─────────────────────────────────────────────────────────────
 # CAMADA HTTP → PHP (único ponto de acesso ao banco)
@@ -4232,7 +4355,37 @@ def enriquecer_com_evidencias(resultado: dict, resultados_web: list,
         )
         resp.raise_for_status()
 
+        new_chat_id = chat_id
+        new_chat_url = chat_url
         markdown = ""
+        last_status = ""
+        inline_active = False
+
+        def _inline(msg):
+            sys.stdout.write(f'\r  {msg:<55}')
+            sys.stdout.flush()
+
+        def _newline():
+            sys.stdout.write('\n')
+            sys.stdout.flush()
+
+        def _log_wrapped(prefixo: str, msg: str):
+            texto = re.sub(r"\s+", " ", str(msg or "")).strip()
+            if not texto:
+                return
+
+            largura_terminal = shutil.get_terminal_size((140, 20)).columns
+            largura_util = max(50, largura_terminal - 36)
+            linhas = textwrap.wrap(
+                texto,
+                width=largura_util,
+                break_long_words=False,
+                break_on_hyphens=False,
+            ) or [texto]
+
+            for linha in linhas:
+                log.info(f"  {prefixo} {linha}")
+
         for raw_line in resp.iter_lines():
             if not raw_line:
                 continue
@@ -4241,11 +4394,53 @@ def enriquecer_com_evidencias(resultado: dict, resultados_web: list,
             except json.JSONDecodeError:
                 continue
             t = obj.get("type")
-            if t == "markdown":
+            if t == "status":
+                msg = obj.get("content", "")
+                if msg == last_status:
+                    continue
+                last_status = msg
+                if "%" in msg:
+                    _inline(f'⏳ {msg}')
+                    inline_active = True
+                else:
+                    if inline_active:
+                        _newline()
+                        inline_active = False
+                    _log_wrapped('⏳', msg)
+            elif t == "log":
+                if inline_active:
+                    _newline()
+                    inline_active = False
+                log.info(f"  🔧 {obj.get('content', '').strip()}")
+            elif t == "chatid":
+                if inline_active:
+                    _newline()
+                    inline_active = False
+                new_chat_id = obj.get("content") or new_chat_id
+                log.info(f"  📎 chat_id: {new_chat_id}")
+            elif t == "markdown":
                 markdown = obj.get("content", "")
+                _inline(f'📝 Recebendo: {len(markdown)} chars...')
+                inline_active = True
+            elif t == "finish":
+                if inline_active:
+                    _newline()
+                    inline_active = False
+                fin = obj.get("content", {})
+                new_chat_url = fin.get("url") or new_chat_url
+                new_chat_id = fin.get("chat_id") or new_chat_id
+                if not new_chat_id and new_chat_url:
+                    new_chat_id = new_chat_url.rstrip('/').split('/')[-1] or new_chat_id
+                log.info(f"  🔗 chat_url: {new_chat_url} | chat_id: {new_chat_id}")
             elif t == "error":
+                if inline_active:
+                    _newline()
+                    inline_active = False
                 log.warning(f"  ⚠️ Enriquecimento: LLM retornou erro: {obj.get('content')}")
                 return resultado
+
+        if inline_active:
+            _newline()
 
         if not markdown:
             log.warning("  ⚠️ Enriquecimento: LLM não retornou conteúdo.")

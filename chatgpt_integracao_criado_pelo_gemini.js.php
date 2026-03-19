@@ -4190,17 +4190,24 @@ header('Content-Type: application/javascript; charset=utf-8');
         try {
             const [queueData, avgTodayData, avgHistoricData] = await Promise.all([
                 runSql(`
-                    SELECT COUNT(*) AS itens_a_frente
+                    SELECT
+                        SUM(CASE WHEN status = 'processando' AND id <> ${analiseId} THEN 1 ELSE 0 END) AS processos_em_andamento,
+                        SUM(
+                            CASE
+                                WHEN status = 'pendente' AND (
+                                    datetime_analise_criacao < '${createdAtSql}'
+                                    OR (datetime_analise_criacao = '${createdAtSql}' AND id < ${analiseId})
+                                )
+                                THEN 1 ELSE 0
+                            END
+                        ) AS pendentes_anteriores
                     FROM chatgpt_atendimentos_analise
                     WHERE status IN ('pendente','processando')
-                      AND (
-                            datetime_analise_criacao < '${createdAtSql}'
-                         OR (datetime_analise_criacao = '${createdAtSql}' AND id < ${analiseId})
-                      )
                 `, 'Posição da análise na fila'),
                 runSql(`
                     SELECT
                         COUNT(*) AS total,
+                        DATE_FORMAT(CURDATE(), '%d/%m/%y') AS data_base,
                         AVG(TIMESTAMPDIFF(SECOND, datetime_analise_criacao, datetime_analise_concluida)) AS media_segundos
                     FROM chatgpt_atendimentos_analise
                     WHERE status = 'concluido'
@@ -4212,6 +4219,7 @@ header('Content-Type: application/javascript; charset=utf-8');
                 runSql(`
                     SELECT
                         COUNT(*) AS total,
+                        COUNT(DISTINCT DATE(datetime_analise_concluida)) AS dias_distintos,
                         AVG(TIMESTAMPDIFF(SECOND, datetime_analise_criacao, datetime_analise_concluida)) AS media_segundos
                     FROM chatgpt_atendimentos_analise
                     WHERE status = 'concluido'
@@ -4222,25 +4230,33 @@ header('Content-Type: application/javascript; charset=utf-8');
                 `, 'Média histórica das análises concluídas')
             ]);
 
-            const ahead = Number(queueData?.data?.[0]?.itens_a_frente || 0);
+            const inProgressAhead = Number(queueData?.data?.[0]?.processos_em_andamento || 0);
+            const pendingAhead = Number(queueData?.data?.[0]?.pendentes_anteriores || 0);
+            const ahead = inProgressAhead + pendingAhead;
             const todayCount = Number(avgTodayData?.data?.[0]?.total || 0);
             const todayAvg = Number(avgTodayData?.data?.[0]?.media_segundos || 0);
+            const todayDate = String(avgTodayData?.data?.[0]?.data_base || '').trim();
             const historicCount = Number(avgHistoricData?.data?.[0]?.total || 0);
             const historicAvg = Number(avgHistoricData?.data?.[0]?.media_segundos || 0);
+            const historicDays = Number(avgHistoricData?.data?.[0]?.dias_distintos || 0);
 
             const useToday = todayCount > 0 && todayAvg > 0;
             const avgSeconds = useToday ? todayAvg : historicAvg;
             const sampleSize = useToday ? todayCount : historicCount;
-            const basis = useToday ? 'hoje' : (historicAvg > 0 ? 'histórico' : null);
+            const basis = useToday ? 'today' : (historicAvg > 0 ? 'historical' : null);
             const workUnits = statusNorm === 'processando' ? Math.max(0.5, ahead + 0.5) : ahead + 1;
 
             return {
                 aheadCount: ahead,
+                inProgressAhead,
+                pendingAhead,
                 position: ahead + 1,
                 avgSeconds: avgSeconds > 0 ? Math.round(avgSeconds) : null,
                 etaSeconds: avgSeconds > 0 ? Math.round(avgSeconds * workUnits) : null,
                 basis,
-                sampleSize
+                sampleSize,
+                todayDate,
+                historicDays
             };
         } catch (e) {
             console.warn('⚠️ Falha ao calcular posição/ETA da análise:', e);
@@ -4306,12 +4322,18 @@ header('Content-Type: application/javascript; charset=utf-8');
                         const statusLabel = cfg.status === 'processando' ? 'PROCESSANDO' : 'PENDENTE';
                         const statusText = scopeMeta.descricao[cfg.status] || 'A análise ainda não está disponível.';
                         const queueInfo = cfg?.row?.queueInfo || null;
+                        const avgLabel = queueInfo?.avgSeconds ? formatDurationEstimate(queueInfo.avgSeconds) : '';
+                        const basisLabel = queueInfo?.basis === 'today'
+                            ? `média de hoje, ${queueInfo.todayDate || 'dia atual'}`
+                            : queueInfo?.basis === 'historical'
+                                ? `média histórica de ${queueInfo.historicDays > 1 ? `${queueInfo.historicDays} dias anteriores` : 'dia anterior'}`
+                                : '';
                         const queueHtml = queueInfo
                             ? `
                                 <div class="iap-item-text" style="margin-top:10px;padding-top:10px;border-top:1px dashed #fcd34d;">
-                                    📍 Posição estimada na fila: <strong>${queueInfo.position}º</strong>${Number.isFinite(queueInfo.aheadCount) ? ` · ${queueInfo.aheadCount} antes desta análise` : ''}
-                                    ${queueInfo.etaSeconds ? `<br>⏱️ Previsão de conclusão: <strong>~${formatDurationEstimate(queueInfo.etaSeconds)}</strong>` : ''}
-                                    ${queueInfo.avgSeconds ? `<br>📊 Base: média ${queueInfo.basis === 'hoje' ? 'das análises concluídas hoje' : 'histórica'}${queueInfo.sampleSize ? ` (${queueInfo.sampleSize} análise(s))` : ''}.` : ''}
+                                    📍 Posição estimada na fila: <strong>${queueInfo.position}º</strong>${Number.isFinite(queueInfo.aheadCount) ? ` · ${queueInfo.aheadCount} processos antes desta análise.` : ''}
+                                    ${queueInfo.etaSeconds ? `<br>⏱️ Previsão de tempo até processamento e conclusão: <strong>~${formatDurationEstimate(queueInfo.etaSeconds)}</strong>.` : ''}
+                                    ${queueInfo.avgSeconds ? `<br>📊 Base: ${basisLabel}${queueInfo.sampleSize ? ` (com base em ${queueInfo.sampleSize} análise(s))` : ''} - ${avgLabel} por análise.` : ''}
                                 </div>
                             `
                             : '';
