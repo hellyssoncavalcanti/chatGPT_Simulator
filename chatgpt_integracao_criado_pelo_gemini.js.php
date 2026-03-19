@@ -27,6 +27,51 @@ $CHATGPT_VIA_API_KEY = "CVAPI_2b9c80c2abf94a76baf8b3e68d89cb7e";
 // --- CONFIGURAÇÃO: IP MANUAL OLLAMA (OPCIONAL) ---
 $ollama_manual_ip = ""; 
 
+// --- CONFIGURAÇÃO: LIMPEZA ASSÍNCRONA DE LOGS SQL ---
+$CHATGPT_SQL_LOG_TABLE = 'chatgpt_sql_logs';
+$CHATGPT_SQL_LOG_RETENTION_HOURS = 12;            // ajuste fácil: tempo de retenção dos logs
+$CHATGPT_SQL_LOG_CLEANUP_MIN_INTERVAL_SEC = 900; // evita DELETE em toda requisição
+
+function chatgpt_get_requester_context(): array {
+    global $row_login_atual;
+    if (session_status() !== PHP_SESSION_ACTIVE) @session_start();
+    $id = null;
+    $nome = null;
+    if (isset($row_login_atual['id']) && $row_login_atual['id'] !== '') $id = $row_login_atual['id'];
+    elseif (isset($_SESSION['id']) && $_SESSION['id'] !== '') $id = $_SESSION['id'];
+    if (isset($row_login_atual['nome']) && $row_login_atual['nome'] !== '') $nome = $row_login_atual['nome'];
+    elseif (isset($_SESSION['nome']) && $_SESSION['nome'] !== '') $nome = $_SESSION['nome'];
+    return [
+        'id_membro_solicitante' => $id,
+        'nome_membro_solicitante' => $nome,
+    ];
+}
+
+function chatgpt_should_run_sql_log_cleanup(): bool {
+    global $CHATGPT_SQL_LOG_CLEANUP_MIN_INTERVAL_SEC;
+    $marker = sys_get_temp_dir() . '/chatgpt_sql_logs_cleanup.marker';
+    $now = time();
+    $last = is_file($marker) ? intval(@file_get_contents($marker)) : 0;
+    if ($last > 0 && ($now - $last) < intval($CHATGPT_SQL_LOG_CLEANUP_MIN_INTERVAL_SEC)) {
+        return false;
+    }
+    @file_put_contents($marker, (string) $now, LOCK_EX);
+    return true;
+}
+
+function chatgpt_cleanup_sql_logs(): array {
+    global $CHATGPT_SQL_LOG_TABLE, $CHATGPT_SQL_LOG_RETENTION_HOURS;
+    $db = get_mysql_connection_local();
+    if (!$db) return ['success' => false, 'error' => 'Database connection failed'];
+    $db->set_charset("utf8mb4");
+    $hours = max(1, intval($CHATGPT_SQL_LOG_RETENTION_HOURS));
+    $table = preg_replace('/[^a-zA-Z0-9_]/', '', $CHATGPT_SQL_LOG_TABLE ?: 'chatgpt_sql_logs');
+    $sql = "DELETE FROM {$table} WHERE created_at < DATE_SUB(NOW(), INTERVAL {$hours} HOUR)";
+    $ok = @$db->query($sql);
+    if (!$ok) return ['success' => false, 'error' => $db->error ?: 'Erro ao limpar logs'];
+    return ['success' => true, 'affected_rows' => intval($db->affected_rows), 'retention_hours' => $hours, 'table' => $table];
+}
+
 function chatgpt_rate_limit_check($max_per_min = 200) {
     if (!function_exists('apcu_fetch')) return;
     $ip  = $_SERVER['REMOTE_ADDR'] ?? 'unknown';
@@ -139,6 +184,7 @@ $actions_without_login_bootstrap = [
   'ping_simulator',
   'sync_simulator',
   'web_search',
+  'cleanup_sql_logs',
   'salvar_analise_auxiliar'
 ];
 $is_direct_script_request = ($current_action === '' && basename($_SERVER['PHP_SELF'] ?? '') === $currentFileName);
@@ -904,6 +950,26 @@ if (isset($_GET['action']) && $_GET['action'] === 'save_prompt') {
 }
 
 // -----------------------------------------------------
+// HANDLER: LIMPEZA ASSÍNCRONA DOS LOGS SQL
+// -----------------------------------------------------
+if (isset($_GET['action']) && $_GET['action'] === 'cleanup_sql_logs') {
+    header('Content-Type: application/json; charset=utf-8');
+    $body = json_decode(file_get_contents('php://input'), true) ?: [];
+    $providedKey = $body['api_key'] ?? ($_SERVER['HTTP_X_API_KEY'] ?? '');
+    if (!HasRequiredApiKeyOrIsSameOrigin((string) $providedKey, $CHATGPT_VIA_API_KEY)) {
+        http_response_code(401);
+        echo json_encode(['success' => false, 'error' => 'Unauthorized']);
+        exit;
+    }
+    if (!chatgpt_should_run_sql_log_cleanup()) {
+        echo json_encode(['success' => true, 'skipped' => true, 'reason' => 'cleanup_recently_executed']);
+        exit;
+    }
+    echo json_encode(chatgpt_cleanup_sql_logs());
+    exit;
+}
+
+// -----------------------------------------------------
 // HANDLER: PESQUISA WEB VIA BROWSER.PY (Google)
 // -----------------------------------------------------
 if (isset($_GET['action']) && $_GET['action'] === 'web_search') {
@@ -911,6 +977,7 @@ if (isset($_GET['action']) && $_GET['action'] === 'web_search') {
 
     $body    = json_decode(file_get_contents('php://input'), true);
     $queries = $body['queries'] ?? [];
+    $requester = chatgpt_get_requester_context();
 
     if (empty($queries) || !is_array($queries)) {
         echo json_encode(['success' => false, 'error' => 'queries array ausente']); exit;
@@ -949,7 +1016,11 @@ if (isset($_GET['action']) && $_GET['action'] === 'web_search') {
         'Content-Type: application/json',
         'Authorization: Bearer ' . $CHATGPT_VIA_API_KEY
     ]);
-    curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode(['queries' => $queries]));
+    curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode([
+        'queries' => $queries,
+        'id_membro_solicitante' => $requester['id_membro_solicitante'],
+        'nome_membro_solicitante' => $requester['nome_membro_solicitante']
+    ]));
     $response  = curl_exec($ch);
     $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
     $curl_err  = curl_error($ch);
@@ -4089,6 +4160,94 @@ header('Content-Type: application/javascript; charset=utf-8');
         }
     }
 
+    function formatDurationEstimate(seconds) {
+        const total = Math.max(0, Number(seconds) || 0);
+        if (!total) return '';
+        if (total < 60) return `${Math.round(total)}s`;
+        const minutes = Math.round(total / 60);
+        if (minutes < 60) return `${minutes} min`;
+        const hours = Math.floor(minutes / 60);
+        const mins = minutes % 60;
+        return mins ? `${hours}h ${mins}min` : `${hours}h`;
+    }
+
+    async function fetchAnaliseQueueEstimate(row) {
+        const analiseId = Number(row?.id || 0);
+        const createdAt = String(row?.datetime_analise_criacao || '').trim();
+        const statusNorm = String(row?.status || '').trim().toLowerCase();
+        if (!analiseId || !createdAt || !['pendente', 'processando'].includes(statusNorm)) return null;
+
+        const createdAtSql = createdAt.replace(/'/g, "\\'");
+        const runSql = async (query, reason) => {
+            const res = await fetch("<?php echo $_SERVER['PHP_SELF']; ?>?action=execute_sql", {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json; charset=utf-8' },
+                body: JSON.stringify({ query: normalizeSQL(query), reason })
+            });
+            return await res.json();
+        };
+
+        try {
+            const [queueData, avgTodayData, avgHistoricData] = await Promise.all([
+                runSql(`
+                    SELECT COUNT(*) AS itens_a_frente
+                    FROM chatgpt_atendimentos_analise
+                    WHERE status IN ('pendente','processando')
+                      AND (
+                            datetime_analise_criacao < '${createdAtSql}'
+                         OR (datetime_analise_criacao = '${createdAtSql}' AND id < ${analiseId})
+                      )
+                `, 'Posição da análise na fila'),
+                runSql(`
+                    SELECT
+                        COUNT(*) AS total,
+                        AVG(TIMESTAMPDIFF(SECOND, datetime_analise_criacao, datetime_analise_concluida)) AS media_segundos
+                    FROM chatgpt_atendimentos_analise
+                    WHERE status = 'concluido'
+                      AND datetime_analise_criacao IS NOT NULL
+                      AND datetime_analise_concluida IS NOT NULL
+                      AND DATE(datetime_analise_concluida) = CURDATE()
+                      AND TIMESTAMPDIFF(SECOND, datetime_analise_criacao, datetime_analise_concluida) BETWEEN 5 AND 21600
+                `, 'Média das análises concluídas hoje'),
+                runSql(`
+                    SELECT
+                        COUNT(*) AS total,
+                        AVG(TIMESTAMPDIFF(SECOND, datetime_analise_criacao, datetime_analise_concluida)) AS media_segundos
+                    FROM chatgpt_atendimentos_analise
+                    WHERE status = 'concluido'
+                      AND datetime_analise_criacao IS NOT NULL
+                      AND datetime_analise_concluida IS NOT NULL
+                      AND DATE(datetime_analise_concluida) < CURDATE()
+                      AND TIMESTAMPDIFF(SECOND, datetime_analise_criacao, datetime_analise_concluida) BETWEEN 5 AND 21600
+                `, 'Média histórica das análises concluídas')
+            ]);
+
+            const ahead = Number(queueData?.data?.[0]?.itens_a_frente || 0);
+            const todayCount = Number(avgTodayData?.data?.[0]?.total || 0);
+            const todayAvg = Number(avgTodayData?.data?.[0]?.media_segundos || 0);
+            const historicCount = Number(avgHistoricData?.data?.[0]?.total || 0);
+            const historicAvg = Number(avgHistoricData?.data?.[0]?.media_segundos || 0);
+
+            const useToday = todayCount > 0 && todayAvg > 0;
+            const avgSeconds = useToday ? todayAvg : historicAvg;
+            const sampleSize = useToday ? todayCount : historicCount;
+            const basis = useToday ? 'hoje' : (historicAvg > 0 ? 'histórico' : null);
+            const workUnits = statusNorm === 'processando' ? Math.max(0.5, ahead + 0.5) : ahead + 1;
+
+            return {
+                aheadCount: ahead,
+                position: ahead + 1,
+                avgSeconds: avgSeconds > 0 ? Math.round(avgSeconds) : null,
+                etaSeconds: avgSeconds > 0 ? Math.round(avgSeconds * workUnits) : null,
+                basis,
+                sampleSize
+            };
+        } catch (e) {
+            console.warn('⚠️ Falha ao calcular posição/ETA da análise:', e);
+            return null;
+        }
+    }
+
     function setPendingAnaliseNotice(scopeKey, status, row = {}) {
         const statusNorm = String(status || '').trim().toLowerCase();
         if (!['pendente', 'processando'].includes(statusNorm)) {
@@ -4146,6 +4305,16 @@ header('Content-Type: application/javascript; charset=utf-8');
                         const scopeMeta = meta[scopeKey] || meta.atendimento;
                         const statusLabel = cfg.status === 'processando' ? 'PROCESSANDO' : 'PENDENTE';
                         const statusText = scopeMeta.descricao[cfg.status] || 'A análise ainda não está disponível.';
+                        const queueInfo = cfg?.row?.queueInfo || null;
+                        const queueHtml = queueInfo
+                            ? `
+                                <div class="iap-item-text" style="margin-top:10px;padding-top:10px;border-top:1px dashed #fcd34d;">
+                                    📍 Posição estimada na fila: <strong>${queueInfo.position}º</strong>${Number.isFinite(queueInfo.aheadCount) ? ` · ${queueInfo.aheadCount} antes desta análise` : ''}
+                                    ${queueInfo.etaSeconds ? `<br>⏱️ Previsão de conclusão: <strong>~${formatDurationEstimate(queueInfo.etaSeconds)}</strong>` : ''}
+                                    ${queueInfo.avgSeconds ? `<br>📊 Base: média ${queueInfo.basis === 'hoje' ? 'das análises concluídas hoje' : 'histórica'}${queueInfo.sampleSize ? ` (${queueInfo.sampleSize} análise(s))` : ''}.` : ''}
+                                </div>
+                            `
+                            : '';
                         return `
                             <div class="iap-item">
                                 <div class="iap-item-head">
@@ -4153,6 +4322,7 @@ header('Content-Type: application/javascript; charset=utf-8');
                                     <span class="iap-badge ${cfg.status}">${statusLabel}</span>
                                 </div>
                                 <div class="iap-item-text">${statusText}</div>
+                                ${queueHtml}
                             </div>
                         `;
                     }).join('')}
@@ -4183,7 +4353,9 @@ header('Content-Type: application/javascript; charset=utf-8');
                 body:    JSON.stringify({
                     query: normalizeSQL(`
                         SELECT
+                                id,
                                 status,
+                                datetime_analise_criacao,
                                 datetime_atendimento_inicio,
                                 datetime_analise_concluida,
                                 resumo_texto,
@@ -4234,6 +4406,7 @@ header('Content-Type: application/javascript; charset=utf-8');
             if (row.status !== 'concluido') {
                 console.log(`%cℹ️  Análise existe mas status='${row.status}' — ignorando.`, 'color: #ff9800');
                 if (row.status === 'pendente' || row.status === 'processando') {
+                    row.queueInfo = await fetchAnaliseQueueEstimate(row);
                     setPendingAnaliseNotice('atendimento', row.status, row);
                     notifyAnalisePreviaPendente(row.status, 'atendimento');
                 } else {
@@ -4269,7 +4442,9 @@ header('Content-Type: application/javascript; charset=utf-8');
                 body:    JSON.stringify({
                     query: normalizeSQL(`
                         SELECT
+                            id,
                             status,
+                            datetime_analise_criacao,
                             datetime_analise_concluida,
                             resumo_texto,
                             gravidade_clinica,
@@ -4314,6 +4489,7 @@ header('Content-Type: application/javascript; charset=utf-8');
             if (row.status !== 'concluido') {
                 console.log(`%cℹ️  Síntese compilada existe mas status='${row.status}' — ignorando.`, 'color: #ff9800');
                 if (row.status === 'pendente' || row.status === 'processando') {
+                    row.queueInfo = await fetchAnaliseQueueEstimate(row);
                     setPendingAnaliseNotice('paciente_compilado', row.status, row);
                     notifyAnalisePreviaPendente(row.status, 'síntese do paciente');
                 } else {
@@ -4389,6 +4565,28 @@ header('Content-Type: application/javascript; charset=utf-8');
             chatMode:  mode,
             lastQ:     currentUserQuestion   // ← NOVO: persiste a pergunta
         }));
+    }
+
+    function scheduleSqlLogCleanup() {
+        const cleanupKey = `${PREFIX}sql_logs_cleanup_last_run`;
+        const now = Date.now();
+        const minIntervalMs = 15 * 60 * 1000;
+        const lastRun = Number(localStorage.getItem(cleanupKey) || 0);
+        if ((now - lastRun) < minIntervalMs) return;
+        localStorage.setItem(cleanupKey, String(now));
+
+        fetch(`<?php echo $_SERVER['PHP_SELF']; ?>?action=cleanup_sql_logs`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({})
+        })
+        .then(res => res.json())
+        .then(data => {
+            console.log(`${FILE_PREFIX} 🧹 Limpeza assíncrona de logs SQL:`, data);
+        })
+        .catch(err => {
+            console.warn(`${FILE_PREFIX} ⚠️ Limpeza assíncrona de logs SQL falhou:`, err);
+        });
     }
     
     async function loadLocal(options = {}) {
@@ -7216,6 +7414,7 @@ header('Content-Type: application/javascript; charset=utf-8');
     document.addEventListener('DOMContentLoaded', (event) => {
         document.body.appendChild(widget); // Append to the body
         console.log(`%c🔧 ${FILE_PREFIX} Widget de IA incorporado ao body após o DOMContentLoaded.`, "color: #2196f3; font-weight: bold;");
+        if (typeof scheduleSqlLogCleanup === 'function') scheduleSqlLogCleanup();
         
         window.switchSidebarView = function(viewName) {
             document.querySelectorAll('.sb-view').forEach(el => el.classList.remove('active'));

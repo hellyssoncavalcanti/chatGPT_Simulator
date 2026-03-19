@@ -639,9 +639,14 @@ def api_web_search():
     data    = request.get_json() or {}
     queries = data.get('queries', [])  # lista de strings
     stream  = bool(data.get('stream', False))
+    nome_membro = data.get("nome_membro_solicitante") or None
+    id_membro   = data.get("id_membro_solicitante") or None
+    _quem = f', por "{nome_membro}" (id_membro: "{id_membro}")' if (nome_membro or id_membro) else ""
 
     if not queries or not isinstance(queries, list):
         return jsonify({'success': False, 'error': 'Missing queries array'}), 400
+
+    print(f"\n[🌐 WEB_SEARCH] Pedido recebido{_quem} | queries={len(queries)}")
 
     if stream:
         def generate():
