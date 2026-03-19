@@ -296,7 +296,7 @@ def garantir_tabela():
                 prompt_version                          VARCHAR(30) NULL
                                                         COMMENT 'Versao do prompt clinico utilizado. Facilita auditoria e reprocessamento por versao.',
                 hash_prontuario                         CHAR(64) NULL
-                                                        COMMENT 'Hash SHA-256 do conteudo bruto do prontuario. Detecta alteracoes e evita reprocessamento desnecessario.',
+                                                        COMMENT 'Hash SHA-256 do conteudo bruto do prontuario. Para sinteses compiladas do paciente, usar o marcador literal analise_compilada_paciente.',
                 -- cdss / scoring
                 score_risco                             TINYINT NULL
                                                         COMMENT 'Score numerico de risco clinico estimado pela analise: 1=baixo, 2=moderado, 3=alto.',
@@ -366,7 +366,7 @@ def garantir_colunas_v16():
     colunas_v16 = [
         ("modelo_llm",        "VARCHAR(100) NULL", "Modelo LLM utilizado para gerar esta analise."),
         ("prompt_version",    "VARCHAR(30) NULL",  "Versao do prompt clinico utilizado."),
-        ("hash_prontuario",   "CHAR(64) NULL",     "Hash SHA-256 do conteudo bruto do prontuario."),
+        ("hash_prontuario",   "CHAR(64) NULL",     "Hash SHA-256 do conteudo bruto do prontuario. Para sinteses compiladas do paciente, usar o marcador literal analise_compilada_paciente."),
         ("score_risco",       "TINYINT NULL",      "Score numerico de risco clinico: 1=baixo, 2=moderado, 3=alto."),
         ("alertas_clinicos",  "LONGTEXT NULL",     "JSON array de alertas clinicos identificados automaticamente."),
         ("casos_semelhantes", "LONGTEXT NULL",     "JSON array com IDs de atendimentos clinicamente semelhantes."),
@@ -845,25 +845,36 @@ def _val_para_sql(val):
 def buscar_pendentes() -> dict:
     stats = sql_exec(f"""
         SELECT
-            COUNT(*)                                                        AS total_tabela,
-            SUM(la.status = 'concluido'
-                AND NOT (
+            COUNT(*) AS total_tabela,
+            SUM(la.id_atendimento IS NULL) AS total_analises_compiladas_paciente,
+            SUM(
+                la.id_atendimento IS NOT NULL
+                AND la.status = 'concluido'
+                AND NOT IFNULL(
                     COALESCE(
                         NULLIF(ca.datetime_atualizacao,  '0000-00-00 00:00:00'),
                         NULLIF(ca.datetime_consulta_fim, '0000-00-00 00:00:00')
-                    ) > la.datetime_analise_concluida
-                ))                                                          AS total_concluidos,
-            SUM(la.status = 'pendente')                                     AS total_pendentes,
-            SUM(la.status = 'processando')                                  AS total_processando,
-            SUM(la.status = 'erro' AND la.tentativas < {MAX_TENTATIVAS})    AS total_erros,
-            SUM(la.status = 'erro' AND la.tentativas >= {MAX_TENTATIVAS})   AS total_esgotados,
-            SUM(la.status = 'concluido'
-                AND COALESCE(
+                    ) > la.datetime_analise_concluida,
+                    0
+                )
+            ) AS total_concluidos,
+            SUM(la.id_atendimento IS NOT NULL AND la.status = 'pendente') AS total_pendentes,
+            SUM(la.id_atendimento IS NOT NULL AND la.status = 'processando') AS total_processando,
+            SUM(la.id_atendimento IS NOT NULL AND la.status = 'erro' AND la.tentativas < {MAX_TENTATIVAS}) AS total_erros,
+            SUM(la.id_atendimento IS NOT NULL AND la.status = 'erro' AND la.tentativas >= {MAX_TENTATIVAS}) AS total_esgotados,
+            SUM(
+                la.id_atendimento IS NOT NULL
+                AND la.status = 'concluido'
+                AND IFNULL(
+                    COALESCE(
                         NULLIF(ca.datetime_atualizacao,  '0000-00-00 00:00:00'),
                         NULLIF(ca.datetime_consulta_fim, '0000-00-00 00:00:00')
-                    ) > la.datetime_analise_concluida)                      AS total_desatualizados
+                    ) > la.datetime_analise_concluida,
+                    0
+                )
+            ) AS total_desatualizados
         FROM {TABELA} la
-        INNER JOIN clinica_atendimentos ca ON ca.id = la.id_atendimento
+        LEFT JOIN clinica_atendimentos ca ON ca.id = la.id_atendimento
     """)
     row = (stats.get("data") or [{}])[0]
 
@@ -904,6 +915,7 @@ def buscar_pendentes() -> dict:
     return {
         "pendentes":            data.get("data", []),
         "total_tabela":         int(row.get("total_tabela")         or 0),
+        "total_analises_compiladas_paciente": int(row.get("total_analises_compiladas_paciente") or 0),
         "total_concluidos":     int(row.get("total_concluidos")     or 0),
         "total_pendentes":      int(row.get("total_pendentes")      or 0),
         "total_processando":    int(row.get("total_processando")    or 0),
@@ -1040,6 +1052,7 @@ def garantir_registro_compilado_paciente_pendente(id_paciente: str) -> int:
                 erro_msg = NULL,
                 chat_id = '',
                 chat_url = '',
+                hash_prontuario = 'analise_compilada_paciente',
                 modelo_llm = {esc_str(LLM_MODEL)},
                 prompt_version = {esc_str(PROMPT_VERSION)}
             WHERE id = {id_registro}
@@ -1050,11 +1063,11 @@ def garantir_registro_compilado_paciente_pendente(id_paciente: str) -> int:
         INSERT INTO {TABELA}
             (id_atendimento, id_paciente, id_criador, datetime_atendimento_inicio,
              datetime_ultima_atualizacao_atendimento, status, tentativas, erro_msg,
-             modelo_llm, prompt_version, chat_id, chat_url)
+             modelo_llm, prompt_version, chat_id, chat_url, hash_prontuario)
         VALUES
             (NULL, {esc_str(id_paciente)}, NULL, NULL,
              NULL, 'pendente', 0, NULL,
-             {esc_str(LLM_MODEL)}, {esc_str(PROMPT_VERSION)}, '', '')
+             {esc_str(LLM_MODEL)}, {esc_str(PROMPT_VERSION)}, '', '', 'analise_compilada_paciente')
     """, reason="criar_registro_compilado_pendente")
 
     criado = sql_exec(f"""
@@ -1267,6 +1280,7 @@ def salvar_resultado_compilado_paciente(id_paciente: str, resultado: dict):
         "datetime_atendimento_inicio = NULL",
         "datetime_ultima_atualizacao_atendimento = NULL",
         "id_criador = NULL",
+        "hash_prontuario = 'analise_compilada_paciente'",
         f"id_paciente = '{esc(id_paciente)}'",
     ] + _montar_sets_resultado(resultado)
 
@@ -1430,6 +1444,7 @@ def salvar_resultado_compilado_paciente(id_paciente: str, resultado: dict):
         "datetime_atendimento_inicio = NULL",
         "datetime_ultima_atualizacao_atendimento = NULL",
         "id_criador = NULL",
+        "hash_prontuario = 'analise_compilada_paciente'",
         f"id_paciente = '{esc(id_paciente)}'",
     ] + _montar_sets_resultado(resultado)
 
@@ -1593,6 +1608,7 @@ def salvar_resultado_compilado_paciente(id_paciente: str, resultado: dict):
         "datetime_atendimento_inicio = NULL",
         "datetime_ultima_atualizacao_atendimento = NULL",
         "id_criador = NULL",
+        "hash_prontuario = 'analise_compilada_paciente'",
         f"id_paciente = '{esc(id_paciente)}'",
     ] + _montar_sets_resultado(resultado)
 
@@ -1756,6 +1772,7 @@ def salvar_resultado_compilado_paciente(id_paciente: str, resultado: dict):
         "datetime_atendimento_inicio = NULL",
         "datetime_ultima_atualizacao_atendimento = NULL",
         "id_criador = NULL",
+        "hash_prontuario = 'analise_compilada_paciente'",
         f"id_paciente = '{esc(id_paciente)}'",
     ] + _montar_sets_resultado(resultado)
 
@@ -1919,6 +1936,7 @@ def salvar_resultado_compilado_paciente(id_paciente: str, resultado: dict):
         "datetime_atendimento_inicio = NULL",
         "datetime_ultima_atualizacao_atendimento = NULL",
         "id_criador = NULL",
+        "hash_prontuario = 'analise_compilada_paciente'",
         f"id_paciente = '{esc(id_paciente)}'",
     ] + _montar_sets_resultado(resultado)
 
@@ -3862,6 +3880,7 @@ def main():
 
             log.info(f"── Ciclo #{ciclo} {'─' * 50}")
             log.info(f"   📊 Prontuários na fila : {resultado['total_tabela']}")
+            log.info(f"   🧬 Análises compiladas   : {resultado['total_analises_compiladas_paciente']}")
             log.info(f"   ✅ Concluídos/atualizados : {resultado['total_concluidos']}")
             log.info(f"   🕐 Aguardando análise     : {resultado['total_pendentes']}")
             log.info(f"   🔄 Em processamento       : {resultado['total_processando']}")
