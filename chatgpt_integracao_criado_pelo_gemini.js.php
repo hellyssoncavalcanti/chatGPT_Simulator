@@ -571,6 +571,8 @@ if (isset($_GET['action']) && $_GET['action'] === 'save_chat_meta') {
     $id_chatgpt    = $data['id_chatgpt']  ?? '';
     $url_chatgpt   = $data['url_chatgpt'] ?? '';
     $url_atual     = $data['url_atual']   ?? '';
+    $chat_mode_raw = strtolower(trim($data['chat_mode'] ?? 'assistant'));
+    $chat_mode     = in_array($chat_mode_raw, ['assistant', 'direct'], true) ? $chat_mode_raw : 'assistant';
 
     // Contexto clínico vindo do corpo POST
     $id_paciente    = isset($data['id_paciente'])    && is_numeric($data['id_paciente'])    ? intval($data['id_paciente'])    : null;
@@ -594,10 +596,12 @@ if (isset($_GET['action']) && $_GET['action'] === 'save_chat_meta') {
         if (!$db) throw new Exception("Falha na conexão com banco de dados");
 
         $db->set_charset("utf8mb4");
+        @$db->query("ALTER TABLE chatgpt_chats ADD COLUMN chat_mode VARCHAR(20) NOT NULL DEFAULT 'assistant'");
 
         $id_chatgpt_esc  = $db->real_escape_string($id_chatgpt);
         $url_chatgpt_esc = $db->real_escape_string($url_chatgpt);
         $url_atual_esc   = $db->real_escape_string($url_atual);
+        $chat_mode_esc   = $db->real_escape_string($chat_mode);
         $id_criador_esc  = is_numeric($id_criador) ? intval($id_criador) : "NULL";
 
         // ------------------------------------------------------------------
@@ -605,20 +609,21 @@ if (isset($_GET['action']) && $_GET['action'] === 'save_chat_meta') {
         // (nunca usa o título vindo do POST — calculado aqui no servidor)
         // ------------------------------------------------------------------
         $nome_paciente = null;
+        $titulo_base = $chat_mode === 'direct' ? 'ConexaoVida Execução' : 'ConexaoVida IA';
         if ($id_atendimento) {
             $r = $db->query("SELECT m.nome FROM clinica_atendimentos ca JOIN membros m ON m.id = ca.id_paciente WHERE ca.id = $id_atendimento LIMIT 1");
             if ($r && $r->num_rows > 0) $nome_paciente = $r->fetch_assoc()['nome'];
-            $titulo = 'ConexaoVida IA' . ($nome_paciente ? " - $nome_paciente" : '') . " - Atend. $id_atendimento";
+            $titulo = $titulo_base . ($nome_paciente ? " - $nome_paciente" : '') . " - Atend. $id_atendimento";
         } elseif ($id_receita) {
             $r = $db->query("SELECT m.nome FROM clinica_receitas cr JOIN membros m ON m.id = cr.id_paciente WHERE cr.id = $id_receita LIMIT 1");
             if ($r && $r->num_rows > 0) $nome_paciente = $r->fetch_assoc()['nome'];
-            $titulo = 'ConexaoVida IA' . ($nome_paciente ? " - $nome_paciente" : '') . " - Receita/Laudo $id_receita";
+            $titulo = $titulo_base . ($nome_paciente ? " - $nome_paciente" : '') . " - Receita/Laudo $id_receita";
         } elseif ($id_paciente) {
             $r = $db->query("SELECT nome FROM membros WHERE id = $id_paciente LIMIT 1");
             if ($r && $r->num_rows > 0) $nome_paciente = $r->fetch_assoc()['nome'];
-            $titulo = 'ConexaoVida IA' . ($nome_paciente ? " - $nome_paciente" : '');
+            $titulo = $titulo_base . ($nome_paciente ? " - $nome_paciente" : '');
         } else {
-            $titulo = 'ConexaoVida IA - Geral';
+            $titulo = $titulo_base . ' - Geral';
         }
         $titulo_esc = $db->real_escape_string($titulo);
 
@@ -630,13 +635,13 @@ if (isset($_GET['action']) && $_GET['action'] === 'save_chat_meta') {
         // Monta WHERE de busca conforme prioridade de contexto clínico
         // ------------------------------------------------------------------
         if ($id_atendimento) {
-            $where_check = "id_atendimento = $id_atendimento";
+            $where_check = "id_atendimento = $id_atendimento AND chat_mode = '$chat_mode_esc'";
         } elseif ($id_receita) {
-            $where_check = "id_receita = $id_receita AND id_atendimento IS NULL";
+            $where_check = "id_receita = $id_receita AND id_atendimento IS NULL AND chat_mode = '$chat_mode_esc'";
         } elseif ($id_paciente) {
-            $where_check = "id_paciente = $id_paciente AND id_atendimento IS NULL AND id_receita IS NULL";
+            $where_check = "id_paciente = $id_paciente AND id_atendimento IS NULL AND id_receita IS NULL AND chat_mode = '$chat_mode_esc'";
         } else {
-            $where_check = "id_criador = $id_criador_esc AND id_atendimento IS NULL AND id_receita IS NULL AND id_paciente IS NULL";
+            $where_check = "id_criador = $id_criador_esc AND id_atendimento IS NULL AND id_receita IS NULL AND id_paciente IS NULL AND chat_mode = '$chat_mode_esc'";
         }
 
         $check_sql    = "SELECT id FROM chatgpt_chats WHERE $where_check LIMIT 1";
@@ -656,6 +661,7 @@ if (isset($_GET['action']) && $_GET['action'] === 'save_chat_meta') {
                 id_chatgpt    = '$id_chatgpt_esc',
                 url_chatgpt   = '$url_chatgpt_esc',
                 url_atual     = '$url_atual_esc',
+                chat_mode     = '$chat_mode_esc',
                 id_criador    = $id_criador_esc,
                 id_paciente   = $sql_paciente,
                 id_atendimento = $sql_atendimento,
@@ -667,10 +673,10 @@ if (isset($_GET['action']) && $_GET['action'] === 'save_chat_meta') {
             }
         } else {
             $insert_sql = "INSERT INTO chatgpt_chats
-                (id_criador, id_paciente, id_atendimento, id_receita, url_atual, titulo, id_chatgpt, url_chatgpt)
+                (id_criador, id_paciente, id_atendimento, id_receita, url_atual, titulo, id_chatgpt, url_chatgpt, chat_mode)
                 VALUES
                 ($id_criador_esc, $sql_paciente, $sql_atendimento, $sql_receita,
-                 '$url_atual_esc', '$titulo_esc', '$id_chatgpt_esc', '$url_chatgpt_esc')";
+                 '$url_atual_esc', '$titulo_esc', '$id_chatgpt_esc', '$url_chatgpt_esc', '$chat_mode_esc')";
 
             if (!$db->query($insert_sql)) {
                 throw new Exception($db->error);
@@ -692,6 +698,9 @@ if (isset($_GET['action']) && $_GET['action'] === 'get_chat_meta') {
 
     $inputJSON = file_get_contents('php://input');
     $data = json_decode($inputJSON, true);
+    $chat_mode_raw  = strtolower(trim($data['chat_mode'] ?? 'assistant'));
+    $chat_mode      = in_array($chat_mode_raw, ['assistant', 'direct'], true) ? $chat_mode_raw : 'assistant';
+    $url_atual      = trim($data['url_atual'] ?? '');
     
     // Contexto clínico vindo do corpo POST
     $id_paciente    = isset($data['id_paciente'])    && is_numeric($data['id_paciente'])    ? intval($data['id_paciente'])    : null;
@@ -716,19 +725,21 @@ if (isset($_GET['action']) && $_GET['action'] === 'get_chat_meta') {
         if (!$db) throw new Exception("Falha na conexão com banco de dados");
 
         $db->set_charset("utf8mb4");
+        @$db->query("ALTER TABLE chatgpt_chats ADD COLUMN chat_mode VARCHAR(20) NOT NULL DEFAULT 'assistant'");
         $id_criador_esc = intval($id_criador);
+        $chat_mode_esc = $db->real_escape_string($chat_mode);
 
         // ------------------------------------------------------------------
         // Monta WHERE de busca conforme prioridade de contexto clínico
         // ------------------------------------------------------------------
         if ($id_atendimento) {
-            $where = "id_atendimento = $id_atendimento";
+            $where = "id_atendimento = $id_atendimento AND chat_mode = '$chat_mode_esc'";
         } elseif ($id_receita) {
-            $where = "id_receita = $id_receita AND id_atendimento IS NULL";
+            $where = "id_receita = $id_receita AND id_atendimento IS NULL AND chat_mode = '$chat_mode_esc'";
         } elseif ($id_paciente) {
-            $where = "id_paciente = $id_paciente AND id_atendimento IS NULL AND id_receita IS NULL";
+            $where = "id_paciente = $id_paciente AND id_atendimento IS NULL AND id_receita IS NULL AND chat_mode = '$chat_mode_esc'";
         } else {
-            $where = "id_criador = $id_criador_esc AND id_atendimento IS NULL AND id_receita IS NULL AND id_paciente IS NULL";
+            $where = "id_criador = $id_criador_esc AND id_atendimento IS NULL AND id_receita IS NULL AND id_paciente IS NULL AND chat_mode = '$chat_mode_esc'";
         }
 
         $sql = "SELECT id_chatgpt, url_chatgpt, titulo FROM chatgpt_chats
@@ -750,6 +761,58 @@ if (isset($_GET['action']) && $_GET['action'] === 'get_chat_meta') {
                 'sql' => $sql
             ]);
         } else {
+            if (!empty($url_atual)) {
+                $ip_final = '';
+                if (!empty($ollama_manual_ip)) {
+                    $ip_final = str_replace('11434', '3003', rtrim($ollama_manual_ip, '/'));
+                } else {
+                    $url_monitor = "http://conexaovida.org/no-ip-dynamic_ip.php?port=3003";
+                    $ch = curl_init($url_monitor);
+                    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+                    curl_setopt($ch, CURLOPT_FOLLOWLOCATION, true);
+                    curl_setopt($ch, CURLOPT_HEADER, true);
+                    curl_setopt($ch, CURLOPT_TIMEOUT, 10);
+                    $raw_response = curl_exec($ch);
+                    $effective_url = curl_getinfo($ch, CURLINFO_EFFECTIVE_URL);
+                    curl_close($ch);
+                    $ip_found = null;
+                    if (preg_match('/(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})/', $effective_url, $matches)) $ip_found = $matches[1];
+                    else if (preg_match('/(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})/', $raw_response ?? '', $matches)) $ip_found = $matches[1];
+                    if ($ip_found && filter_var($ip_found, FILTER_VALIDATE_IP)) $ip_final = "http://{$ip_found}:3003";
+                }
+
+                if (!empty($ip_final)) {
+                    $lookupPayload = json_encode([
+                        'api_key' => $GLOBALS['CHATGPT_VIA_API_KEY'],
+                        'origin_url' => $url_atual
+                    ]);
+                    $lookup = curl_init(rtrim($ip_final, '/') . '/api/chat_lookup');
+                    curl_setopt($lookup, CURLOPT_RETURNTRANSFER, true);
+                    curl_setopt($lookup, CURLOPT_POST, true);
+                    curl_setopt($lookup, CURLOPT_POSTFIELDS, $lookupPayload);
+                    curl_setopt($lookup, CURLOPT_TIMEOUT, 20);
+                    curl_setopt($lookup, CURLOPT_HTTPHEADER, [
+                        'Authorization: Bearer ' . $GLOBALS['CHATGPT_VIA_API_KEY'],
+                        'Content-Type: application/json'
+                    ]);
+                    $lookupRaw = curl_exec($lookup);
+                    curl_close($lookup);
+                    $lookupData = json_decode($lookupRaw ?: '', true);
+                    if (!empty($lookupData['success']) && !empty($lookupData['chat']['chat_id'])) {
+                        echo json_encode([
+                            'success' => true,
+                            'chat' => [
+                                'id_chatgpt' => $lookupData['chat']['chat_id'],
+                                'url_chatgpt' => $lookupData['chat']['url'] ?? '',
+                                'titulo' => $lookupData['chat']['title'] ?? ''
+                            ],
+                            'sql' => $sql,
+                            'fallback' => 'storage_lookup'
+                        ]);
+                        exit;
+                    }
+                }
+            }
             echo json_encode(['success' => false, 'error' => 'Nenhum chat prévio encontrado.', 'sql' => $sql]);
         }
     } catch (Exception $e) {
@@ -2278,7 +2341,8 @@ if (isset($_GET['action']) && $_GET['action'] === 'proxy') {
             "nome_membro_solicitante" => ((isset($row_login_atual['nome']) && !empty($row_login_atual['nome']))?$row_login_atual['nome']:null),
             "url" => $url_context,
             "stream" => $stream,
-            "attachments" => $req['data']['attachments'] ?? []
+            "attachments" => $req['data']['attachments'] ?? [],
+            "origin_url" => $req['data']['origin_url'] ?? ($_SERVER['HTTP_REFERER'] ?? "")
         ];
 
         // Conexão direta com Timeout de 5 Minutos
@@ -2781,6 +2845,8 @@ header('Content-Type: application/javascript; charset=utf-8');
     const KEY_STREAM = PREFIX + 'stream_enabled';
     const KEY_CONTEXT = PREFIX + 'context_prefs'; 
     const KEY_HIST_PREFIX = PREFIX + 'hist_';
+    const CHAT_MODE_ASSISTANT = 'assistant';
+    const CHAT_MODE_DIRECT = 'direct';
     const DIRECT_TOOL_MODEL = 'Execução de search_queries e sql_queries';
     const DIRECT_TOOL_MODEL_LABEL = '🧩 Execução de search_queries e sql_queries';
     const DIRECT_TOOL_INTRO_MD = [
@@ -2826,7 +2892,10 @@ header('Content-Type: application/javascript; charset=utf-8');
     ].join('\n');
 
     const URL_ID = btoa(window.location.search); //Captura o GET da URL e usa como um ID/KEY do chat.
-    const HISTORYKEY   = KEY_HIST_PREFIX + URL_ID; // ← já existe, não duplicar
+    const getSelectedModelName = () => document.getElementById('ow-model-sel')?.value || localStorage.getItem(KEY_MODEL) || '';
+    const getChatModeForModel = (modelName = '') => modelName === DIRECT_TOOL_MODEL ? CHAT_MODE_DIRECT : CHAT_MODE_ASSISTANT;
+    const getCurrentChatMode = () => getChatModeForModel(getSelectedModelName());
+    const getHistoryKey = (mode = getCurrentChatMode()) => `${KEY_HIST_PREFIX}${mode}_${URL_ID}`;
     const MAX_RETRIES  = 3;
     
     
@@ -2875,27 +2944,14 @@ header('Content-Type: application/javascript; charset=utf-8');
 
         // --- helper interno ---
         _ls() {
-            try { return JSON.parse(localStorage.getItem(HISTORYKEY) || '{}'); } catch(e) { return {}; }
+            try { return JSON.parse(localStorage.getItem(getHistoryKey()) || '{}'); } catch(e) { return {}; }
         }
     };
-
     function isDirectToolMode() {
-        return document.getElementById('ow-model-sel')?.value === DIRECT_TOOL_MODEL;
+        return getCurrentChatMode() === CHAT_MODE_DIRECT;
     }
 
-    function isDirectToolMode() {
-        return document.getElementById('ow-model-sel')?.value === DIRECT_TOOL_MODEL;
-    }
-
-    function isDirectToolMode() {
-        return document.getElementById('ow-model-sel')?.value === DIRECT_TOOL_MODEL;
-    }
-
-    function isDirectToolMode() {
-        return document.getElementById('ow-model-sel')?.value === DIRECT_TOOL_MODEL;
-    }
-
-    let state = { messages: [], currentChatId: null, currentChatTitle: null, currentChatUrl: null };
+    let state = { messages: [], currentChatId: null, currentChatTitle: null, currentChatUrl: null, chatMode: CHAT_MODE_ASSISTANT };
     let currentUserQuestion = '';
     let currentAbortController = null;
     
@@ -3321,11 +3377,41 @@ header('Content-Type: application/javascript; charset=utf-8');
     }
 
 
+    function buildDefaultChatTitle(chatMode = getCurrentChatMode()) {
+        const ctx = window.PAGE_CTX || {};
+
+        let nome_paciente = null;
+        const titleParts = document.title.split(' - ');
+        if (titleParts.length >= 3) {
+            nome_paciente = titleParts[1].trim() || null;
+        }
+
+        let idade_paciente = null;
+        document.querySelectorAll('td').forEach(td => {
+            if (idade_paciente) return;
+            const txt = td.textContent || '';
+            const match = txt.match(/<>\s*(.+?\banos\b.+)/);
+            if (match) idade_paciente = match[1].trim();
+        });
+
+        const nome_com_idade = nome_paciente
+            ? (idade_paciente ? `${nome_paciente} - ${idade_paciente}` : nome_paciente)
+            : null;
+
+        const prefixo = chatMode === CHAT_MODE_DIRECT ? 'ConexaoVida Execução' : 'ConexaoVida IA';
+        const id_pac_ctx = ctx.id_paciente || ctx.id_membro || null;
+        if (ctx.id_atendimento) return `${prefixo}${nome_com_idade ? ' - ' + nome_com_idade : ''} - Atend. ${ctx.id_atendimento}`;
+        if (ctx.id_receita)     return `${prefixo}${nome_com_idade ? ' - ' + nome_com_idade : ''} - Receita/Laudo ${ctx.id_receita}`;
+        if (id_pac_ctx)         return `${prefixo}${nome_com_idade ? ' - ' + nome_com_idade : ''}`;
+        return `${prefixo} - Geral`;
+    }
+
     function updateTitleUI() {
         const el = document.getElementById('ow-chat-title');
         if (el) {
-            el.innerText = state.currentChatTitle ? state.currentChatTitle : `REF: ${URL_ID}`;
-            el.title = state.currentChatTitle ? state.currentChatTitle : `REF: ${URL_ID}`;
+            const title = state.currentChatTitle || buildDefaultChatTitle(state.chatMode || getCurrentChatMode()) || `REF: ${URL_ID}`;
+            el.innerText = title;
+            el.title = title;
         }
     }
 
@@ -4149,11 +4235,13 @@ header('Content-Type: application/javascript; charset=utf-8');
     function saveChatMetaToDatabase() {
         // Só prossegue se tivermos um ID válido na memória global
         if (typeof state === 'undefined' || !state.currentChatId) return;
+        if ((state.chatMode || getCurrentChatMode()) === CHAT_MODE_DIRECT) return;
 
         const payload = {
             id_chatgpt:     state.currentChatId,
             url_chatgpt:    state.currentChatUrl || '',
             url_atual:      window.location.href,
+            chat_mode:      state.chatMode || getCurrentChatMode(),
             id_paciente:    PAGE_CTX.id_paciente    || null,
             id_membro:      PAGE_CTX.id_membro      || null,
             id_atendimento: PAGE_CTX.id_atendimento || null,
@@ -4188,19 +4276,29 @@ header('Content-Type: application/javascript; charset=utf-8');
     
     
     
-    function saveLocal() {
-        localStorage.setItem(HISTORYKEY, JSON.stringify({
+    function saveLocal(mode = state.chatMode || getCurrentChatMode()) {
+        localStorage.setItem(getHistoryKey(mode), JSON.stringify({
             messages:  state.messages.slice(-30),
             chatId:    state.currentChatId,
             title:     state.currentChatTitle,
             url:       state.currentChatUrl,
+            chatMode:  mode,
             lastQ:     currentUserQuestion   // ← NOVO: persiste a pergunta
         }));
     }
     
-    async function loadLocal() {
+    async function loadLocal(options = {}) {
+        const targetMode = options.chatMode || getCurrentChatMode();
+        const showDirectIntro = options.showDirectIntro === true;
+        state.chatMode = targetMode;
+        state.messages = [];
+        state.currentChatId = null;
+        state.currentChatTitle = buildDefaultChatTitle(targetMode);
+        state.currentChatUrl = null;
+        currentUserQuestion = '';
+
         // 1. Carrega os dados locais primeiro para exibir as mensagens de imediato na UI
-        const saved = localStorage.getItem(HISTORYKEY);
+        const saved = localStorage.getItem(getHistoryKey(targetMode));
         if (saved) {
             try {
                 const parsed = JSON.parse(saved);
@@ -4210,8 +4308,9 @@ header('Content-Type: application/javascript; charset=utf-8');
                 } else {
                     state.messages       = parsed.messages      || [];
                     state.currentChatId  = parsed.chatId        || null;
-                    state.currentChatTitle = parsed.title       || null;
+                    state.currentChatTitle = parsed.title       || buildDefaultChatTitle(targetMode);
                     state.currentChatUrl = parsed.url           || null;
+                    state.chatMode       = parsed.chatMode      || targetMode;
                     // Restaura pergunta persistida
                     if (parsed.lastQ) currentUserQuestion = parsed.lastQ;
                 }
@@ -4234,7 +4333,9 @@ header('Content-Type: application/javascript; charset=utf-8');
                     id_paciente:    PAGE_CTX.id_paciente    || null,
                     id_membro:      PAGE_CTX.id_membro      || null,
                     id_atendimento: PAGE_CTX.id_atendimento || null,
-                    id_receita:     PAGE_CTX.id_receita     || null
+                    id_receita:     PAGE_CTX.id_receita     || null,
+                    chat_mode:      targetMode,
+                    url_atual:      window.location.href
                 })
             });
             
@@ -4244,6 +4345,7 @@ header('Content-Type: application/javascript; charset=utf-8');
                 // Se a BD tem dados, eles têm prioridade sobre o LocalStorage!
                 state.currentChatId = metaData.chat.id_chatgpt;
                 state.currentChatUrl = metaData.chat.url_chatgpt;
+                state.chatMode = targetMode;
                 
                 if (metaData.chat.titulo) {
                     state.currentChatTitle = metaData.chat.titulo;
@@ -4251,7 +4353,7 @@ header('Content-Type: application/javascript; charset=utf-8');
                     if (titleEl) titleEl.innerText = state.currentChatTitle;
                 }
                 
-                saveLocal(); // Sincroniza o novo estado no localStorage do navegador
+                saveLocal(targetMode); // Sincroniza o novo estado no localStorage do navegador
                 console.log(`%c✅ ${FILE_PREFIX} [MySQL] [loadLocal]Chat recuperado: ${state.currentChatId}`, "color: #4caf50; font-weight: bold;");
             } else {
                 console.log(`%cℹ️ ${FILE_PREFIX} [MySQL][loadLocal] Nenhum histórico de chat encontrado para esta URL específica.`, "color: #9e9e9e;");
@@ -4304,8 +4406,11 @@ header('Content-Type: application/javascript; charset=utf-8');
                     console.groupEnd();
                     
                     state.messages = msgArray; 
-                    saveLocal();
+                    saveLocal(targetMode);
                     renderChatMessages();
+                    if (targetMode === CHAT_MODE_ASSISTANT && typeof saveChatMetaToDatabase === 'function') {
+                        saveChatMetaToDatabase();
+                    }
                 } else if (data && data.error) {
                     console.groupCollapsed(`%c☁️ ${FILE_PREFIX} [SYNC] ⚠️ Erro do Servidor`, "color: #ff9800; font-weight: bold; background: #fff3e0; padding: 4px 8px; border-radius: 4px;");
                     console.warn("Detalhe do Erro:", data.error);
@@ -4331,6 +4436,10 @@ header('Content-Type: application/javascript; charset=utf-8');
                 console.groupEnd();
                 if (document.getElementById('ow-sync-indicator')) document.getElementById('ow-sync-indicator').remove();
             }
+        }
+
+        if (targetMode === CHAT_MODE_DIRECT && showDirectIntro && !state.messages.length) {
+            ensureDirectToolIntro(true);
         }
     }
     
@@ -5159,20 +5268,10 @@ header('Content-Type: application/javascript; charset=utf-8');
                 if (match) idade_paciente = match[1].trim();
             });
 
-            const nome_com_idade = nome_paciente
-                ? (idade_paciente ? `${nome_paciente} - ${idade_paciente}` : nome_paciente)
-                : null;
-
-            const id_pac_ctx = ctx.id_paciente || ctx.id_membro || null; // id_paciente tem prioridade
-            let titulo = null;
-            if      (ctx.id_atendimento) titulo = `ConexaoVida IA${nome_com_idade ? ' - ' + nome_com_idade : ''} - Atend. ${ctx.id_atendimento}`;
-            else if (ctx.id_receita)     titulo = `ConexaoVida IA${nome_com_idade ? ' - ' + nome_com_idade : ''} - Receita/Laudo ${ctx.id_receita}`;
-            else if (id_pac_ctx)         titulo = `ConexaoVida IA${nome_com_idade ? ' - ' + nome_com_idade : ''}`;
-            else                         titulo = 'ConexaoVida IA - Geral';
-
-            state.currentChatTitle = titulo;
+            state.chatMode = getCurrentChatMode();
+            state.currentChatTitle = buildDefaultChatTitle(state.chatMode);
             const el = document.getElementById('ow-chat-title');
-            if (el) { el.innerText = titulo; el.title = titulo; }
+            if (el) { el.innerText = state.currentChatTitle; el.title = state.currentChatTitle; }
         })();
         
         const _idAtendAnalise = window.PAGE_CTX?.id_atendimento ?? null;
@@ -5185,7 +5284,7 @@ header('Content-Type: application/javascript; charset=utf-8');
         }
         
         if (typeof detectContexts === 'function') detectContexts();
-        if (typeof loadLocal === 'function') loadLocal();
+        if (typeof loadLocal === 'function') loadLocal({ chatMode: getCurrentChatMode(), showDirectIntro: false });
         if (typeof initPrompts === 'function') initPrompts(); 
         
         // SETUP DO MICROFONE
@@ -5337,19 +5436,20 @@ header('Content-Type: application/javascript; charset=utf-8');
                 sel.innerHTML = '<option value="">Todos os Servidores Offline</option>'; 
             }
             
-            sel.onchange = () => {
+            sel.onchange = async () => {
                 if(!sel.options[sel.selectedIndex].disabled) {
+                    const previousMode = state.chatMode || getCurrentChatMode();
                     localStorage.setItem(KEY_MODEL, sel.value);
+                    const nextMode = getCurrentChatMode();
                     updateInputPlaceholderForModel();
-                    if (isDirectToolMode()) {
+                    if (previousMode !== nextMode) {
+                        await loadLocal({ chatMode: nextMode, showDirectIntro: nextMode === CHAT_MODE_DIRECT });
+                    } else if (nextMode === CHAT_MODE_DIRECT) {
                         ensureDirectToolIntro(true);
                     }
                 }
             };
             updateInputPlaceholderForModel();
-            if (isDirectToolMode()) {
-                ensureDirectToolIntro();
-            }
         } catch(e) { 
             sel.innerHTML = '<option value="">Erro Crítico ao buscar modelos</option>'; 
             console.error(e);
@@ -7025,10 +7125,11 @@ header('Content-Type: application/javascript; charset=utf-8');
                 const idCriador = ctx.id_profissional_atual || null;
                 let where = '';
                 const idPacOuMembro = ctx.id_paciente || ctx.id_membro || null;
-                if      (ctx.id_atendimento) where = `id_atendimento = ${ctx.id_atendimento}`;
-                else if (ctx.id_receita)     where = `id_receita = ${ctx.id_receita} AND id_atendimento IS NULL`;
-                else if (idPacOuMembro)      where = `id_paciente = ${idPacOuMembro} AND id_atendimento IS NULL AND id_receita IS NULL`;
-                else if (idCriador)          where = `id_criador = ${idCriador} AND id_atendimento IS NULL AND id_receita IS NULL AND id_paciente IS NULL`;
+                const currentModeSql = (state.chatMode || getCurrentChatMode()) === CHAT_MODE_DIRECT ? 'direct' : 'assistant';
+                if      (ctx.id_atendimento) where = `id_atendimento = ${ctx.id_atendimento} AND chat_mode = '${currentModeSql}'`;
+                else if (ctx.id_receita)     where = `id_receita = ${ctx.id_receita} AND id_atendimento IS NULL AND chat_mode = '${currentModeSql}'`;
+                else if (idPacOuMembro)      where = `id_paciente = ${idPacOuMembro} AND id_atendimento IS NULL AND id_receita IS NULL AND chat_mode = '${currentModeSql}'`;
+                else if (idCriador)          where = `id_criador = ${idCriador} AND id_atendimento IS NULL AND id_receita IS NULL AND id_paciente IS NULL AND chat_mode = '${currentModeSql}'`;
 
                 if (!where) {
                     alert('Não foi possível identificar o chat a excluir (usuário não autenticado).');
@@ -7063,7 +7164,7 @@ header('Content-Type: application/javascript; charset=utf-8');
                 state.currentChatId = null;
                 state.currentChatTitle = null;
                 state.currentChatUrl = null;
-                localStorage.removeItem(HISTORYKEY); 
+                localStorage.removeItem(getHistoryKey(state.chatMode || getCurrentChatMode())); 
                 updateTitleUI();
                 renderAnalisePrevia();  // ← Renderiza a analise prévia da LLM diretamente no chat, para o usuário ver, como ele limpou/zerou o chat.
             } 
