@@ -32,6 +32,7 @@ import json
 import queue
 import base64
 import os
+import random
 import shutil
 import time
 import copy
@@ -46,6 +47,12 @@ from utils import log as file_log
 import threading
 
 ACTIVE_CHATS = {}
+WEB_SEARCH_MIN_INTERVAL_SEC = 8
+WEB_SEARCH_MAX_INTERVAL_SEC = 22
+WEB_SEARCH_PROGRESS_TICK_SEC = 1.0
+_web_search_timing_lock = threading.Lock()
+_web_search_last_started_at = 0.0
+_web_search_last_interval_sec = 0.0
 
 
 def _cleanup_active_chats():
@@ -92,6 +99,122 @@ CORS(app, resources={r"/*": {"origins": [
 
 def log(msg):
     file_log("server.py", msg)
+
+
+def _format_wait_seconds(seconds):
+    remaining = max(0, int(round(seconds)))
+    mins, secs = divmod(remaining, 60)
+    return f"{mins:02d}:{secs:02d}"
+
+
+def _reserve_web_search_slot():
+    """
+    Reserva a próxima janela permitida para busca web com espaçamento humano.
+    O lock garante que buscas concorrentes respeitem o mesmo relógio global.
+    """
+    global _web_search_last_started_at, _web_search_last_interval_sec
+
+    now = time.time()
+    interval = random.uniform(WEB_SEARCH_MIN_INTERVAL_SEC, WEB_SEARCH_MAX_INTERVAL_SEC)
+
+    with _web_search_timing_lock:
+        earliest_start = now
+        if _web_search_last_started_at > 0:
+            earliest_start = max(earliest_start, _web_search_last_started_at + interval)
+
+        wait_seconds = max(0.0, earliest_start - now)
+        _web_search_last_started_at = earliest_start
+        _web_search_last_interval_sec = interval
+
+    return {
+        "interval_sec": interval,
+        "scheduled_start_at": earliest_start,
+        "wait_seconds": wait_seconds,
+        "requested_at": now,
+    }
+
+
+def _iter_web_search_wait_messages(wait_ctx, query_str):
+    remaining = wait_ctx["wait_seconds"]
+    interval = wait_ctx["interval_sec"]
+
+    if remaining <= 0:
+        return
+
+    yield {
+        "type": "status",
+        "content": (
+            f"⏳ Aguardando intervalo humano antes da busca web por "
+            f"\"{query_str}\". Pausa planejada: {_format_wait_seconds(interval)}."
+        ),
+        "query": query_str,
+        "wait_seconds": round(remaining, 1),
+        "planned_interval_seconds": round(interval, 1),
+        "phase": "web_search_cooldown",
+    }
+
+    while remaining > 0:
+        chunk = min(WEB_SEARCH_PROGRESS_TICK_SEC, remaining)
+        time.sleep(chunk)
+        remaining = max(0.0, wait_ctx["scheduled_start_at"] - time.time())
+        yield {
+            "type": "status",
+            "content": (
+                f"⏳ Pausa anti-bot em andamento antes da busca web por "
+                f"\"{query_str}\". Início previsto em {_format_wait_seconds(remaining)}."
+            ),
+            "query": query_str,
+            "wait_seconds": round(remaining, 1),
+            "planned_interval_seconds": round(interval, 1),
+            "phase": "web_search_cooldown",
+        }
+
+
+def _execute_single_web_search(query_str, stream_queue=None):
+    wait_ctx = _reserve_web_search_slot()
+
+    if wait_ctx["wait_seconds"] > 0:
+        log(
+            f"[WEB_SEARCH] cooldown de {wait_ctx['wait_seconds']:.1f}s "
+            f"(intervalo alvo {wait_ctx['interval_sec']:.1f}s) antes da query: {query_str}"
+        )
+
+    for msg in _iter_web_search_wait_messages(wait_ctx, query_str):
+        if stream_queue is not None:
+            stream_queue.put(json.dumps(msg, ensure_ascii=False))
+
+    if stream_queue is not None:
+        stream_queue.put(json.dumps({
+            "type": "status",
+            "content": f"🔎 Iniciando busca web por \"{query_str}\".",
+            "query": query_str,
+            "wait_seconds": 0,
+            "phase": "web_search_start",
+        }, ensure_ascii=False))
+
+    q = queue.Queue()
+    browser_queue.put({
+        'action':       'SEARCH',
+        'query':        query_str,
+        'stream_queue': q
+    })
+
+    try:
+        while True:
+            raw_msg = q.get(timeout=60)
+            if raw_msg is None:
+                break
+            msg = json.loads(raw_msg)
+            if msg.get('type') == 'searchresult':
+                return msg.get('content', {})
+            if msg.get('type') == 'error':
+                return {'success': False, 'query': query_str, 'error': msg.get('content')}
+    except queue.Empty:
+        return {'success': False, 'query': query_str, 'error': 'Timeout na busca'}
+    except Exception as e:
+        return {'success': False, 'query': query_str, 'error': str(e)}
+
+    return {'success': False, 'query': query_str, 'error': 'Busca encerrada sem resultado'}
 
 # --- BLOQUEIO DE SEGURANÇA POR DOMÍNIO E IP ---
 @app.before_request
@@ -257,6 +380,22 @@ def get_history():
     history = storage.load_chats()
     return jsonify(history)
 
+@app.route('/api/chat_lookup', methods=['POST'])
+def api_chat_lookup():
+    if not check_auth():
+        return jsonify({"error": "Unauthorized"}), 401
+
+    data = request.get_json() or {}
+    origin_url = data.get('origin_url') or data.get('url_atual') or ''
+    if not origin_url:
+        return jsonify({"success": False, "error": "Missing origin_url"}), 400
+
+    chat = storage.find_chat_by_origin(origin_url)
+    if not chat:
+        return jsonify({"success": False, "error": "chat_not_found"}), 404
+
+    return jsonify({"success": True, "chat": chat})
+
 @app.route("/api/menu/options", methods=["POST"])
 def menu_options():
     data = request.get_json() or {}
@@ -380,6 +519,7 @@ def api_sync():
             msgs           = list(chat_data.get('messages', []))
             if fresh_markdown and (not msgs or msgs[-1].get('content') != fresh_markdown):
                 msgs.append({"role": "assistant", "content": fresh_markdown})
+                storage.save_chat(chat_id, chat_data.get('title', 'Chat'), chat_data.get('url', url or ''), msgs, origin_url=chat_data.get('origin_url') or '')
             return jsonify({
                 "success": True, "updated": True,
                 "chat": {
@@ -405,8 +545,9 @@ def api_sync():
                 if content.get("success"):
                     fresh_messages = content.get('messages', [])
                     fresh_title    = content.get("title", "")
-                    was_updated    = storage.update_full_history(chat_id, fresh_messages)
-                    if fresh_title: storage.save_chat(chat_id, fresh_title, url, [])
+                    fresh_url      = content.get("url", "") or url
+                    was_updated    = storage.update_full_history(chat_id, fresh_messages, title=fresh_title, url=fresh_url)
+                    storage.save_chat(chat_id, fresh_title or 'Chat', fresh_url, [], origin_url=(storage.load_chats().get(chat_id, {}) or {}).get('origin_url', ''))
                     return jsonify({
                         "success": True, "updated": was_updated,
                         "chat": {
@@ -497,36 +638,77 @@ def api_web_search():
 
     data    = request.get_json() or {}
     queries = data.get('queries', [])  # lista de strings
+    stream  = bool(data.get('stream', False))
 
     if not queries or not isinstance(queries, list):
         return jsonify({'success': False, 'error': 'Missing queries array'}), 400
 
+    if stream:
+        def generate():
+            all_results = []
+
+            for idx, query_str in enumerate(queries, start=1):
+                yield json.dumps({
+                    'type': 'status',
+                    'content': f'📚 Preparando busca web {idx}/{len(queries)}.',
+                    'query': query_str,
+                    'index': idx,
+                    'total': len(queries),
+                    'phase': 'web_search_prepare',
+                }, ensure_ascii=False) + "\n"
+
+                progress_q = queue.Queue()
+                worker = threading.Thread(
+                    target=lambda q_str=query_str, out_q=progress_q: out_q.put(_execute_single_web_search(q_str, stream_queue=out_q)),
+                    daemon=True,
+                )
+                worker.start()
+
+                result = None
+                while True:
+                    try:
+                        item = progress_q.get(timeout=15)
+                    except queue.Empty:
+                        yield json.dumps({
+                            'type': 'status',
+                            'content': f'⏳ Busca web por "{query_str}" ainda em andamento...',
+                            'query': query_str,
+                            'index': idx,
+                            'total': len(queries),
+                            'phase': 'web_search_keepalive',
+                        }, ensure_ascii=False) + "\n"
+                        continue
+
+                    if isinstance(item, dict) and ('success' in item or 'error' in item):
+                        result = item
+                        all_results.append(result)
+                        yield json.dumps({
+                            'type': 'searchresult',
+                            'content': result,
+                            'query': query_str,
+                            'index': idx,
+                            'total': len(queries),
+                        }, ensure_ascii=False) + "\n"
+                        break
+
+                    if isinstance(item, str):
+                        yield item + "\n"
+
+                worker.join(timeout=0.1)
+
+            yield json.dumps({
+                'type': 'finish',
+                'content': {
+                    'success': True,
+                    'results': all_results,
+                }
+            }, ensure_ascii=False) + "\n"
+
+        return Response(stream_with_context(generate()), mimetype='application/x-ndjson')
+
     all_results = []
-
     for query_str in queries:
-        q = queue.Queue()
-        browser_queue.put({
-            'action':       'SEARCH',
-            'query':        query_str,
-            'stream_queue': q
-        })
-
-        try:
-            while True:
-                raw_msg = q.get(timeout=60)
-                if raw_msg is None:
-                    break
-                msg = json.loads(raw_msg)
-                if msg.get('type') == 'searchresult':
-                    all_results.append(msg.get('content', {}))
-                    break
-                elif msg.get('type') == 'error':
-                    all_results.append({'success': False, 'query': query_str, 'error': msg.get('content')})
-                    break
-        except queue.Empty:
-            all_results.append({'success': False, 'query': query_str, 'error': 'Timeout na busca'})
-        except Exception as e:
-            all_results.append({'success': False, 'query': query_str, 'error': str(e)})
+        all_results.append(_execute_single_web_search(query_str))
 
     return jsonify({'success': True, 'results': all_results})
 
@@ -888,6 +1070,7 @@ def chat_completions():
 
     stream      = data.get("stream", False)
     attachments = data.get("attachments", [])
+    origin_url  = data.get("origin_url") or data.get("url_atual") or request.headers.get("X-Origin-URL") or ""
 
     # --- 2. PROCESSAMENTO DE ANEXOS ---
     saved_paths = []
@@ -915,6 +1098,18 @@ def chat_completions():
         print(f"[📡 SERVIDOR] URL detectada. Retomando conversa em: {url}")
     else:
         print("[📡 SERVIDOR] Nenhuma URL detectada. Iniciando um novo chat do zero.")
+
+    # Persiste imediatamente o pedido remoto para sobreviver ao fechamento precoce da aba.
+    chat_snapshot = storage.load_chats().get(chat_id, {})
+    storage.save_chat(
+        chat_id,
+        chat_snapshot.get('title') or 'Novo Chat',
+        url or chat_snapshot.get('url', ''),
+        [],
+        origin_url=origin_url or chat_snapshot.get('origin_url', '')
+    )
+    if message:
+        storage.append_message(chat_id, "user", message)
 
     # --- 4. PREPARAÇÃO DA FILA ---
     stream_q = queue.Queue()
@@ -972,7 +1167,7 @@ def chat_completions():
                                 fin = msg_obj.get('content', {})
                                 storage.append_message(chat_id, "user", message)
                                 storage.append_message(chat_id, "assistant", ACTIVE_CHATS[chat_id]['markdown'])
-                                storage.save_chat(chat_id, fin.get('title', ''), fin.get('url', '') or url or '', [])
+                                storage.save_chat(chat_id, fin.get('title', ''), fin.get('url', '') or url or '', [], origin_url=origin_url)
                             except Exception as e:
                                 log(f"[WARN] Falha ao persistir stream finish: {e}")
                     except Exception:
@@ -1040,7 +1235,7 @@ def chat_completions():
         # Persiste no storage
         storage.append_message(chat_id, "user",      message)
         storage.append_message(chat_id, "assistant", final_html)
-        storage.save_chat(chat_id, final_title, final_url, [])  # [FIX S3] passa [] — save_chat carrega e mescla internamente
+        storage.save_chat(chat_id, final_title, final_url, [], origin_url=origin_url)  # [FIX S3] passa [] — save_chat carrega e mescla internamente
 
         return jsonify({
             "success": True,
