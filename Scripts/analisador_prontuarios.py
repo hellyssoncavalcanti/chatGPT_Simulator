@@ -952,67 +952,39 @@ def enfileirar_atendimentos_antigos(id_paciente: str) -> int:
     if not atendimentos:
         return 0
 
-    enfileirados = 0
+    valores_sql = []
     for at in atendimentos:
-        id_at   = int(at["id_atendimento"])
-        id_pac  = esc(at.get("id_paciente") or id_paciente)
-        id_cri  = esc(at.get("id_criador") or "0")
-        dt_ini  = esc(at.get("datetime_consulta_inicio") or "0000-00-00 00:00:00")
-        try:
-            sql_exec(f"""
-                INSERT IGNORE INTO {TABELA}
-                    (id_atendimento, id_paciente, id_criador, datetime_atendimento_inicio, status)
-                VALUES
-                    ({id_at}, _utf8mb4'{id_pac}', _utf8mb4'{id_cri}', '{dt_ini}', 'pendente')
-            """)
-            enfileirados += 1
-        except Exception as e:
-            log.debug(f"  ↷ Atendimento {id_at} já existe ou erro: {e}")
+        id_at  = int(at["id_atendimento"])
+        id_pac = esc(at.get("id_paciente") or id_paciente)
+        id_cri = esc(at.get("id_criador") or "0")
+        dt_ini = esc(at.get("datetime_consulta_inicio") or "0000-00-00 00:00:00")
+        valores_sql.append(
+            f"({id_at}, _utf8mb4'{id_pac}', _utf8mb4'{id_cri}', '{dt_ini}', 'pendente')"
+        )
+
+    if not valores_sql:
+        return 0
+
+    try:
+        resultado_insert = sql_exec(f"""
+            INSERT IGNORE INTO {TABELA}
+                (id_atendimento, id_paciente, id_criador, datetime_atendimento_inicio, status)
+            VALUES
+                {", ".join(valores_sql)}
+        """)
+    except Exception as e:
+        log.warning(f"  ⚠️ Erro ao salvar atendimentos antigos do paciente {id_paciente}: {e}")
+        return 0
+
+    enfileirados = int(resultado_insert.get("affected_rows") or 0)
 
     if enfileirados:
         log.info(f"  📥 {enfileirados} atendimento(s) antigo(s) do paciente {id_paciente} enfileirado(s) para análise")
-
-    return enfileirados
-
-
-def enfileirar_atendimentos_antigos_globais(limit: int = 500) -> int:
-    """
-    Materializa na tabela de análise os atendimentos antigos que ainda existem
-    apenas em clinica_atendimentos.
-
-    Isso cobre pacientes que ainda não têm nenhum registro prévio em
-    chatgpt_atendimentos_analise — cenário em que a versão anterior nunca
-    chamava enfileirar_atendimentos_antigos(id_paciente) porque não havia
-    nenhum item daquele paciente entrando no lote.
-    """
-    limit_sql = f"LIMIT {int(limit)}" if limit and int(limit) > 0 else ""
-
-    try:
-        resultado = sql_exec(f"""
-            INSERT IGNORE INTO {TABELA}
-                (id_atendimento, id_paciente, id_criador, datetime_atendimento_inicio, status)
-            SELECT
-                ca.id,
-                ca.id_paciente,
-                ca.id_criador,
-                ca.datetime_consulta_inicio,
-                'pendente'
-            FROM clinica_atendimentos ca
-            LEFT JOIN {TABELA} la ON la.id_atendimento = ca.id
-            WHERE la.id IS NULL
-              AND ca.consulta_tipo_arquivo = 'texto'
-              AND ca.consulta_conteudo IS NOT NULL
-              AND LENGTH(ca.consulta_conteudo) > {MIN_CHARS}
-            ORDER BY ca.datetime_consulta_inicio ASC
-            {limit_sql}
-        """, reason="enfileirar_antigos_global")
-    except Exception as e:
-        log.warning(f"⚠️  Erro ao enfileirar atendimentos antigos globais: {e}")
-        return 0
-
-    enfileirados = int(resultado.get("affected_rows") or 0)
-    if enfileirados:
-        log.info(f"📥 {enfileirados} atendimento(s) antigo(s) sem registro prévio foram inseridos na fila de análise.")
+    else:
+        log.info(
+            f"  ℹ️ Atendimentos antigos encontrados para o paciente {id_paciente}, "
+            f"mas nenhum novo registro precisou ser inserido na tabela de análise."
+        )
 
     return enfileirados
 
@@ -3737,7 +3709,6 @@ def main():
 
             # ── Ciclo normal ──────────────────────────────────────────
             resetar_travados()
-            enfileirar_atendimentos_antigos_globais()
             resultado = buscar_pendentes()
             pendentes = resultado["pendentes"]
 
