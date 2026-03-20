@@ -1524,7 +1524,16 @@ async def handle_chat_task_inner(task, page, q, stop_event: asyncio.Event, activ
             elif visible_status_txt == plain_markdown:
                 visible_status_txt = ""
 
-        if not status_txt and visible_status_txt and visible_status_txt != last_status_text:
+        # Só reaproveita o texto visível do balão como "status" enquanto ainda não
+        # há resposta markdown consolidada. Depois que o markdown começa a surgir,
+        # o texto do balão já representa a resposta final e não deve vazar no CMD
+        # como se fosse pensamento da LLM.
+        if (
+            not status_txt
+            and visible_status_txt
+            and not plain_markdown
+            and visible_status_txt != last_status_text
+        ):
             emit_event(q, "status", visible_status_txt[:800])
             last_status_text = visible_status_txt
             started = True

@@ -3286,7 +3286,10 @@ def analisar_prontuario(texto: str, chat_url: str = None, chat_id: str = None, c
 
     # Funcao auxiliar para progresso inline (sobrescreve a linha atual no CMD)
     def _inline(msg):
-        sys.stdout.write(f'\r  {msg:<55}')
+        largura_terminal = shutil.get_terminal_size((140, 20)).columns
+        largura_util = max(30, largura_terminal - 2)
+        linha = f"  {str(msg or '')}"
+        sys.stdout.write('\r' + linha.ljust(largura_util))
         sys.stdout.flush()
 
     def _newline():
@@ -4247,7 +4250,10 @@ def enriquecer_com_evidencias(resultado: dict, resultados_web: list,
         inline_active = False
 
         def _inline(msg):
-            sys.stdout.write(f'\r  {msg:<55}')
+            largura_terminal = shutil.get_terminal_size((140, 20)).columns
+            largura_util = max(30, largura_terminal - 2)
+            linha = f"  {str(msg or '')}"
+            sys.stdout.write('\r' + linha.ljust(largura_util))
             sys.stdout.flush()
 
         def _newline():
