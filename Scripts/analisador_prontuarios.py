@@ -79,7 +79,7 @@ _ensure("numpy")
 # ─────────────────────────────────────────────────────────────
 # IMPORTS NORMAIS
 # ─────────────────────────────────────────────────────────────
-import time, json, logging, re, html as html_mod, requests, hashlib, shutil, textwrap
+import time, json, logging, re, html as html_mod, requests, hashlib
 from html.parser import HTMLParser
 from datetime import datetime
 
@@ -386,30 +386,6 @@ def garantir_colunas_v16():
             log.warning(f"\u26a0\ufe0f  garantir_colunas_v16: {err}")
     else:
         log.info("\u2705 Colunas V16 (CDSS/RAG) verificadas/criadas.")
-    _COLUNAS_TABELA = None
-
-
-def garantir_schema_analise_compilada_paciente():
-    """
-    Libera a própria chatgpt_atendimentos_analise para armazenar uma síntese
-    longitudinal do paciente usando apenas id_paciente como localizador.
-    """
-    ajustes = [
-        f"ALTER TABLE {TABELA} MODIFY COLUMN id_atendimento INT(10) NULL COMMENT 'FK para clinica_atendimentos.id. NULL = sintese compilada do paciente.'",
-        f"ALTER TABLE {TABELA} MODIFY COLUMN datetime_atendimento_inicio DATETIME NULL COMMENT 'Data/hora de inicio do atendimento clinico. NULL = sintese compilada do paciente.'",
-        f"ALTER TABLE {TABELA} MODIFY COLUMN id_criador VARCHAR(10) NULL COMMENT 'FK para membros.id do profissional criador. NULL = sintese compilada do paciente.'",
-        f"ALTER TABLE {TABELA} ADD INDEX idx_paciente (id_paciente)",
-    ]
-    for sql in ajustes:
-        try:
-            sql_exec(sql)
-        except RuntimeError as e:
-            msg = str(e).lower()
-            if 'duplicate key name' in msg or 'already exists' in msg:
-                continue
-            log.warning(f"⚠️  garantir_schema_analise_compilada_paciente: {e}")
-
-    global _COLUNAS_TABELA
     _COLUNAS_TABELA = None
 
 
@@ -952,121 +928,46 @@ def enfileirar_atendimentos_antigos(id_paciente: str) -> int:
     if not atendimentos:
         return 0
 
-    valores_sql = []
+    enfileirados = 0
     for at in atendimentos:
-        id_at  = int(at["id_atendimento"])
-        id_pac = esc(at.get("id_paciente") or id_paciente)
-        id_cri = esc(at.get("id_criador") or "0")
-        dt_ini = esc(at.get("datetime_consulta_inicio") or "0000-00-00 00:00:00")
-        valores_sql.append(
-            f"({id_at}, _utf8mb4'{id_pac}', _utf8mb4'{id_cri}', '{dt_ini}', 'pendente')"
-        )
-
-    if not valores_sql:
-        return 0
-
-    try:
-        resultado_insert = sql_exec(f"""
-            INSERT IGNORE INTO {TABELA}
-                (id_atendimento, id_paciente, id_criador, datetime_atendimento_inicio, status)
-            VALUES
-                {", ".join(valores_sql)}
-        """)
-    except Exception as e:
-        log.warning(f"  ⚠️ Erro ao salvar atendimentos antigos do paciente {id_paciente}: {e}")
-        return 0
-
-    enfileirados = int(resultado_insert.get("affected_rows") or 0)
+        id_at   = int(at["id_atendimento"])
+        id_pac  = esc(at.get("id_paciente") or id_paciente)
+        id_cri  = esc(at.get("id_criador") or "0")
+        dt_ini  = esc(at.get("datetime_consulta_inicio") or "0000-00-00 00:00:00")
+        try:
+            sql_exec(f"""
+                INSERT IGNORE INTO {TABELA}
+                    (id_atendimento, id_paciente, id_criador, datetime_atendimento_inicio, status)
+                VALUES
+                    ({id_at}, _utf8mb4'{id_pac}', _utf8mb4'{id_cri}', '{dt_ini}', 'pendente')
+            """)
+            enfileirados += 1
+        except Exception as e:
+            log.debug(f"  ↷ Atendimento {id_at} já existe ou erro: {e}")
 
     if enfileirados:
         log.info(f"  📥 {enfileirados} atendimento(s) antigo(s) do paciente {id_paciente} enfileirado(s) para análise")
-    else:
-        log.info(
-            f"  ℹ️ Atendimentos antigos encontrados para o paciente {id_paciente}, "
-            f"mas nenhum novo registro precisou ser inserido na tabela de análise."
-        )
 
     return enfileirados
 
 
-def contar_atendimentos_nao_concluidos_paciente(id_paciente: str) -> int:
-    """Conta atendimentos do paciente que ainda não chegaram ao status concluído."""
+def contar_atendimentos_pendentes_paciente(id_paciente: str) -> int:
+    """Conta atendimentos do paciente ainda não concluídos na tabela de análise."""
     try:
         resp = sql_exec(f"""
             SELECT COUNT(*) AS total
             FROM {TABELA}
             WHERE id_paciente = '{esc(id_paciente)}'
               AND id_atendimento IS NOT NULL
-              AND status IN ('pendente', 'processando', 'erro')
-        """, reason="contar_atendimentos_nao_concluidos_paciente")
+              AND status IN ('pendente', 'processando')
+        """, reason="contar_atendimentos_pendentes_paciente")
         data = resp.get("data") or []
         if not data:
             return 0
         return int(data[0].get("total") or 0)
     except Exception as e:
-        log.warning(f"  ⚠️ Erro ao contar atendimentos não concluídos do paciente {id_paciente}: {e}")
+        log.warning(f"  ⚠️ Erro ao contar atendimentos pendentes do paciente {id_paciente}: {e}")
         return 0
-
-
-def garantir_registro_compilado_paciente_pendente(id_paciente: str) -> int:
-    """
-    Garante a existência do registro da síntese longitudinal do paciente.
-
-    O registro é criado/atualizado com status='pendente' somente depois que todos
-    os atendimentos unitários do paciente já estiverem concluídos, para que a
-    síntese do paciente possa entrar na fila com id_atendimento NULL.
-    """
-    existente = sql_exec(f"""
-        SELECT id
-        FROM {TABELA}
-        WHERE id_paciente = '{esc(id_paciente)}'
-          AND id_atendimento IS NULL
-          AND id_criador IS NULL
-        ORDER BY id DESC
-        LIMIT 1
-    """, reason="buscar_registro_compilado_pendente").get("data", [])
-
-    if existente:
-        id_registro = int(existente[0]["id"])
-        sql_exec(f"""
-            UPDATE {TABELA} SET
-                id_atendimento = NULL,
-                datetime_atendimento_inicio = NULL,
-                datetime_ultima_atualizacao_atendimento = NULL,
-                id_criador = NULL,
-                status = 'pendente',
-                erro_msg = NULL,
-                chat_id = '',
-                chat_url = '',
-                modelo_llm = {esc_str(LLM_MODEL)},
-                prompt_version = {esc_str(PROMPT_VERSION)}
-            WHERE id = {id_registro}
-        """)
-        return id_registro
-
-    sql_exec(f"""
-        INSERT INTO {TABELA}
-            (id_atendimento, id_paciente, id_criador, datetime_atendimento_inicio,
-             datetime_ultima_atualizacao_atendimento, status, tentativas, erro_msg,
-             modelo_llm, prompt_version, chat_id, chat_url)
-        VALUES
-            (NULL, {esc_str(id_paciente)}, NULL, NULL,
-             NULL, 'pendente', 0, NULL,
-             {esc_str(LLM_MODEL)}, {esc_str(PROMPT_VERSION)}, '', '')
-    """, reason="criar_registro_compilado_pendente")
-
-    criado = sql_exec(f"""
-        SELECT id
-        FROM {TABELA}
-        WHERE id_paciente = '{esc(id_paciente)}'
-          AND id_atendimento IS NULL
-          AND id_criador IS NULL
-        ORDER BY id DESC
-        LIMIT 1
-    """, reason="buscar_registro_compilado_pendente_criado").get("data", [])
-    if not criado:
-        raise RuntimeError(f"Falha ao criar registro compilado pendente do paciente {id_paciente}")
-    return int(criado[0]["id"])
 
 
 def marcar_processando(row: dict):
@@ -1258,7 +1159,38 @@ def montar_texto_compilado_paciente(id_paciente: str):
 
 
 def salvar_resultado_compilado_paciente(id_paciente: str, resultado: dict):
-    id_registro = garantir_registro_compilado_paciente_pendente(id_paciente)
+    existente = sql_exec(f"""
+        SELECT id
+        FROM {TABELA}
+        WHERE id_paciente = '{esc(id_paciente)}'
+          AND id_atendimento IS NULL
+          AND id_criador IS NULL
+        ORDER BY id DESC
+        LIMIT 1
+    """, reason="buscar_registro_compilado_paciente").get("data", [])
+
+    if existente:
+        id_registro = int(existente[0]["id"])
+    else:
+        sql_exec(f"""
+            INSERT INTO {TABELA}
+                (id_atendimento, datetime_atendimento_inicio, datetime_ultima_atualizacao_atendimento,
+                 id_paciente, id_criador, status, erro_msg)
+            VALUES
+                (NULL, NULL, NULL, '{esc(id_paciente)}', NULL, 'processando', NULL)
+        """)
+        criado = sql_exec(f"""
+            SELECT id
+            FROM {TABELA}
+            WHERE id_paciente = '{esc(id_paciente)}'
+              AND id_atendimento IS NULL
+              AND id_criador IS NULL
+            ORDER BY id DESC
+            LIMIT 1
+        """, reason="buscar_registro_compilado_criado").get("data", [])
+        if not criado:
+            raise RuntimeError(f"Falha ao criar registro compilado do paciente {id_paciente}")
+        id_registro = int(criado[0]["id"])
 
     sets = [
         "id_atendimento = NULL",
@@ -1275,11 +1207,11 @@ def salvar_resultado_compilado_paciente(id_paciente: str, resultado: dict):
 
 def atualizar_analise_compilada_paciente(id_paciente: str):
     enfileirados = enfileirar_atendimentos_antigos(id_paciente)
-    pendentes = contar_atendimentos_nao_concluidos_paciente(id_paciente)
+    pendentes = contar_atendimentos_pendentes_paciente(id_paciente)
     if pendentes > 0:
         log.info(
             f"⏳ Síntese compilada adiada para paciente {id_paciente}: "
-            f"{pendentes} atendimento(s) ainda não concluído(s)"
+            f"{pendentes} atendimento(s) ainda pendente(s)/processando(s)"
             + (f" ({enfileirados} recém-enfileirado(s))" if enfileirados else "")
             + "."
         )
@@ -1289,17 +1221,6 @@ def atualizar_analise_compilada_paciente(id_paciente: str):
     if not texto_compilado or not row_base:
         log.info(f"ℹ️  Sem histórico suficiente para compilar síntese do paciente {id_paciente}.")
         return
-
-    id_registro_compilado = garantir_registro_compilado_paciente_pendente(id_paciente)
-    sql_exec(f"""
-        UPDATE {TABELA} SET
-            status = 'processando',
-            tentativas = tentativas + 1,
-            erro_msg = NULL,
-            datetime_analise_concluida = NULL,
-            datetime_ultima_atualizacao_atendimento = NULL
-        WHERE id = {id_registro_compilado}
-    """, reason="marcar_registro_compilado_processando")
 
     log.info(f"🧬 Atualizando síntese compilada do paciente {id_paciente}...")
     contexto = ""
@@ -1421,7 +1342,38 @@ def montar_texto_compilado_paciente(id_paciente: str):
 
 
 def salvar_resultado_compilado_paciente(id_paciente: str, resultado: dict):
-    id_registro = garantir_registro_compilado_paciente_pendente(id_paciente)
+    existente = sql_exec(f"""
+        SELECT id
+        FROM {TABELA}
+        WHERE id_paciente = '{esc(id_paciente)}'
+          AND id_atendimento IS NULL
+          AND id_criador IS NULL
+        ORDER BY id DESC
+        LIMIT 1
+    """, reason="buscar_registro_compilado_paciente").get("data", [])
+
+    if existente:
+        id_registro = int(existente[0]["id"])
+    else:
+        sql_exec(f"""
+            INSERT INTO {TABELA}
+                (id_atendimento, datetime_atendimento_inicio, datetime_ultima_atualizacao_atendimento,
+                 id_paciente, id_criador, status, erro_msg)
+            VALUES
+                (NULL, NULL, NULL, '{esc(id_paciente)}', NULL, 'processando', NULL)
+        """)
+        criado = sql_exec(f"""
+            SELECT id
+            FROM {TABELA}
+            WHERE id_paciente = '{esc(id_paciente)}'
+              AND id_atendimento IS NULL
+              AND id_criador IS NULL
+            ORDER BY id DESC
+            LIMIT 1
+        """, reason="buscar_registro_compilado_criado").get("data", [])
+        if not criado:
+            raise RuntimeError(f"Falha ao criar registro compilado do paciente {id_paciente}")
+        id_registro = int(criado[0]["id"])
 
     sets = [
         "id_atendimento = NULL",
@@ -1438,11 +1390,11 @@ def salvar_resultado_compilado_paciente(id_paciente: str, resultado: dict):
 
 def atualizar_analise_compilada_paciente(id_paciente: str):
     enfileirados = enfileirar_atendimentos_antigos(id_paciente)
-    pendentes = contar_atendimentos_nao_concluidos_paciente(id_paciente)
+    pendentes = contar_atendimentos_pendentes_paciente(id_paciente)
     if pendentes > 0:
         log.info(
             f"⏳ Síntese compilada adiada para paciente {id_paciente}: "
-            f"{pendentes} atendimento(s) ainda não concluído(s)"
+            f"{pendentes} atendimento(s) ainda pendente(s)/processando(s)"
             + (f" ({enfileirados} recém-enfileirado(s))" if enfileirados else "")
             + "."
         )
@@ -1452,17 +1404,6 @@ def atualizar_analise_compilada_paciente(id_paciente: str):
     if not texto_compilado or not row_base:
         log.info(f"ℹ️  Sem histórico suficiente para compilar síntese do paciente {id_paciente}.")
         return
-
-    id_registro_compilado = garantir_registro_compilado_paciente_pendente(id_paciente)
-    sql_exec(f"""
-        UPDATE {TABELA} SET
-            status = 'processando',
-            tentativas = tentativas + 1,
-            erro_msg = NULL,
-            datetime_analise_concluida = NULL,
-            datetime_ultima_atualizacao_atendimento = NULL
-        WHERE id = {id_registro_compilado}
-    """, reason="marcar_registro_compilado_processando")
 
     log.info(f"🧬 Atualizando síntese compilada do paciente {id_paciente}...")
     contexto = ""
@@ -1584,7 +1525,38 @@ def montar_texto_compilado_paciente(id_paciente: str):
 
 
 def salvar_resultado_compilado_paciente(id_paciente: str, resultado: dict):
-    id_registro = garantir_registro_compilado_paciente_pendente(id_paciente)
+    existente = sql_exec(f"""
+        SELECT id
+        FROM {TABELA}
+        WHERE id_paciente = '{esc(id_paciente)}'
+          AND id_atendimento IS NULL
+          AND id_criador IS NULL
+        ORDER BY id DESC
+        LIMIT 1
+    """, reason="buscar_registro_compilado_paciente").get("data", [])
+
+    if existente:
+        id_registro = int(existente[0]["id"])
+    else:
+        sql_exec(f"""
+            INSERT INTO {TABELA}
+                (id_atendimento, datetime_atendimento_inicio, datetime_ultima_atualizacao_atendimento,
+                 id_paciente, id_criador, status, erro_msg)
+            VALUES
+                (NULL, NULL, NULL, '{esc(id_paciente)}', NULL, 'processando', NULL)
+        """)
+        criado = sql_exec(f"""
+            SELECT id
+            FROM {TABELA}
+            WHERE id_paciente = '{esc(id_paciente)}'
+              AND id_atendimento IS NULL
+              AND id_criador IS NULL
+            ORDER BY id DESC
+            LIMIT 1
+        """, reason="buscar_registro_compilado_criado").get("data", [])
+        if not criado:
+            raise RuntimeError(f"Falha ao criar registro compilado do paciente {id_paciente}")
+        id_registro = int(criado[0]["id"])
 
     sets = [
         "id_atendimento = NULL",
@@ -1601,11 +1573,11 @@ def salvar_resultado_compilado_paciente(id_paciente: str, resultado: dict):
 
 def atualizar_analise_compilada_paciente(id_paciente: str):
     enfileirados = enfileirar_atendimentos_antigos(id_paciente)
-    pendentes = contar_atendimentos_nao_concluidos_paciente(id_paciente)
+    pendentes = contar_atendimentos_pendentes_paciente(id_paciente)
     if pendentes > 0:
         log.info(
             f"⏳ Síntese compilada adiada para paciente {id_paciente}: "
-            f"{pendentes} atendimento(s) ainda não concluído(s)"
+            f"{pendentes} atendimento(s) ainda pendente(s)/processando(s)"
             + (f" ({enfileirados} recém-enfileirado(s))" if enfileirados else "")
             + "."
         )
@@ -1615,17 +1587,6 @@ def atualizar_analise_compilada_paciente(id_paciente: str):
     if not texto_compilado or not row_base:
         log.info(f"ℹ️  Sem histórico suficiente para compilar síntese do paciente {id_paciente}.")
         return
-
-    id_registro_compilado = garantir_registro_compilado_paciente_pendente(id_paciente)
-    sql_exec(f"""
-        UPDATE {TABELA} SET
-            status = 'processando',
-            tentativas = tentativas + 1,
-            erro_msg = NULL,
-            datetime_analise_concluida = NULL,
-            datetime_ultima_atualizacao_atendimento = NULL
-        WHERE id = {id_registro_compilado}
-    """, reason="marcar_registro_compilado_processando")
 
     log.info(f"🧬 Atualizando síntese compilada do paciente {id_paciente}...")
     contexto = ""
@@ -1747,170 +1708,38 @@ def montar_texto_compilado_paciente(id_paciente: str):
 
 
 def salvar_resultado_compilado_paciente(id_paciente: str, resultado: dict):
-    id_registro = garantir_registro_compilado_paciente_pendente(id_paciente)
-
-    sets = [
-        "id_atendimento = NULL",
-        "datetime_atendimento_inicio = NULL",
-        "datetime_ultima_atualizacao_atendimento = NULL",
-        "id_criador = NULL",
-        f"id_paciente = '{esc(id_paciente)}'",
-    ] + _montar_sets_resultado(resultado)
-
-    sql_exec(
-        f"UPDATE {TABELA} SET\n    " + ",\n    ".join(sets) + f"\nWHERE id = {id_registro}"
-    )
-
-
-def atualizar_analise_compilada_paciente(id_paciente: str):
-    enfileirados = enfileirar_atendimentos_antigos(id_paciente)
-    pendentes = contar_atendimentos_nao_concluidos_paciente(id_paciente)
-    if pendentes > 0:
-        log.info(
-            f"⏳ Síntese compilada adiada para paciente {id_paciente}: "
-            f"{pendentes} atendimento(s) ainda não concluído(s)"
-            + (f" ({enfileirados} recém-enfileirado(s))" if enfileirados else "")
-            + "."
-        )
-        return
-
-    texto_compilado, row_base = montar_texto_compilado_paciente(id_paciente)
-    if not texto_compilado or not row_base:
-        log.info(f"ℹ️  Sem histórico suficiente para compilar síntese do paciente {id_paciente}.")
-        return
-
-    id_registro_compilado = garantir_registro_compilado_paciente_pendente(id_paciente)
-    sql_exec(f"""
-        UPDATE {TABELA} SET
-            status = 'processando',
-            tentativas = tentativas + 1,
-            erro_msg = NULL,
-            datetime_analise_concluida = NULL,
-            datetime_ultima_atualizacao_atendimento = NULL
-        WHERE id = {id_registro_compilado}
-    """, reason="marcar_registro_compilado_processando")
-
-    log.info(f"🧬 Atualizando síntese compilada do paciente {id_paciente}...")
-    contexto = ""
-    try:
-        contexto = buscar_contexto_clinico({
-            "id_paciente": id_paciente,
-            "id": row_base.get("id_atendimento"),
-            "id_criador": row_base.get("id_criador"),
-        }) or ""
-    except Exception as e:
-        log.warning(f"  ⚠️ Falha ao buscar contexto do paciente compilado {id_paciente}: {e}")
-
-    resultado = analisar_prontuario(texto_compilado[:18000], contexto=contexto)
-    try:
-        resultado = executar_busca_evidencias(
-            resultado,
-            chat_url=resultado.get("_chat_url"),
-            chat_id=resultado.get("_chat_id"),
-        )
-    except Exception as e:
-        log.warning(f"  ⚠️ Enriquecimento da síntese compilada falhou (não fatal): {e}")
-
-    salvar_resultado_compilado_paciente(id_paciente, resultado)
-    log.info(f"✅ Síntese compilada do paciente {id_paciente} atualizada.")
-
-
-def _stringify_compact(value) -> str:
-    try:
-        parsed = json.loads(value) if isinstance(value, str) else value
-    except Exception:
-        parsed = value
-    if isinstance(parsed, list):
-        partes = []
-        for item in parsed:
-            if item in (None, "", [], {}):
-                continue
-            partes.append(json.dumps(item, ensure_ascii=False) if isinstance(item, (dict, list)) else str(item))
-        return "; ".join(partes)
-    if isinstance(parsed, dict):
-        return json.dumps(parsed, ensure_ascii=False)
-    return str(parsed or "").strip()
-
-
-def montar_texto_compilado_paciente(id_paciente: str):
-    rows = sql_exec(f"""
-        SELECT
-            id_atendimento,
-            id_paciente,
-            id_criador,
-            datetime_atendimento_inicio,
-            resumo_texto,
-            gravidade_clinica,
-            diagnosticos_citados,
-            pontos_chave,
-            mudancas_relevantes,
-            sinais_nucleares,
-            eventos_comportamentais,
-            terapias_referidas,
-            exames_citados,
-            pendencias_clinicas,
-            condutas_no_prontuario,
-            medicacoes_em_uso,
-            medicacoes_iniciadas,
-            medicacoes_suspensas,
-            condutas_especificas_sugeridas,
-            condutas_gerais_sugeridas,
-            mensagens_acompanhamento
+    existente = sql_exec(f"""
+        SELECT id
         FROM {TABELA}
         WHERE id_paciente = '{esc(id_paciente)}'
-          AND status = 'concluido'
-          AND id_atendimento IS NOT NULL
-        ORDER BY datetime_atendimento_inicio DESC, id_atendimento DESC
-        LIMIT 25
-    """, reason="carregar_analises_paciente_compilado").get("data", [])
+          AND id_atendimento IS NULL
+          AND id_criador IS NULL
+        ORDER BY id DESC
+        LIMIT 1
+    """, reason="buscar_registro_compilado_paciente").get("data", [])
 
-    if not rows:
-        return "", None
-
-    blocos = []
-    for idx, row in enumerate(rows, start=1):
-        linhas = [
-            f"ATENDIMENTO #{idx}",
-            f"id_atendimento: {row.get('id_atendimento')}",
-            f"data_atendimento: {row.get('datetime_atendimento_inicio') or 'sem_data'}",
-        ]
-        if row.get("resumo_texto"):
-            linhas.append(f"resumo_texto: {row['resumo_texto']}")
-
-        for campo in [
-            "gravidade_clinica",
-            "diagnosticos_citados",
-            "pontos_chave",
-            "mudancas_relevantes",
-            "sinais_nucleares",
-            "eventos_comportamentais",
-            "terapias_referidas",
-            "exames_citados",
-            "pendencias_clinicas",
-            "condutas_no_prontuario",
-            "medicacoes_em_uso",
-            "medicacoes_iniciadas",
-            "medicacoes_suspensas",
-            "condutas_especificas_sugeridas",
-            "condutas_gerais_sugeridas",
-            "mensagens_acompanhamento",
-        ]:
-            val = _stringify_compact(row.get(campo))
-            if val:
-                linhas.append(f"{campo}: {val}")
-        blocos.append("\n".join(linhas))
-
-    texto = (
-        f"HISTÓRICO LONGITUDINAL COMPILADO DO PACIENTE {id_paciente}\n"
-        "Os blocos abaixo representam análises estruturadas já concluídas deste paciente.\n"
-        "Consolide o histórico completo do paciente, sintetizando padrões persistentes, mudanças relevantes, terapias, medicações, riscos, pendências e condutas, sem inventar dados.\n\n"
-        + "\n\n" + ("\n\n" + ("=" * 70) + "\n\n").join(blocos)
-    )
-    return texto, rows[0]
-
-
-def salvar_resultado_compilado_paciente(id_paciente: str, resultado: dict):
-    id_registro = garantir_registro_compilado_paciente_pendente(id_paciente)
+    if existente:
+        id_registro = int(existente[0]["id"])
+    else:
+        sql_exec(f"""
+            INSERT INTO {TABELA}
+                (id_atendimento, datetime_atendimento_inicio, datetime_ultima_atualizacao_atendimento,
+                 id_paciente, id_criador, status, erro_msg)
+            VALUES
+                (NULL, NULL, NULL, '{esc(id_paciente)}', NULL, 'processando', NULL)
+        """)
+        criado = sql_exec(f"""
+            SELECT id
+            FROM {TABELA}
+            WHERE id_paciente = '{esc(id_paciente)}'
+              AND id_atendimento IS NULL
+              AND id_criador IS NULL
+            ORDER BY id DESC
+            LIMIT 1
+        """, reason="buscar_registro_compilado_criado").get("data", [])
+        if not criado:
+            raise RuntimeError(f"Falha ao criar registro compilado do paciente {id_paciente}")
+        id_registro = int(criado[0]["id"])
 
     sets = [
         "id_atendimento = NULL",
@@ -1927,11 +1756,11 @@ def salvar_resultado_compilado_paciente(id_paciente: str, resultado: dict):
 
 def atualizar_analise_compilada_paciente(id_paciente: str):
     enfileirados = enfileirar_atendimentos_antigos(id_paciente)
-    pendentes = contar_atendimentos_nao_concluidos_paciente(id_paciente)
+    pendentes = contar_atendimentos_pendentes_paciente(id_paciente)
     if pendentes > 0:
         log.info(
             f"⏳ Síntese compilada adiada para paciente {id_paciente}: "
-            f"{pendentes} atendimento(s) ainda não concluído(s)"
+            f"{pendentes} atendimento(s) ainda pendente(s)/processando(s)"
             + (f" ({enfileirados} recém-enfileirado(s))" if enfileirados else "")
             + "."
         )
@@ -1941,17 +1770,6 @@ def atualizar_analise_compilada_paciente(id_paciente: str):
     if not texto_compilado or not row_base:
         log.info(f"ℹ️  Sem histórico suficiente para compilar síntese do paciente {id_paciente}.")
         return
-
-    id_registro_compilado = garantir_registro_compilado_paciente_pendente(id_paciente)
-    sql_exec(f"""
-        UPDATE {TABELA} SET
-            status = 'processando',
-            tentativas = tentativas + 1,
-            erro_msg = NULL,
-            datetime_analise_concluida = NULL,
-            datetime_ultima_atualizacao_atendimento = NULL
-        WHERE id = {id_registro_compilado}
-    """, reason="marcar_registro_compilado_processando")
 
     log.info(f"🧬 Atualizando síntese compilada do paciente {id_paciente}...")
     contexto = ""
@@ -2905,28 +2723,6 @@ def analisar_prontuario(texto: str, chat_url: str = None, chat_id: str = None, c
         sys.stdout.write('\n')
         sys.stdout.flush()
 
-    def _log_wrapped(prefixo: str, msg: str):
-        """
-        Loga mensagens longas em múltiplas linhas reais para evitar que o
-        próximo progresso inline (\r) sobrescreva o trecho final quando o
-        terminal fizer quebra visual automática.
-        """
-        texto = re.sub(r"\s+", " ", str(msg or "")).strip()
-        if not texto:
-            return
-
-        largura_terminal = shutil.get_terminal_size((140, 20)).columns
-        largura_util = max(50, largura_terminal - 36)  # reserva espaço do timestamp/logger
-        linhas = textwrap.wrap(
-            texto,
-            width=largura_util,
-            break_long_words=False,
-            break_on_hyphens=False,
-        ) or [texto]
-
-        for linha in linhas:
-            log.info(f"  {prefixo} {linha}")
-
     last_status = ""
     inline_active = False  # True quando ha uma linha inline aberta
     for raw_line in resp.iter_lines():
@@ -2953,7 +2749,7 @@ def analisar_prontuario(texto: str, chat_url: str = None, chat_id: str = None, c
                 if inline_active:
                     _newline()
                     inline_active = False
-                _log_wrapped('⏳', msg)
+                log.info(f'  ⏳ {msg}')
 
         elif t == "log":
             if inline_active:
@@ -3093,15 +2889,6 @@ def extrair_termos_busca(resultado: dict) -> list:
                 if nd_tipo == tipo_node and nd_valor and len(nd_valor) > 2:
                     valores.append(nd_valor)
         return valores
-
-    def _compactar_termo_busca(valor, max_chars=90):
-        valor = re.sub(r"\s+", " ", str(valor or "")).strip(" ,;:-")
-        if len(valor) <= max_chars:
-            return valor
-        corte = valor.rfind(" ", 0, max_chars + 1)
-        if corte >= int(max_chars * 0.6):
-            return valor[:corte].strip(" ,;:-")
-        return valor[:max_chars].strip(" ,;:-")
 
     def _compactar_termo_busca(valor, max_chars=90):
         valor = re.sub(r"\s+", " ", str(valor or "")).strip(" ,;:-")

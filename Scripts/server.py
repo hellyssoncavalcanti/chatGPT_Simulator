@@ -257,22 +257,6 @@ def get_history():
     history = storage.load_chats()
     return jsonify(history)
 
-@app.route('/api/chat_lookup', methods=['POST'])
-def api_chat_lookup():
-    if not check_auth():
-        return jsonify({"error": "Unauthorized"}), 401
-
-    data = request.get_json() or {}
-    origin_url = data.get('origin_url') or data.get('url_atual') or ''
-    if not origin_url:
-        return jsonify({"success": False, "error": "Missing origin_url"}), 400
-
-    chat = storage.find_chat_by_origin(origin_url)
-    if not chat:
-        return jsonify({"success": False, "error": "chat_not_found"}), 404
-
-    return jsonify({"success": True, "chat": chat})
-
 @app.route("/api/menu/options", methods=["POST"])
 def menu_options():
     data = request.get_json() or {}
@@ -396,7 +380,6 @@ def api_sync():
             msgs           = list(chat_data.get('messages', []))
             if fresh_markdown and (not msgs or msgs[-1].get('content') != fresh_markdown):
                 msgs.append({"role": "assistant", "content": fresh_markdown})
-                storage.save_chat(chat_id, chat_data.get('title', 'Chat'), chat_data.get('url', url or ''), msgs, origin_url=chat_data.get('origin_url') or '')
             return jsonify({
                 "success": True, "updated": True,
                 "chat": {
@@ -422,9 +405,8 @@ def api_sync():
                 if content.get("success"):
                     fresh_messages = content.get('messages', [])
                     fresh_title    = content.get("title", "")
-                    fresh_url      = content.get("url", "") or url
-                    was_updated    = storage.update_full_history(chat_id, fresh_messages, title=fresh_title, url=fresh_url)
-                    storage.save_chat(chat_id, fresh_title or 'Chat', fresh_url, [], origin_url=(storage.load_chats().get(chat_id, {}) or {}).get('origin_url', ''))
+                    was_updated    = storage.update_full_history(chat_id, fresh_messages)
+                    if fresh_title: storage.save_chat(chat_id, fresh_title, url, [])
                     return jsonify({
                         "success": True, "updated": was_updated,
                         "chat": {
@@ -906,7 +888,6 @@ def chat_completions():
 
     stream      = data.get("stream", False)
     attachments = data.get("attachments", [])
-    origin_url  = data.get("origin_url") or data.get("url_atual") or request.headers.get("X-Origin-URL") or ""
 
     # --- 2. PROCESSAMENTO DE ANEXOS ---
     saved_paths = []
@@ -934,18 +915,6 @@ def chat_completions():
         print(f"[📡 SERVIDOR] URL detectada. Retomando conversa em: {url}")
     else:
         print("[📡 SERVIDOR] Nenhuma URL detectada. Iniciando um novo chat do zero.")
-
-    # Persiste imediatamente o pedido remoto para sobreviver ao fechamento precoce da aba.
-    chat_snapshot = storage.load_chats().get(chat_id, {})
-    storage.save_chat(
-        chat_id,
-        chat_snapshot.get('title') or 'Novo Chat',
-        url or chat_snapshot.get('url', ''),
-        [],
-        origin_url=origin_url or chat_snapshot.get('origin_url', '')
-    )
-    if message:
-        storage.append_message(chat_id, "user", message)
 
     # --- 4. PREPARAÇÃO DA FILA ---
     stream_q = queue.Queue()
@@ -1003,7 +972,7 @@ def chat_completions():
                                 fin = msg_obj.get('content', {})
                                 storage.append_message(chat_id, "user", message)
                                 storage.append_message(chat_id, "assistant", ACTIVE_CHATS[chat_id]['markdown'])
-                                storage.save_chat(chat_id, fin.get('title', ''), fin.get('url', '') or url or '', [], origin_url=origin_url)
+                                storage.save_chat(chat_id, fin.get('title', ''), fin.get('url', '') or url or '', [])
                             except Exception as e:
                                 log(f"[WARN] Falha ao persistir stream finish: {e}")
                     except Exception:
@@ -1071,7 +1040,7 @@ def chat_completions():
         # Persiste no storage
         storage.append_message(chat_id, "user",      message)
         storage.append_message(chat_id, "assistant", final_html)
-        storage.save_chat(chat_id, final_title, final_url, [], origin_url=origin_url)  # [FIX S3] passa [] — save_chat carrega e mescla internamente
+        storage.save_chat(chat_id, final_title, final_url, [])  # [FIX S3] passa [] — save_chat carrega e mescla internamente
 
         return jsonify({
             "success": True,
