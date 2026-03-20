@@ -2767,49 +2767,6 @@ header('Content-Type: application/javascript; charset=utf-8');
     const KEY_STREAM = PREFIX + 'stream_enabled';
     const KEY_CONTEXT = PREFIX + 'context_prefs'; 
     const KEY_HIST_PREFIX = PREFIX + 'hist_';
-    const DIRECT_TOOL_MODEL = 'Execução de search_queries e sql_queries';
-    const DIRECT_TOOL_MODEL_LABEL = '🧩 Execução de search_queries e sql_queries';
-    const DIRECT_TOOL_INTRO_MD = [
-        '## 🧩 Modo direto: Execução de `search_queries` e `sql_queries`',
-        '',
-        'Neste modo, suas próximas mensagens **não vão para a LLM**.',
-        'Elas serão interpretadas diretamente pelo PHP para executar:',
-        '',
-        '- `sql_queries` via banco de dados',
-        '- `search_queries` via pesquisa web',
-        '',
-        '### Formato correto',
-        '',
-        '- Envie **um único JSON por mensagem**.',
-        '- Use **ou** `sql_queries` **ou** `search_queries`.',
-        '- **Nunca misture os dois** no mesmo JSON.',
-        '',
-        '### Exemplo SQL',
-        '',
-        '```json',
-        '{',
-        '  "sql_queries": [',
-        '    {',
-        '      "query": "SELECT id, nome FROM membros ORDER BY id DESC LIMIT 5",',
-        '      "reason": "Listar os últimos membros cadastrados"',
-        '    }',
-        '  ]',
-        '}',
-        '```',
-        '',
-        '### Exemplo search',
-        '',
-        '```json',
-        '{',
-        '  "search_queries": [',
-        '    {',
-        '      "query": "Risperidona autism children site:pubmed.ncbi.nlm.nih.gov",',
-        '      "reason": "Buscar evidências em crianças com TEA"',
-        '    }',
-        '  ]',
-        '}',
-        '```',
-    ].join('\n');
 
     const URL_ID = btoa(window.location.search); //Captura o GET da URL e usa como um ID/KEY do chat.
     const HISTORYKEY   = KEY_HIST_PREFIX + URL_ID; // ← já existe, não duplicar
@@ -2864,10 +2821,6 @@ header('Content-Type: application/javascript; charset=utf-8');
             try { return JSON.parse(localStorage.getItem(HISTORYKEY) || '{}'); } catch(e) { return {}; }
         }
     };
-
-    function isDirectToolMode() {
-        return document.getElementById('ow-model-sel')?.value === DIRECT_TOOL_MODEL;
-    }
 
     let state = { messages: [], currentChatId: null, currentChatTitle: null, currentChatUrl: null };
     let currentUserQuestion = '';
@@ -4897,188 +4850,6 @@ header('Content-Type: application/javascript; charset=utf-8');
         b.appendChild(wrap); return { tID, mID, hID };
     }
 
-    function appendAssistantMarkdown(markdown) {
-        const safeMd = String(markdown || '').trim();
-        if (!safeMd) return;
-        addSimpleMsg('assistant', safeMd);
-        state.messages.push({ role: 'assistant', content: safeMd });
-        saveLocal();
-        scroll(true);
-    }
-
-    function ensureDirectToolIntro(force = false) {
-        if (!isDirectToolMode()) return;
-        const lastMsg = state.messages[state.messages.length - 1];
-        if (!force && lastMsg?.role === 'assistant' && lastMsg.content === DIRECT_TOOL_INTRO_MD) return;
-        appendAssistantMarkdown(DIRECT_TOOL_INTRO_MD);
-    }
-
-    function formatDirectToolError(userTxt = '') {
-        const trimmed = String(userTxt || '').trim();
-        return [
-            '⚠️ **Formato inválido para o modo direto.**',
-            '',
-            'Envie **um único JSON válido** contendo **ou** `sql_queries` **ou** `search_queries`.',
-            'Não misture os dois no mesmo payload.',
-            '',
-            '### Exemplo SQL',
-            '```json',
-            '{',
-            '  "sql_queries": [',
-            '    {',
-            '      "query": "SELECT id, nome FROM membros ORDER BY id DESC LIMIT 5",',
-            '      "reason": "Listar os últimos membros cadastrados"',
-            '    }',
-            '  ]',
-            '}',
-            '```',
-            '',
-            '### Exemplo search',
-            '```json',
-            '{',
-            '  "search_queries": [',
-            '    {',
-            '      "query": "Risperidona autism children site:pubmed.ncbi.nlm.nih.gov",',
-            '      "reason": "Buscar evidências em crianças com TEA"',
-            '    }',
-            '  ]',
-            '}',
-            '```',
-            trimmed ? `\n**Mensagem recebida:**\n\`\`\`\n${trimmed}\n\`\`\`` : '',
-        ].join('\n');
-    }
-
-    function parseDirectToolRequest(userTxt) {
-        const sqlQueries = extractSQLFromResponse(userTxt);
-        const searchQueries = extractSearchFromResponse(userTxt, false);
-        const hasSql = Array.isArray(sqlQueries) && sqlQueries.length > 0;
-        const hasSearch = Array.isArray(searchQueries) && searchQueries.length > 0;
-        if (hasSql && hasSearch) {
-            return { ok: false, error: 'Payload misto: envie apenas sql_queries ou apenas search_queries.' };
-        }
-        if (hasSql) return { ok: true, type: 'sql', queries: sqlQueries };
-        if (hasSearch) return { ok: true, type: 'search', queries: searchQueries };
-        return { ok: false, error: 'Nenhum bloco válido de sql_queries/search_queries encontrado.' };
-    }
-
-    function formatDirectSqlResults(sqlResults) {
-        const lines = ['## 🐬 Resultado da execução SQL', ''];
-        sqlResults.forEach((result, index) => {
-            lines.push(`### Query ${index + 1}`);
-            lines.push(`- **SQL:** \`${result.query || '(sem query)'}\``);
-            if (result.reason) lines.push(`- **Motivo:** ${result.reason}`);
-            if (result.success === false || result.error) {
-                lines.push(`- **Status:** ❌ Erro`);
-                lines.push(`- **Detalhe:** ${result.error || 'Falha não especificada'}`);
-                lines.push('');
-                return;
-            }
-            const count = Array.isArray(result.data) ? result.data.length : (result.affected_rows ?? 0);
-            lines.push(`- **Status:** ✅ Sucesso`);
-            lines.push(`- **Registros:** ${count}`);
-            if (Array.isArray(result.data) && result.data.length > 0) {
-                lines.push('');
-                lines.push('```json');
-                lines.push(JSON.stringify(result.data.slice(0, 20), null, 2));
-                lines.push('```');
-            }
-            lines.push('');
-        });
-        return lines.join('\n').trim();
-    }
-
-    function formatDirectSearchResults(searchData, queries) {
-        const lines = ['## 🔍 Resultado da pesquisa web', ''];
-        const results = Array.isArray(searchData?.results) ? searchData.results : [];
-        queries.forEach((q, index) => {
-            const result = results[index] || {};
-            lines.push(`### Pesquisa ${index + 1}`);
-            lines.push(`- **Query:** \`${q.query || q}\``);
-            if (q.reason) lines.push(`- **Motivo:** ${q.reason}`);
-            if (result.success === false) {
-                lines.push(`- **Status:** ❌ ${result.error || 'Erro na pesquisa'}`);
-                lines.push('');
-                return;
-            }
-            const items = Array.isArray(result.results) ? result.results : [];
-            lines.push(`- **Status:** ✅ ${items.length} resultado(s)`);
-            lines.push('');
-            if (!items.length) {
-                lines.push('_Nenhum resultado encontrado._');
-                lines.push('');
-                return;
-            }
-            items.slice(0, 10).forEach((item, itemIndex) => {
-                lines.push(`${itemIndex + 1}. **${item.title || 'Sem título'}**`);
-                if (item.url) lines.push(`   - URL: ${item.url}`);
-                if (item.snippet) lines.push(`   - Resumo: ${item.snippet}`);
-            });
-            lines.push('');
-        });
-        return lines.join('\n').trim();
-    }
-
-    async function handleDirectToolModeMessage(userTxt) {
-        const parsed = parseDirectToolRequest(userTxt);
-        if (!parsed.ok) {
-            appendAssistantMarkdown(formatDirectToolError(userTxt));
-            return false;
-        }
-
-        const ui = addAiMarkup();
-        const mEl = document.getElementById(ui.mID);
-        const btn = document.getElementById('ow-send');
-        try {
-            if (parsed.type === 'sql') {
-                if (mEl) {
-                    mEl.innerHTML = `<div style="padding:14px;border-left:4px solid #00bcd4;background:#e0f7fa;border-radius:8px;">🐬 Executando ${parsed.queries.length} consulta(s) SQL...</div>`;
-                }
-                const sqlResults = await Promise.all(parsed.queries.map(async (q, index) => {
-                    const query = q.query || q;
-                    const reason = q.reason || `Query #${index + 1}`;
-                    const result = await executeSQLQuery(query, reason);
-                    return { ...result, query, reason };
-                }));
-                const markdown = formatDirectSqlResults(sqlResults);
-                if (mEl) {
-                    mEl.classList.remove('cursor-blink');
-                    mEl.innerHTML = formatMarkdown(markdown);
-                }
-                state.messages.push({ role: 'assistant', content: markdown });
-                saveLocal();
-                return true;
-            }
-
-            if (mEl) {
-                mEl.innerHTML = `<div style="padding:14px;border-left:4px solid #4caf50;background:#e8f5e9;border-radius:8px;">🔍 Executando ${parsed.queries.length} pesquisa(s) web...</div>`;
-            }
-            const searchData = await executeWebSearch(parsed.queries);
-            const markdown = formatDirectSearchResults(searchData, parsed.queries);
-            if (mEl) {
-                mEl.classList.remove('cursor-blink');
-                mEl.innerHTML = formatMarkdown(markdown);
-            }
-            state.messages.push({ role: 'assistant', content: markdown });
-            saveLocal();
-            return true;
-        } catch (e) {
-            const markdown = `❌ **Erro ao executar ${parsed.type === 'sql' ? 'sql_queries' : 'search_queries'}:**\n\n\`${e.message}\``;
-            if (mEl) {
-                mEl.classList.remove('cursor-blink');
-                mEl.innerHTML = formatMarkdown(markdown);
-            }
-            state.messages.push({ role: 'assistant', content: markdown });
-            saveLocal();
-            return false;
-        } finally {
-            if (btn) {
-                btn.innerText = 'Enviar';
-                btn.classList.remove('stop-mode');
-            }
-            scroll(true);
-        }
-    }
-
     async function init() {
         console.groupCollapsed(`%c🔧 ${FILE_PREFIX} [SYSTEM] Inicialização ChatJS`, "color: #e67e22; font-weight: bold;");
         const streamPref = localStorage.getItem(KEY_STREAM);
@@ -5251,7 +5022,6 @@ header('Content-Type: application/javascript; charset=utf-8');
             } else {
                 finalModels.push({ name: 'ChatGPT Simulator (Offline)', displayName: '❌ ChatGPT Simulator (Offline)', disabled: true });
             }
-            finalModels.push({ name: DIRECT_TOOL_MODEL, displayName: DIRECT_TOOL_MODEL_LABEL });
             
             // Adiciona os modelos locais
             finalModels = finalModels.concat(ollamaModels);
@@ -5288,29 +5058,13 @@ header('Content-Type: application/javascript; charset=utf-8');
             sel.onchange = () => {
                 if(!sel.options[sel.selectedIndex].disabled) {
                     localStorage.setItem(KEY_MODEL, sel.value);
-                    updateInputPlaceholderForModel();
-                    if (isDirectToolMode()) {
-                        ensureDirectToolIntro(true);
-                    }
                 }
             };
-            updateInputPlaceholderForModel();
-            if (isDirectToolMode()) {
-                ensureDirectToolIntro();
-            }
         } catch(e) { 
             sel.innerHTML = '<option value="">Erro Crítico ao buscar modelos</option>'; 
             console.error(e);
         } 
         console.groupEnd();
-    }
-
-    function updateInputPlaceholderForModel() {
-        const input = document.getElementById('ow-input');
-        if (!input) return;
-        input.placeholder = isDirectToolMode()
-            ? 'Cole um JSON com sql_queries ou search_queries...'
-            : 'Pergunte algo...';
     }
     
     // [FIX 7.7] HANDLER SEGURO DO CLIQUE
@@ -5847,20 +5601,6 @@ header('Content-Type: application/javascript; charset=utf-8');
             return s.replace(/[\u2018\u2019]/g,"'").replace(/[\u201C\u201D]/g,'"').replace(/[\u00A0]/g,' ').trim();
         }
 
-        function decodeLooseJsonString(value) {
-            let v = sanitize(String(value || ''));
-            v = v.replace(/,$/, '').trim();
-            while ((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'"))) {
-                v = v.slice(1, -1).trim();
-            }
-            return v
-                .replace(/\\"/g, '"')
-                .replace(/\\n/g, '\n')
-                .replace(/\\t/g, '\t')
-                .replace(/\\\\/g, '\\')
-                .trim();
-        }
-
         // Normaliza: converte pesquisa_query (string) → search_queries (array de objetos)
         function normalizeToArray(j) {
             // Formato correto: search_queries é array
@@ -5875,32 +5615,6 @@ header('Content-Type: application/javascript; charset=utf-8');
             if (j.pesquisa_query && Array.isArray(j.pesquisa_query)) {
                 return j.pesquisa_query.map(q => typeof q === 'string' ? { query: q, reason: 'Pesquisa solicitada' } : q);
             }
-            return null;
-        }
-
-        function extractLoosePairs(rawText) {
-            const compact = sanitize(String(rawText || ''))
-                .replace(/```(?:json)?/gi, '')
-                .replace(/```/g, '')
-                .replace(/\r/g, '');
-
-            const matches = [...compact.matchAll(/{[\s\S]*?"query"\s*:\s*([\s\S]*?)(?:,\s*"reason"\s*:\s*([\s\S]*?))?\s*}/gi)];
-            if (matches.length > 0) {
-                const parsed = matches
-                    .map(([, rawQuery, rawReason]) => ({
-                        query:  decodeLooseJsonString(rawQuery),
-                        reason: decodeLooseJsonString(rawReason || 'Pesquisa solicitada'),
-                    }))
-                    .filter(item => item.query);
-                if (parsed.length > 0) return parsed;
-            }
-
-            const legacy = compact.match(/"pesquisa_query"\s*:\s*([\s\S]*?)(?=,\s*"[a-z_]+\"\s*:|\s*}\s*$)/i);
-            if (legacy?.[1]) {
-                const query = decodeLooseJsonString(legacy[1]);
-                if (query) return [{ query, reason: 'Pesquisa solicitada' }];
-            }
-
             return null;
         }
 
@@ -5931,9 +5645,6 @@ header('Content-Type: application/javascript; charset=utf-8');
                 start = text.indexOf('{', start + 1);
             }
         } catch (_) {}
-
-        const looseResult = extractLoosePairs(text);
-        if (looseResult && looseResult.length > 0) return looseResult;
         return null;
     }
 
@@ -6067,7 +5778,6 @@ header('Content-Type: application/javascript; charset=utf-8');
 
             const mEl = document.getElementById(uiNew.mID);
             if (mEl) { mEl.classList.remove('cursor-blink'); mEl.innerHTML = formatMarkdown(fullC); }
-            if (typeof injectSearchButtons === 'function') setTimeout(() => injectSearchButtons(), 0);
 
             if (fullC) {
                 const chainedSearchDetected = await detectAndExecuteSearch(fullC, originalQuestion, uiNew, depth + 1);
@@ -6158,7 +5868,6 @@ header('Content-Type: application/javascript; charset=utf-8');
 
                 const mEl = document.getElementById(uiNew.mID);
                 if (mEl) { mEl.classList.remove('cursor-blink'); mEl.innerHTML = formatMarkdown(fullC); }
-                if (typeof injectSearchButtons === 'function') setTimeout(() => injectSearchButtons(), 0);
                 if (fullC) {
                     const chainedSearchDetected = await detectAndExecuteSearch(fullC, lastUserMsg, uiNew, 1);
                     if (!chainedSearchDetected) {
@@ -6657,7 +6366,6 @@ header('Content-Type: application/javascript; charset=utf-8');
                 mEl.classList.remove('cursor-blink');
                 mEl.innerHTML = fullC.trim().startsWith(('<div>').slice(0, -1)) ? fullC : formatMarkdown(fullC);
             }
-            if (typeof injectSearchButtons === 'function') setTimeout(() => injectSearchButtons(), 0);
             if (fullT) document.getElementById(ui.tID).innerText = fullT;
             
             //só salva se houver conteúdo real:
@@ -6722,13 +6430,6 @@ header('Content-Type: application/javascript; charset=utf-8');
         scroll(true);
         btn.innerText = 'Parar'; 
         btn.classList.add('stop-mode');
-
-        if (isDirectToolMode()) {
-            state.messages.push({ role: 'user', content: userTxt });
-            saveLocal();
-            await handleDirectToolModeMessage(userTxt);
-            return;
-        }
 
         let ctx = "";
         document.querySelectorAll('#ow-context-area input:checked').forEach(cb => {
