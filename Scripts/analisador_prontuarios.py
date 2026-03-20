@@ -354,8 +354,6 @@ def garantir_tabela():
                                                         COMMENT 'FK para membros.id do profissional criador. NULL = sintese compilada do paciente.',
                 datetime_analise_criacao                DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
                                                         COMMENT 'Data/hora de insercao do registro.',
-                datetime_analise_iniciada               DATETIME NULL
-                                                        COMMENT 'Data/hora em que o analisador iniciou efetivamente o processamento desta analise.',
                 datetime_analise_concluida              DATETIME NULL
                                                         COMMENT 'Data/hora em que a analise foi concluida com sucesso.',
                 chat_id                                 VARCHAR(100) NULL
@@ -480,27 +478,6 @@ def garantir_coluna_mensagens_acompanhamento():
     finally:
         global _COLUNAS_TABELA
         _COLUNAS_TABELA = None   # invalida cache para incluir a coluna recem-garantida
-
-
-def garantir_coluna_datetime_analise_iniciada():
-    """
-    Garante a coluna datetime_analise_iniciada em instâncias antigas do schema.
-    Essa coluna marca o início efetivo do processamento pelo analisador e deve
-    ser usada nas métricas de duração reais (início → conclusão).
-    """
-    try:
-        sql_exec(f"""
-            ALTER TABLE {TABELA}
-            ADD COLUMN IF NOT EXISTS datetime_analise_iniciada DATETIME NULL
-            COMMENT 'Data/hora em que o analisador iniciou efetivamente o processamento desta analise.'
-            AFTER datetime_analise_criacao
-        """)
-        log.info("✅ Coluna datetime_analise_iniciada verificada/criada.")
-    except RuntimeError as e:
-        log.warning(f"⚠️  garantir_coluna_datetime_analise_iniciada: {e}")
-    finally:
-        global _COLUNAS_TABELA
-        _COLUNAS_TABELA = None
 
 
 def garantir_colunas_v16():
@@ -1238,7 +1215,6 @@ def marcar_processando(row: dict):
         UPDATE {TABELA} SET
             status                                  = 'processando',
             tentativas                              = tentativas + 1,
-            datetime_analise_iniciada               = NOW(),
             datetime_ultima_atualizacao_atendimento = {f"'{dtp}'" if dtp else 'NULL'}
         WHERE id_atendimento = {idat}
     """)
@@ -1254,7 +1230,6 @@ def resetar_travados():
         f"""
         UPDATE {TABELA}
         SET    status    = 'pendente',
-               datetime_analise_iniciada = NULL,
                erro_msg  = CONCAT(
                                COALESCE(erro_msg, ''),
                                ' | [AUTO-RESET] Travado em processando por mais de {TIMEOUT_PROCESSANDO_MIN} min em ',
@@ -1282,7 +1257,6 @@ def _montar_sets_resultado(resultado: dict) -> list:
         f"status                    = 'concluido'",
         f"datetime_analise_concluida = '{now}'",
         f"erro_msg                   = NULL",
-        f"datetime_analise_iniciada  = COALESCE(datetime_analise_iniciada, '{now}')",
         f"chat_id                    = '{chat_id}'",
         f"chat_url                   = '{chat_url}'",
     ]
@@ -1461,7 +1435,6 @@ def atualizar_analise_compilada_paciente(id_paciente: str):
             status = 'processando',
             tentativas = tentativas + 1,
             erro_msg = NULL,
-            datetime_analise_iniciada = NOW(),
             datetime_analise_concluida = NULL,
             datetime_ultima_atualizacao_atendimento = NULL
         WHERE id = {id_registro_compilado}
@@ -1626,7 +1599,6 @@ def atualizar_analise_compilada_paciente(id_paciente: str):
             status = 'processando',
             tentativas = tentativas + 1,
             erro_msg = NULL,
-            datetime_analise_iniciada = NOW(),
             datetime_analise_concluida = NULL,
             datetime_ultima_atualizacao_atendimento = NULL
         WHERE id = {id_registro_compilado}
@@ -1791,7 +1763,6 @@ def atualizar_analise_compilada_paciente(id_paciente: str):
             status = 'processando',
             tentativas = tentativas + 1,
             erro_msg = NULL,
-            datetime_analise_iniciada = NOW(),
             datetime_analise_concluida = NULL,
             datetime_ultima_atualizacao_atendimento = NULL
         WHERE id = {id_registro_compilado}
@@ -1956,7 +1927,6 @@ def atualizar_analise_compilada_paciente(id_paciente: str):
             status = 'processando',
             tentativas = tentativas + 1,
             erro_msg = NULL,
-            datetime_analise_iniciada = NOW(),
             datetime_analise_concluida = NULL,
             datetime_ultima_atualizacao_atendimento = NULL
         WHERE id = {id_registro_compilado}
@@ -2121,7 +2091,6 @@ def atualizar_analise_compilada_paciente(id_paciente: str):
             status = 'processando',
             tentativas = tentativas + 1,
             erro_msg = NULL,
-            datetime_analise_iniciada = NOW(),
             datetime_analise_concluida = NULL,
             datetime_ultima_atualizacao_atendimento = NULL
         WHERE id = {id_registro_compilado}
@@ -3771,37 +3740,7 @@ def enriquecer_com_evidencias(resultado: dict, resultados_web: list,
         )
         resp.raise_for_status()
 
-        new_chat_id = chat_id
-        new_chat_url = chat_url
         markdown = ""
-        last_status = ""
-        inline_active = False
-
-        def _inline(msg):
-            sys.stdout.write(f'\r  {msg:<55}')
-            sys.stdout.flush()
-
-        def _newline():
-            sys.stdout.write('\n')
-            sys.stdout.flush()
-
-        def _log_wrapped(prefixo: str, msg: str):
-            texto = re.sub(r"\s+", " ", str(msg or "")).strip()
-            if not texto:
-                return
-
-            largura_terminal = shutil.get_terminal_size((140, 20)).columns
-            largura_util = max(50, largura_terminal - 36)
-            linhas = textwrap.wrap(
-                texto,
-                width=largura_util,
-                break_long_words=False,
-                break_on_hyphens=False,
-            ) or [texto]
-
-            for linha in linhas:
-                log.info(f"  {prefixo} {linha}")
-
         for raw_line in resp.iter_lines():
             if not raw_line:
                 continue
@@ -3810,53 +3749,11 @@ def enriquecer_com_evidencias(resultado: dict, resultados_web: list,
             except json.JSONDecodeError:
                 continue
             t = obj.get("type")
-            if t == "status":
-                msg = obj.get("content", "")
-                if msg == last_status:
-                    continue
-                last_status = msg
-                if "%" in msg:
-                    _inline(f'⏳ {msg}')
-                    inline_active = True
-                else:
-                    if inline_active:
-                        _newline()
-                        inline_active = False
-                    _log_wrapped('⏳', msg)
-            elif t == "log":
-                if inline_active:
-                    _newline()
-                    inline_active = False
-                log.info(f"  🔧 {obj.get('content', '').strip()}")
-            elif t == "chatid":
-                if inline_active:
-                    _newline()
-                    inline_active = False
-                new_chat_id = obj.get("content") or new_chat_id
-                log.info(f"  📎 chat_id: {new_chat_id}")
-            elif t == "markdown":
+            if t == "markdown":
                 markdown = obj.get("content", "")
-                _inline(f'📝 Recebendo: {len(markdown)} chars...')
-                inline_active = True
-            elif t == "finish":
-                if inline_active:
-                    _newline()
-                    inline_active = False
-                fin = obj.get("content", {})
-                new_chat_url = fin.get("url") or new_chat_url
-                new_chat_id = fin.get("chat_id") or new_chat_id
-                if not new_chat_id and new_chat_url:
-                    new_chat_id = new_chat_url.rstrip('/').split('/')[-1] or new_chat_id
-                log.info(f"  🔗 chat_url: {new_chat_url} | chat_id: {new_chat_id}")
             elif t == "error":
-                if inline_active:
-                    _newline()
-                    inline_active = False
                 log.warning(f"  ⚠️ Enriquecimento: LLM retornou erro: {obj.get('content')}")
                 return resultado
-
-        if inline_active:
-            _newline()
 
         if not markdown:
             log.warning("  ⚠️ Enriquecimento: LLM não retornou conteúdo.")
@@ -4069,7 +3966,6 @@ def main():
     garantir_tabela()
     garantir_coluna_dados_json()                 # garante dados_json em tabelas pré-existentes
     garantir_coluna_mensagens_acompanhamento()   # garante mensagens_acompanhamento em tabelas pré-existentes
-    garantir_coluna_datetime_analise_iniciada()  # garante datetime_analise_iniciada em tabelas pré-existentes
     garantir_colunas_v16()                       # garante colunas CDSS/RAG da V16 (modelo_llm, hash_prontuario, score_risco, etc.)
     garantir_schema_analise_compilada_paciente() # permite síntese longitudinal por id_paciente sem id_atendimento
     garantir_migracoes()                         # corrige tipos de colunas em tabelas pré-existentes
