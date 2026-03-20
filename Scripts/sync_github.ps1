@@ -224,7 +224,8 @@ function Invoke-Git {
         }
 
         if (-not $AllowFailure -and $exitCode -ne 0) {
-            throw "Git falhou: $($Args -join ' ')`n$($output -join \"`n\")"
+            $joinedOutput = ($output -join [Environment]::NewLine)
+            throw ("Git falhou: {0}{1}{2}" -f ($Args -join ' '), [Environment]::NewLine, $joinedOutput)
         }
         return $output
     } finally {
