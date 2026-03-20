@@ -1136,32 +1136,6 @@ def enfileirar_atendimentos_antigos(id_paciente: str) -> int:
         log.warning(f"  ⚠️ Erro ao salvar atendimentos antigos do paciente {id_paciente}: {e}")
         return 0
 
-    valores_sql = []
-    for at in atendimentos:
-        id_at  = int(at["id_atendimento"])
-        id_pac = esc(at.get("id_paciente") or id_paciente)
-        id_cri = esc(at.get("id_criador") or "0")
-        dt_ini = esc(at.get("datetime_consulta_inicio") or "0000-00-00 00:00:00")
-        valores_sql.append(
-            f"({id_at}, _utf8mb4'{id_pac}', _utf8mb4'{id_cri}', '{dt_ini}', 'pendente')"
-        )
-
-    if not valores_sql:
-        return 0
-
-    try:
-        resultado_insert = sql_exec(f"""
-            INSERT INTO {TABELA}
-                (id_atendimento, id_paciente, id_criador, datetime_atendimento_inicio, status)
-            VALUES
-                {", ".join(valores_sql)}
-            ON DUPLICATE KEY UPDATE
-                id_atendimento = id_atendimento
-        """)
-    except Exception as e:
-        log.warning(f"  ⚠️ Erro ao salvar atendimentos antigos do paciente {id_paciente}: {e}")
-        return 0
-
     enfileirados = int(resultado_insert.get("affected_rows") or 0)
 
     if enfileirados:
