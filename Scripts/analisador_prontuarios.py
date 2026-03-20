@@ -120,7 +120,7 @@ PHP_ACTION_WRITE = "api_exec"
 PHP_KEY_FIELD    = "api_key"
 
 # Nome do log com timestamp do momento de inicialização
-_log_ts   = datetime.now().strftime("%H_%M_%S-%d_%m_%Y")
+_log_ts   = datetime.now().strftime("%d_%m_%Y-%H_%M_%S")
 _log_file = f"logs/analisador_prontuarios-{_log_ts}.log"
 # ─────────────────────────────────────────────────────────────
 
