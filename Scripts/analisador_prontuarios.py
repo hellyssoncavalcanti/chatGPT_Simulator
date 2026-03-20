@@ -3365,11 +3365,14 @@ def analisar_prontuario(texto: str, chat_url: str = None, chat_id: str = None, c
     if not markdown:
         raise ValueError("Simulador não retornou conteúdo markdown.")
 
-    match = re.search(r'\{[\s\S]*\}', markdown)
-    if not match:
-        raise ValueError(f"LLM não retornou JSON válido: {markdown[:200]}")
+    try:
+        resultado = _parse_json_llm(markdown)
+    except Exception as parse_err:
+        preview = re.sub(r"\s+", " ", _strip_code_fences(markdown))[:500]
+        raise ValueError(
+            f"LLM não retornou JSON válido ({parse_err}). Prévia: {preview}"
+        ) from parse_err
 
-    resultado = json.loads(match.group())
     resultado["_chat_id"]       = new_chat_id
     resultado["_chat_url"]       = new_chat_url
     resultado["_chat_title"]     = new_chat_title
@@ -4317,12 +4320,14 @@ def enriquecer_com_evidencias(resultado: dict, resultados_web: list,
             log.warning("  ⚠️ Enriquecimento: LLM não retornou conteúdo.")
             return resultado
 
-        match = re.search(r'\{[\s\S]*\}', markdown)
-        if not match:
-            log.warning(f"  ⚠️ Enriquecimento: LLM não retornou JSON válido.")
+        try:
+            enriquecido = _parse_json_llm(markdown)
+        except Exception as parse_err:
+            preview = re.sub(r"\s+", " ", _strip_code_fences(markdown))[:500]
+            log.warning(
+                f"  ⚠️ Enriquecimento: LLM não retornou JSON válido ({parse_err}). Prévia: {preview}"
+            )
             return resultado
-
-        enriquecido = json.loads(match.group())
 
         # Merge: substitui condutas apenas se a LLM retornou algo não-vazio
         condutas_esp = enriquecido.get("condutas_especificas_sugeridas")
