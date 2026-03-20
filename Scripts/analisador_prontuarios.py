@@ -1344,6 +1344,18 @@ def _stringify_compact(value) -> str:
     return str(parsed or "").strip()
 
 
+def _valor_compilado_para_prompt(value, max_chars: int = 1200):
+    try:
+        parsed = json.loads(value) if isinstance(value, str) else value
+    except Exception:
+        parsed = value
+
+    if isinstance(parsed, str):
+        texto = re.sub(r"\s+", " ", parsed).strip()
+        return texto[:max_chars]
+    return parsed
+
+
 def montar_texto_compilado_paciente(id_paciente: str):
     rows = sql_exec(f"""
         SELECT
@@ -1372,66 +1384,83 @@ def montar_texto_compilado_paciente(id_paciente: str):
         WHERE id_paciente = '{esc(id_paciente)}'
           AND status = 'concluido'
           AND id_atendimento IS NOT NULL
-        ORDER BY datetime_atendimento_inicio DESC, id_atendimento DESC
-        LIMIT 25
+        ORDER BY datetime_atendimento_inicio ASC, id_atendimento ASC
+        LIMIT 50
     """, reason="carregar_analises_paciente_compilado").get("data", [])
 
     if not rows:
         return "", None
 
-    blocos = []
-    for idx, row in enumerate(rows, start=1):
-        linhas = [
-            f"ATENDIMENTO #{idx}",
-            f"id_atendimento: {row.get('id_atendimento')}",
-            f"data_atendimento: {row.get('datetime_atendimento_inicio') or 'sem_data'}",
-        ]
-        if row.get("resumo_texto"):
-            linhas.append(f"resumo_texto: {row['resumo_texto']}")
+    historico = []
+    datas = []
+    campos_detalhe = [
+        "gravidade_clinica",
+        "diagnosticos_citados",
+        "pontos_chave",
+        "mudancas_relevantes",
+        "sinais_nucleares",
+        "eventos_comportamentais",
+        "terapias_referidas",
+        "exames_citados",
+        "pendencias_clinicas",
+        "condutas_no_prontuario",
+        "medicacoes_em_uso",
+        "medicacoes_iniciadas",
+        "medicacoes_suspensas",
+        "condutas_especificas_sugeridas",
+        "condutas_gerais_sugeridas",
+        "mensagens_acompanhamento",
+    ]
 
-        for campo in [
-            "gravidade_clinica",
-            "diagnosticos_citados",
-            "pontos_chave",
-            "mudancas_relevantes",
-            "sinais_nucleares",
-            "eventos_comportamentais",
-            "terapias_referidas",
-            "exames_citados",
-            "pendencias_clinicas",
-            "condutas_no_prontuario",
-            "medicacoes_em_uso",
-            "medicacoes_iniciadas",
-            "medicacoes_suspensas",
-            "condutas_especificas_sugeridas",
-            "condutas_gerais_sugeridas",
-            "mensagens_acompanhamento",
-        ]:
-            val = _stringify_compact(row.get(campo))
-            if val:
-                linhas.append(f"{campo}: {val}")
-        blocos.append("\n".join(linhas))
+    for idx, row in enumerate(rows, start=1):
+        dt_at = row.get("datetime_atendimento_inicio") or ""
+        if dt_at:
+            datas.append(dt_at)
+
+        item = {
+            "ordem_cronologica": idx,
+            "id_atendimento": row.get("id_atendimento"),
+            "datetime_atendimento_inicio": dt_at or None,
+            "resumo_texto": _valor_compilado_para_prompt(row.get("resumo_texto") or "", max_chars=1500),
+        }
+
+        for campo in campos_detalhe:
+            valor = _valor_compilado_para_prompt(row.get(campo))
+            if valor not in (None, "", [], {}):
+                item[campo] = valor
+
+        historico.append(item)
+
+    payload_compilado = {
+        "id_paciente": id_paciente,
+        "total_atendimentos_analisados": len(historico),
+        "periodo_primeiro_atendimento": datas[0] if datas else None,
+        "periodo_ultimo_atendimento": datas[-1] if datas else None,
+        "atendimentos": historico,
+    }
 
     texto = (
         f"HISTÓRICO LONGITUDINAL COMPILADO DO PACIENTE {id_paciente}\n"
-        "Os blocos abaixo representam análises estruturadas já concluídas deste paciente.\n"
-        "Consolide o histórico completo do paciente, sintetizando padrões persistentes, mudanças relevantes, terapias, medicações, riscos, pendências e condutas, sem inventar dados.\n\n"
-        + "\n\n" + ("\n\n" + ("=" * 70) + "\n\n").join(blocos)
+        "O conteúdo abaixo representa TODOS os atendimentos estruturados já concluídos deste paciente em ordem cronológica.\n"
+        "Sua tarefa é consolidar o histórico longitudinal completo, identificando padrões persistentes, mudanças entre consultas, terapias, medicações, riscos, pendências e condutas.\n"
+        "NÃO copie apenas o último atendimento; compare e sintetize o conjunto completo do histórico abaixo.\n\n"
+        "DADOS COMPILADOS (JSON):\n"
+        + json.dumps(payload_compilado, ensure_ascii=False, indent=2)
     )
-    return texto, rows[0]
+    return texto, rows[-1]
 
 
 def salvar_resultado_compilado_paciente(id_paciente: str, resultado: dict):
     id_registro = garantir_registro_compilado_paciente_pendente(id_paciente)
 
-    sets = [
+    sets = _montar_sets_resultado(resultado) + [
         "id_atendimento = NULL",
         "datetime_atendimento_inicio = NULL",
         "datetime_ultima_atualizacao_atendimento = NULL",
         "id_criador = NULL",
         "hash_prontuario = 'analise_compilada_paciente'",
         f"id_paciente = '{esc(id_paciente)}'",
-    ] + _montar_sets_resultado(resultado)
+    ]
 
     sql_exec(
         f"UPDATE {TABELA} SET\n    " + ",\n    ".join(sets) + f"\nWHERE id = {id_registro}"
