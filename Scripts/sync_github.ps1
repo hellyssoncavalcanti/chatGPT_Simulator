@@ -64,6 +64,22 @@ function Write-Log([string]$Message) {
     "$ts $Message" | Out-File -FilePath $script:LogFile -Append -Encoding utf8
 }
 
+function Resolve-TempRoot {
+    $candidates = @(
+        $env:TEMP,
+        $env:TMP,
+        $env:TMPDIR,
+        [System.IO.Path]::GetTempPath()
+    ) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+
+    $tempRoot = $candidates | Select-Object -First 1
+    if (-not $tempRoot) {
+        throw 'Nao foi possivel determinar uma pasta temporaria para o sync.'
+    }
+
+    return [System.IO.Path]::GetFullPath($tempRoot)
+}
+
 function Initialize-Logging {
     $logDir = Join-Path $script:Config.localDir 'logs'
     if (-not (Test-Path $logDir)) {
@@ -74,20 +90,22 @@ function Initialize-Logging {
 }
 
 function Import-Settings {
-    $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+    $scriptPath = $PSCommandPath
+    if ([string]::IsNullOrWhiteSpace($scriptPath)) {
+        $scriptPath = $MyInvocation.MyCommand.Path
+    }
+    if ([string]::IsNullOrWhiteSpace($scriptPath)) {
+        throw 'Nao foi possivel resolver o caminho do proprio script sync_github.ps1.'
+    }
+
+    $scriptDir = Split-Path -Parent $scriptPath
     $settingsCandidates = @(
         (Join-Path $scriptDir 'sync_github_settings.ps1'),
         (Join-Path $scriptDir 'sync_github.settings.ps1')
     )
-    $exampleCandidates = @(
-        (Join-Path $scriptDir 'sync_github_settings.ps1.example'),
-        (Join-Path $scriptDir 'sync_github.settings.ps1.example')
-    )
 
     $settingsPath = $settingsCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
-    $examplePath = $exampleCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
     if (-not $settingsPath) { $settingsPath = $settingsCandidates[0] }
-    if (-not $examplePath) { $examplePath = $exampleCandidates[0] }
 
     $defaults = [ordered]@{
         githubToken         = $env:CHATGPT_SIMULATOR_GITHUB_TOKEN
@@ -103,9 +121,9 @@ function Import-Settings {
 
     if (Test-Path $settingsPath) {
         . $settingsPath
-        Write-Host "Usando configuracao local: $settingsPath" -ForegroundColor DarkGray
-    } elseif (Test-Path $examplePath) {
-        Write-Host "Configuracao local nao encontrada. Use o exemplo em: $examplePath" -ForegroundColor DarkGray
+        Write-Host "Usando configuracao do sync: $settingsPath" -ForegroundColor DarkGray
+    } else {
+        Write-Host "Configuracao do sync nao encontrada em disco; usando defaults internos do script." -ForegroundColor DarkGray
     }
 
     foreach ($key in $defaults.Keys) {
@@ -119,9 +137,9 @@ function Import-Settings {
     $script:Config.scriptDir = $scriptDir
     $script:Config.syncBatPath = Join-Path $script:Config.localDir 'sync_github.bat'
     $script:Config.syncPs1Path = Join-Path $script:Config.localDir 'Scripts\sync_github.ps1'
-    $script:Config.settingsExamplePath = $examplePath
     $script:Config.settingsPath = $settingsPath
-    $script:Config.tempDir = Join-Path $env:TEMP 'sync_chatgpt'
+    $tempRoot = Resolve-TempRoot
+    $script:Config.tempDir = Join-Path $tempRoot 'sync_chatgpt'
     $script:Config.lockFile = Join-Path $script:Config.tempDir 'sync_github.lock'
     $script:Config.apiBase = if ($script:Config.ghUser -and $script:Config.repo) { "https://api.github.com/repos/$($script:Config.ghUser)/$($script:Config.repo)" } else { $null }
     $script:Config.headers = @{
@@ -136,8 +154,6 @@ function Import-Settings {
         'Scripts\sync_github.ps1',
         'Scripts\sync_github_settings.ps1',
         'Scripts\sync_github.settings.ps1',
-        'Scripts\sync_github_settings.ps1.example',
-        'Scripts\sync_github.settings.ps1.example',
         'chrome_profile'
     )
 }

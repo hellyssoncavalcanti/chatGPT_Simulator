@@ -355,8 +355,8 @@ Na prática, esse PHP parece funcionar como ponte entre a aplicação principal 
 - **`sync_github.bat`** / **`Scripts/sync_github.ps1`**
   Sincronizam o repositório no Windows, tentam mergear automaticamente o PR aberto mais recente, fecham PRs mais antigos, atualizam os arquivos locais e, quando houver mudanças, reiniciam em sequência o `Scripts/main.py` e o `Scripts/analisador_prontuarios.py`. Também aceitam `install-task` para registrar uma tarefa agendada no Windows a cada 10 minutos.
 
-- **`Scripts\sync_github_settings.ps1`** *(local, não versionado)*
-  Arquivo opcional de configuração local do sync automático. Deve conter token, usuário, branch, caminhos e padrões de processo. **Esse arquivo é tratado como protegido pelo sync e não deve ser sobrescrito no Windows.**
+- **`Scripts\sync_github_settings.ps1`** *(versionado com valores-base de exemplo)*
+  Arquivo de configuração do sync automático. No repositório ele fica com parâmetros-base de exemplo; na máquina Windows ele pode ser personalizado localmente. **Esse arquivo é tratado como protegido pelo sync e não deve ser sobrescrito no Windows.**
 
 - **`abrir_cmd_nesta_pasta.bat`**  
   Abre um CMD elevado com menu para executar os `.bat` do projeto.
@@ -368,7 +368,7 @@ Na prática, esse PHP parece funcionar como ponte entre a aplicação principal 
 Esta automação existe para manter a pasta `C:\chatgpt_simulator` alinhada com o GitHub sem intervenção manual. O fluxo pensado para outra LLM entender é este:
 
 1. `sync_github.bat` chama `Scripts\sync_github.ps1`.
-2. O PowerShell carrega primeiro `Scripts\sync_github_settings.ps1` se ele existir; por compatibilidade, também aceita o nome antigo `Scripts\sync_github.settings.ps1`.
+2. O PowerShell carrega primeiro `Scripts\sync_github_settings.ps1`; por compatibilidade, também aceita o nome antigo `Scripts\sync_github.settings.ps1`.
 3. O script cria um lock para evitar duas execuções simultâneas quando a tarefa agendada roda a cada 10 minutos.
 4. Se houver token GitHub configurado, ele lista PRs abertos na branch alvo, fecha os mais antigos e tenta mergear o PR aberto mais recente.
 5. Em seguida ele faz um clone temporário da branch principal, compara os arquivos rastreados e copia apenas os novos/alterados para `C:\chatgpt_simulator`.
@@ -383,7 +383,6 @@ Para evitar perda de estado local, o sync **não deve sobrescrever** estes itens
 - `Scripts\sync_github.ps1`
 - `Scripts\sync_github_settings.ps1`
 - `Scripts\sync_github.settings.ps1` *(compatibilidade com nome antigo)*
-- os arquivos de exemplo de configuração do sync
 - toda a pasta `chrome_profile\`
 
 ### Arquivos exatos desta automação no repositório
@@ -392,19 +391,19 @@ Se outra LLM ou um revisor humano estiver procurando os arquivos do sync no repo
 
 - `sync_github.bat`
 - `Scripts\sync_github.ps1`
-- `Scripts\sync_github_settings.ps1.example`
-- `.gitignore` *(contendo a exclusão do arquivo local real `Scripts\sync_github_settings.ps1`)*
+- `Scripts\sync_github_settings.ps1`
+- `.gitignore` *(mantendo apenas a compatibilidade com o nome legado `Scripts\sync_github.settings.ps1`)*
 
-O arquivo `Scripts\sync_github_settings.ps1` **não aparece versionado de propósito**, porque ele é local, sensível e deve continuar apenas na máquina Windows de execução.
+O arquivo `Scripts\sync_github_settings.ps1` agora faz parte do repositório com valores-base de exemplo, mas o sync continua tratando-o como protegido para não sobrescrever a versão personalizada existente na máquina Windows.
 
 ### Convenção recomendada para configuração local do sync
 
 A convenção atual recomendada para qualquer operador humano ou outra LLM é:
 
-- arquivo local real: `Scripts\sync_github_settings.ps1`
-- arquivo de exemplo versionado: `Scripts\sync_github_settings.ps1.example`
-- nunca commitar o arquivo real com token
-- nunca depender que o `git pull`/sync substitua esse arquivo local
+- arquivo versionado/base: `Scripts\sync_github_settings.ps1`
+- uso no Windows: personalize esse mesmo arquivo localmente
+- não dependa que o sync substitua esse arquivo local, porque ele é protegido
+- o nome antigo `Scripts\sync_github.settings.ps1` continua aceito apenas por compatibilidade
 
 ### Agendamento
 
