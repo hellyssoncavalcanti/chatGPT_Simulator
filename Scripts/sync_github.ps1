@@ -199,6 +199,26 @@ function Get-GitExe {
     throw 'Git nao encontrado. Instale o Git for Windows antes de usar a automacao.'
 }
 
+function Get-CommandExecutablePath {
+    param([string[]]$Names)
+
+    foreach ($name in $Names) {
+        $cmd = Get-Command $name -ErrorAction SilentlyContinue
+        if (-not $cmd) { continue }
+
+        $path = $cmd.Path
+        if ([string]::IsNullOrWhiteSpace($path)) {
+            $path = $cmd.Source
+        }
+
+        if (-not [string]::IsNullOrWhiteSpace($path) -and (Test-Path $path)) {
+            return $path
+        }
+    }
+
+    return $null
+}
+
 function Invoke-Git {
     param(
         [Parameter(Mandatory = $true)][string[]]$Args,
@@ -429,19 +449,34 @@ function Sync-FilesFromMirror {
     Write-Ok ("Resumo: $added novo(s), $updated atualizado(s), $unchanged inalterado(s), $protectedCount protegido(s)")
 }
 
-function Get-PythonCommandLine {
+function Get-PythonCommandSpec {
     $venvPython = Join-Path $script:Config.localDir '.venv\Scripts\python.exe'
     if (Test-Path $venvPython) {
-        return @($venvPython)
+        return @{
+            FilePath   = $venvPython
+            PrefixArgs = @()
+            Display    = $venvPython
+        }
     }
-    $py = Get-Command py.exe -ErrorAction SilentlyContinue
-    if ($py) {
-        return @($py.Source, '-3')
+
+    $pyPath = Get-CommandExecutablePath -Names @('py', 'py.exe')
+    if ($pyPath) {
+        return @{
+            FilePath   = $pyPath
+            PrefixArgs = @('-3')
+            Display    = "$pyPath -3"
+        }
     }
-    $python = Get-Command python.exe -ErrorAction SilentlyContinue
-    if ($python) {
-        return @($python.Source)
+
+    $pythonPath = Get-CommandExecutablePath -Names @('python', 'python.exe')
+    if ($pythonPath) {
+        return @{
+            FilePath   = $pythonPath
+            PrefixArgs = @()
+            Display    = $pythonPath
+        }
     }
+
     throw 'Python nao encontrado para reiniciar os processos.'
 }
 
@@ -473,24 +508,21 @@ function Stop-ManagedProcesses {
 function Start-ManagedProcesses {
     Write-Section 'REINICIANDO PROCESSOS'
 
-    $pythonCmd = Get-PythonCommandLine
+    $pythonSpec = Get-PythonCommandSpec
     $mainScript = Join-Path $script:Config.localDir 'Scripts\main.py'
     $analyzerScript = Join-Path $script:Config.localDir 'Scripts\analisador_prontuarios.py'
 
     if (-not (Test-Path $mainScript)) { throw "Arquivo nao encontrado: $mainScript" }
     if (-not (Test-Path $analyzerScript)) { throw "Arquivo nao encontrado: $analyzerScript" }
+    if (-not (Test-Path $pythonSpec.FilePath)) { throw "Python nao encontrado em: $($pythonSpec.FilePath)" }
 
-    $mainArgs = @($mainScript)
-    $analyzerArgs = @($analyzerScript)
-    if ($pythonCmd.Count -gt 1) {
-        $prefixArgs = @($pythonCmd[1..($pythonCmd.Count - 1)])
-        $mainArgs = @($prefixArgs + @($mainScript))
-        $analyzerArgs = @($prefixArgs + @($analyzerScript))
-    }
+    $mainArgs = @($pythonSpec.PrefixArgs + @($mainScript))
+    $analyzerArgs = @($pythonSpec.PrefixArgs + @($analyzerScript))
 
-    Start-Process -FilePath $pythonCmd[0] -ArgumentList $mainArgs -WorkingDirectory $script:Config.localDir -WindowStyle Minimized | Out-Null
+    Write-Info ("Usando Python: $($pythonSpec.Display)")
+    Start-Process -FilePath $pythonSpec.FilePath -ArgumentList $mainArgs -WorkingDirectory $script:Config.localDir -WindowStyle Minimized | Out-Null
     Start-Sleep -Seconds 5
-    Start-Process -FilePath $pythonCmd[0] -ArgumentList $analyzerArgs -WorkingDirectory $script:Config.localDir -WindowStyle Minimized | Out-Null
+    Start-Process -FilePath $pythonSpec.FilePath -ArgumentList $analyzerArgs -WorkingDirectory $script:Config.localDir -WindowStyle Minimized | Out-Null
 
     Write-Ok 'ChatGPT Simulator e analisador de prontuarios reiniciados.'
 }
@@ -540,45 +572,82 @@ function Show-Summary {
     Write-Host '========================================' -ForegroundColor White
 }
 
-try {
+function Reset-CycleState {
+    $script:RestartRequested = $false
+    $script:UpdatedFiles = New-Object System.Collections.Generic.List[string]
+    $script:AddedFiles = New-Object System.Collections.Generic.List[string]
+    $script:ProtectedFiles = New-Object System.Collections.Generic.List[string]
+    $script:RepoMirror = $null
+    $script:LogFile = $null
+}
+
+function Run-SyncCycle {
+    Reset-CycleState
     Import-Settings
     Assert-Configuration
     Initialize-Logging
     Acquire-Lock
-    $script:GitExe = Get-GitExe
+    try {
+        $script:GitExe = Get-GitExe
 
-    Write-Info "Repositorio local: $($script:Config.localDir)"
-    Write-Info "Branch monitorada: $($script:Config.branch)"
+        Write-Info "Repositorio local: $($script:Config.localDir)"
+        Write-Info "Branch monitorada: $($script:Config.branch)"
+
+        Merge-NewestPullRequest
+        Fetch-RepositoryMirror
+        Sync-FilesFromMirror
+
+        if ($script:RestartRequested) {
+            Stop-ManagedProcesses
+            Start-ManagedProcesses
+        } else {
+            Write-Info 'Nenhum arquivo novo/atualizado. Reinicio nao necessario.'
+        }
+
+        Show-Summary
+    } finally {
+        Release-Lock
+    }
+}
+
+try {
+    Import-Settings
+    Assert-Configuration
 
     if ($script:InstallTask) {
         Register-AutoSyncTask
-        return
+        exit 0
     }
 
     if ($script:UninstallTask) {
         Unregister-AutoSyncTask
-        return
+        exit 0
     }
 
-    Merge-NewestPullRequest
-    Fetch-RepositoryMirror
-    Sync-FilesFromMirror
+    do {
+        try {
+            Run-SyncCycle
+            if (-not $script:IsScheduled) {
+                exit 0
+            }
+        } catch {
+            if ($script:LogFile) {
+                Write-Log $_.Exception.ToString()
+            }
+            Write-Fail $_.Exception.Message
+            if (-not $script:IsScheduled) {
+                exit 1
+            }
+        }
 
-    if ($script:RestartRequested) {
-        Stop-ManagedProcesses
-        Start-ManagedProcesses
-    } else {
-        Write-Info 'Nenhum arquivo novo/atualizado. Reinicio nao necessario.'
-    }
-
-    Show-Summary
-    exit 0
+        $intervalMinutes = [math]::Max(1, [int]$script:Config.syncIntervalMinutes)
+        Write-Info ("Modo agendado persistente: aguardando {0} minuto(s) para a proxima conferencia." -f $intervalMinutes)
+        Start-Sleep -Seconds ($intervalMinutes * 60)
+    } while ($script:IsScheduled)
 } catch {
     if ($script:LogFile) {
         Write-Log $_.Exception.ToString()
     }
     Write-Fail $_.Exception.Message
     exit 1
-} finally {
-    Release-Lock
 }

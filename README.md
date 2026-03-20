@@ -410,6 +410,7 @@ A convenção atual recomendada para qualquer operador humano ou outra LLM é:
 - `sync_github.bat install-task` registra a tarefa agendada do Windows.
 - `sync_github.bat uninstall-task` remove a tarefa.
 - a frequência padrão é de 10 minutos, configurável em `syncIntervalMinutes`.
+- quando executado com `--scheduled`, o próprio `sync_github.ps1` entra em modo persistente e repete automaticamente a conferência a cada intervalo configurado.
 
 ---
 
