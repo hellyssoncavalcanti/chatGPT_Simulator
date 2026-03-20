@@ -81,6 +81,25 @@ function Resolve-TempRoot {
     return [System.IO.Path]::GetFullPath($tempRoot)
 }
 
+function Test-IsPlaceholderValue([string]$Value) {
+    if ([string]::IsNullOrWhiteSpace($Value)) {
+        return $false
+    }
+
+    return $Value -in @(
+        'COLE_SEU_TOKEN_AQUI',
+        'seu_usuario_ou_org'
+    )
+}
+
+function Normalize-RelativePath([string]$PathValue) {
+    if ([string]::IsNullOrWhiteSpace($PathValue)) {
+        return ''
+    }
+
+    return $PathValue.Replace('/', '\').TrimStart('.', '\').ToLowerInvariant()
+}
+
 function Initialize-Logging {
     $logDir = Join-Path $script:Config.localDir 'logs'
     if (-not (Test-Path $logDir)) {
@@ -133,6 +152,13 @@ function Import-Settings {
         } else {
             $script:Config[$key] = $defaults[$key]
         }
+    }
+
+    if (Test-IsPlaceholderValue $script:Config.githubToken) {
+        $script:Config.githubToken = $null
+    }
+    if (Test-IsPlaceholderValue $script:Config.ghUser) {
+        throw "Configuracao invalida em $settingsPath: substitua 'seu_usuario_ou_org' pelo usuario real do GitHub."
     }
 
     $script:Config.scriptDir = $scriptDir
@@ -374,9 +400,9 @@ function Fetch-RepositoryMirror {
 }
 
 function Test-IsProtectedPath([string]$RelativePath) {
-    $pathLower = $RelativePath.ToLowerInvariant()
+    $pathLower = Normalize-RelativePath $RelativePath
     foreach ($item in $script:Config.protectedItems) {
-        $protected = $item.ToLowerInvariant()
+        $protected = Normalize-RelativePath $item
         if ($pathLower -eq $protected -or $pathLower.StartsWith("$protected\\")) {
             return $true
         }

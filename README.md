@@ -403,6 +403,7 @@ A convenção atual recomendada para qualquer operador humano ou outra LLM é:
 - arquivo versionado/base: `Scripts\sync_github_settings.ps1`
 - uso no Windows: personalize esse mesmo arquivo localmente
 - não dependa que o sync substitua esse arquivo local, porque ele é protegido
+- substitua os placeholders `COLE_SEU_TOKEN_AQUI` e `seu_usuario_ou_org` antes de tentar processar PRs ou clonar um repositório privado
 - o nome antigo `Scripts\sync_github.settings.ps1` continua aceito apenas por compatibilidade
 
 ### Agendamento
