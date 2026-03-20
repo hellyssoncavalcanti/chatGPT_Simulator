@@ -4525,7 +4525,16 @@ header('Content-Type: application/javascript; charset=utf-8');
                         WHERE id_paciente = ${idPaciente}
                           AND id_atendimento IS NULL
                           AND id_criador IS NULL
-                        ORDER BY datetime_analise_concluida DESC, id DESC
+                        ORDER BY
+                            CASE
+                                WHEN status = 'processando' THEN 0
+                                WHEN status = 'pendente' THEN 1
+                                WHEN status = 'erro' THEN 2
+                                WHEN status = 'concluido' THEN 3
+                                ELSE 4
+                            END ASC,
+                            datetime_analise_concluida DESC,
+                            id DESC
                         LIMIT 1
                     `),
                     reason: 'Busca síntese longitudinal compilada do paciente'

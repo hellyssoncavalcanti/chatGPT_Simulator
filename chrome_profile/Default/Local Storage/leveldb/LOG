@@ -1,0 +1,20 @@
+2026/03/18-04:59:16.596 3ab4 Reusing MANIFEST C:\chatgpt_simulator\chrome_profile\Default\Local Storage\leveldb/MANIFEST-000001
+2026/03/18-04:59:16.603 3ab4 Recovering log #4817
+2026/03/18-04:59:16.603 3ab4 Level-0 table #4820: started
+2026/03/18-04:59:16.626 3ab4 Level-0 table #4820: 20527 bytes OK
+2026/03/18-04:59:16.631 3ab4 Delete type=0 #4817
+2026/03/18-04:59:16.632 4220 Compacting 4@0 + 1@1 files
+2026/03/18-04:59:16.652 4220 Generated table #4822@0: 43 keys, 183771 bytes
+2026/03/18-04:59:16.653 4220 Compacted 4@0 + 1@1 files => 183771 bytes
+2026/03/18-04:59:16.655 4220 compacted to: files[ 0 1 1 0 0 0 0 ]
+2026/03/18-04:59:16.656 4220 Delete type=2 #4812
+2026/03/18-04:59:16.656 4220 Delete type=2 #4814
+2026/03/18-04:59:16.656 4220 Delete type=2 #4816
+2026/03/18-04:59:16.656 4220 Delete type=2 #4818
+2026/03/18-04:59:16.656 4220 Delete type=2 #4820
+2026/03/18-05:00:16.655 4220 Level-0 table #4824: started
+2026/03/18-05:00:16.672 4220 Level-0 table #4824: 68329 bytes OK
+2026/03/18-05:00:16.675 4220 Delete type=0 #4821
+2026/03/18-05:21:34.313 4220 Level-0 table #4826: started
+2026/03/18-05:21:34.322 4220 Level-0 table #4826: 55588 bytes OK
+2026/03/18-05:21:34.325 4220 Delete type=0 #4823

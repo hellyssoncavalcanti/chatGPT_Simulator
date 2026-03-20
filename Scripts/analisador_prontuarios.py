@@ -1273,6 +1273,45 @@ def resetar_travados():
     return afetados
 
 
+def resetar_analises_interrompidas_no_startup():
+    """
+    Ao subir o analisador, limpa datetime_analise_iniciada de registros que
+    ficaram interrompidos sem conclusão válida na execução anterior.
+
+    Isso evita que o sistema trate como "análise já iniciada" algo que será
+    reprocessado do zero após uma parada/queda do processo Python.
+    """
+    resultado = sql_exec(
+        f"""
+        UPDATE {TABELA}
+        SET
+            status = CASE
+                        WHEN status = 'processando' THEN 'pendente'
+                        ELSE status
+                     END,
+            datetime_analise_iniciada = NULL,
+            erro_msg = CONCAT(
+                COALESCE(erro_msg, ''),
+                ' | [AUTO-RESET-STARTUP] datetime_analise_iniciada zerado em ',
+                NOW(),
+                ' após interrupção anterior sem conclusão válida'
+            )
+        WHERE
+            datetime_analise_iniciada IS NOT NULL
+            AND (
+                datetime_analise_concluida IS NULL
+                OR datetime_analise_concluida = '0000-00-00 00:00:00'
+            )
+        """
+    )
+    afetados = resultado.get('affected_rows', 0)
+    if afetados:
+        log.warning(
+            f"⚠️  {afetados} registro(s) com análise interrompida tiveram datetime_analise_iniciada resetado no startup."
+        )
+    return afetados
+
+
 def _montar_sets_resultado(resultado: dict) -> list:
     colunas  = _get_colunas_tabela()
     chat_id  = esc(resultado.get("_chat_id")  or "")
@@ -1472,6 +1511,12 @@ def atualizar_analise_compilada_paciente(id_paciente: str):
     enfileirados = enfileirar_atendimentos_antigos(id_paciente)
     pendentes = contar_atendimentos_nao_concluidos_paciente(id_paciente)
     if pendentes > 0:
+        try:
+            garantir_registro_compilado_paciente_pendente(id_paciente)
+        except Exception as e:
+            log.warning(
+                f"  ⚠️ Falha ao garantir registro pendente da síntese compilada do paciente {id_paciente}: {e}"
+            )
         log.info(
             f"⏳ Síntese compilada adiada para paciente {id_paciente}: "
             f"{pendentes} atendimento(s) ainda não concluído(s)"
@@ -1647,6 +1692,12 @@ def atualizar_analise_compilada_paciente(id_paciente: str):
     enfileirados = enfileirar_atendimentos_antigos(id_paciente)
     pendentes = contar_atendimentos_nao_concluidos_paciente(id_paciente)
     if pendentes > 0:
+        try:
+            garantir_registro_compilado_paciente_pendente(id_paciente)
+        except Exception as e:
+            log.warning(
+                f"  ⚠️ Falha ao garantir registro pendente da síntese compilada do paciente {id_paciente}: {e}"
+            )
         log.info(
             f"⏳ Síntese compilada adiada para paciente {id_paciente}: "
             f"{pendentes} atendimento(s) ainda não concluído(s)"
@@ -2142,6 +2193,12 @@ def atualizar_analise_compilada_paciente(id_paciente: str):
     enfileirados = enfileirar_atendimentos_antigos(id_paciente)
     pendentes = contar_atendimentos_nao_concluidos_paciente(id_paciente)
     if pendentes > 0:
+        try:
+            garantir_registro_compilado_paciente_pendente(id_paciente)
+        except Exception as e:
+            log.warning(
+                f"  ⚠️ Falha ao garantir registro pendente da síntese compilada do paciente {id_paciente}: {e}"
+            )
         log.info(
             f"⏳ Síntese compilada adiada para paciente {id_paciente}: "
             f"{pendentes} atendimento(s) ainda não concluído(s)"
@@ -4507,6 +4564,7 @@ def main():
     garantir_schema_analise_compilada_paciente() # permite síntese longitudinal por id_paciente sem id_atendimento
     garantir_migracoes()                         # corrige tipos de colunas em tabelas pré-existentes
     garantir_tabela_embeddings()                 # garante tabelas de embeddings + casos semelhantes
+    resetar_analises_interrompidas_no_startup()  # limpa inícios de análise sem conclusão válida após quedas/interrupções
 
     llm_estava_fora = False   # rastreia se houve queda para logar a reconexão
     ciclo = 0
