@@ -21,6 +21,7 @@ $script:RepoMirror = $null
 $script:GitExe = $null
 $script:Config = [ordered]@{}
 $script:LastMergeInfo = $null
+$script:CanWriteRepo = $true
 
 foreach ($arg in ($RemainingArgs | Where-Object { $_ -and $_.Trim() })) {
     switch ($arg.ToLowerInvariant()) {
@@ -288,11 +289,25 @@ function Merge-NewestPullRequest {
     Write-Section 'PULL REQUESTS'
 
     if (-not $script:Config.githubToken) {
+        $script:CanWriteRepo = $false
         Write-Warn 'Token GitHub nao configurado; etapa de PR sera ignorada, mas o sync dos arquivos ainda sera tentado.'
         return
     }
 
-    $prsResponse = Invoke-GitHubApi -Uri "$($script:Config.apiBase)/pulls?state=open&base=$($script:Config.branch)&per_page=100&sort=created&direction=desc"
+    try {
+        $prsResponse = Invoke-GitHubApi -Uri "$($script:Config.apiBase)/pulls?state=open&base=$($script:Config.branch)&per_page=100&sort=created&direction=desc"
+    } catch {
+        $statusCode = $null
+        try { $statusCode = [int]$_.Exception.Response.StatusCode.value__ } catch {}
+
+        if ($statusCode -in @(401, 403)) {
+            $script:CanWriteRepo = $false
+            Write-Warn ("Token sem autorizacao para processar PRs (HTTP {0}). O sync dos arquivos continuara." -f $statusCode)
+            return
+        }
+
+        throw
+    }
     $prsArray = @($prsResponse)
     if ($prsArray.Count -eq 1 -and $prsArray[0] -is [System.Array]) {
         $prsArray = @($prsArray[0])
@@ -579,6 +594,7 @@ function Reset-CycleState {
     $script:ProtectedFiles = New-Object System.Collections.Generic.List[string]
     $script:RepoMirror = $null
     $script:LogFile = $null
+    $script:CanWriteRepo = $true
 }
 
 function Run-SyncCycle {
@@ -611,15 +627,16 @@ function Run-SyncCycle {
 }
 
 try {
-    Import-Settings
-    Assert-Configuration
-
     if ($script:InstallTask) {
+        Import-Settings
+        Assert-Configuration
         Register-AutoSyncTask
         exit 0
     }
 
     if ($script:UninstallTask) {
+        Import-Settings
+        Assert-Configuration
         Unregister-AutoSyncTask
         exit 0
     }
