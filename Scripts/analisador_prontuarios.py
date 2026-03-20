@@ -79,7 +79,7 @@ _ensure("numpy")
 # ─────────────────────────────────────────────────────────────
 # IMPORTS NORMAIS
 # ─────────────────────────────────────────────────────────────
-import time, json, logging, re, html as html_mod, requests, hashlib, shutil, textwrap
+import time, json, logging, re, html as html_mod, requests, hashlib, shutil
 from html.parser import HTMLParser
 from datetime import datetime
 
@@ -3236,27 +3236,17 @@ def analisar_prontuario(texto: str, chat_url: str = None, chat_id: str = None, c
         sys.stdout.write('\n')
         sys.stdout.flush()
 
-    def _log_wrapped(prefixo: str, msg: str):
-        """
-        Loga mensagens longas em múltiplas linhas reais para evitar que o
-        próximo progresso inline (\r) sobrescreva o trecho final quando o
-        terminal fizer quebra visual automática.
-        """
+    def _inline_status(prefixo: str, msg: str):
         texto = re.sub(r"\s+", " ", str(msg or "")).strip()
         if not texto:
             return
 
         largura_terminal = shutil.get_terminal_size((140, 20)).columns
-        largura_util = max(50, largura_terminal - 36)  # reserva espaço do timestamp/logger
-        linhas = textwrap.wrap(
-            texto,
-            width=largura_util,
-            break_long_words=False,
-            break_on_hyphens=False,
-        ) or [texto]
-
-        for linha in linhas:
-            log.info(f"  {prefixo} {linha}")
+        largura_util = max(30, largura_terminal - 6)
+        mensagem = f"{prefixo} {texto}"
+        if len(mensagem) > largura_util:
+            mensagem = mensagem[:max(0, largura_util - 3)].rstrip() + "..."
+        _inline(mensagem)
 
     last_status = ""
     inline_active = False  # True quando ha uma linha inline aberta
@@ -3275,16 +3265,8 @@ def analisar_prontuario(texto: str, chat_url: str = None, chat_id: str = None, c
             if msg == last_status:
                 continue
             last_status = msg
-            is_progress = '%' in msg
-            if is_progress:
-                # Progresso com %: escreve inline sobrescrevendo a linha
-                _inline(f'⏳ {msg}')
-                inline_active = True
-            else:
-                if inline_active:
-                    _newline()
-                    inline_active = False
-                _log_wrapped('⏳', msg)
+            _inline_status('⏳', msg)
+            inline_active = True
 
         elif t == "log":
             if inline_active:
@@ -3301,8 +3283,7 @@ def analisar_prontuario(texto: str, chat_url: str = None, chat_id: str = None, c
 
         elif t == "markdown":
             markdown = obj.get("content", "")
-            # Progresso de recepcao: inline sobrescrevendo a linha
-            _inline(f'📝 Recebendo: {len(markdown)} chars...')
+            _inline_status('📝', f"Recebendo: {len(markdown)} chars...")
             inline_active = True
 
         elif t == "finish":
@@ -4213,22 +4194,17 @@ def enriquecer_com_evidencias(resultado: dict, resultados_web: list,
             sys.stdout.write('\n')
             sys.stdout.flush()
 
-        def _log_wrapped(prefixo: str, msg: str):
+        def _inline_status(prefixo: str, msg: str):
             texto = re.sub(r"\s+", " ", str(msg or "")).strip()
             if not texto:
                 return
 
             largura_terminal = shutil.get_terminal_size((140, 20)).columns
-            largura_util = max(50, largura_terminal - 36)
-            linhas = textwrap.wrap(
-                texto,
-                width=largura_util,
-                break_long_words=False,
-                break_on_hyphens=False,
-            ) or [texto]
-
-            for linha in linhas:
-                log.info(f"  {prefixo} {linha}")
+            largura_util = max(30, largura_terminal - 6)
+            mensagem = f"{prefixo} {texto}"
+            if len(mensagem) > largura_util:
+                mensagem = mensagem[:max(0, largura_util - 3)].rstrip() + "..."
+            _inline(mensagem)
 
         for raw_line in resp.iter_lines():
             if not raw_line:
@@ -4243,14 +4219,8 @@ def enriquecer_com_evidencias(resultado: dict, resultados_web: list,
                 if msg == last_status:
                     continue
                 last_status = msg
-                if "%" in msg:
-                    _inline(f'⏳ {msg}')
-                    inline_active = True
-                else:
-                    if inline_active:
-                        _newline()
-                        inline_active = False
-                    _log_wrapped('⏳', msg)
+                _inline_status('⏳', msg)
+                inline_active = True
             elif t == "log":
                 if inline_active:
                     _newline()
@@ -4264,7 +4234,7 @@ def enriquecer_com_evidencias(resultado: dict, resultados_web: list,
                 log.info(f"  📎 chat_id: {new_chat_id}")
             elif t == "markdown":
                 markdown = obj.get("content", "")
-                _inline(f'📝 Recebendo: {len(markdown)} chars...')
+                _inline_status('📝', f"Recebendo: {len(markdown)} chars...")
                 inline_active = True
             elif t == "finish":
                 if inline_active:
