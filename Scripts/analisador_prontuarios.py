@@ -108,6 +108,7 @@ SIMILARIDADE_MIN     = 0.40                    # score mínimo p/ considerar sem
 
 # Busca Web (enriquecimento de condutas com evidências)
 SEARCH_URL           = "http://127.0.0.1:3003/api/web_search"  # endpoint local do Simulator
+UPTODATE_SEARCH_URL  = "http://127.0.0.1:3003/api/uptodate_search"  # endpoint local do Simulator
 SEARCH_MAX_QUERIES   = 3                       # máximo de queries por prontuário
 SEARCH_TIMEOUT       = 90                      # timeout por chamada (o browser precisa digitar)
 SEARCH_HABILITADA    = True                    # False para desabilitar sem remover código
@@ -3372,6 +3373,32 @@ def buscar_web(queries: list) -> list:
         return []
 
 
+def buscar_uptodate(queries: list) -> list:
+    """
+    Chama o endpoint /api/uptodate_search do ChatGPT Simulator.
+    Retorna lista de dicts: [{query, results: [{title, url, snippet}]}]
+    """
+    if not queries:
+        return []
+
+    try:
+        resp = requests.post(
+            UPTODATE_SEARCH_URL,
+            json={"queries": queries},
+            headers={
+                "Content-Type":  "application/json",
+                "Authorization": f"Bearer {API_KEY}",
+            },
+            timeout=SEARCH_TIMEOUT * len(queries),
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        return data.get("results", [])
+    except Exception as e:
+        log.warning(f"  ⚠️ Busca UpToDate falhou: {e}")
+        return []
+
+
 def extrair_termos_busca(resultado: dict) -> list:
     """
     Extrai termos clínicos relevantes do resultado da análise e monta
@@ -3660,6 +3687,12 @@ OBJETIVO:
 
 FORMATO OBRIGATÓRIO:
 {
+  "uptodate_queries": [
+    {
+      "query": "consulta médica apropriada para UpToDate",
+      "reason": "por que pesquisar este tema médico no UpToDate é útil para este paciente"
+    }
+  ],
   "search_queries": [
     {
       "query": "consulta para Google/PubMed",
@@ -3670,8 +3703,11 @@ FORMATO OBRIGATÓRIO:
 
 REGRAS:
 - Responder SOMENTE com JSON válido.
-- Máximo de 3 queries.
+- Máximo de 3 queries por lista.
 - Preferir inglês quando isso melhorar a busca científica.
+- Você PODE usar `uptodate_queries` para temas médicos/clínicos em que o UpToDate tende a ter bons resultados.
+- NÃO usar `uptodate_queries` para pesquisar pessoas, notícias, instituições, temas administrativos ou assuntos não médicos.
+- Quando o tema for claramente médico, clínico, terapêutico, diagnóstico ou de monitorização, considere priorizar `uptodate_queries`.
 - Quando fizer sentido, usar PubMed, diretrizes pediátricas, systematic review, guideline, consensus.
 - Não inventar fatos que não estejam explícitos no caso.
 - Não repetir queries redundantes.
@@ -3900,7 +3936,7 @@ def gerar_dados_auxiliares_llm(resultado: dict, chat_url: str = None, chat_id: s
         return resultado
 
 
-def gerar_queries_pesquisa_llm(resultado: dict, chat_url: str = None, chat_id: str = None) -> list:
+def gerar_queries_pesquisa_llm(resultado: dict, chat_url: str = None, chat_id: str = None) -> dict:
     """
     Pede à própria LLM que proponha as queries/tópicos de pesquisa mais úteis
     para o paciente específico analisado.
@@ -3928,7 +3964,7 @@ def gerar_queries_pesquisa_llm(resultado: dict, chat_url: str = None, chat_id: s
     }
 
     if not contexto_pesquisa:
-        return []
+        return {"search_queries": [], "uptodate_queries": []}
 
     user_content = (
         f"[INICIO_TEXTO_COLADO]\n"
@@ -3977,48 +4013,61 @@ def gerar_queries_pesquisa_llm(resultado: dict, chat_url: str = None, chat_id: s
                 markdown = obj.get("content", "")
             elif t == "error":
                 log.warning(f"  ⚠️ Planejamento de pesquisa: LLM retornou erro: {obj.get('content')}")
-                return []
+                return {"search_queries": [], "uptodate_queries": []}
 
         if not markdown:
             log.warning("  ⚠️ Planejamento de pesquisa: LLM não retornou conteúdo.")
-            return []
+            return {"search_queries": [], "uptodate_queries": []}
 
         try:
             planejado = _parse_json_llm(markdown)
-            itens = planejado.get("search_queries") or []
+            itens_search = planejado.get("search_queries") or []
+            itens_uptodate = planejado.get("uptodate_queries") or []
         except Exception as parse_err:
-            itens = _extrair_queries_pesquisa_fallback(markdown)
-            if itens:
+            itens_search = _extrair_queries_pesquisa_fallback(markdown)
+            itens_uptodate = []
+            if itens_search:
                 log.info(f"  ℹ️ Planejamento de pesquisa: JSON fora do formato estrito; extração tolerante aplicada ({parse_err}).")
             else:
                 preview = re.sub(r"\s+", " ", _strip_code_fences(markdown))[:500]
                 log.warning(f"  ⚠️ Planejamento de pesquisa: não foi possível interpretar a resposta da LLM ({parse_err}). Prévia: {preview}")
-                return []
+                return {"search_queries": [], "uptodate_queries": []}
 
-        queries = []
-        query_labels = set()
-        for item in itens[:SEARCH_MAX_QUERIES]:
-            if not isinstance(item, dict):
-                continue
-            query = re.sub(r"\s+", " ", str(item.get("query") or "")).strip()
-            reason = re.sub(r"\s+", " ", str(item.get("reason") or "")).strip()
-            if not query:
-                continue
-            key = query.lower()
-            if key in query_labels:
-                continue
-            query_labels.add(key)
-            queries.append(query)
-            log.info(f"     🧠 {query}" + (f" | motivo: {reason}" if reason else ""))
+        def _normalizar_lista_queries(itens, label_log):
+            queries = []
+            vistos = set()
+            for item in (itens or [])[:SEARCH_MAX_QUERIES]:
+                if not isinstance(item, dict):
+                    continue
+                query = re.sub(r"\s+", " ", str(item.get("query") or "")).strip()
+                reason = re.sub(r"\s+", " ", str(item.get("reason") or "")).strip()
+                if not query:
+                    continue
+                key = query.lower()
+                if key in vistos:
+                    continue
+                vistos.add(key)
+                queries.append(query)
+                log.info(f"     🧠 {label_log}: {query}" + (f" | motivo: {reason}" if reason else ""))
+            return queries[:SEARCH_MAX_QUERIES]
 
-        if queries:
-            log.info(f"  🧠 LLM planejou {len(queries)} query(s) de pesquisa específicas para o paciente.")
+        search_queries = _normalizar_lista_queries(itens_search, "search")
+        uptodate_queries = _normalizar_lista_queries(itens_uptodate, "uptodate")
 
-        return queries[:SEARCH_MAX_QUERIES]
+        if search_queries or uptodate_queries:
+            log.info(
+                "  🧠 LLM planejou "
+                f"{len(search_queries)} search_queries e {len(uptodate_queries)} uptodate_queries."
+            )
+
+        return {
+            "search_queries": search_queries,
+            "uptodate_queries": uptodate_queries,
+        }
 
     except Exception as e:
         log.warning(f"  ⚠️ Planejamento de pesquisa via LLM falhou: {e}")
-        return []
+        return {"search_queries": [], "uptodate_queries": []}
 
 
 PROMPT_ENRIQUECIMENTO = """Com base nos resultados de busca em literatura médica fornecidos abaixo, enriqueça as condutas clínicas sugeridas com referências reais.
@@ -4270,41 +4319,68 @@ def enriquecer_com_evidencias(resultado: dict, resultados_web: list,
 def executar_busca_evidencias(resultado: dict, chat_url: str = None, chat_id: str = None) -> dict:
     """
     Pipeline completo de busca + enriquecimento:
-      1. Extrair termos de busca do resultado da análise
-      2. Buscar no Google via /api/web_search
-      3. Enviar resultados para a LLM enriquecer condutas
+      1. Pedir à LLM um plano estruturado com queries de UpToDate e web
+      2. Priorizar UpToDate para temas clínicos, com fallback para web search
+      3. Enviar os resultados encontrados para a LLM enriquecer condutas
     """
     if not SEARCH_HABILITADA:
         return resultado
 
-    # 1. Pede à LLM para planejar queries específicas do paciente
-    queries = gerar_queries_pesquisa_llm(resultado, chat_url=chat_url, chat_id=chat_id)
-    if not queries:
-        log.info("  🔄 Fallback: usando extração heurística de termos para montar as queries.")
-        queries = extrair_termos_busca(resultado)
-    if not queries:
+    def _resumo_resultados(label: str, resultados: list) -> tuple:
+        total_items = sum(
+            len(r.get("results", [])) for r in resultados if r.get("success", True)
+        )
+        tem_html = any(r.get("raw_html") for r in resultados if r.get("success", True))
+        log.info(
+            f"  {label} {total_items} resultado(s) estruturado(s) | HTML bruto: {'sim' if tem_html else 'não'}"
+        )
+        return total_items, tem_html
+
+    plano_pesquisa = gerar_queries_pesquisa_llm(resultado, chat_url=chat_url, chat_id=chat_id) or {}
+    search_queries = list(plano_pesquisa.get("search_queries") or [])
+    uptodate_queries = list(plano_pesquisa.get("uptodate_queries") or [])
+
+    if not search_queries and not uptodate_queries:
+        log.info("  🔄 Fallback: usando extração heurística de termos para montar as queries de web.")
+        search_queries = extrair_termos_busca(resultado)
+
+    if not search_queries and not uptodate_queries:
         log.info("  🔍 Nenhum termo clínico para busca — pulando enriquecimento.")
         return resultado
 
-    log.info(f"  🌐 Busca web: {len(queries)} query(s)")
-    for q in queries:
-        log.info(f"     🔎 {q}")
+    resultados_busca = []
 
-    # 2. Busca no Google
-    resultados_web = buscar_web(queries)
-    total_items = sum(
-        len(r.get("results", [])) for r in resultados_web if r.get("success", True)
-    )
-    tem_html = any(r.get("raw_html") for r in resultados_web if r.get("success", True))
-    log.info(f"  🌐 {total_items} resultado(s) estruturado(s) | HTML bruto: {'sim' if tem_html else 'não'}")
+    if uptodate_queries:
+        log.info(f"  🩺 Busca UpToDate prioritária: {len(uptodate_queries)} query(s)")
+        for q in uptodate_queries:
+            log.info(f"     🩺 {q}")
 
-    if total_items == 0 and not tem_html:
+        resultados_uptodate = buscar_uptodate(uptodate_queries)
+        total_items, tem_html = _resumo_resultados("🩺 UpToDate:", resultados_uptodate)
+
+        if total_items > 0 or tem_html:
+            resultados_busca.extend(resultados_uptodate)
+        else:
+            log.info("  🔄 UpToDate sem resultados úteis — acionando fallback para web search.")
+            if not search_queries:
+                search_queries = uptodate_queries[:SEARCH_MAX_QUERIES]
+
+    if search_queries and not resultados_busca:
+        log.info(f"  🌐 Busca web: {len(search_queries)} query(s)")
+        for q in search_queries:
+            log.info(f"     🔎 {q}")
+
+        resultados_web = buscar_web(search_queries)
+        total_items, tem_html = _resumo_resultados("🌐 Web:", resultados_web)
+        if total_items > 0 or tem_html:
+            resultados_busca.extend(resultados_web)
+
+    if not resultados_busca:
         log.info("  🔍 Nenhum resultado — pulando enriquecimento.")
         return resultado
 
-    # 3. Enriquecer condutas via LLM (Passo 2)
-    log.info(f"  📚 Enviando resultados para LLM enriquecer condutas...")
-    resultado = enriquecer_com_evidencias(resultado, resultados_web, chat_url, chat_id)
+    log.info("  📚 Enviando resultados para LLM enriquecer condutas...")
+    resultado = enriquecer_com_evidencias(resultado, resultados_busca, chat_url, chat_id)
 
     return resultado
 
