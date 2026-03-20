@@ -352,8 +352,65 @@ Na prática, esse PHP parece funcionar como ponte entre a aplicação principal 
 - **`DDNS_automatico.bat`**  
   Executa o cliente PowerShell de DDNS.
 
+- **`sync_github.bat`** / **`Scripts/sync_github.ps1`**
+  Sincronizam o repositório no Windows, tentam mergear automaticamente o PR aberto mais recente, fecham PRs mais antigos, atualizam os arquivos locais e, quando houver mudanças, reiniciam em sequência o `Scripts/main.py` e o `Scripts/analisador_prontuarios.py`. Também aceitam `install-task` para registrar uma tarefa agendada no Windows a cada 10 minutos.
+
+- **`Scripts\sync_github_settings.ps1`** *(local, não versionado)*
+  Arquivo opcional de configuração local do sync automático. Deve conter token, usuário, branch, caminhos e padrões de processo. **Esse arquivo é tratado como protegido pelo sync e não deve ser sobrescrito no Windows.**
+
 - **`abrir_cmd_nesta_pasta.bat`**  
   Abre um CMD elevado com menu para executar os `.bat` do projeto.
+
+---
+
+## Sincronização automática com GitHub no Windows
+
+Esta automação existe para manter a pasta `C:\chatgpt_simulator` alinhada com o GitHub sem intervenção manual. O fluxo pensado para outra LLM entender é este:
+
+1. `sync_github.bat` chama `Scripts\sync_github.ps1`.
+2. O PowerShell carrega primeiro `Scripts\sync_github_settings.ps1` se ele existir; por compatibilidade, também aceita o nome antigo `Scripts\sync_github.settings.ps1`.
+3. O script cria um lock para evitar duas execuções simultâneas quando a tarefa agendada roda a cada 10 minutos.
+4. Se houver token GitHub configurado, ele lista PRs abertos na branch alvo, fecha os mais antigos e tenta mergear o PR aberto mais recente.
+5. Em seguida ele faz um clone temporário da branch principal, compara os arquivos rastreados e copia apenas os novos/alterados para `C:\chatgpt_simulator`.
+6. Se algo realmente mudou, ele encerra os processos correspondentes a `Scripts\main.py` e `Scripts\analisador_prontuarios.py` e os inicia novamente em sequência.
+7. Se nada mudou, ele apenas registra em log e encerra sem reiniciar nada.
+
+### Arquivos protegidos pelo sync automático
+
+Para evitar perda de estado local, o sync **não deve sobrescrever** estes itens quando está atualizando a máquina Windows:
+
+- `sync_github.bat`
+- `Scripts\sync_github.ps1`
+- `Scripts\sync_github_settings.ps1`
+- `Scripts\sync_github.settings.ps1` *(compatibilidade com nome antigo)*
+- os arquivos de exemplo de configuração do sync
+- toda a pasta `chrome_profile\`
+
+### Arquivos exatos desta automação no repositório
+
+Se outra LLM ou um revisor humano estiver procurando os arquivos do sync no repositório, os caminhos versionados corretos são exatamente estes:
+
+- `sync_github.bat`
+- `Scripts\sync_github.ps1`
+- `Scripts\sync_github_settings.ps1.example`
+- `.gitignore` *(contendo a exclusão do arquivo local real `Scripts\sync_github_settings.ps1`)*
+
+O arquivo `Scripts\sync_github_settings.ps1` **não aparece versionado de propósito**, porque ele é local, sensível e deve continuar apenas na máquina Windows de execução.
+
+### Convenção recomendada para configuração local do sync
+
+A convenção atual recomendada para qualquer operador humano ou outra LLM é:
+
+- arquivo local real: `Scripts\sync_github_settings.ps1`
+- arquivo de exemplo versionado: `Scripts\sync_github_settings.ps1.example`
+- nunca commitar o arquivo real com token
+- nunca depender que o `git pull`/sync substitua esse arquivo local
+
+### Agendamento
+
+- `sync_github.bat install-task` registra a tarefa agendada do Windows.
+- `sync_github.bat uninstall-task` remove a tarefa.
+- a frequência padrão é de 10 minutos, configurável em `syncIntervalMinutes`.
 
 ---
 
