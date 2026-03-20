@@ -3609,11 +3609,12 @@ def gerar_queries_pesquisa_llm(resultado: dict, chat_url: str = None, chat_id: s
             planejado = _parse_json_llm(markdown)
             itens = planejado.get("search_queries") or []
         except Exception as parse_err:
-            log.warning(f"  ⚠️ Planejamento de pesquisa: JSON inválido, tentando extração tolerante ({parse_err}).")
             itens = _extrair_queries_pesquisa_fallback(markdown)
-            if not itens:
+            if itens:
+                log.info(f"  ℹ️ Planejamento de pesquisa: JSON fora do formato estrito; extração tolerante aplicada ({parse_err}).")
+            else:
                 preview = re.sub(r"\s+", " ", _strip_code_fences(markdown))[:500]
-                log.warning(f"  ⚠️ Planejamento de pesquisa: não foi possível interpretar a resposta da LLM. Prévia: {preview}")
+                log.warning(f"  ⚠️ Planejamento de pesquisa: não foi possível interpretar a resposta da LLM ({parse_err}). Prévia: {preview}")
                 return []
 
         queries = []
