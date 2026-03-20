@@ -2368,38 +2368,6 @@ def _primeiro_node_representativo(nodes: list):
     return nodes[0] if nodes else None
 
 
-def _deduplicar_nodes_grafo(nodes: list) -> list:
-    dedup = {}
-    for node in nodes:
-        if not isinstance(node, dict):
-            continue
-        chave = (
-            str(node.get("tipo") or "").strip().lower(),
-            str(node.get("normalizado") or node.get("valor") or "").strip().lower(),
-        )
-        if not chave[1]:
-            continue
-        if chave not in dedup:
-            dedup[chave] = node
-            continue
-        existente = dedup[chave]
-        if not existente.get("id") and node.get("id"):
-            existente["id"] = node["id"]
-        if not existente.get("contexto") and node.get("contexto"):
-            existente["contexto"] = node["contexto"]
-        elif node.get("contexto") and node["contexto"] not in str(existente.get("contexto") or ""):
-            existente["contexto"] = f"{existente.get('contexto','')} | {node['contexto']}".strip(" |")
-    return list(dedup.values())
-
-
-def _primeiro_node_representativo(nodes: list):
-    for tipo_prioritario in ("diagnostico", "medicamento", "terapia", "sintoma", "gene", "risco"):
-        for node in nodes:
-            if (node.get("tipo") or "").lower() == tipo_prioritario:
-                return node
-    return nodes[0] if nodes else None
-
-
 def salvar_auxiliar(idatendimento: int, id_paciente: str, resultado: dict):
     """
     Chama o endpoint PHP salvar_analise_auxiliar para popular tabelas auxiliares
@@ -3279,28 +3247,6 @@ def analisar_prontuario(texto: str, chat_url: str = None, chat_id: str = None, c
         if len(mensagem) > largura_util:
             mensagem = mensagem[:max(0, largura_util - 3)].rstrip() + "..."
         _inline(mensagem)
-
-    def _log_wrapped(prefixo: str, msg: str):
-        """
-        Loga mensagens longas em múltiplas linhas reais para evitar que o
-        próximo progresso inline (\r) sobrescreva o trecho final quando o
-        terminal fizer quebra visual automática.
-        """
-        texto = re.sub(r"\s+", " ", str(msg or "")).strip()
-        if not texto:
-            return
-
-        largura_terminal = shutil.get_terminal_size((140, 20)).columns
-        largura_util = max(50, largura_terminal - 36)  # reserva espaço do timestamp/logger
-        linhas = textwrap.wrap(
-            texto,
-            width=largura_util,
-            break_long_words=False,
-            break_on_hyphens=False,
-        ) or [texto]
-
-        for linha in linhas:
-            log.info(f"  {prefixo} {linha}")
 
     last_status = ""
     inline_active = False  # True quando ha uma linha inline aberta

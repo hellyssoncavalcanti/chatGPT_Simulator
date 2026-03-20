@@ -42,7 +42,7 @@ echo   (Aceite o risco de certificado no navegador)
 echo +-------------------------------------------------------+
 echo.
 
-start /B cmd /c "timeout /t 6 >nul && start https://localhost:3002"
+echo [INFO] O navegador sera aberto automaticamente apos o servidor HTTPS responder.
 
 echo [INFO] Iniciando Sistema Modular...
 %PYTHON_BOOTSTRAP% Scripts\main.py

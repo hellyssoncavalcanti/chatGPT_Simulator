@@ -14,6 +14,8 @@ import socket
 import subprocess
 import sys
 import threading
+import time
+import webbrowser
 
 SCRIPTS_DIR = os.path.dirname(os.path.abspath(__file__))
 BASE_DIR = os.path.dirname(SCRIPTS_DIR)
@@ -220,6 +222,34 @@ def start_http_server(config_module, server_module):
     server_module.app.run(host="0.0.0.0", port=http_port, debug=False, use_reloader=False)
 
 
+def _wait_for_port(host: str, port: int, timeout: int = 180, interval: float = 0.5) -> bool:
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            with socket.create_connection((host, port), timeout=2):
+                return True
+        except OSError:
+            time.sleep(interval)
+    return False
+
+
+def open_urls_when_server_is_ready(port: int, urls: list, startup_timeout: int = 180):
+    def _worker():
+        if not _wait_for_port("127.0.0.1", port, timeout=startup_timeout):
+            print(f"[BOOT] Aviso: servidor HTTPS na porta {port} não ficou pronto a tempo; navegador não será aberto automaticamente.")
+            return
+
+        time.sleep(1.0)
+        for url in urls:
+            try:
+                webbrowser.open_new(url)
+            except Exception as exc:
+                print(f"[BOOT] Aviso: falha ao abrir {url}: {exc}")
+
+    t_open = threading.Thread(target=_worker, daemon=True)
+    t_open.start()
+
+
 if __name__ == "__main__":
     ensure_runtime_environment()
 
@@ -248,11 +278,14 @@ if __name__ == "__main__":
     utils.setup_frontend()
 
     local_ip = get_local_ip()
+    local_https_url = f"https://localhost:{config.PORT}"
     print("\n[SERVIDOR ONLINE]")
-    print(f" 🔒 HTTPS (Seguro):   https://localhost:{config.PORT}")
+    print(f" 🔒 HTTPS (Seguro):   {local_https_url}")
     print(f" 🌍 HTTP (Remoto):    http://{local_ip}:{config.PORT + 1}")
     print("\n[ADMIN] User: admin | Pass: 32713091")
     print("--------------------------------------------------\n")
+
+    open_urls_when_server_is_ready(config.PORT, [local_https_url])
 
     try:
         ssl_context = (config.CERT_FILE, config.KEY_FILE)

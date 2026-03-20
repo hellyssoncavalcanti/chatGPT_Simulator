@@ -1,0 +1,30 @@
+2026/03/18-04:43:13.746 21a0 Reusing MANIFEST C:\chatgpt_simulator\chrome_profile\Default\Local Storage\leveldb/MANIFEST-000001
+2026/03/18-04:43:13.753 21a0 Recovering log #4803
+2026/03/18-04:43:13.755 21a0 Reusing old log C:\chatgpt_simulator\chrome_profile\Default\Local Storage\leveldb/004803.log 
+2026/03/18-04:44:13.780 35a4 Level-0 table #4807: started
+2026/03/18-04:44:13.791 35a4 Level-0 table #4807: 56034 bytes OK
+2026/03/18-04:44:13.794 35a4 Delete type=0 #4803
+2026/03/18-04:45:31.483 35a4 Level-0 table #4809: started
+2026/03/18-04:45:31.491 35a4 Level-0 table #4809: 68143 bytes OK
+2026/03/18-04:45:31.494 35a4 Delete type=0 #4806
+2026/03/18-04:46:20.273 35a4 Level-0 table #4811: started
+2026/03/18-04:46:20.281 35a4 Level-0 table #4811: 70819 bytes OK
+2026/03/18-04:46:20.284 35a4 Delete type=0 #4808
+2026/03/18-04:46:20.285 35a4 Compacting 4@0 + 1@1 files
+2026/03/18-04:46:20.296 35a4 Generated table #4812@0: 43 keys, 159445 bytes
+2026/03/18-04:46:20.296 35a4 Compacted 4@0 + 1@1 files => 159445 bytes
+2026/03/18-04:46:20.298 35a4 compacted to: files[ 0 1 1 0 0 0 0 ]
+2026/03/18-04:46:20.299 35a4 Delete type=2 #4802
+2026/03/18-04:46:20.299 35a4 Delete type=2 #4804
+2026/03/18-04:46:20.299 35a4 Delete type=2 #4807
+2026/03/18-04:46:20.299 35a4 Delete type=2 #4809
+2026/03/18-04:46:20.299 35a4 Delete type=2 #4811
+2026/03/18-04:47:15.251 35a4 Level-0 table #4814: started
+2026/03/18-04:47:15.259 35a4 Level-0 table #4814: 66556 bytes OK
+2026/03/18-04:47:15.261 35a4 Delete type=0 #4810
+2026/03/18-04:48:28.245 35a4 Level-0 table #4816: started
+2026/03/18-04:48:28.252 35a4 Level-0 table #4816: 69302 bytes OK
+2026/03/18-04:48:28.255 35a4 Delete type=0 #4813
+2026/03/18-04:50:15.251 35a4 Level-0 table #4818: started
+2026/03/18-04:50:15.258 35a4 Level-0 table #4818: 68275 bytes OK
+2026/03/18-04:50:15.260 35a4 Delete type=0 #4815
