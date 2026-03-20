@@ -27,51 +27,6 @@ $CHATGPT_VIA_API_KEY = "CVAPI_2b9c80c2abf94a76baf8b3e68d89cb7e";
 // --- CONFIGURAÇÃO: IP MANUAL OLLAMA (OPCIONAL) ---
 $ollama_manual_ip = ""; 
 
-// --- CONFIGURAÇÃO: LIMPEZA ASSÍNCRONA DE LOGS SQL ---
-$CHATGPT_SQL_LOG_TABLE = 'chatgpt_sql_logs';
-$CHATGPT_SQL_LOG_RETENTION_HOURS = 12;            // ajuste fácil: tempo de retenção dos logs
-$CHATGPT_SQL_LOG_CLEANUP_MIN_INTERVAL_SEC = 900; // evita DELETE em toda requisição
-
-function chatgpt_get_requester_context(): array {
-    global $row_login_atual;
-    if (session_status() !== PHP_SESSION_ACTIVE) @session_start();
-    $id = null;
-    $nome = null;
-    if (isset($row_login_atual['id']) && $row_login_atual['id'] !== '') $id = $row_login_atual['id'];
-    elseif (isset($_SESSION['id']) && $_SESSION['id'] !== '') $id = $_SESSION['id'];
-    if (isset($row_login_atual['nome']) && $row_login_atual['nome'] !== '') $nome = $row_login_atual['nome'];
-    elseif (isset($_SESSION['nome']) && $_SESSION['nome'] !== '') $nome = $_SESSION['nome'];
-    return [
-        'id_membro_solicitante' => $id,
-        'nome_membro_solicitante' => $nome,
-    ];
-}
-
-function chatgpt_should_run_sql_log_cleanup(): bool {
-    global $CHATGPT_SQL_LOG_CLEANUP_MIN_INTERVAL_SEC;
-    $marker = sys_get_temp_dir() . '/chatgpt_sql_logs_cleanup.marker';
-    $now = time();
-    $last = is_file($marker) ? intval(@file_get_contents($marker)) : 0;
-    if ($last > 0 && ($now - $last) < intval($CHATGPT_SQL_LOG_CLEANUP_MIN_INTERVAL_SEC)) {
-        return false;
-    }
-    @file_put_contents($marker, (string) $now, LOCK_EX);
-    return true;
-}
-
-function chatgpt_cleanup_sql_logs(): array {
-    global $CHATGPT_SQL_LOG_TABLE, $CHATGPT_SQL_LOG_RETENTION_HOURS;
-    $db = get_mysql_connection_local();
-    if (!$db) return ['success' => false, 'error' => 'Database connection failed'];
-    $db->set_charset("utf8mb4");
-    $hours = max(1, intval($CHATGPT_SQL_LOG_RETENTION_HOURS));
-    $table = preg_replace('/[^a-zA-Z0-9_]/', '', $CHATGPT_SQL_LOG_TABLE ?: 'chatgpt_sql_logs');
-    $sql = "DELETE FROM {$table} WHERE created_at < DATE_SUB(NOW(), INTERVAL {$hours} HOUR)";
-    $ok = @$db->query($sql);
-    if (!$ok) return ['success' => false, 'error' => $db->error ?: 'Erro ao limpar logs'];
-    return ['success' => true, 'affected_rows' => intval($db->affected_rows), 'retention_hours' => $hours, 'table' => $table];
-}
-
 function chatgpt_rate_limit_check($max_per_min = 200) {
     if (!function_exists('apcu_fetch')) return;
     $ip  = $_SERVER['REMOTE_ADDR'] ?? 'unknown';
@@ -184,7 +139,6 @@ $actions_without_login_bootstrap = [
   'ping_simulator',
   'sync_simulator',
   'web_search',
-  'cleanup_sql_logs',
   'salvar_analise_auxiliar'
 ];
 $is_direct_script_request = ($current_action === '' && basename($_SERVER['PHP_SELF'] ?? '') === $currentFileName);
@@ -950,26 +904,6 @@ if (isset($_GET['action']) && $_GET['action'] === 'save_prompt') {
 }
 
 // -----------------------------------------------------
-// HANDLER: LIMPEZA ASSÍNCRONA DOS LOGS SQL
-// -----------------------------------------------------
-if (isset($_GET['action']) && $_GET['action'] === 'cleanup_sql_logs') {
-    header('Content-Type: application/json; charset=utf-8');
-    $body = json_decode(file_get_contents('php://input'), true) ?: [];
-    $providedKey = $body['api_key'] ?? ($_SERVER['HTTP_X_API_KEY'] ?? '');
-    if (!HasRequiredApiKeyOrIsSameOrigin((string) $providedKey, $CHATGPT_VIA_API_KEY)) {
-        http_response_code(401);
-        echo json_encode(['success' => false, 'error' => 'Unauthorized']);
-        exit;
-    }
-    if (!chatgpt_should_run_sql_log_cleanup()) {
-        echo json_encode(['success' => true, 'skipped' => true, 'reason' => 'cleanup_recently_executed']);
-        exit;
-    }
-    echo json_encode(chatgpt_cleanup_sql_logs());
-    exit;
-}
-
-// -----------------------------------------------------
 // HANDLER: PESQUISA WEB VIA BROWSER.PY (Google)
 // -----------------------------------------------------
 if (isset($_GET['action']) && $_GET['action'] === 'web_search') {
@@ -977,7 +911,6 @@ if (isset($_GET['action']) && $_GET['action'] === 'web_search') {
 
     $body    = json_decode(file_get_contents('php://input'), true);
     $queries = $body['queries'] ?? [];
-    $requester = chatgpt_get_requester_context();
 
     if (empty($queries) || !is_array($queries)) {
         echo json_encode(['success' => false, 'error' => 'queries array ausente']); exit;
@@ -1016,11 +949,7 @@ if (isset($_GET['action']) && $_GET['action'] === 'web_search') {
         'Content-Type: application/json',
         'Authorization: Bearer ' . $CHATGPT_VIA_API_KEY
     ]);
-    curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode([
-        'queries' => $queries,
-        'id_membro_solicitante' => $requester['id_membro_solicitante'],
-        'nome_membro_solicitante' => $requester['nome_membro_solicitante']
-    ]));
+    curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode(['queries' => $queries]));
     $response  = curl_exec($ch);
     $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
     $curl_err  = curl_error($ch);
@@ -3030,7 +2959,6 @@ header('Content-Type: application/javascript; charset=utf-8');
     
     // Análise clínica pré-carregada em background
     let analiseAtendimentoCtx = null;
-    let pendingAnaliseCtx = { atendimento: null, paciente_compilado: null };
 
     let recognition = null;
     let isRecording = false;
@@ -3128,18 +3056,6 @@ header('Content-Type: application/javascript; charset=utf-8');
         #ow-analise-previa .ia-prio{font-size:11px;font-weight:700;padding:2px 9px;border-radius:999px;color:#fff}
         #iap-toast{position:fixed;bottom:20px;right:20px;background:#0f172a;color:#fff;padding:8px 12px;border-radius:8px;font-size:13px;opacity:0;transform:translateY(10px);transition:0.2s;z-index:9999}
         #iap-toast.show{opacity:1;transform:translateY(0)}
-        #ow-analise-pendente{font-family:Inter,system-ui,-apple-system,Segoe UI,Roboto,sans-serif;border:1px solid #fde68a;border-radius:14px;background:linear-gradient(135deg,#fffdf5 0%,#fff7db 100%);box-shadow:0 8px 24px rgba(180,83,9,.08);margin:10px 0;overflow:hidden;width:100%;box-sizing:border-box}
-        #ow-analise-pendente .iap-header{display:flex;align-items:flex-start;justify-content:space-between;padding:14px 16px;border-bottom:1px solid #fde68a;background:rgba(255,251,235,.9);gap:8px;flex-wrap:wrap}
-        #ow-analise-pendente .iap-title{font-weight:700;font-size:15px;color:#92400e}
-        #ow-analise-pendente .iap-subtitle{font-size:12px;color:#b45309;margin-top:3px}
-        #ow-analise-pendente .iap-list{padding:14px 16px;display:flex;flex-direction:column;gap:10px}
-        #ow-analise-pendente .iap-item{border:1px solid #fcd34d;border-radius:10px;background:#fff;padding:12px 13px}
-        #ow-analise-pendente .iap-item-head{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap}
-        #ow-analise-pendente .iap-item-title{font-size:13px;font-weight:700;color:#78350f}
-        #ow-analise-pendente .iap-badge{font-size:11px;font-weight:800;padding:4px 10px;border-radius:999px;color:#fff}
-        #ow-analise-pendente .iap-badge.pendente{background:#d97706}
-        #ow-analise-pendente .iap-badge.processando{background:#2563eb}
-        #ow-analise-pendente .iap-item-text{font-size:12px;line-height:1.5;color:#7c5a10;margin-top:7px}
         /* === ANÁLISE PRÉVIA DA LLM EXPOSTA NO CHAT — DESIGN SYSTEM = FIM === */
         
         @keyframes pulseRed { 0% { box-shadow: 0 0 0 0 rgba(211, 47, 47, 0.4); } 70% { box-shadow: 0 0 0 10px rgba(211, 47, 47, 0); } 100% { box-shadow: 0 0 0 0 rgba(211, 47, 47, 0); } }
@@ -4160,181 +4076,6 @@ header('Content-Type: application/javascript; charset=utf-8');
         }
     }
 
-    function formatDurationEstimate(seconds) {
-        const total = Math.max(0, Number(seconds) || 0);
-        if (!total) return '';
-        if (total < 60) return `${Math.round(total)}s`;
-        const minutes = Math.round(total / 60);
-        if (minutes < 60) return `${minutes} min`;
-        const hours = Math.floor(minutes / 60);
-        const mins = minutes % 60;
-        return mins ? `${hours}h ${mins}min` : `${hours}h`;
-    }
-
-    async function fetchAnaliseQueueEstimate(row) {
-        const analiseId = Number(row?.id || 0);
-        const createdAt = String(row?.datetime_analise_criacao || '').trim();
-        const statusNorm = String(row?.status || '').trim().toLowerCase();
-        if (!analiseId || !createdAt || !['pendente', 'processando'].includes(statusNorm)) return null;
-
-        const createdAtSql = createdAt.replace(/'/g, "\\'");
-        const runSql = async (query, reason) => {
-            const res = await fetch("<?php echo $_SERVER['PHP_SELF']; ?>?action=execute_sql", {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json; charset=utf-8' },
-                body: JSON.stringify({ query: normalizeSQL(query), reason })
-            });
-            return await res.json();
-        };
-
-        try {
-            const [queueData, avgTodayData, avgHistoricData] = await Promise.all([
-                runSql(`
-                    SELECT COUNT(*) AS itens_a_frente
-                    FROM chatgpt_atendimentos_analise
-                    WHERE status IN ('pendente','processando')
-                      AND (
-                            datetime_analise_criacao < '${createdAtSql}'
-                         OR (datetime_analise_criacao = '${createdAtSql}' AND id < ${analiseId})
-                      )
-                `, 'Posição da análise na fila'),
-                runSql(`
-                    SELECT
-                        COUNT(*) AS total,
-                        AVG(TIMESTAMPDIFF(SECOND, datetime_analise_criacao, datetime_analise_concluida)) AS media_segundos
-                    FROM chatgpt_atendimentos_analise
-                    WHERE status = 'concluido'
-                      AND datetime_analise_criacao IS NOT NULL
-                      AND datetime_analise_concluida IS NOT NULL
-                      AND DATE(datetime_analise_concluida) = CURDATE()
-                      AND TIMESTAMPDIFF(SECOND, datetime_analise_criacao, datetime_analise_concluida) BETWEEN 5 AND 21600
-                `, 'Média das análises concluídas hoje'),
-                runSql(`
-                    SELECT
-                        COUNT(*) AS total,
-                        AVG(TIMESTAMPDIFF(SECOND, datetime_analise_criacao, datetime_analise_concluida)) AS media_segundos
-                    FROM chatgpt_atendimentos_analise
-                    WHERE status = 'concluido'
-                      AND datetime_analise_criacao IS NOT NULL
-                      AND datetime_analise_concluida IS NOT NULL
-                      AND DATE(datetime_analise_concluida) < CURDATE()
-                      AND TIMESTAMPDIFF(SECOND, datetime_analise_criacao, datetime_analise_concluida) BETWEEN 5 AND 21600
-                `, 'Média histórica das análises concluídas')
-            ]);
-
-            const ahead = Number(queueData?.data?.[0]?.itens_a_frente || 0);
-            const todayCount = Number(avgTodayData?.data?.[0]?.total || 0);
-            const todayAvg = Number(avgTodayData?.data?.[0]?.media_segundos || 0);
-            const historicCount = Number(avgHistoricData?.data?.[0]?.total || 0);
-            const historicAvg = Number(avgHistoricData?.data?.[0]?.media_segundos || 0);
-
-            const useToday = todayCount > 0 && todayAvg > 0;
-            const avgSeconds = useToday ? todayAvg : historicAvg;
-            const sampleSize = useToday ? todayCount : historicCount;
-            const basis = useToday ? 'hoje' : (historicAvg > 0 ? 'histórico' : null);
-            const workUnits = statusNorm === 'processando' ? Math.max(0.5, ahead + 0.5) : ahead + 1;
-
-            return {
-                aheadCount: ahead,
-                position: ahead + 1,
-                avgSeconds: avgSeconds > 0 ? Math.round(avgSeconds) : null,
-                etaSeconds: avgSeconds > 0 ? Math.round(avgSeconds * workUnits) : null,
-                basis,
-                sampleSize
-            };
-        } catch (e) {
-            console.warn('⚠️ Falha ao calcular posição/ETA da análise:', e);
-            return null;
-        }
-    }
-
-    function setPendingAnaliseNotice(scopeKey, status, row = {}) {
-        const statusNorm = String(status || '').trim().toLowerCase();
-        if (!['pendente', 'processando'].includes(statusNorm)) {
-            pendingAnaliseCtx[scopeKey] = null;
-            renderPendingAnaliseNotice();
-            return;
-        }
-        pendingAnaliseCtx[scopeKey] = { status: statusNorm, row: row || {} };
-        renderPendingAnaliseNotice();
-    }
-
-    function clearPendingAnaliseNotice(scopeKey) {
-        if (scopeKey) pendingAnaliseCtx[scopeKey] = null;
-        else pendingAnaliseCtx = { atendimento: null, paciente_compilado: null };
-        renderPendingAnaliseNotice();
-    }
-
-    function renderPendingAnaliseNotice() {
-        const container = document.getElementById('ow-messages');
-        if (!container) return;
-
-        const anterior = document.getElementById('ow-analise-pendente');
-        if (anterior) anterior.remove();
-
-        const notices = Object.entries(pendingAnaliseCtx).filter(([, cfg]) => cfg && ['pendente', 'processando'].includes(cfg.status));
-        if (!notices.length) return;
-
-        const meta = {
-            atendimento: {
-                titulo: 'Atendimento atual',
-                descricao: {
-                    pendente: 'A análise estruturada deste atendimento ainda está na fila do processador clínico.',
-                    processando: 'A análise estruturada deste atendimento está sendo processada agora.'
-                }
-            },
-            paciente_compilado: {
-                titulo: 'Síntese longitudinal do paciente',
-                descricao: {
-                    pendente: 'A síntese compilada do paciente ainda está pendente e será exibida aqui assim que for concluída.',
-                    processando: 'A síntese compilada do paciente está em processamento neste momento.'
-                }
-            }
-        };
-
-        const html = `
-            <div id="ow-analise-pendente">
-                <div class="iap-header">
-                    <div>
-                        <div class="iap-title">⏳ Análise clínica pendente</div>
-                        <div class="iap-subtitle">Aviso contextual da fila de processamento — não entra no histórico do chat.</div>
-                    </div>
-                </div>
-                <div class="iap-list">
-                    ${notices.map(([scopeKey, cfg]) => {
-                        const scopeMeta = meta[scopeKey] || meta.atendimento;
-                        const statusLabel = cfg.status === 'processando' ? 'PROCESSANDO' : 'PENDENTE';
-                        const statusText = scopeMeta.descricao[cfg.status] || 'A análise ainda não está disponível.';
-                        const queueInfo = cfg?.row?.queueInfo || null;
-                        const queueHtml = queueInfo
-                            ? `
-                                <div class="iap-item-text" style="margin-top:10px;padding-top:10px;border-top:1px dashed #fcd34d;">
-                                    📍 Posição estimada na fila: <strong>${queueInfo.position}º</strong>${Number.isFinite(queueInfo.aheadCount) ? ` · ${queueInfo.aheadCount} antes desta análise` : ''}
-                                    ${queueInfo.etaSeconds ? `<br>⏱️ Previsão de conclusão: <strong>~${formatDurationEstimate(queueInfo.etaSeconds)}</strong>` : ''}
-                                    ${queueInfo.avgSeconds ? `<br>📊 Base: média ${queueInfo.basis === 'hoje' ? 'das análises concluídas hoje' : 'histórica'}${queueInfo.sampleSize ? ` (${queueInfo.sampleSize} análise(s))` : ''}.` : ''}
-                                </div>
-                            `
-                            : '';
-                        return `
-                            <div class="iap-item">
-                                <div class="iap-item-head">
-                                    <div class="iap-item-title">${scopeMeta.titulo}</div>
-                                    <span class="iap-badge ${cfg.status}">${statusLabel}</span>
-                                </div>
-                                <div class="iap-item-text">${statusText}</div>
-                                ${queueHtml}
-                            </div>
-                        `;
-                    }).join('')}
-                </div>
-            </div>
-        `;
-
-        const analisePrevia = document.getElementById('ow-analise-previa');
-        if (analisePrevia) analisePrevia.insertAdjacentHTML('afterend', html);
-        else container.insertAdjacentHTML('afterbegin', html);
-    }
-
     async function fetchAnaliseAtendimento(idAtendimento) {
         console.groupCollapsed(`%c${FILE_PREFIX} 🧠 Análise Prévia — id_atendimento=${idAtendimento}`, 'color: #9c27b0; font-weight: bold');
 
@@ -4353,9 +4094,7 @@ header('Content-Type: application/javascript; charset=utf-8');
                 body:    JSON.stringify({
                     query: normalizeSQL(`
                         SELECT
-                                id,
                                 status,
-                                datetime_analise_criacao,
                                 datetime_atendimento_inicio,
                                 datetime_analise_concluida,
                                 resumo_texto,
@@ -4389,7 +4128,6 @@ header('Content-Type: application/javascript; charset=utf-8');
             const data = await res.json();
 
             if (!data?.success || !data.data?.length) {
-                clearPendingAnaliseNotice('atendimento');
                 // diagnóstico: mostra o que o PHP realmente retornou
                 console.warn('⚠️  Resposta do execute_sql:', data);
                 if (!data?.success) {
@@ -4406,16 +4144,11 @@ header('Content-Type: application/javascript; charset=utf-8');
             if (row.status !== 'concluido') {
                 console.log(`%cℹ️  Análise existe mas status='${row.status}' — ignorando.`, 'color: #ff9800');
                 if (row.status === 'pendente' || row.status === 'processando') {
-                    row.queueInfo = await fetchAnaliseQueueEstimate(row);
-                    setPendingAnaliseNotice('atendimento', row.status, row);
                     notifyAnalisePreviaPendente(row.status, 'atendimento');
-                } else {
-                    clearPendingAnaliseNotice('atendimento');
                 }
                 console.groupEnd();
                 return;
             }
-            clearPendingAnaliseNotice('atendimento');
             const analise = parseAnalisePreviaRow(row);
             applyAnalisePrevia(analise, row, 'atendimento');
 
@@ -4442,9 +4175,7 @@ header('Content-Type: application/javascript; charset=utf-8');
                 body:    JSON.stringify({
                     query: normalizeSQL(`
                         SELECT
-                            id,
                             status,
-                            datetime_analise_criacao,
                             datetime_analise_concluida,
                             resumo_texto,
                             gravidade_clinica,
@@ -4479,7 +4210,6 @@ header('Content-Type: application/javascript; charset=utf-8');
 
             const data = await res.json();
             if (!data?.success || !data.data?.length) {
-                clearPendingAnaliseNotice('paciente_compilado');
                 console.log('%cℹ️  Nenhuma síntese compilada do paciente encontrada.', 'color: #9e9e9e');
                 console.groupEnd();
                 return;
@@ -4488,18 +4218,10 @@ header('Content-Type: application/javascript; charset=utf-8');
             const row = data.data[0];
             if (row.status !== 'concluido') {
                 console.log(`%cℹ️  Síntese compilada existe mas status='${row.status}' — ignorando.`, 'color: #ff9800');
-                if (row.status === 'pendente' || row.status === 'processando') {
-                    row.queueInfo = await fetchAnaliseQueueEstimate(row);
-                    setPendingAnaliseNotice('paciente_compilado', row.status, row);
-                    notifyAnalisePreviaPendente(row.status, 'síntese do paciente');
-                } else {
-                    clearPendingAnaliseNotice('paciente_compilado');
-                }
                 console.groupEnd();
                 return;
             }
 
-            clearPendingAnaliseNotice('paciente_compilado');
             const analise = parseAnalisePreviaRow(row);
             applyAnalisePrevia(analise, row, 'paciente_compilado');
         } catch (e) {
@@ -4566,28 +4288,6 @@ header('Content-Type: application/javascript; charset=utf-8');
             lastQ:     currentUserQuestion   // ← NOVO: persiste a pergunta
         }));
     }
-
-    function scheduleSqlLogCleanup() {
-        const cleanupKey = `${PREFIX}sql_logs_cleanup_last_run`;
-        const now = Date.now();
-        const minIntervalMs = 15 * 60 * 1000;
-        const lastRun = Number(localStorage.getItem(cleanupKey) || 0);
-        if ((now - lastRun) < minIntervalMs) return;
-        localStorage.setItem(cleanupKey, String(now));
-
-        fetch(`<?php echo $_SERVER['PHP_SELF']; ?>?action=cleanup_sql_logs`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({})
-        })
-        .then(res => res.json())
-        .then(data => {
-            console.log(`${FILE_PREFIX} 🧹 Limpeza assíncrona de logs SQL:`, data);
-        })
-        .catch(err => {
-            console.warn(`${FILE_PREFIX} ⚠️ Limpeza assíncrona de logs SQL falhou:`, err);
-        });
-    }
     
     async function loadLocal(options = {}) {
         const targetMode = options.chatMode || getCurrentChatMode();
@@ -4620,13 +4320,6 @@ header('Content-Type: application/javascript; charset=utf-8');
         }
         
         renderChatMessages();
-
-        if (targetMode === CHAT_MODE_DIRECT) {
-            if (showDirectIntro && !state.messages.length) {
-                ensureDirectToolIntro(true);
-            }
-            return;
-        }
 
         // ------------------------------------------------------------------
         // 👉 NOVO: 2. Buscar metadados oficias do MySQL antes do Sync Remoto
@@ -4747,7 +4440,9 @@ header('Content-Type: application/javascript; charset=utf-8');
             }
         }
 
-        if (targetMode === CHAT_MODE_DIRECT && showDirectIntro && !state.messages.length) ensureDirectToolIntro(true);
+        if (targetMode === CHAT_MODE_DIRECT && showDirectIntro && !state.messages.length) {
+            ensureDirectToolIntro(true);
+        }
     }
     
     function renderChatMessages() {
@@ -4756,10 +4451,7 @@ header('Content-Type: application/javascript; charset=utf-8');
         box.innerHTML = '';
         state.messages.forEach(m => {
             if (m.role === 'assistant') {
-                const directResultMeta = getDirectResultMeta(m.content);
-                if (directResultMeta) {
-                    appendDirectResultMessage(directResultMeta);
-                } else if (m.content.includes('</think>')) {
+                if (m.content.includes('</think>')) {
                     const parts = m.content.split('</think>');
                     const ui = addAiMarkup();
                     document.getElementById(ui.tID).parentElement.style.display = 'block';
@@ -4794,7 +4486,6 @@ header('Content-Type: application/javascript; charset=utf-8');
                 addSimpleMsg('user', display.trim());
             }
         });
-        renderPendingAnaliseNotice();
         scroll(true);
     }
     // ===================== INICIO =====================
@@ -5441,34 +5132,14 @@ header('Content-Type: application/javascript; charset=utf-8');
             .replace(/'/g, '&#39;');
     }
 
-    function escapeHtmlAttr(value) {
-        return String(value ?? '')
-            .replace(/&/g, '&amp;')
-            .replace(/"/g, '&quot;')
-            .replace(/'/g, '&#39;')
-            .replace(/</g, '&lt;')
-            .replace(/>/g, '&gt;');
-    }
-
-    function encodeDirectResultPayload(value) {
-        return encodeURIComponent(String(value ?? ''));
-    }
-
-    window.copyDirectResult = function(btn) {
-        const encoded = btn?.dataset?.txt || '';
-        const decoded = decodeURIComponent(encoded);
-        navigator.clipboard.writeText(decoded).then(() => apToast('Resultado copiado!'));
-    };
-
     function buildDirectResultBoxHtml(title, plainText, accentColor = '#475569') {
         const safeText = String(plainText || '').trim();
-        const encodedText = escapeHtmlAttr(encodeDirectResultPayload(safeText));
         return `
             <div style="border:1px solid #e2e8f0;border-radius:12px;overflow:hidden;background:#ffffff;box-shadow:0 1px 2px rgba(15,23,42,.05);">
                 <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;padding:10px 12px;background:${accentColor}12;border-bottom:1px solid #e2e8f0;">
                     <strong style="font-size:13px;color:${accentColor};">${title}</strong>
-                    <button onclick="copyDirectResult(this)"
-                        data-txt="${encodedText}"
+                    <button onclick="navigator.clipboard.writeText(this.dataset.txt).then(()=>apToast('Resultado copiado!'))"
+                        data-txt="${escapeDirectResultText(safeText)}"
                         style="background:#fff;border:1px solid #cbd5e1;border-radius:6px;padding:5px 10px;font-size:11px;cursor:pointer;color:#334155;white-space:nowrap;">
                         📋 Copiar resultado
                     </button>
@@ -5477,29 +5148,6 @@ header('Content-Type: application/javascript; charset=utf-8');
                     <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:12px;font-family:SFMono-Regular,Consolas,Menlo,monospace;font-size:12px;line-height:1.6;color:#1e293b;white-space:pre-wrap;max-height:360px;overflow:auto;">${escapeDirectResultText(safeText)}</div>
                 </div>
             </div>`;
-    }
-
-    function getDirectResultMeta(content) {
-        const text = String(content || '').trim();
-        if (!text || text === DIRECT_TOOL_INTRO_MD) return null;
-        if (text.startsWith('## 🐬 Resultado da execução SQL')) {
-            return { title: '🐬 Resultado da execução SQL', accentColor: '#0891b2', plainText: text };
-        }
-        if (text.startsWith('## 🔍 Resultado da pesquisa web')) {
-            return { title: '🔍 Resultado da pesquisa web', accentColor: '#16a34a', plainText: text };
-        }
-        return null;
-    }
-
-    function appendDirectResultMessage(meta) {
-        const b = document.getElementById('ow-messages');
-        if (!b || !meta) return;
-        const wrap = document.createElement('div');
-        wrap.className = 'msg msg-ai';
-        wrap.style.background = 'transparent';
-        wrap.style.padding = '0';
-        wrap.innerHTML = buildDirectResultBoxHtml(meta.title, meta.plainText, meta.accentColor);
-        b.appendChild(wrap);
     }
 
     function formatDirectSearchResults(searchData, queries) {
@@ -5638,7 +5286,7 @@ header('Content-Type: application/javascript; charset=utf-8');
         }
         
         if (typeof detectContexts === 'function') detectContexts();
-        if (typeof loadLocal === 'function') loadLocal({ chatMode: getCurrentChatMode(), showDirectIntro: getCurrentChatMode() === CHAT_MODE_DIRECT });
+        if (typeof loadLocal === 'function') loadLocal({ chatMode: getCurrentChatMode(), showDirectIntro: false });
         if (typeof initPrompts === 'function') initPrompts(); 
         
         // SETUP DO MICROFONE
@@ -7414,7 +7062,6 @@ header('Content-Type: application/javascript; charset=utf-8');
     document.addEventListener('DOMContentLoaded', (event) => {
         document.body.appendChild(widget); // Append to the body
         console.log(`%c🔧 ${FILE_PREFIX} Widget de IA incorporado ao body após o DOMContentLoaded.`, "color: #2196f3; font-weight: bold;");
-        if (typeof scheduleSqlLogCleanup === 'function') scheduleSqlLogCleanup();
         
         window.switchSidebarView = function(viewName) {
             document.querySelectorAll('.sb-view').forEach(el => el.classList.remove('active'));
@@ -7481,38 +7128,35 @@ header('Content-Type: application/javascript; charset=utf-8');
                 let where = '';
                 const idPacOuMembro = ctx.id_paciente || ctx.id_membro || null;
                 const currentModeSql = (state.chatMode || getCurrentChatMode()) === CHAT_MODE_DIRECT ? 'direct' : 'assistant';
-                const isDirectMode = currentModeSql === 'direct';
                 if      (ctx.id_atendimento) where = `id_atendimento = ${ctx.id_atendimento} AND chat_mode = '${currentModeSql}'`;
                 else if (ctx.id_receita)     where = `id_receita = ${ctx.id_receita} AND id_atendimento IS NULL AND chat_mode = '${currentModeSql}'`;
                 else if (idPacOuMembro)      where = `id_paciente = ${idPacOuMembro} AND id_atendimento IS NULL AND id_receita IS NULL AND chat_mode = '${currentModeSql}'`;
                 else if (idCriador)          where = `id_criador = ${idCriador} AND id_atendimento IS NULL AND id_receita IS NULL AND id_paciente IS NULL AND chat_mode = '${currentModeSql}'`;
 
-                if (!where && !isDirectMode) {
+                if (!where) {
                     alert('Não foi possível identificar o chat a excluir (usuário não autenticado).');
                     return;
                 }
 
-                let deletou = isDirectMode;
-                if (!isDirectMode) {
-                    try {
-                        const res = await fetch(`<?php echo $_SERVER['PHP_SELF']; ?>?action=execute_sql`, {
-                            method: 'POST',
-                            headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({
-                                query:  `DELETE FROM chatgpt_chats WHERE ${where}`,
-                                reason: 'Limpeza de histórico solicitada pelo usuário'
-                            })
-                        });
-                        const d = await res.json();
-                        if (d.success || d.affected_rows >= 0) {
-                            deletou = true;
-                            alert(`✅ Chat excluído do banco de dados.`);
-                        } else {
-                            alert(`⚠️ Não foi possível excluir o chat do banco:\n${d.error || JSON.stringify(d)}`);
-                        }
-                    } catch(e) {
-                        alert(`⚠️ Erro de rede ao excluir chat do banco:\n${e.message}`);
+                let deletou = false;
+                try {
+                    const res = await fetch(`<?php echo $_SERVER['PHP_SELF']; ?>?action=execute_sql`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            query:  `DELETE FROM chatgpt_chats WHERE ${where}`,
+                            reason: 'Limpeza de histórico solicitada pelo usuário'
+                        })
+                    });
+                    const d = await res.json();
+                    if (d.success || d.affected_rows >= 0) {
+                        deletou = true;
+                        alert(`✅ Chat excluído do banco de dados.`);
+                    } else {
+                        alert(`⚠️ Não foi possível excluir o chat do banco:\n${d.error || JSON.stringify(d)}`);
                     }
+                } catch(e) {
+                    alert(`⚠️ Erro de rede ao excluir chat do banco:\n${e.message}`);
                 }
 
                 if (!deletou) return; // Aborta limpeza visual se exclusão falhou
@@ -7520,16 +7164,11 @@ header('Content-Type: application/javascript; charset=utf-8');
                 document.getElementById('ow-messages').innerHTML = ''; 
                 state.messages = []; 
                 state.currentChatId = null;
-                state.currentChatTitle = buildDefaultChatTitle(currentModeSql);
+                state.currentChatTitle = null;
                 state.currentChatUrl = null;
-                currentUserQuestion = '';
-                localStorage.removeItem(getHistoryKey(currentModeSql)); 
+                localStorage.removeItem(getHistoryKey(state.chatMode || getCurrentChatMode())); 
                 updateTitleUI();
                 renderAnalisePrevia();  // ← Renderiza a analise prévia da LLM diretamente no chat, para o usuário ver, como ele limpou/zerou o chat.
-                if (isDirectMode) {
-                    ensureDirectToolIntro(true);
-                    apToast('🧹 Histórico local do chat de execução limpo.');
-                }
             } 
         };
         document.getElementById('ow-btn-close').onclick = () => document.getElementById('ow-window').style.display = 'none';
