@@ -208,9 +208,23 @@ function Invoke-Git {
 
     Push-Location $WorkingDirectory
     try {
-        $output = & $script:GitExe @Args 2>&1
-        if (-not $AllowFailure -and $LASTEXITCODE -ne 0) {
-            throw "Git falhou: $($Args -join ' ')`n$output"
+        $previousErrorActionPreference = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        try {
+            $output = & $script:GitExe @Args 2>&1 | ForEach-Object {
+                if ($_ -is [System.Management.Automation.ErrorRecord]) {
+                    $_.ToString()
+                } else {
+                    "$_"
+                }
+            }
+            $exitCode = $LASTEXITCODE
+        } finally {
+            $ErrorActionPreference = $previousErrorActionPreference
+        }
+
+        if (-not $AllowFailure -and $exitCode -ne 0) {
+            throw "Git falhou: $($Args -join ' ')`n$($output -join \"`n\")"
         }
         return $output
     } finally {
