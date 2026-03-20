@@ -6,17 +6,23 @@ cd /d "C:\chatgpt_simulator"
 if not exist "logs" mkdir logs
 if not exist "db" mkdir db
 
+set "PYTHON_BOOTSTRAP="
+if exist ".venv\pyvenv.cfg" if exist ".venv\Scripts\python.exe" set "PYTHON_BOOTSTRAP=.venv\Scripts\python.exe"
+if not defined PYTHON_BOOTSTRAP (
+    where py >nul 2>&1
+    if %errorLevel%==0 (
+        set "PYTHON_BOOTSTRAP=py -3"
+    ) else (
+        set "PYTHON_BOOTSTRAP=python"
+    )
+)
+
 :: Limpeza de processos
 echo [INFO] Limpando processos...
 taskkill /F /IM python.exe >nul 2>&1
 taskkill /F /IM ms-playwright.exe >nul 2>&1
 
-echo [INFO] Ativando venv...
-call .venv\Scripts\activate.bat
-
-echo [INFO] Verificando dependencias...
-python -m pip install flask flask-cors playwright pystray pillow cryptography --quiet
-playwright install chromium --quiet >nul 2>&1
+echo [INFO] Preparando ambiente Python...
 
 :: Verifica se a regra de firewall ja existe — eleva SOMENTE se necessario
 netsh advfirewall firewall show rule name="ChatGPT-3002" >nul 2>&1
@@ -39,6 +45,11 @@ echo.
 start /B cmd /c "timeout /t 6 >nul && start https://localhost:3002"
 
 echo [INFO] Iniciando Sistema Modular...
-.venv\Scripts\python.exe scripts\main.py
+%PYTHON_BOOTSTRAP% Scripts\main.py
+if %errorLevel% neq 0 (
+    echo.
+    echo [ERRO] Falha ao iniciar o ChatGPT Simulator.
+    echo [ERRO] Verifique se o Python 3 esta instalado e disponivel no PATH.
+)
 
 pause
