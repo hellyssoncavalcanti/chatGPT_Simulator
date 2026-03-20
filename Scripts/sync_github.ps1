@@ -157,8 +157,10 @@ function Import-Settings {
     if (Test-IsPlaceholderValue $script:Config.githubToken) {
         $script:Config.githubToken = $null
     }
+    
+    # CORREÇÃO APLICADA AQUI: Usamos ${settingsPath} em vez de $settingsPath:
     if (Test-IsPlaceholderValue $script:Config.ghUser) {
-        throw "Configuracao invalida em $settingsPath: substitua 'seu_usuario_ou_org' pelo usuario real do GitHub."
+        throw "Configuracao invalida em ${settingsPath}: substitua 'seu_usuario_ou_org' pelo usuario real do GitHub."
     }
 
     $script:Config.scriptDir = $scriptDir
@@ -345,8 +347,6 @@ function Merge-NewestPullRequest {
         return
     }
 
-    # Mantem a mesma estrategia do script que ja estava funcionando no Windows:
-    # usa o numero do PR como criterio de "mais recente" e processa o maior numero.
     $ordered = @($prsArray | Sort-Object -Property number -Descending)
     $newest = $ordered[0]
     $older = @()
