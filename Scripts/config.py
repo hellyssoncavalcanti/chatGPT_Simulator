@@ -47,7 +47,7 @@ CERT_FILE = os.path.join(DIRS["certs"], "cert.pem")
 KEY_FILE = os.path.join(DIRS["certs"], "key.pem")
 FRONTEND_FILE = os.path.join(DIRS["frontend"], "index.html")
 
-log_filename = datetime.now().strftime("simulator-%d_%m_%Y-%H_%M_%S.log")
+log_filename = datetime.now().strftime("simulator-%H_%M_%S-%d_%m_%Y.log")
 LOG_PATH = os.path.join(DIRS["logs"], log_filename)
 
 for d in DIRS.values(): os.makedirs(d, exist_ok=True)

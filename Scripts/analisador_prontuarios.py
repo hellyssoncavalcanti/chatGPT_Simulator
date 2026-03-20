@@ -108,7 +108,6 @@ SIMILARIDADE_MIN     = 0.40                    # score mínimo p/ considerar sem
 
 # Busca Web (enriquecimento de condutas com evidências)
 SEARCH_URL           = "http://127.0.0.1:3003/api/web_search"  # endpoint local do Simulator
-UPTODATE_SEARCH_URL  = "http://127.0.0.1:3003/api/uptodate_search"  # endpoint local do Simulator
 SEARCH_MAX_QUERIES   = 3                       # máximo de queries por prontuário
 SEARCH_TIMEOUT       = 90                      # timeout por chamada (o browser precisa digitar)
 SEARCH_HABILITADA    = True                    # False para desabilitar sem remover código
@@ -121,7 +120,7 @@ PHP_ACTION_WRITE = "api_exec"
 PHP_KEY_FIELD    = "api_key"
 
 # Nome do log com timestamp do momento de inicialização
-_log_ts   = datetime.now().strftime("%d_%m_%Y-%H_%M_%S")
+_log_ts   = datetime.now().strftime("%H_%M_%S-%d_%m_%Y")
 _log_file = f"logs/analisador_prontuarios-{_log_ts}.log"
 # ─────────────────────────────────────────────────────────────
 
@@ -1345,18 +1344,6 @@ def _stringify_compact(value) -> str:
     return str(parsed or "").strip()
 
 
-def _valor_compilado_para_prompt(value, max_chars: int = 1200):
-    try:
-        parsed = json.loads(value) if isinstance(value, str) else value
-    except Exception:
-        parsed = value
-
-    if isinstance(parsed, str):
-        texto = re.sub(r"\s+", " ", parsed).strip()
-        return texto[:max_chars]
-    return parsed
-
-
 def montar_texto_compilado_paciente(id_paciente: str):
     rows = sql_exec(f"""
         SELECT
@@ -1385,83 +1372,66 @@ def montar_texto_compilado_paciente(id_paciente: str):
         WHERE id_paciente = '{esc(id_paciente)}'
           AND status = 'concluido'
           AND id_atendimento IS NOT NULL
-        ORDER BY datetime_atendimento_inicio ASC, id_atendimento ASC
-        LIMIT 50
+        ORDER BY datetime_atendimento_inicio DESC, id_atendimento DESC
+        LIMIT 25
     """, reason="carregar_analises_paciente_compilado").get("data", [])
 
     if not rows:
         return "", None
 
-    historico = []
-    datas = []
-    campos_detalhe = [
-        "gravidade_clinica",
-        "diagnosticos_citados",
-        "pontos_chave",
-        "mudancas_relevantes",
-        "sinais_nucleares",
-        "eventos_comportamentais",
-        "terapias_referidas",
-        "exames_citados",
-        "pendencias_clinicas",
-        "condutas_no_prontuario",
-        "medicacoes_em_uso",
-        "medicacoes_iniciadas",
-        "medicacoes_suspensas",
-        "condutas_especificas_sugeridas",
-        "condutas_gerais_sugeridas",
-        "mensagens_acompanhamento",
-    ]
-
+    blocos = []
     for idx, row in enumerate(rows, start=1):
-        dt_at = row.get("datetime_atendimento_inicio") or ""
-        if dt_at:
-            datas.append(dt_at)
+        linhas = [
+            f"ATENDIMENTO #{idx}",
+            f"id_atendimento: {row.get('id_atendimento')}",
+            f"data_atendimento: {row.get('datetime_atendimento_inicio') or 'sem_data'}",
+        ]
+        if row.get("resumo_texto"):
+            linhas.append(f"resumo_texto: {row['resumo_texto']}")
 
-        item = {
-            "ordem_cronologica": idx,
-            "id_atendimento": row.get("id_atendimento"),
-            "datetime_atendimento_inicio": dt_at or None,
-            "resumo_texto": _valor_compilado_para_prompt(row.get("resumo_texto") or "", max_chars=1500),
-        }
-
-        for campo in campos_detalhe:
-            valor = _valor_compilado_para_prompt(row.get(campo))
-            if valor not in (None, "", [], {}):
-                item[campo] = valor
-
-        historico.append(item)
-
-    payload_compilado = {
-        "id_paciente": id_paciente,
-        "total_atendimentos_analisados": len(historico),
-        "periodo_primeiro_atendimento": datas[0] if datas else None,
-        "periodo_ultimo_atendimento": datas[-1] if datas else None,
-        "atendimentos": historico,
-    }
+        for campo in [
+            "gravidade_clinica",
+            "diagnosticos_citados",
+            "pontos_chave",
+            "mudancas_relevantes",
+            "sinais_nucleares",
+            "eventos_comportamentais",
+            "terapias_referidas",
+            "exames_citados",
+            "pendencias_clinicas",
+            "condutas_no_prontuario",
+            "medicacoes_em_uso",
+            "medicacoes_iniciadas",
+            "medicacoes_suspensas",
+            "condutas_especificas_sugeridas",
+            "condutas_gerais_sugeridas",
+            "mensagens_acompanhamento",
+        ]:
+            val = _stringify_compact(row.get(campo))
+            if val:
+                linhas.append(f"{campo}: {val}")
+        blocos.append("\n".join(linhas))
 
     texto = (
         f"HISTÓRICO LONGITUDINAL COMPILADO DO PACIENTE {id_paciente}\n"
-        "O conteúdo abaixo representa TODOS os atendimentos estruturados já concluídos deste paciente em ordem cronológica.\n"
-        "Sua tarefa é consolidar o histórico longitudinal completo, identificando padrões persistentes, mudanças entre consultas, terapias, medicações, riscos, pendências e condutas.\n"
-        "NÃO copie apenas o último atendimento; compare e sintetize o conjunto completo do histórico abaixo.\n\n"
-        "DADOS COMPILADOS (JSON):\n"
-        + json.dumps(payload_compilado, ensure_ascii=False, indent=2)
+        "Os blocos abaixo representam análises estruturadas já concluídas deste paciente.\n"
+        "Consolide o histórico completo do paciente, sintetizando padrões persistentes, mudanças relevantes, terapias, medicações, riscos, pendências e condutas, sem inventar dados.\n\n"
+        + "\n\n" + ("\n\n" + ("=" * 70) + "\n\n").join(blocos)
     )
-    return texto, rows[-1]
+    return texto, rows[0]
 
 
 def salvar_resultado_compilado_paciente(id_paciente: str, resultado: dict):
     id_registro = garantir_registro_compilado_paciente_pendente(id_paciente)
 
-    sets = _montar_sets_resultado(resultado) + [
+    sets = [
         "id_atendimento = NULL",
         "datetime_atendimento_inicio = NULL",
         "datetime_ultima_atualizacao_atendimento = NULL",
         "id_criador = NULL",
         "hash_prontuario = 'analise_compilada_paciente'",
         f"id_paciente = '{esc(id_paciente)}'",
-    ]
+    ] + _montar_sets_resultado(resultado)
 
     sql_exec(
         f"UPDATE {TABELA} SET\n    " + ",\n    ".join(sets) + f"\nWHERE id = {id_registro}"
@@ -1517,16 +1487,6 @@ def atualizar_analise_compilada_paciente(id_paciente: str):
         )
     except Exception as e:
         log.warning(f"  ⚠️ Enriquecimento da síntese compilada falhou (não fatal): {e}")
-
-    try:
-        if _grafo_clinico_esta_generico(resultado):
-            resultado = gerar_dados_auxiliares_llm(
-                resultado,
-                chat_url=resultado.get("_chat_url"),
-                chat_id=resultado.get("_chat_id"),
-            )
-    except Exception as e:
-        log.warning(f"  ⚠️ Refinamento auxiliar da síntese compilada falhou (não fatal): {e}")
 
     salvar_resultado_compilado_paciente(id_paciente, resultado)
     log.info(f"✅ Síntese compilada do paciente {id_paciente} atualizada.")
@@ -2234,92 +2194,12 @@ def _normalizar_node(nd: dict) -> dict:
 
     A LLM pode retornar variantes em inglês, abreviadas, etc.
     """
-    tipo_bruto = str(
-        nd.get("tipo") or nd.get("node_tipo") or nd.get("type") or nd.get("category") or ""
-    ).strip()
-    valor = str(
-        nd.get("valor") or nd.get("node_valor") or nd.get("value") or nd.get("label") or nd.get("name") or nd.get("nome") or ""
-    ).strip()
-    normalizado = str(
-        nd.get("normalizado") or nd.get("node_normalizado") or nd.get("normalized") or nd.get("normalised") or ""
-    ).strip()
-    contexto = str(
-        nd.get("contexto") or nd.get("node_contexto") or nd.get("context") or nd.get("description") or nd.get("descricao") or ""
-    ).strip()
-
-    tipo_alias = {
-        "patient": "paciente",
-        "paciente": "paciente",
-        "patient_name": "paciente",
-        "diagnosis": "diagnostico",
-        "diagnostico": "diagnostico",
-        "diagnóstico": "diagnostico",
-        "cid": "diagnostico",
-        "symptom": "sintoma",
-        "symptoms": "sintoma",
-        "sintoma": "sintoma",
-        "sinal": "sintoma",
-        "sign": "sintoma",
-        "medication": "medicamento",
-        "medicine": "medicamento",
-        "drug": "medicamento",
-        "medicamento": "medicamento",
-        "medicacao": "medicamento",
-        "medicação": "medicamento",
-        "therapy": "terapia",
-        "terapia": "terapia",
-        "exam": "exame",
-        "test": "exame",
-        "exame": "exame",
-        "gene": "gene",
-        "genetics": "gene",
-        "genetica": "gene",
-        "genética": "gene",
-        "behavior": "comportamento",
-        "behaviour": "comportamento",
-        "comportamento": "comportamento",
-        "conduct": "conduta",
-        "plan": "conduta",
-        "conduta": "conduta",
-        "risk": "risco",
-        "risco": "risco",
-        "pending": "pendencia",
-        "pendencia": "pendencia",
-        "pendência": "pendencia",
-    }
-    tipo = tipo_alias.get(tipo_bruto.lower(), tipo_bruto.lower())
-
-    if not normalizado and valor:
-        normalizado = re.sub(r"[^a-z0-9]+", "_", valor.lower()).strip("_")
-
-    campos_base = {
-        "id", "node_id", "tipo", "node_tipo", "type", "category",
-        "valor", "node_valor", "value", "label", "name", "nome",
-        "normalizado", "node_normalizado", "normalized", "normalised",
-        "contexto", "node_contexto", "context", "description", "descricao",
-    }
-    extras = []
-    for k, v in nd.items():
-        if k in campos_base or v in (None, "", [], {}):
-            continue
-        if isinstance(v, (dict, list)):
-            extras.append(f"{k}={json.dumps(v, ensure_ascii=False)}")
-        else:
-            extras.append(f"{k}={v}")
-    extras_txt = " | ".join(extras[:4])
-    if extras_txt:
-        contexto = f"{contexto} | {extras_txt}".strip(" |") if contexto else extras_txt
-
-    node_id = str(nd.get("id") or nd.get("node_id") or "").strip()
-    if not node_id and tipo and normalizado:
-        node_id = f"{tipo}_{normalizado[:80]}"
-
     return {
-        "id":           node_id,
-        "tipo":         tipo,
-        "valor":        valor,
-        "normalizado":  normalizado,
-        "contexto":     contexto,
+        "id":           nd.get("id") or nd.get("node_id") or "",
+        "tipo":         nd.get("tipo") or nd.get("node_tipo") or nd.get("type") or nd.get("category") or "",
+        "valor":        nd.get("valor") or nd.get("node_valor") or nd.get("value") or nd.get("label") or nd.get("name") or nd.get("nome") or "",
+        "normalizado":  nd.get("normalizado") or nd.get("node_normalizado") or nd.get("normalized") or nd.get("normalised") or "",
+        "contexto":     nd.get("contexto") or nd.get("node_contexto") or nd.get("context") or nd.get("description") or nd.get("descricao") or "",
     }
 
 
@@ -2334,38 +2214,6 @@ def _normalizar_edge(ed: dict) -> dict:
         "relacao_tipo":     ed.get("relacao_tipo") or ed.get("relation") or ed.get("type") or ed.get("tipo") or ed.get("relationship") or "",
         "relacao_contexto": ed.get("relacao_contexto") or ed.get("contexto") or ed.get("context") or ed.get("description") or ed.get("descricao") or "",
     }
-
-
-def _deduplicar_nodes_grafo(nodes: list) -> list:
-    dedup = {}
-    for node in nodes:
-        if not isinstance(node, dict):
-            continue
-        chave = (
-            str(node.get("tipo") or "").strip().lower(),
-            str(node.get("normalizado") or node.get("valor") or "").strip().lower(),
-        )
-        if not chave[1]:
-            continue
-        if chave not in dedup:
-            dedup[chave] = node
-            continue
-        existente = dedup[chave]
-        if not existente.get("id") and node.get("id"):
-            existente["id"] = node["id"]
-        if not existente.get("contexto") and node.get("contexto"):
-            existente["contexto"] = node["contexto"]
-        elif node.get("contexto") and node["contexto"] not in str(existente.get("contexto") or ""):
-            existente["contexto"] = f"{existente.get('contexto','')} | {node['contexto']}".strip(" |")
-    return list(dedup.values())
-
-
-def _primeiro_node_representativo(nodes: list):
-    for tipo_prioritario in ("diagnostico", "medicamento", "terapia", "sintoma", "gene", "risco"):
-        for node in nodes:
-            if (node.get("tipo") or "").lower() == tipo_prioritario:
-                return node
-    return nodes[0] if nodes else None
 
 
 def salvar_auxiliar(idatendimento: int, id_paciente: str, resultado: dict):
@@ -2412,17 +2260,12 @@ def salvar_auxiliar(idatendimento: int, id_paciente: str, resultado: dict):
         if chave_php == "grafo_clinico_nodes" and isinstance(val, list):
             val_original = val
             val = [_normalizar_node(nd) for nd in val if isinstance(nd, dict)]
+            # Log de diagnóstico: mostra primeiro node antes/depois
+            if val_original:
+                log.info(f"  🔬 Primeiro node LLM (original): {json.dumps(val_original[0], ensure_ascii=False)[:200]}")
+                log.info(f"  🔬 Primeiro node (normalizado):   {json.dumps(val[0], ensure_ascii=False)[:200]}")
             # Filtra nodes sem valor (o PHP faria isso de qualquer forma)
             val = [n for n in val if n.get("valor")]
-            val = _deduplicar_nodes_grafo(val)
-            node_original_log = _primeiro_node_representativo([
-                _normalizar_node(nd) for nd in val_original if isinstance(nd, dict)
-            ])
-            node_normalizado_log = _primeiro_node_representativo(val)
-            if node_original_log:
-                log.info(f"  🔬 Node representativo LLM (normalizado): {json.dumps(node_original_log, ensure_ascii=False)[:300]}")
-            if node_normalizado_log:
-                log.info(f"  🔬 Node representativo salvo:           {json.dumps(node_normalizado_log, ensure_ascii=False)[:300]}")
             if not val:
                 log.warning(f"  ⚠️ Todos os nodes do grafo ficaram sem 'valor' após normalização!")
                 continue
@@ -3373,32 +3216,6 @@ def buscar_web(queries: list) -> list:
         return []
 
 
-def buscar_uptodate(queries: list) -> list:
-    """
-    Chama o endpoint /api/uptodate_search do ChatGPT Simulator.
-    Retorna lista de dicts: [{query, results: [{title, url, snippet}]}]
-    """
-    if not queries:
-        return []
-
-    try:
-        resp = requests.post(
-            UPTODATE_SEARCH_URL,
-            json={"queries": queries},
-            headers={
-                "Content-Type":  "application/json",
-                "Authorization": f"Bearer {API_KEY}",
-            },
-            timeout=SEARCH_TIMEOUT * len(queries),
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        return data.get("results", [])
-    except Exception as e:
-        log.warning(f"  ⚠️ Busca UpToDate falhou: {e}")
-        return []
-
-
 def extrair_termos_busca(resultado: dict) -> list:
     """
     Extrai termos clínicos relevantes do resultado da análise e monta
@@ -3687,12 +3504,6 @@ OBJETIVO:
 
 FORMATO OBRIGATÓRIO:
 {
-  "uptodate_queries": [
-    {
-      "query": "consulta médica apropriada para UpToDate",
-      "reason": "por que pesquisar este tema médico no UpToDate é útil para este paciente"
-    }
-  ],
   "search_queries": [
     {
       "query": "consulta para Google/PubMed",
@@ -3703,240 +3514,15 @@ FORMATO OBRIGATÓRIO:
 
 REGRAS:
 - Responder SOMENTE com JSON válido.
-- Máximo de 3 queries por lista.
+- Máximo de 3 queries.
 - Preferir inglês quando isso melhorar a busca científica.
-- Você PODE usar `uptodate_queries` para temas médicos/clínicos em que o UpToDate tende a ter bons resultados.
-- NÃO usar `uptodate_queries` para pesquisar pessoas, notícias, instituições, temas administrativos ou assuntos não médicos.
-- Quando o tema for claramente médico, clínico, terapêutico, diagnóstico ou de monitorização, considere priorizar `uptodate_queries`.
 - Quando fizer sentido, usar PubMed, diretrizes pediátricas, systematic review, guideline, consensus.
 - Não inventar fatos que não estejam explícitos no caso.
 - Não repetir queries redundantes.
 """
 
-PROMPT_AUXILIAR_GRAFO_V18 = """ASSISTENTE DE ANÁLISE CLÍNICA DE PRONTUÁRIOS — PROMPT V18
-Compatível com arquitetura SQL + RAG + CDSS
 
-OBJETIVO
-Transformar o caso clínico estruturado abaixo em dados auxiliares confiáveis e específicos,
-compatíveis com:
-- chatgpt_alertas_clinicos
-- chatgpt_clinical_graph_nodes
-- chatgpt_clinical_graph_edges
-
-PRINCÍPIOS
-- PRIORIDADE ABSOLUTA: extração fiel do texto/caso estruturado.
-- Nunca inventar dados ausentes.
-- Nunca criar diagnóstico, medicação, terapia ou exame sem base explícita.
-- Se não houver informação suficiente, devolver lista vazia ou texto vazio.
-
-FOCO PRINCIPAL DESTA ETAPA
-Gerar um grafo clínico útil e ESPECÍFICO para o caso.
-
-REGRAS PARA O GRAFO CLÍNICO
-- Os nodes devem representar entidades clínicas concretas do caso, por exemplo:
-  paciente, diagnóstico, sintoma, comportamento, medicamento, terapia, exame, pendência, risco, gene.
-- Evitar nodes genéricos demais como "paciente", "tratamento", "consulta", "medicação" sem detalhamento.
-- Preferir nodes específicos como:
-  "TEA", "deficiência intelectual", "aripiprazol", "topiramato", "ausência de fala funcional",
-  "avaliação genética pendente", "psicologia", "fácies dismórfica".
-- O campo `normalizado` deve ser estável e curto.
-- O campo `contexto` deve explicar por que aquele node existe no caso concreto.
-- As edges devem ligar entidades reais do caso e usar relações semânticas específicas.
-
-NOVA REGRA — MENSAGENS DE ACOMPANHAMENTO
-Quando houver base suficiente no caso, as mensagens de acompanhamento devem ser humanas,
-acolhedoras, personalizadas e não robóticas.
-
-FORMATO DE RESPOSTA
-Responder SOMENTE com JSON válido, sem markdown, sem explicações e sem campos extras.
-
-SCHEMA OBRIGATÓRIO:
-{
-  "alertas_clinicos": [
-    {
-      "tipo_alerta": "",
-      "descricao": "",
-      "nivel_risco": ""
-    }
-  ],
-  "grafo_clinico_nodes": [
-    {
-      "id": "",
-      "tipo": "",
-      "valor": "",
-      "normalizado": "",
-      "contexto": ""
-    }
-  ],
-  "grafo_clinico_edges": [
-    {
-      "node_origem": "",
-      "node_destino": "",
-      "relacao_tipo": "",
-      "contexto": ""
-    }
-  ],
-  "mensagens_acompanhamento": {
-    "mensagem_1_semana": "",
-    "mensagem_1_mes": "",
-    "mensagem_pre_retorno": ""
-  }
-}
-"""
-
-
-def _ensure_list_local(val):
-    if val is None:
-        return []
-    if isinstance(val, list):
-        return val
-    if isinstance(val, str):
-        try:
-            parsed = json.loads(val)
-            return parsed if isinstance(parsed, list) else []
-        except Exception:
-            return []
-    return []
-
-
-def _grafo_clinico_esta_generico(resultado: dict) -> bool:
-    nodes = _ensure_list_local(
-        resultado.get("grafo_clinico_nodes")
-        or resultado.get("grafo_nodes")
-        or resultado.get("nodes")
-    )
-    if not nodes:
-        return True
-
-    tipos_relevantes = {
-        "diagnostico", "sintoma", "medicamento", "terapia",
-        "exame", "pendencia", "risco", "gene", "comportamento",
-    }
-    nodes_relevantes = [
-        n for n in nodes
-        if isinstance(n, dict)
-        and (n.get("valor") or n.get("node_valor"))
-        and ((n.get("tipo") or n.get("node_tipo") or "").lower() in tipos_relevantes)
-    ]
-    return len(nodes_relevantes) < 2
-
-
-def gerar_dados_auxiliares_llm(resultado: dict, chat_url: str = None, chat_id: str = None) -> dict:
-    """
-    Pede à própria LLM, na mesma conversa do caso, um refinamento dos campos
-    auxiliares mais sensíveis a especificidade semântica (grafo, alertas e
-    mensagens de acompanhamento), usando um prompt dedicado de estilo V18.
-    """
-    contexto_auxiliar = {
-        chave: valor
-        for chave, valor in {
-            "resumo_texto": resultado.get("resumo_texto"),
-            "gravidade_clinica": resultado.get("gravidade_clinica"),
-            "score_risco": resultado.get("score_risco"),
-            "diagnosticos_citados": resultado.get("diagnosticos_citados"),
-            "pontos_chave": resultado.get("pontos_chave"),
-            "mudancas_relevantes": resultado.get("mudancas_relevantes"),
-            "eventos_comportamentais": resultado.get("eventos_comportamentais"),
-            "sinais_nucleares": resultado.get("sinais_nucleares"),
-            "medicacoes_em_uso": resultado.get("medicacoes_em_uso"),
-            "medicacoes_iniciadas": resultado.get("medicacoes_iniciadas"),
-            "medicacoes_suspensas": resultado.get("medicacoes_suspensas"),
-            "terapias_referidas": resultado.get("terapias_referidas"),
-            "exames_citados": resultado.get("exames_citados"),
-            "pendencias_clinicas": resultado.get("pendencias_clinicas"),
-            "condutas_no_prontuario": resultado.get("condutas_no_prontuario"),
-            "condutas_especificas_sugeridas": resultado.get("condutas_especificas_sugeridas"),
-            "condutas_gerais_sugeridas": resultado.get("condutas_gerais_sugeridas"),
-            "seguimento_retorno_estimado": resultado.get("seguimento_retorno_estimado"),
-        }.items()
-        if valor not in (None, "", [], {})
-    }
-
-    if not contexto_auxiliar:
-        return resultado
-
-    user_content = (
-        f"[INICIO_TEXTO_COLADO]\n"
-        f"{PROMPT_AUXILIAR_GRAFO_V18}\n\n"
-        f"CASO CLÍNICO ESTRUTURADO (JSON):\n"
-        f"{json.dumps(contexto_auxiliar, ensure_ascii=False, indent=2)}\n"
-        f"[FIM_TEXTO_COLADO]"
-    )
-
-    payload = {
-        "model": LLM_MODEL,
-        "stream": True,
-        "messages": [
-            {"role": "user", "content": user_content},
-        ],
-    }
-    if chat_url:
-        payload["url"] = chat_url
-    if chat_id:
-        payload["chatid"] = chat_id
-
-    try:
-        log.info("  🕸️ Solicitando refinamento de grafo/alertas à LLM na mesma conversa...")
-        resp = requests.post(
-            LLM_URL,
-            json=payload,
-            headers={
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {API_KEY}",
-            },
-            stream=True,
-            timeout=300,
-        )
-        resp.raise_for_status()
-
-        markdown = ""
-        last_chat_url = chat_url
-        last_chat_id = chat_id
-        for raw_line in resp.iter_lines():
-            if not raw_line:
-                continue
-            try:
-                obj = json.loads(raw_line)
-            except json.JSONDecodeError:
-                continue
-            t = obj.get("type")
-            if t == "markdown":
-                markdown = obj.get("content", "")
-            elif t == "finish":
-                fin = obj.get("content", {}) or {}
-                last_chat_url = fin.get("url") or last_chat_url
-                last_chat_id = fin.get("chat_id") or last_chat_id
-            elif t == "error":
-                log.warning(f"  ⚠️ Refinamento auxiliar: LLM retornou erro: {obj.get('content')}")
-                return resultado
-
-        if not markdown:
-            log.warning("  ⚠️ Refinamento auxiliar: LLM não retornou conteúdo.")
-            return resultado
-
-        extra = _parse_json_llm(markdown)
-        for chave in ("alertas_clinicos", "grafo_clinico_nodes", "grafo_clinico_edges", "mensagens_acompanhamento"):
-            val = extra.get(chave)
-            if val not in (None, "", [], {}):
-                resultado[chave] = val
-        if last_chat_url:
-            resultado["_chat_url"] = last_chat_url
-        if last_chat_id:
-            resultado["_chat_id"] = last_chat_id
-
-        log.info(
-            "  🕸️ Refinamento auxiliar concluído: "
-            f"nodes={len(_ensure_list_local(resultado.get('grafo_clinico_nodes')))} | "
-            f"edges={len(_ensure_list_local(resultado.get('grafo_clinico_edges')))}"
-        )
-        return resultado
-
-    except Exception as e:
-        log.warning(f"  ⚠️ Refinamento auxiliar via LLM falhou: {e}")
-        return resultado
-
-
-def gerar_queries_pesquisa_llm(resultado: dict, chat_url: str = None, chat_id: str = None) -> dict:
+def gerar_queries_pesquisa_llm(resultado: dict, chat_url: str = None, chat_id: str = None) -> list:
     """
     Pede à própria LLM que proponha as queries/tópicos de pesquisa mais úteis
     para o paciente específico analisado.
@@ -3964,7 +3550,7 @@ def gerar_queries_pesquisa_llm(resultado: dict, chat_url: str = None, chat_id: s
     }
 
     if not contexto_pesquisa:
-        return {"search_queries": [], "uptodate_queries": []}
+        return []
 
     user_content = (
         f"[INICIO_TEXTO_COLADO]\n"
@@ -4013,61 +3599,47 @@ def gerar_queries_pesquisa_llm(resultado: dict, chat_url: str = None, chat_id: s
                 markdown = obj.get("content", "")
             elif t == "error":
                 log.warning(f"  ⚠️ Planejamento de pesquisa: LLM retornou erro: {obj.get('content')}")
-                return {"search_queries": [], "uptodate_queries": []}
+                return []
 
         if not markdown:
             log.warning("  ⚠️ Planejamento de pesquisa: LLM não retornou conteúdo.")
-            return {"search_queries": [], "uptodate_queries": []}
+            return []
 
         try:
             planejado = _parse_json_llm(markdown)
-            itens_search = planejado.get("search_queries") or []
-            itens_uptodate = planejado.get("uptodate_queries") or []
+            itens = planejado.get("search_queries") or []
         except Exception as parse_err:
-            itens_search = _extrair_queries_pesquisa_fallback(markdown)
-            itens_uptodate = []
-            if itens_search:
-                log.info(f"  ℹ️ Planejamento de pesquisa: JSON fora do formato estrito; extração tolerante aplicada ({parse_err}).")
-            else:
+            log.warning(f"  ⚠️ Planejamento de pesquisa: JSON inválido, tentando extração tolerante ({parse_err}).")
+            itens = _extrair_queries_pesquisa_fallback(markdown)
+            if not itens:
                 preview = re.sub(r"\s+", " ", _strip_code_fences(markdown))[:500]
-                log.warning(f"  ⚠️ Planejamento de pesquisa: não foi possível interpretar a resposta da LLM ({parse_err}). Prévia: {preview}")
-                return {"search_queries": [], "uptodate_queries": []}
+                log.warning(f"  ⚠️ Planejamento de pesquisa: não foi possível interpretar a resposta da LLM. Prévia: {preview}")
+                return []
 
-        def _normalizar_lista_queries(itens, label_log):
-            queries = []
-            vistos = set()
-            for item in (itens or [])[:SEARCH_MAX_QUERIES]:
-                if not isinstance(item, dict):
-                    continue
-                query = re.sub(r"\s+", " ", str(item.get("query") or "")).strip()
-                reason = re.sub(r"\s+", " ", str(item.get("reason") or "")).strip()
-                if not query:
-                    continue
-                key = query.lower()
-                if key in vistos:
-                    continue
-                vistos.add(key)
-                queries.append(query)
-                log.info(f"     🧠 {label_log}: {query}" + (f" | motivo: {reason}" if reason else ""))
-            return queries[:SEARCH_MAX_QUERIES]
+        queries = []
+        query_labels = set()
+        for item in itens[:SEARCH_MAX_QUERIES]:
+            if not isinstance(item, dict):
+                continue
+            query = re.sub(r"\s+", " ", str(item.get("query") or "")).strip()
+            reason = re.sub(r"\s+", " ", str(item.get("reason") or "")).strip()
+            if not query:
+                continue
+            key = query.lower()
+            if key in query_labels:
+                continue
+            query_labels.add(key)
+            queries.append(query)
+            log.info(f"     🧠 {query}" + (f" | motivo: {reason}" if reason else ""))
 
-        search_queries = _normalizar_lista_queries(itens_search, "search")
-        uptodate_queries = _normalizar_lista_queries(itens_uptodate, "uptodate")
+        if queries:
+            log.info(f"  🧠 LLM planejou {len(queries)} query(s) de pesquisa específicas para o paciente.")
 
-        if search_queries or uptodate_queries:
-            log.info(
-                "  🧠 LLM planejou "
-                f"{len(search_queries)} search_queries e {len(uptodate_queries)} uptodate_queries."
-            )
-
-        return {
-            "search_queries": search_queries,
-            "uptodate_queries": uptodate_queries,
-        }
+        return queries[:SEARCH_MAX_QUERIES]
 
     except Exception as e:
         log.warning(f"  ⚠️ Planejamento de pesquisa via LLM falhou: {e}")
-        return {"search_queries": [], "uptodate_queries": []}
+        return []
 
 
 PROMPT_ENRIQUECIMENTO = """Com base nos resultados de busca em literatura médica fornecidos abaixo, enriqueça as condutas clínicas sugeridas com referências reais.
@@ -4319,68 +3891,41 @@ def enriquecer_com_evidencias(resultado: dict, resultados_web: list,
 def executar_busca_evidencias(resultado: dict, chat_url: str = None, chat_id: str = None) -> dict:
     """
     Pipeline completo de busca + enriquecimento:
-      1. Pedir à LLM um plano estruturado com queries de UpToDate e web
-      2. Priorizar UpToDate para temas clínicos, com fallback para web search
-      3. Enviar os resultados encontrados para a LLM enriquecer condutas
+      1. Extrair termos de busca do resultado da análise
+      2. Buscar no Google via /api/web_search
+      3. Enviar resultados para a LLM enriquecer condutas
     """
     if not SEARCH_HABILITADA:
         return resultado
 
-    def _resumo_resultados(label: str, resultados: list) -> tuple:
-        total_items = sum(
-            len(r.get("results", [])) for r in resultados if r.get("success", True)
-        )
-        tem_html = any(r.get("raw_html") for r in resultados if r.get("success", True))
-        log.info(
-            f"  {label} {total_items} resultado(s) estruturado(s) | HTML bruto: {'sim' if tem_html else 'não'}"
-        )
-        return total_items, tem_html
-
-    plano_pesquisa = gerar_queries_pesquisa_llm(resultado, chat_url=chat_url, chat_id=chat_id) or {}
-    search_queries = list(plano_pesquisa.get("search_queries") or [])
-    uptodate_queries = list(plano_pesquisa.get("uptodate_queries") or [])
-
-    if not search_queries and not uptodate_queries:
-        log.info("  🔄 Fallback: usando extração heurística de termos para montar as queries de web.")
-        search_queries = extrair_termos_busca(resultado)
-
-    if not search_queries and not uptodate_queries:
+    # 1. Pede à LLM para planejar queries específicas do paciente
+    queries = gerar_queries_pesquisa_llm(resultado, chat_url=chat_url, chat_id=chat_id)
+    if not queries:
+        log.info("  🔄 Fallback: usando extração heurística de termos para montar as queries.")
+        queries = extrair_termos_busca(resultado)
+    if not queries:
         log.info("  🔍 Nenhum termo clínico para busca — pulando enriquecimento.")
         return resultado
 
-    resultados_busca = []
+    log.info(f"  🌐 Busca web: {len(queries)} query(s)")
+    for q in queries:
+        log.info(f"     🔎 {q}")
 
-    if uptodate_queries:
-        log.info(f"  🩺 Busca UpToDate prioritária: {len(uptodate_queries)} query(s)")
-        for q in uptodate_queries:
-            log.info(f"     🩺 {q}")
+    # 2. Busca no Google
+    resultados_web = buscar_web(queries)
+    total_items = sum(
+        len(r.get("results", [])) for r in resultados_web if r.get("success", True)
+    )
+    tem_html = any(r.get("raw_html") for r in resultados_web if r.get("success", True))
+    log.info(f"  🌐 {total_items} resultado(s) estruturado(s) | HTML bruto: {'sim' if tem_html else 'não'}")
 
-        resultados_uptodate = buscar_uptodate(uptodate_queries)
-        total_items, tem_html = _resumo_resultados("🩺 UpToDate:", resultados_uptodate)
-
-        if total_items > 0 or tem_html:
-            resultados_busca.extend(resultados_uptodate)
-        else:
-            log.info("  🔄 UpToDate sem resultados úteis — acionando fallback para web search.")
-            if not search_queries:
-                search_queries = uptodate_queries[:SEARCH_MAX_QUERIES]
-
-    if search_queries and not resultados_busca:
-        log.info(f"  🌐 Busca web: {len(search_queries)} query(s)")
-        for q in search_queries:
-            log.info(f"     🔎 {q}")
-
-        resultados_web = buscar_web(search_queries)
-        total_items, tem_html = _resumo_resultados("🌐 Web:", resultados_web)
-        if total_items > 0 or tem_html:
-            resultados_busca.extend(resultados_web)
-
-    if not resultados_busca:
+    if total_items == 0 and not tem_html:
         log.info("  🔍 Nenhum resultado — pulando enriquecimento.")
         return resultado
 
-    log.info("  📚 Enviando resultados para LLM enriquecer condutas...")
-    resultado = enriquecer_com_evidencias(resultado, resultados_busca, chat_url, chat_id)
+    # 3. Enriquecer condutas via LLM (Passo 2)
+    log.info(f"  📚 Enviando resultados para LLM enriquecer condutas...")
+    resultado = enriquecer_com_evidencias(resultado, resultados_web, chat_url, chat_id)
 
     return resultado
 
@@ -4445,14 +3990,6 @@ def processar_lote(pendentes: list):
                 resultado = executar_busca_evidencias(resultado, chat_url=chat_url_atual, chat_id=chat_id_atual)
             except Exception as e:
                 log.warning(f"  ⚠️ Enriquecimento com evidências falhou (não fatal): {e}")
-
-            try:
-                if _grafo_clinico_esta_generico(resultado):
-                    chat_url_aux = resultado.get("_chat_url") or chat_url_prev
-                    chat_id_aux  = resultado.get("_chat_id") or chat_id_prev
-                    resultado = gerar_dados_auxiliares_llm(resultado, chat_url=chat_url_aux, chat_id=chat_id_aux)
-            except Exception as e:
-                log.warning(f"  ⚠️ Refinamento auxiliar do grafo falhou (não fatal): {e}")
 
             salvar_resultado(idat, resultado)
             log.info(

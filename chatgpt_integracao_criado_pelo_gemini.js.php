@@ -4200,7 +4200,7 @@ header('Content-Type: application/javascript; charset=utf-8');
         };
 
         try {
-            const [queueData, avgTodayData, avgHistoricData, avgInProgressData] = await Promise.all([
+            const [queueData, avgTodayData, avgHistoricData] = await Promise.all([
                 runSql(`
                     SELECT
                         SUM(CASE WHEN status = 'processando' AND id <> ${analiseId} THEN 1 ELSE 0 END) AS processos_em_andamento,
@@ -4239,16 +4239,7 @@ header('Content-Type: application/javascript; charset=utf-8');
                       AND datetime_analise_concluida IS NOT NULL
                       AND DATE(datetime_analise_concluida) < CURDATE()
                       AND TIMESTAMPDIFF(SECOND, datetime_analise_iniciada, datetime_analise_concluida) BETWEEN 5 AND 21600
-                `, 'Média histórica das análises concluídas'),
-                runSql(`
-                    SELECT
-                        COUNT(*) AS total,
-                        AVG(TIMESTAMPDIFF(SECOND, datetime_analise_iniciada, NOW())) AS media_segundos
-                    FROM chatgpt_atendimentos_analise
-                    WHERE status = 'processando'
-                      AND datetime_analise_iniciada IS NOT NULL
-                      AND TIMESTAMPDIFF(SECOND, datetime_analise_iniciada, NOW()) BETWEEN 5 AND 21600
-                `, 'Média do tempo já transcorrido das análises em andamento')
+                `, 'Média histórica das análises concluídas')
             ]);
 
             const inProgressAhead = Number(queueData?.data?.[0]?.processos_em_andamento || 0);
@@ -4260,15 +4251,11 @@ header('Content-Type: application/javascript; charset=utf-8');
             const historicCount = Number(avgHistoricData?.data?.[0]?.total || 0);
             const historicAvg = Number(avgHistoricData?.data?.[0]?.media_segundos || 0);
             const historicDays = Number(avgHistoricData?.data?.[0]?.dias_distintos || 0);
-            const inProgressCount = Number(avgInProgressData?.data?.[0]?.total || 0);
-            const inProgressAvg = Number(avgInProgressData?.data?.[0]?.media_segundos || 0);
 
             const useToday = todayCount > 0 && todayAvg > 0;
-            const useHistorical = !useToday && historicAvg > 0;
-            const useInProgress = !useToday && !useHistorical && inProgressAvg > 0;
-            const avgSeconds = useToday ? todayAvg : (useHistorical ? historicAvg : (useInProgress ? inProgressAvg : 0));
-            const sampleSize = useToday ? todayCount : (useHistorical ? historicCount : (useInProgress ? inProgressCount : 0));
-            const basis = useToday ? 'today' : (useHistorical ? 'historical' : (useInProgress ? 'in_progress' : null));
+            const avgSeconds = useToday ? todayAvg : historicAvg;
+            const sampleSize = useToday ? todayCount : historicCount;
+            const basis = useToday ? 'today' : (historicAvg > 0 ? 'historical' : null);
             const workUnits = statusNorm === 'processando' ? Math.max(0.5, ahead + 0.5) : ahead + 1;
             const rawEtaSeconds = avgSeconds > 0 ? Math.round(avgSeconds * workUnits) : null;
             const etaSeconds = rawEtaSeconds == null
@@ -4357,8 +4344,6 @@ header('Content-Type: application/javascript; charset=utf-8');
                             ? `média de hoje, ${queueInfo.todayDate || 'dia atual'}`
                             : queueInfo?.basis === 'historical'
                                 ? `média histórica de ${queueInfo.historicDays > 1 ? `${queueInfo.historicDays} dias anteriores` : 'dia anterior'}`
-                                : queueInfo?.basis === 'in_progress'
-                                    ? 'média do tempo já transcorrido nas análises em andamento'
                                 : '';
                         const queueHtml = queueInfo
                             ? `

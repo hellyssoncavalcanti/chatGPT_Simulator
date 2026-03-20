@@ -26,7 +26,6 @@
 #                                     e retorna resposta em streaming ou bloco
 #   GET  /api/history               — histórico local de chats
 #   POST /api/web_search            — pesquisa web via browser.py (Google)
-#   POST /api/uptodate_search       — pesquisa no UpToDate via browser.py
 # =============================================================================
 import uuid
 import json
@@ -171,35 +170,31 @@ def _iter_web_search_wait_messages(wait_ctx, query_str):
         }
 
 
-def _execute_single_browser_search(query_str, browser_action, source_label, phase_prefix, stream_queue=None):
+def _execute_single_web_search(query_str, stream_queue=None):
     wait_ctx = _reserve_web_search_slot()
 
     if wait_ctx["wait_seconds"] > 0:
         log(
-            f"[{phase_prefix.upper()}] cooldown de {wait_ctx['wait_seconds']:.1f}s "
+            f"[WEB_SEARCH] cooldown de {wait_ctx['wait_seconds']:.1f}s "
             f"(intervalo alvo {wait_ctx['interval_sec']:.1f}s) antes da query: {query_str}"
         )
 
     for msg in _iter_web_search_wait_messages(wait_ctx, query_str):
-        msg["phase"] = f"{phase_prefix}_cooldown"
-        msg["source"] = source_label
-        msg["content"] = msg["content"].replace("busca web", f"busca {source_label}")
         if stream_queue is not None:
             stream_queue.put(json.dumps(msg, ensure_ascii=False))
 
     if stream_queue is not None:
         stream_queue.put(json.dumps({
             "type": "status",
-            "content": f"🔎 Iniciando busca {source_label} por \"{query_str}\".",
+            "content": f"🔎 Iniciando busca web por \"{query_str}\".",
             "query": query_str,
             "wait_seconds": 0,
-            "phase": f"{phase_prefix}_start",
-            "source": source_label,
+            "phase": "web_search_start",
         }, ensure_ascii=False))
 
     q = queue.Queue()
     browser_queue.put({
-        'action':       browser_action,
+        'action':       'SEARCH',
         'query':        query_str,
         'stream_queue': q
     })
@@ -211,37 +206,15 @@ def _execute_single_browser_search(query_str, browser_action, source_label, phas
                 break
             msg = json.loads(raw_msg)
             if msg.get('type') == 'searchresult':
-                content = msg.get('content', {}) or {}
-                content.setdefault('source', source_label)
-                return content
+                return msg.get('content', {})
             if msg.get('type') == 'error':
-                return {'success': False, 'query': query_str, 'error': msg.get('content'), 'source': source_label}
+                return {'success': False, 'query': query_str, 'error': msg.get('content')}
     except queue.Empty:
-        return {'success': False, 'query': query_str, 'error': f'Timeout na busca {source_label}', 'source': source_label}
+        return {'success': False, 'query': query_str, 'error': 'Timeout na busca'}
     except Exception as e:
-        return {'success': False, 'query': query_str, 'error': str(e), 'source': source_label}
+        return {'success': False, 'query': query_str, 'error': str(e)}
 
-    return {'success': False, 'query': query_str, 'error': f'Busca {source_label} encerrada sem resultado', 'source': source_label}
-
-
-def _execute_single_web_search(query_str, stream_queue=None):
-    return _execute_single_browser_search(
-        query_str=query_str,
-        browser_action='SEARCH',
-        source_label='web',
-        phase_prefix='web_search',
-        stream_queue=stream_queue,
-    )
-
-
-def _execute_single_uptodate_search(query_str, stream_queue=None):
-    return _execute_single_browser_search(
-        query_str=query_str,
-        browser_action='UPTODATE_SEARCH',
-        source_label='uptodate',
-        phase_prefix='uptodate_search',
-        stream_queue=stream_queue,
-    )
+    return {'success': False, 'query': query_str, 'error': 'Busca encerrada sem resultado'}
 
 # --- BLOQUEIO DE SEGURANÇA POR DOMÍNIO E IP ---
 @app.before_request
@@ -658,7 +631,8 @@ def api_delete():
         return jsonify({"success": False, "error": str(e)})
 
 # Retorna as regras bloqueando todos os robôs
-def _handle_browser_search_api(execute_fn, *, route_label, source_label):
+@app.route('/api/web_search', methods=['POST'])
+def api_web_search():
     if not check_auth():
         return jsonify({'error': 'Unauthorized'}), 401
 
@@ -672,7 +646,7 @@ def _handle_browser_search_api(execute_fn, *, route_label, source_label):
     if not queries or not isinstance(queries, list):
         return jsonify({'success': False, 'error': 'Missing queries array'}), 400
 
-    print(f"\n[🌐 {route_label}] Pedido recebido{_quem} | queries={len(queries)}")
+    print(f"\n[🌐 WEB_SEARCH] Pedido recebido{_quem} | queries={len(queries)}")
 
     if stream:
         def generate():
@@ -681,17 +655,16 @@ def _handle_browser_search_api(execute_fn, *, route_label, source_label):
             for idx, query_str in enumerate(queries, start=1):
                 yield json.dumps({
                     'type': 'status',
-                    'content': f'📚 Preparando busca {source_label} {idx}/{len(queries)}.',
+                    'content': f'📚 Preparando busca web {idx}/{len(queries)}.',
                     'query': query_str,
                     'index': idx,
                     'total': len(queries),
-                    'phase': f'{route_label.lower()}_prepare',
-                    'source': source_label,
+                    'phase': 'web_search_prepare',
                 }, ensure_ascii=False) + "\n"
 
                 progress_q = queue.Queue()
                 worker = threading.Thread(
-                    target=lambda q_str=query_str, out_q=progress_q: out_q.put(execute_fn(q_str, stream_queue=out_q)),
+                    target=lambda q_str=query_str, out_q=progress_q: out_q.put(_execute_single_web_search(q_str, stream_queue=out_q)),
                     daemon=True,
                 )
                 worker.start()
@@ -703,12 +676,11 @@ def _handle_browser_search_api(execute_fn, *, route_label, source_label):
                     except queue.Empty:
                         yield json.dumps({
                             'type': 'status',
-                            'content': f'⏳ Busca {source_label} por "{query_str}" ainda em andamento...',
+                            'content': f'⏳ Busca web por "{query_str}" ainda em andamento...',
                             'query': query_str,
                             'index': idx,
                             'total': len(queries),
-                            'phase': f'{route_label.lower()}_keepalive',
-                            'source': source_label,
+                            'phase': 'web_search_keepalive',
                         }, ensure_ascii=False) + "\n"
                         continue
 
@@ -721,7 +693,6 @@ def _handle_browser_search_api(execute_fn, *, route_label, source_label):
                             'query': query_str,
                             'index': idx,
                             'total': len(queries),
-                            'source': source_label,
                         }, ensure_ascii=False) + "\n"
                         break
 
@@ -742,27 +713,9 @@ def _handle_browser_search_api(execute_fn, *, route_label, source_label):
 
     all_results = []
     for query_str in queries:
-        all_results.append(execute_fn(query_str))
+        all_results.append(_execute_single_web_search(query_str))
 
     return jsonify({'success': True, 'results': all_results})
-
-
-@app.route('/api/web_search', methods=['POST'])
-def api_web_search():
-    return _handle_browser_search_api(
-        _execute_single_web_search,
-        route_label='WEB_SEARCH',
-        source_label='web',
-    )
-
-
-@app.route('/api/uptodate_search', methods=['POST'])
-def api_uptodate_search():
-    return _handle_browser_search_api(
-        _execute_single_uptodate_search,
-        route_label='UPTODATE_SEARCH',
-        source_label='uptodate',
-    )
 
 
 # --- ROTA DE DOCUMENTAÇÃO + TESTE DA PESQUISA WEB (PROTEGIDA) ---
