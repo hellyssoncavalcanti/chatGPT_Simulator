@@ -1,6 +1,0 @@
-2026/03/18-01:51:44.525 2270 Creating DB C:\chatgpt_simulator\chrome_profile\Default\IndexedDB\https_www.youtube.com_0.indexeddb.leveldb since it was missing.
-2026/03/18-01:51:44.564 2270 Reusing MANIFEST C:\chatgpt_simulator\chrome_profile\Default\IndexedDB\https_www.youtube.com_0.indexeddb.leveldb/MANIFEST-000001
-2026/03/18-01:51:46.860 3768 Level-0 table #5: started
-2026/03/18-01:51:46.864 3768 Level-0 table #5: 7019 bytes OK
-2026/03/18-01:51:46.868 3768 Delete type=0 #3
-2026/03/18-01:51:46.869 3768 Manual compaction at level-0 from (begin) .. (end); will stop at (end)
