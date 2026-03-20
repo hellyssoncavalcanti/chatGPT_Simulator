@@ -257,25 +257,21 @@ function Merge-NewestPullRequest {
         return
     }
 
-    $prs = @(Invoke-GitHubApi -Uri "$($script:Config.apiBase)/pulls?state=open&base=$($script:Config.branch)&per_page=100&sort=created&direction=desc")
-    if ($prs.Count -eq 0) {
+    $prsResponse = Invoke-GitHubApi -Uri "$($script:Config.apiBase)/pulls?state=open&base=$($script:Config.branch)&per_page=100&sort=created&direction=desc"
+    $prsArray = @($prsResponse)
+    if ($prsArray.Count -eq 1 -and $prsArray[0] -is [System.Array]) {
+        $prsArray = @($prsArray[0])
+    }
+    $prsArray = @($prsArray | Where-Object { $_ -and $null -ne $_.number })
+
+    if ($prsArray.Count -eq 0) {
         Write-Info 'Nenhum PR aberto encontrado.'
         return
     }
 
-    # O GitHub ja devolve os PRs ordenados por criacao desc, mas algumas respostas
-    # podem vir sem created_at resolvido no PowerShell local. Para evitar quebrar o
-    # sync por conversao de null -> DateTime, ordenamos de forma tolerante pelo
-    # numero do PR (mais alto = mais recente) e apenas registramos o created_at.
-    $ordered = @(
-        $prs | Sort-Object -Property @{ Expression = {
-            if ($null -ne $_.number -and $_.number.ToString().Trim()) {
-                [int]$_.number
-            } else {
-                0
-            }
-        } } -Descending
-    )
+    # Mantem a mesma estrategia do script que ja estava funcionando no Windows:
+    # usa o numero do PR como criterio de "mais recente" e processa o maior numero.
+    $ordered = @($prsArray | Sort-Object -Property number -Descending)
     $newest = $ordered[0]
     $older = @()
     if ($ordered.Count -gt 1) {
