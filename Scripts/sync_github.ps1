@@ -263,14 +263,27 @@ function Merge-NewestPullRequest {
         return
     }
 
-    $ordered = $prs | Sort-Object -Property @{ Expression = { [datetime]$_.created_at }; Descending = $true }, @{ Expression = { $_.number }; Descending = $true }
+    # O GitHub ja devolve os PRs ordenados por criacao desc, mas algumas respostas
+    # podem vir sem created_at resolvido no PowerShell local. Para evitar quebrar o
+    # sync por conversao de null -> DateTime, ordenamos de forma tolerante pelo
+    # numero do PR (mais alto = mais recente) e apenas registramos o created_at.
+    $ordered = @(
+        $prs | Sort-Object -Property @{ Expression = {
+            if ($null -ne $_.number -and $_.number.ToString().Trim()) {
+                [int]$_.number
+            } else {
+                0
+            }
+        } } -Descending
+    )
     $newest = $ordered[0]
     $older = @()
     if ($ordered.Count -gt 1) {
         $older = @($ordered[1..($ordered.Count - 1)])
     }
 
-    Write-Info ("PR mais recente: #{0} - {1}" -f $newest.number, $newest.title)
+    $createdAtLog = if ($newest.created_at) { $newest.created_at } else { 'sem created_at' }
+    Write-Info ("PR mais recente: #{0} - {1} ({2})" -f $newest.number, $newest.title, $createdAtLog)
     if ($older.Count -gt 0) {
         Write-Info ("Fechando {0} PR(s) mais antigo(s)." -f $older.Count)
         foreach ($pr in $older) {
