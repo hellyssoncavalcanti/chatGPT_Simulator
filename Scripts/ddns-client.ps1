@@ -1,6 +1,6 @@
 # ddns-client.ps1
 # Atualiza IPv4 e IPv6 no endpoint, em loop.
-# Log local: (pasta do PS1)\.ddns_state\ddns-client.log
+# Log local: (raiz do projeto)\logs\ddns-client-DD_MM_AAAA-HH_MM_SS.log
 
 $Endpoint = "https://conexaovida.org/no-ip-dynamic_ip.php"
 $Token    = "ddns_9XJkP8Qm7Vt2Rz4Hq1cN6aY0sL3uF5eD8bG2wK9pT7nM4xZ1vS6rQ0hE3yU"
@@ -14,9 +14,12 @@ $ExemploPorta = 8080
 $Title = "Atualizando IP dinamico para o deste PC - acesse via http://conexaovida.org/no-ip-dynamic_ip.php?port=PORTA_QUE_DESEJA"
 $Host.UI.RawUI.WindowTitle = $Title
 
-# Pasta local para log/estado (ao lado do PS1)
-$LocalStateDir = Join-Path -Path (Split-Path -Parent $PSCommandPath) -ChildPath ".ddns_state"
-$LogFile = Join-Path -Path $LocalStateDir -ChildPath "ddns-client.log"
+# Pasta local para log (raiz do projeto)
+$ScriptDir = Split-Path -Parent $PSCommandPath
+$ProjectRootDir = Split-Path -Parent $ScriptDir
+$LogsDir = Join-Path -Path $ProjectRootDir -ChildPath "logs"
+$LogTimestamp = Get-Date -Format "dd_MM_yyyy-HH_mm_ss"
+$LogFile = Join-Path -Path $LogsDir -ChildPath ("ddns-client-{0}.log" -f $LogTimestamp)
 
 function Ensure-Dir([string]$dir) {
   try { New-Item -ItemType Directory -Force -Path $dir | Out-Null } catch {}
@@ -96,7 +99,7 @@ function Countdown([int]$seconds) {
   Write-Host ""
 }
 
-Ensure-Dir $LocalStateDir
+Ensure-Dir $LogsDir
 Print-Header
 Log "Iniciando DDNS client. Endpoint=$Endpoint Host=$HostName Interval=${IntervalSeconds}s"
 

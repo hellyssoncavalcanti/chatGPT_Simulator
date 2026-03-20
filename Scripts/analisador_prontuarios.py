@@ -79,7 +79,7 @@ _ensure("numpy")
 # ─────────────────────────────────────────────────────────────
 # IMPORTS NORMAIS
 # ─────────────────────────────────────────────────────────────
-import time, json, logging, re, html as html_mod, requests, hashlib
+import time, json, logging, re, html as html_mod, requests, hashlib, shutil
 from html.parser import HTMLParser
 from datetime import datetime
 
@@ -108,6 +108,7 @@ SIMILARIDADE_MIN     = 0.40                    # score mínimo p/ considerar sem
 
 # Busca Web (enriquecimento de condutas com evidências)
 SEARCH_URL           = "http://127.0.0.1:3003/api/web_search"  # endpoint local do Simulator
+UPTODATE_SEARCH_URL  = "http://127.0.0.1:3003/api/uptodate_search"  # endpoint local do Simulator
 SEARCH_MAX_QUERIES   = 3                       # máximo de queries por prontuário
 SEARCH_TIMEOUT       = 90                      # timeout por chamada (o browser precisa digitar)
 SEARCH_HABILITADA    = True                    # False para desabilitar sem remover código
@@ -120,7 +121,7 @@ PHP_ACTION_WRITE = "api_exec"
 PHP_KEY_FIELD    = "api_key"
 
 # Nome do log com timestamp do momento de inicialização
-_log_ts   = datetime.now().strftime("%H_%M_%S-%d_%m_%Y")
+_log_ts   = datetime.now().strftime("%d_%m_%Y-%H_%M_%S")
 _log_file = f"logs/analisador_prontuarios-{_log_ts}.log"
 # ─────────────────────────────────────────────────────────────
 
@@ -135,6 +136,129 @@ logging.basicConfig(
 )
 log = logging.getLogger("analisador")
 log.info(f"📄 Log: {_log_file}")
+
+
+def _strip_code_fences(texto: str) -> str:
+    """Remove cercas Markdown ```...``` mantendo apenas o conteúdo interno."""
+    texto = (texto or "").strip()
+    if texto.startswith("```"):
+        texto = re.sub(r"^```(?:json)?\s*", "", texto, flags=re.IGNORECASE)
+        texto = re.sub(r"\s*```$", "", texto)
+    return texto.strip()
+
+
+def _extrair_bloco_json(texto: str) -> str:
+    """Extrai o primeiro objeto JSON aparente do texto retornado pela LLM."""
+    texto = _strip_code_fences(texto)
+    match = re.search(r'\{[\s\S]*\}', texto)
+    return match.group().strip() if match else ""
+
+
+def _normalizar_json_llm(raw_json: str) -> str:
+    """
+    Corrige problemas comuns de JSON quase-válido retornado por LLMs:
+    - aspas tipográficas;
+    - vírgulas faltando entre pares chave/valor consecutivos;
+    - vírgulas faltando entre objetos de uma lista;
+    - vírgulas sobrando antes de ] ou }.
+    """
+    texto = (raw_json or "").strip()
+    if not texto:
+        return ""
+
+    texto = (
+        texto
+        .replace("“", '"')
+        .replace("”", '"')
+        .replace("’", "'")
+        .replace("‘", "'")
+        .replace("`", '"')
+    )
+
+    # Ex.: "query": "..."   "reason": "..."
+    texto = re.sub(r'("(?:(?:\\.|[^"\\])*)")(\s*)"([A-Za-z0-9_\-]+)"\s*:', r'\1,\2"\3":', texto)
+    # Ex.: } {   ou   ] {
+    texto = re.sub(r'([}\]])(\s*)(\{)', r'\1,\2', texto)
+    # Ex.: } "outra_chave":
+    texto = re.sub(r'([}\]])(\s*)"([A-Za-z0-9_\-]+)"\s*:', r'\1,\2"\3":', texto)
+    # Remove trailing commas antes de fechar objeto/lista
+    texto = re.sub(r',(\s*[}\]])', r'\1', texto)
+    return texto
+
+
+def _parse_json_llm(texto: str) -> dict:
+    """
+    Faz o parse de um objeto JSON retornado pela LLM com pequenas correções
+    tolerantes a formatação imperfeita.
+    """
+    candidato = _extrair_bloco_json(texto)
+    if not candidato:
+        raise ValueError("LLM não retornou bloco JSON.")
+
+    try:
+        return json.loads(candidato)
+    except json.JSONDecodeError:
+        candidato_normalizado = _normalizar_json_llm(candidato)
+        return json.loads(candidato_normalizado)
+
+
+def _decode_json_string_fragment(value: str) -> str:
+    """Decodifica um fragmento de string JSON sem perder caracteres UTF-8."""
+    try:
+        return json.loads(f'"{value}"')
+    except json.JSONDecodeError:
+        return value.replace('\\"', '"').replace("\\n", "\n").replace("\\t", "\t")
+
+
+def _extrair_queries_pesquisa_fallback(markdown: str) -> list:
+    """
+    Extrai queries manualmente quando a LLM não entrega JSON estrito.
+    Aceita objetos quase-JSON e listas em texto contendo campos query/reason.
+    """
+    texto = _strip_code_fences(markdown)
+    if not texto:
+        return []
+
+    queries = []
+    vistos = set()
+
+    # Tenta localizar pares query/reason mesmo quando o JSON veio truncado ou sem vírgulas.
+    pair_pattern = re.compile(
+        r'"query"\s*:\s*"(?P<query>(?:\\.|[^"\\])*)"\s*,?\s*"reason"\s*:\s*"(?P<reason>(?:\\.|[^"\\])*)"',
+        re.IGNORECASE | re.DOTALL,
+    )
+    for match in pair_pattern.finditer(texto):
+        query = re.sub(r"\s+", " ", _decode_json_string_fragment(match.group("query"))).strip()
+        reason = re.sub(r"\s+", " ", _decode_json_string_fragment(match.group("reason"))).strip()
+        if not query:
+            continue
+        chave = query.lower()
+        if chave in vistos:
+            continue
+        vistos.add(chave)
+        queries.append({"query": query, "reason": reason})
+        if len(queries) >= SEARCH_MAX_QUERIES:
+            return queries
+
+    # Fallback mais simples: linhas em lista com query e motivo.
+    line_pattern = re.compile(
+        r'^\s*(?:[-*]|\d+[.)])\s*(?P<query>.+?)(?:\s+[—-]\s+|\s+\|\s+motivo:\s+)(?P<reason>.+?)\s*$',
+        re.IGNORECASE | re.MULTILINE,
+    )
+    for match in line_pattern.finditer(texto):
+        query = re.sub(r"\s+", " ", match.group("query")).strip(' "\'')
+        reason = re.sub(r"\s+", " ", match.group("reason")).strip(' "\'')
+        if not query:
+            continue
+        chave = query.lower()
+        if chave in vistos:
+            continue
+        vistos.add(chave)
+        queries.append({"query": query, "reason": reason})
+        if len(queries) >= SEARCH_MAX_QUERIES:
+            break
+
+    return queries
 
 
 
@@ -187,9 +311,9 @@ def sql_exec(query: str, reason: str = "analisador_prontuarios") -> dict:
         data = json.loads(match.group())
 
     if data.get("status") == "error":
-        raise RuntimeError(f"{action} recusou: {data.get('message')} | SQL: {query[:120]}")
+        raise RuntimeError(f"{action} recusou: {data.get('message')} | SQL completo:\n{query}")
     if not data.get("success", True) and data.get("error"):
-        raise RuntimeError(f"{action} recusou: {data.get('error')} | SQL: {query[:120]}")
+        raise RuntimeError(f"{action} recusou: {data.get('error')} | SQL completo:\n{query}")
 
     log.debug(f"sql_exec OK [{action}] rows={data.get('num_rows', data.get('count', data.get('affected_rows', '?')))}")
     return data
@@ -231,6 +355,8 @@ def garantir_tabela():
                                                         COMMENT 'FK para membros.id do profissional criador. NULL = sintese compilada do paciente.',
                 datetime_analise_criacao                DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
                                                         COMMENT 'Data/hora de insercao do registro.',
+                datetime_analise_iniciada               DATETIME NULL
+                                                        COMMENT 'Data/hora em que o analisador iniciou efetivamente o processamento desta analise.',
                 datetime_analise_concluida              DATETIME NULL
                                                         COMMENT 'Data/hora em que a analise foi concluida com sucesso.',
                 chat_id                                 VARCHAR(100) NULL
@@ -296,7 +422,7 @@ def garantir_tabela():
                 prompt_version                          VARCHAR(30) NULL
                                                         COMMENT 'Versao do prompt clinico utilizado. Facilita auditoria e reprocessamento por versao.',
                 hash_prontuario                         CHAR(64) NULL
-                                                        COMMENT 'Hash SHA-256 do conteudo bruto do prontuario. Detecta alteracoes e evita reprocessamento desnecessario.',
+                                                        COMMENT 'Hash SHA-256 do conteudo bruto do prontuario. Para sinteses compiladas do paciente, usar o marcador literal analise_compilada_paciente.',
                 -- cdss / scoring
                 score_risco                             TINYINT NULL
                                                         COMMENT 'Score numerico de risco clinico estimado pela analise: 1=baixo, 2=moderado, 3=alto.',
@@ -357,6 +483,27 @@ def garantir_coluna_mensagens_acompanhamento():
         _COLUNAS_TABELA = None   # invalida cache para incluir a coluna recem-garantida
 
 
+def garantir_coluna_datetime_analise_iniciada():
+    """
+    Garante a coluna datetime_analise_iniciada em instâncias antigas do schema.
+    Essa coluna marca o início efetivo do processamento pelo analisador e deve
+    ser usada nas métricas de duração reais (início → conclusão).
+    """
+    try:
+        sql_exec(f"""
+            ALTER TABLE {TABELA}
+            ADD COLUMN IF NOT EXISTS datetime_analise_iniciada DATETIME NULL
+            COMMENT 'Data/hora em que o analisador iniciou efetivamente o processamento desta analise.'
+            AFTER datetime_analise_criacao
+        """)
+        log.info("✅ Coluna datetime_analise_iniciada verificada/criada.")
+    except RuntimeError as e:
+        log.warning(f"⚠️  garantir_coluna_datetime_analise_iniciada: {e}")
+    finally:
+        global _COLUNAS_TABELA
+        _COLUNAS_TABELA = None
+
+
 def garantir_colunas_v16():
     """
     Garante as novas colunas da versao V16 do schema (CDSS/RAG).
@@ -366,7 +513,7 @@ def garantir_colunas_v16():
     colunas_v16 = [
         ("modelo_llm",        "VARCHAR(100) NULL", "Modelo LLM utilizado para gerar esta analise."),
         ("prompt_version",    "VARCHAR(30) NULL",  "Versao do prompt clinico utilizado."),
-        ("hash_prontuario",   "CHAR(64) NULL",     "Hash SHA-256 do conteudo bruto do prontuario."),
+        ("hash_prontuario",   "CHAR(64) NULL",     "Hash SHA-256 do conteudo bruto do prontuario. Para sinteses compiladas do paciente, usar o marcador literal analise_compilada_paciente."),
         ("score_risco",       "TINYINT NULL",      "Score numerico de risco clinico: 1=baixo, 2=moderado, 3=alto."),
         ("alertas_clinicos",  "LONGTEXT NULL",     "JSON array de alertas clinicos identificados automaticamente."),
         ("casos_semelhantes", "LONGTEXT NULL",     "JSON array com IDs de atendimentos clinicamente semelhantes."),
@@ -845,25 +992,36 @@ def _val_para_sql(val):
 def buscar_pendentes() -> dict:
     stats = sql_exec(f"""
         SELECT
-            COUNT(*)                                                        AS total_tabela,
-            SUM(la.status = 'concluido'
-                AND NOT (
+            COUNT(*) AS total_tabela,
+            SUM(la.id_atendimento IS NULL) AS total_analises_compiladas_paciente,
+            SUM(
+                la.id_atendimento IS NOT NULL
+                AND la.status = 'concluido'
+                AND NOT IFNULL(
                     COALESCE(
                         NULLIF(ca.datetime_atualizacao,  '0000-00-00 00:00:00'),
                         NULLIF(ca.datetime_consulta_fim, '0000-00-00 00:00:00')
-                    ) > la.datetime_analise_concluida
-                ))                                                          AS total_concluidos,
-            SUM(la.status = 'pendente')                                     AS total_pendentes,
-            SUM(la.status = 'processando')                                  AS total_processando,
-            SUM(la.status = 'erro' AND la.tentativas < {MAX_TENTATIVAS})    AS total_erros,
-            SUM(la.status = 'erro' AND la.tentativas >= {MAX_TENTATIVAS})   AS total_esgotados,
-            SUM(la.status = 'concluido'
-                AND COALESCE(
+                    ) > la.datetime_analise_concluida,
+                    0
+                )
+            ) AS total_concluidos,
+            SUM(la.id_atendimento IS NOT NULL AND la.status = 'pendente') AS total_pendentes,
+            SUM(la.id_atendimento IS NOT NULL AND la.status = 'processando') AS total_processando,
+            SUM(la.id_atendimento IS NOT NULL AND la.status = 'erro' AND la.tentativas < {MAX_TENTATIVAS}) AS total_erros,
+            SUM(la.id_atendimento IS NOT NULL AND la.status = 'erro' AND la.tentativas >= {MAX_TENTATIVAS}) AS total_esgotados,
+            SUM(
+                la.id_atendimento IS NOT NULL
+                AND la.status = 'concluido'
+                AND IFNULL(
+                    COALESCE(
                         NULLIF(ca.datetime_atualizacao,  '0000-00-00 00:00:00'),
                         NULLIF(ca.datetime_consulta_fim, '0000-00-00 00:00:00')
-                    ) > la.datetime_analise_concluida)                      AS total_desatualizados
+                    ) > la.datetime_analise_concluida,
+                    0
+                )
+            ) AS total_desatualizados
         FROM {TABELA} la
-        INNER JOIN clinica_atendimentos ca ON ca.id = la.id_atendimento
+        LEFT JOIN clinica_atendimentos ca ON ca.id = la.id_atendimento
     """)
     row = (stats.get("data") or [{}])[0]
 
@@ -904,6 +1062,7 @@ def buscar_pendentes() -> dict:
     return {
         "pendentes":            data.get("data", []),
         "total_tabela":         int(row.get("total_tabela")         or 0),
+        "total_analises_compiladas_paciente": int(row.get("total_analises_compiladas_paciente") or 0),
         "total_concluidos":     int(row.get("total_concluidos")     or 0),
         "total_pendentes":      int(row.get("total_pendentes")      or 0),
         "total_processando":    int(row.get("total_processando")    or 0),
@@ -952,46 +1111,124 @@ def enfileirar_atendimentos_antigos(id_paciente: str) -> int:
     if not atendimentos:
         return 0
 
-    enfileirados = 0
+    valores_sql = []
     for at in atendimentos:
-        id_at   = int(at["id_atendimento"])
-        id_pac  = esc(at.get("id_paciente") or id_paciente)
-        id_cri  = esc(at.get("id_criador") or "0")
-        dt_ini  = esc(at.get("datetime_consulta_inicio") or "0000-00-00 00:00:00")
-        try:
-            sql_exec(f"""
-                INSERT IGNORE INTO {TABELA}
-                    (id_atendimento, id_paciente, id_criador, datetime_atendimento_inicio, status)
-                VALUES
-                    ({id_at}, _utf8mb4'{id_pac}', _utf8mb4'{id_cri}', '{dt_ini}', 'pendente')
-            """)
-            enfileirados += 1
-        except Exception as e:
-            log.debug(f"  ↷ Atendimento {id_at} já existe ou erro: {e}")
+        id_at  = int(at["id_atendimento"])
+        id_pac = esc(at.get("id_paciente") or id_paciente)
+        id_cri = esc(at.get("id_criador") or "0")
+        dt_ini = esc(at.get("datetime_consulta_inicio") or "0000-00-00 00:00:00")
+        valores_sql.append(
+            f"({id_at}, _utf8mb4'{id_pac}', _utf8mb4'{id_cri}', '{dt_ini}', 'pendente')"
+        )
+
+    if not valores_sql:
+        return 0
+
+    try:
+        resultado_insert = sql_exec(f"""
+            INSERT INTO {TABELA}
+                (id_atendimento, id_paciente, id_criador, datetime_atendimento_inicio, status)
+            VALUES
+                {", ".join(valores_sql)}
+            ON DUPLICATE KEY UPDATE
+                id_atendimento = id_atendimento
+        """)
+    except Exception as e:
+        log.warning(f"  ⚠️ Erro ao salvar atendimentos antigos do paciente {id_paciente}: {e}")
+        return 0
+
+    enfileirados = int(resultado_insert.get("affected_rows") or 0)
 
     if enfileirados:
         log.info(f"  📥 {enfileirados} atendimento(s) antigo(s) do paciente {id_paciente} enfileirado(s) para análise")
+    else:
+        log.info(
+            f"  ℹ️ Atendimentos antigos encontrados para o paciente {id_paciente}, "
+            f"mas nenhum novo registro precisou ser inserido na tabela de análise."
+        )
 
     return enfileirados
 
 
-def contar_atendimentos_pendentes_paciente(id_paciente: str) -> int:
-    """Conta atendimentos do paciente ainda não concluídos na tabela de análise."""
+def contar_atendimentos_nao_concluidos_paciente(id_paciente: str) -> int:
+    """Conta atendimentos do paciente que ainda não chegaram ao status concluído."""
     try:
         resp = sql_exec(f"""
             SELECT COUNT(*) AS total
             FROM {TABELA}
             WHERE id_paciente = '{esc(id_paciente)}'
               AND id_atendimento IS NOT NULL
-              AND status IN ('pendente', 'processando')
-        """, reason="contar_atendimentos_pendentes_paciente")
+              AND status IN ('pendente', 'processando', 'erro')
+        """, reason="contar_atendimentos_nao_concluidos_paciente")
         data = resp.get("data") or []
         if not data:
             return 0
         return int(data[0].get("total") or 0)
     except Exception as e:
-        log.warning(f"  ⚠️ Erro ao contar atendimentos pendentes do paciente {id_paciente}: {e}")
+        log.warning(f"  ⚠️ Erro ao contar atendimentos não concluídos do paciente {id_paciente}: {e}")
         return 0
+
+
+def garantir_registro_compilado_paciente_pendente(id_paciente: str) -> int:
+    """
+    Garante a existência do registro da síntese longitudinal do paciente.
+
+    O registro é criado/atualizado com status='pendente' somente depois que todos
+    os atendimentos unitários do paciente já estiverem concluídos, para que a
+    síntese do paciente possa entrar na fila com id_atendimento NULL.
+    """
+    existente = sql_exec(f"""
+        SELECT id
+        FROM {TABELA}
+        WHERE id_paciente = '{esc(id_paciente)}'
+          AND id_atendimento IS NULL
+          AND id_criador IS NULL
+        ORDER BY id DESC
+        LIMIT 1
+    """, reason="buscar_registro_compilado_pendente").get("data", [])
+
+    if existente:
+        id_registro = int(existente[0]["id"])
+        sql_exec(f"""
+            UPDATE {TABELA} SET
+                id_atendimento = NULL,
+                datetime_atendimento_inicio = NULL,
+                datetime_ultima_atualizacao_atendimento = NULL,
+                id_criador = NULL,
+                status = 'pendente',
+                erro_msg = NULL,
+                chat_id = '',
+                chat_url = '',
+                hash_prontuario = 'analise_compilada_paciente',
+                modelo_llm = {esc_str(LLM_MODEL)},
+                prompt_version = {esc_str(PROMPT_VERSION)}
+            WHERE id = {id_registro}
+        """)
+        return id_registro
+
+    sql_exec(f"""
+        INSERT INTO {TABELA}
+            (id_atendimento, id_paciente, id_criador, datetime_atendimento_inicio,
+             datetime_ultima_atualizacao_atendimento, status, tentativas, erro_msg,
+             modelo_llm, prompt_version, chat_id, chat_url, hash_prontuario)
+        VALUES
+            (NULL, {esc_str(id_paciente)}, NULL, NULL,
+             NULL, 'pendente', 0, NULL,
+             {esc_str(LLM_MODEL)}, {esc_str(PROMPT_VERSION)}, '', '', 'analise_compilada_paciente')
+    """, reason="criar_registro_compilado_pendente")
+
+    criado = sql_exec(f"""
+        SELECT id
+        FROM {TABELA}
+        WHERE id_paciente = '{esc(id_paciente)}'
+          AND id_atendimento IS NULL
+          AND id_criador IS NULL
+        ORDER BY id DESC
+        LIMIT 1
+    """, reason="buscar_registro_compilado_pendente_criado").get("data", [])
+    if not criado:
+        raise RuntimeError(f"Falha ao criar registro compilado pendente do paciente {id_paciente}")
+    return int(criado[0]["id"])
 
 
 def marcar_processando(row: dict):
@@ -1002,6 +1239,7 @@ def marcar_processando(row: dict):
         UPDATE {TABELA} SET
             status                                  = 'processando',
             tentativas                              = tentativas + 1,
+            datetime_analise_iniciada               = NOW(),
             datetime_ultima_atualizacao_atendimento = {f"'{dtp}'" if dtp else 'NULL'}
         WHERE id_atendimento = {idat}
     """)
@@ -1017,6 +1255,7 @@ def resetar_travados():
         f"""
         UPDATE {TABELA}
         SET    status    = 'pendente',
+               datetime_analise_iniciada = NULL,
                erro_msg  = CONCAT(
                                COALESCE(erro_msg, ''),
                                ' | [AUTO-RESET] Travado em processando por mais de {TIMEOUT_PROCESSANDO_MIN} min em ',
@@ -1034,6 +1273,45 @@ def resetar_travados():
     return afetados
 
 
+def resetar_analises_interrompidas_no_startup():
+    """
+    Ao subir o analisador, limpa datetime_analise_iniciada de registros que
+    ficaram interrompidos sem conclusão válida na execução anterior.
+
+    Isso evita que o sistema trate como "análise já iniciada" algo que será
+    reprocessado do zero após uma parada/queda do processo Python.
+    """
+    resultado = sql_exec(
+        f"""
+        UPDATE {TABELA}
+        SET
+            status = CASE
+                        WHEN status = 'processando' THEN 'pendente'
+                        ELSE status
+                     END,
+            datetime_analise_iniciada = NULL,
+            erro_msg = CONCAT(
+                COALESCE(erro_msg, ''),
+                ' | [AUTO-RESET-STARTUP] datetime_analise_iniciada zerado em ',
+                NOW(),
+                ' após interrupção anterior sem conclusão válida'
+            )
+        WHERE
+            datetime_analise_iniciada IS NOT NULL
+            AND (
+                datetime_analise_concluida IS NULL
+                OR datetime_analise_concluida = '0000-00-00 00:00:00'
+            )
+        """
+    )
+    afetados = resultado.get('affected_rows', 0)
+    if afetados:
+        log.warning(
+            f"⚠️  {afetados} registro(s) com análise interrompida tiveram datetime_analise_iniciada resetado no startup."
+        )
+    return afetados
+
+
 def _montar_sets_resultado(resultado: dict) -> list:
     colunas  = _get_colunas_tabela()
     chat_id  = esc(resultado.get("_chat_id")  or "")
@@ -1044,6 +1322,7 @@ def _montar_sets_resultado(resultado: dict) -> list:
         f"status                    = 'concluido'",
         f"datetime_analise_concluida = '{now}'",
         f"erro_msg                   = NULL",
+        f"datetime_analise_iniciada  = COALESCE(datetime_analise_iniciada, '{now}')",
         f"chat_id                    = '{chat_id}'",
         f"chat_url                   = '{chat_url}'",
     ]
@@ -1105,6 +1384,216 @@ def _stringify_compact(value) -> str:
     return str(parsed or "").strip()
 
 
+def _valor_compilado_para_prompt(value, max_chars: int = 1200):
+    try:
+        parsed = json.loads(value) if isinstance(value, str) else value
+    except Exception:
+        parsed = value
+
+    if isinstance(parsed, str):
+        texto = re.sub(r"\s+", " ", parsed).strip()
+        return texto[:max_chars]
+    return parsed
+
+
+def montar_texto_compilado_paciente(id_paciente: str):
+    rows = sql_exec(f"""
+        SELECT
+            id_atendimento,
+            id_paciente,
+            id_criador,
+            datetime_atendimento_inicio,
+            resumo_texto,
+            gravidade_clinica,
+            diagnosticos_citados,
+            pontos_chave,
+            mudancas_relevantes,
+            sinais_nucleares,
+            eventos_comportamentais,
+            terapias_referidas,
+            exames_citados,
+            pendencias_clinicas,
+            condutas_no_prontuario,
+            medicacoes_em_uso,
+            medicacoes_iniciadas,
+            medicacoes_suspensas,
+            condutas_especificas_sugeridas,
+            condutas_gerais_sugeridas,
+            mensagens_acompanhamento
+        FROM {TABELA}
+        WHERE id_paciente = '{esc(id_paciente)}'
+          AND status = 'concluido'
+          AND id_atendimento IS NOT NULL
+        ORDER BY datetime_atendimento_inicio ASC, id_atendimento ASC
+        LIMIT 50
+    """, reason="carregar_analises_paciente_compilado").get("data", [])
+
+    if not rows:
+        return "", None
+
+    historico = []
+    datas = []
+    campos_detalhe = [
+        "gravidade_clinica",
+        "diagnosticos_citados",
+        "pontos_chave",
+        "mudancas_relevantes",
+        "sinais_nucleares",
+        "eventos_comportamentais",
+        "terapias_referidas",
+        "exames_citados",
+        "pendencias_clinicas",
+        "condutas_no_prontuario",
+        "medicacoes_em_uso",
+        "medicacoes_iniciadas",
+        "medicacoes_suspensas",
+        "condutas_especificas_sugeridas",
+        "condutas_gerais_sugeridas",
+        "mensagens_acompanhamento",
+    ]
+
+    for idx, row in enumerate(rows, start=1):
+        dt_at = row.get("datetime_atendimento_inicio") or ""
+        if dt_at:
+            datas.append(dt_at)
+
+        item = {
+            "ordem_cronologica": idx,
+            "id_atendimento": row.get("id_atendimento"),
+            "datetime_atendimento_inicio": dt_at or None,
+            "resumo_texto": _valor_compilado_para_prompt(row.get("resumo_texto") or "", max_chars=1500),
+        }
+
+        for campo in campos_detalhe:
+            valor = _valor_compilado_para_prompt(row.get(campo))
+            if valor not in (None, "", [], {}):
+                item[campo] = valor
+
+        historico.append(item)
+
+    payload_compilado = {
+        "id_paciente": id_paciente,
+        "total_atendimentos_analisados": len(historico),
+        "periodo_primeiro_atendimento": datas[0] if datas else None,
+        "periodo_ultimo_atendimento": datas[-1] if datas else None,
+        "atendimentos": historico,
+    }
+
+    texto = (
+        f"HISTÓRICO LONGITUDINAL COMPILADO DO PACIENTE {id_paciente}\n"
+        "O conteúdo abaixo representa TODOS os atendimentos estruturados já concluídos deste paciente em ordem cronológica.\n"
+        "Sua tarefa é consolidar o histórico longitudinal completo, identificando padrões persistentes, mudanças entre consultas, terapias, medicações, riscos, pendências e condutas.\n"
+        "NÃO copie apenas o último atendimento; compare e sintetize o conjunto completo do histórico abaixo.\n\n"
+        "DADOS COMPILADOS (JSON):\n"
+        + json.dumps(payload_compilado, ensure_ascii=False, indent=2)
+    )
+    return texto, rows[-1]
+
+
+def salvar_resultado_compilado_paciente(id_paciente: str, resultado: dict):
+    id_registro = garantir_registro_compilado_paciente_pendente(id_paciente)
+
+    sets = _montar_sets_resultado(resultado) + [
+        "id_atendimento = NULL",
+        "datetime_atendimento_inicio = NULL",
+        "datetime_ultima_atualizacao_atendimento = NULL",
+        "id_criador = NULL",
+        "hash_prontuario = 'analise_compilada_paciente'",
+        f"id_paciente = '{esc(id_paciente)}'",
+    ]
+
+    sql_exec(
+        f"UPDATE {TABELA} SET\n    " + ",\n    ".join(sets) + f"\nWHERE id = {id_registro}"
+    )
+
+
+def atualizar_analise_compilada_paciente(id_paciente: str):
+    enfileirados = enfileirar_atendimentos_antigos(id_paciente)
+    pendentes = contar_atendimentos_nao_concluidos_paciente(id_paciente)
+    if pendentes > 0:
+        try:
+            garantir_registro_compilado_paciente_pendente(id_paciente)
+        except Exception as e:
+            log.warning(
+                f"  ⚠️ Falha ao garantir registro pendente da síntese compilada do paciente {id_paciente}: {e}"
+            )
+        log.info(
+            f"⏳ Síntese compilada adiada para paciente {id_paciente}: "
+            f"{pendentes} atendimento(s) ainda não concluído(s)"
+            + (f" ({enfileirados} recém-enfileirado(s))" if enfileirados else "")
+            + "."
+        )
+        return
+
+    texto_compilado, row_base = montar_texto_compilado_paciente(id_paciente)
+    if not texto_compilado or not row_base:
+        log.info(f"ℹ️  Sem histórico suficiente para compilar síntese do paciente {id_paciente}.")
+        return
+
+    id_registro_compilado = garantir_registro_compilado_paciente_pendente(id_paciente)
+    sql_exec(f"""
+        UPDATE {TABELA} SET
+            status = 'processando',
+            tentativas = tentativas + 1,
+            erro_msg = NULL,
+            datetime_analise_iniciada = NOW(),
+            datetime_analise_concluida = NULL,
+            datetime_ultima_atualizacao_atendimento = NULL
+        WHERE id = {id_registro_compilado}
+    """, reason="marcar_registro_compilado_processando")
+
+    log.info(f"🧬 Atualizando síntese compilada do paciente {id_paciente}...")
+    contexto = ""
+    try:
+        contexto = buscar_contexto_clinico({
+            "id_paciente": id_paciente,
+            "id": row_base.get("id_atendimento"),
+            "id_criador": row_base.get("id_criador"),
+        }) or ""
+    except Exception as e:
+        log.warning(f"  ⚠️ Falha ao buscar contexto do paciente compilado {id_paciente}: {e}")
+
+    resultado = analisar_prontuario(texto_compilado[:18000], contexto=contexto)
+    try:
+        resultado = executar_busca_evidencias(
+            resultado,
+            chat_url=resultado.get("_chat_url"),
+            chat_id=resultado.get("_chat_id"),
+        )
+    except Exception as e:
+        log.warning(f"  ⚠️ Enriquecimento da síntese compilada falhou (não fatal): {e}")
+
+    try:
+        if _grafo_clinico_esta_generico(resultado):
+            resultado = gerar_dados_auxiliares_llm(
+                resultado,
+                chat_url=resultado.get("_chat_url"),
+                chat_id=resultado.get("_chat_id"),
+            )
+    except Exception as e:
+        log.warning(f"  ⚠️ Refinamento auxiliar da síntese compilada falhou (não fatal): {e}")
+
+    salvar_resultado_compilado_paciente(id_paciente, resultado)
+    log.info(f"✅ Síntese compilada do paciente {id_paciente} atualizada.")
+
+
+def _stringify_compact(value) -> str:
+    try:
+        parsed = json.loads(value) if isinstance(value, str) else value
+    except Exception:
+        parsed = value
+    if isinstance(parsed, list):
+        partes = []
+        for item in parsed:
+            if item in (None, "", [], {}):
+                continue
+            partes.append(json.dumps(item, ensure_ascii=False) if isinstance(item, (dict, list)) else str(item))
+        return "; ".join(partes)
+    if isinstance(parsed, dict):
+        return json.dumps(parsed, ensure_ascii=False)
+    return str(parsed or "").strip()
+
+
 def montar_texto_compilado_paciente(id_paciente: str):
     rows = sql_exec(f"""
         SELECT
@@ -1183,44 +1672,14 @@ def montar_texto_compilado_paciente(id_paciente: str):
 
 
 def salvar_resultado_compilado_paciente(id_paciente: str, resultado: dict):
-    existente = sql_exec(f"""
-        SELECT id
-        FROM {TABELA}
-        WHERE id_paciente = '{esc(id_paciente)}'
-          AND id_atendimento IS NULL
-          AND id_criador IS NULL
-        ORDER BY id DESC
-        LIMIT 1
-    """, reason="buscar_registro_compilado_paciente").get("data", [])
-
-    if existente:
-        id_registro = int(existente[0]["id"])
-    else:
-        sql_exec(f"""
-            INSERT INTO {TABELA}
-                (id_atendimento, datetime_atendimento_inicio, datetime_ultima_atualizacao_atendimento,
-                 id_paciente, id_criador, status, erro_msg)
-            VALUES
-                (NULL, NULL, NULL, '{esc(id_paciente)}', NULL, 'processando', NULL)
-        """)
-        criado = sql_exec(f"""
-            SELECT id
-            FROM {TABELA}
-            WHERE id_paciente = '{esc(id_paciente)}'
-              AND id_atendimento IS NULL
-              AND id_criador IS NULL
-            ORDER BY id DESC
-            LIMIT 1
-        """, reason="buscar_registro_compilado_criado").get("data", [])
-        if not criado:
-            raise RuntimeError(f"Falha ao criar registro compilado do paciente {id_paciente}")
-        id_registro = int(criado[0]["id"])
+    id_registro = garantir_registro_compilado_paciente_pendente(id_paciente)
 
     sets = [
         "id_atendimento = NULL",
         "datetime_atendimento_inicio = NULL",
         "datetime_ultima_atualizacao_atendimento = NULL",
         "id_criador = NULL",
+        "hash_prontuario = 'analise_compilada_paciente'",
         f"id_paciente = '{esc(id_paciente)}'",
     ] + _montar_sets_resultado(resultado)
 
@@ -1231,11 +1690,17 @@ def salvar_resultado_compilado_paciente(id_paciente: str, resultado: dict):
 
 def atualizar_analise_compilada_paciente(id_paciente: str):
     enfileirados = enfileirar_atendimentos_antigos(id_paciente)
-    pendentes = contar_atendimentos_pendentes_paciente(id_paciente)
+    pendentes = contar_atendimentos_nao_concluidos_paciente(id_paciente)
     if pendentes > 0:
+        try:
+            garantir_registro_compilado_paciente_pendente(id_paciente)
+        except Exception as e:
+            log.warning(
+                f"  ⚠️ Falha ao garantir registro pendente da síntese compilada do paciente {id_paciente}: {e}"
+            )
         log.info(
             f"⏳ Síntese compilada adiada para paciente {id_paciente}: "
-            f"{pendentes} atendimento(s) ainda pendente(s)/processando(s)"
+            f"{pendentes} atendimento(s) ainda não concluído(s)"
             + (f" ({enfileirados} recém-enfileirado(s))" if enfileirados else "")
             + "."
         )
@@ -1245,6 +1710,18 @@ def atualizar_analise_compilada_paciente(id_paciente: str):
     if not texto_compilado or not row_base:
         log.info(f"ℹ️  Sem histórico suficiente para compilar síntese do paciente {id_paciente}.")
         return
+
+    id_registro_compilado = garantir_registro_compilado_paciente_pendente(id_paciente)
+    sql_exec(f"""
+        UPDATE {TABELA} SET
+            status = 'processando',
+            tentativas = tentativas + 1,
+            erro_msg = NULL,
+            datetime_analise_iniciada = NOW(),
+            datetime_analise_concluida = NULL,
+            datetime_ultima_atualizacao_atendimento = NULL
+        WHERE id = {id_registro_compilado}
+    """, reason="marcar_registro_compilado_processando")
 
     log.info(f"🧬 Atualizando síntese compilada do paciente {id_paciente}...")
     contexto = ""
@@ -1366,44 +1843,14 @@ def montar_texto_compilado_paciente(id_paciente: str):
 
 
 def salvar_resultado_compilado_paciente(id_paciente: str, resultado: dict):
-    existente = sql_exec(f"""
-        SELECT id
-        FROM {TABELA}
-        WHERE id_paciente = '{esc(id_paciente)}'
-          AND id_atendimento IS NULL
-          AND id_criador IS NULL
-        ORDER BY id DESC
-        LIMIT 1
-    """, reason="buscar_registro_compilado_paciente").get("data", [])
-
-    if existente:
-        id_registro = int(existente[0]["id"])
-    else:
-        sql_exec(f"""
-            INSERT INTO {TABELA}
-                (id_atendimento, datetime_atendimento_inicio, datetime_ultima_atualizacao_atendimento,
-                 id_paciente, id_criador, status, erro_msg)
-            VALUES
-                (NULL, NULL, NULL, '{esc(id_paciente)}', NULL, 'processando', NULL)
-        """)
-        criado = sql_exec(f"""
-            SELECT id
-            FROM {TABELA}
-            WHERE id_paciente = '{esc(id_paciente)}'
-              AND id_atendimento IS NULL
-              AND id_criador IS NULL
-            ORDER BY id DESC
-            LIMIT 1
-        """, reason="buscar_registro_compilado_criado").get("data", [])
-        if not criado:
-            raise RuntimeError(f"Falha ao criar registro compilado do paciente {id_paciente}")
-        id_registro = int(criado[0]["id"])
+    id_registro = garantir_registro_compilado_paciente_pendente(id_paciente)
 
     sets = [
         "id_atendimento = NULL",
         "datetime_atendimento_inicio = NULL",
         "datetime_ultima_atualizacao_atendimento = NULL",
         "id_criador = NULL",
+        "hash_prontuario = 'analise_compilada_paciente'",
         f"id_paciente = '{esc(id_paciente)}'",
     ] + _montar_sets_resultado(resultado)
 
@@ -1414,11 +1861,11 @@ def salvar_resultado_compilado_paciente(id_paciente: str, resultado: dict):
 
 def atualizar_analise_compilada_paciente(id_paciente: str):
     enfileirados = enfileirar_atendimentos_antigos(id_paciente)
-    pendentes = contar_atendimentos_pendentes_paciente(id_paciente)
+    pendentes = contar_atendimentos_nao_concluidos_paciente(id_paciente)
     if pendentes > 0:
         log.info(
             f"⏳ Síntese compilada adiada para paciente {id_paciente}: "
-            f"{pendentes} atendimento(s) ainda pendente(s)/processando(s)"
+            f"{pendentes} atendimento(s) ainda não concluído(s)"
             + (f" ({enfileirados} recém-enfileirado(s))" if enfileirados else "")
             + "."
         )
@@ -1428,6 +1875,18 @@ def atualizar_analise_compilada_paciente(id_paciente: str):
     if not texto_compilado or not row_base:
         log.info(f"ℹ️  Sem histórico suficiente para compilar síntese do paciente {id_paciente}.")
         return
+
+    id_registro_compilado = garantir_registro_compilado_paciente_pendente(id_paciente)
+    sql_exec(f"""
+        UPDATE {TABELA} SET
+            status = 'processando',
+            tentativas = tentativas + 1,
+            erro_msg = NULL,
+            datetime_analise_iniciada = NOW(),
+            datetime_analise_concluida = NULL,
+            datetime_ultima_atualizacao_atendimento = NULL
+        WHERE id = {id_registro_compilado}
+    """, reason="marcar_registro_compilado_processando")
 
     log.info(f"🧬 Atualizando síntese compilada do paciente {id_paciente}...")
     contexto = ""
@@ -1549,44 +2008,14 @@ def montar_texto_compilado_paciente(id_paciente: str):
 
 
 def salvar_resultado_compilado_paciente(id_paciente: str, resultado: dict):
-    existente = sql_exec(f"""
-        SELECT id
-        FROM {TABELA}
-        WHERE id_paciente = '{esc(id_paciente)}'
-          AND id_atendimento IS NULL
-          AND id_criador IS NULL
-        ORDER BY id DESC
-        LIMIT 1
-    """, reason="buscar_registro_compilado_paciente").get("data", [])
-
-    if existente:
-        id_registro = int(existente[0]["id"])
-    else:
-        sql_exec(f"""
-            INSERT INTO {TABELA}
-                (id_atendimento, datetime_atendimento_inicio, datetime_ultima_atualizacao_atendimento,
-                 id_paciente, id_criador, status, erro_msg)
-            VALUES
-                (NULL, NULL, NULL, '{esc(id_paciente)}', NULL, 'processando', NULL)
-        """)
-        criado = sql_exec(f"""
-            SELECT id
-            FROM {TABELA}
-            WHERE id_paciente = '{esc(id_paciente)}'
-              AND id_atendimento IS NULL
-              AND id_criador IS NULL
-            ORDER BY id DESC
-            LIMIT 1
-        """, reason="buscar_registro_compilado_criado").get("data", [])
-        if not criado:
-            raise RuntimeError(f"Falha ao criar registro compilado do paciente {id_paciente}")
-        id_registro = int(criado[0]["id"])
+    id_registro = garantir_registro_compilado_paciente_pendente(id_paciente)
 
     sets = [
         "id_atendimento = NULL",
         "datetime_atendimento_inicio = NULL",
         "datetime_ultima_atualizacao_atendimento = NULL",
         "id_criador = NULL",
+        "hash_prontuario = 'analise_compilada_paciente'",
         f"id_paciente = '{esc(id_paciente)}'",
     ] + _montar_sets_resultado(resultado)
 
@@ -1597,11 +2026,11 @@ def salvar_resultado_compilado_paciente(id_paciente: str, resultado: dict):
 
 def atualizar_analise_compilada_paciente(id_paciente: str):
     enfileirados = enfileirar_atendimentos_antigos(id_paciente)
-    pendentes = contar_atendimentos_pendentes_paciente(id_paciente)
+    pendentes = contar_atendimentos_nao_concluidos_paciente(id_paciente)
     if pendentes > 0:
         log.info(
             f"⏳ Síntese compilada adiada para paciente {id_paciente}: "
-            f"{pendentes} atendimento(s) ainda pendente(s)/processando(s)"
+            f"{pendentes} atendimento(s) ainda não concluído(s)"
             + (f" ({enfileirados} recém-enfileirado(s))" if enfileirados else "")
             + "."
         )
@@ -1611,6 +2040,18 @@ def atualizar_analise_compilada_paciente(id_paciente: str):
     if not texto_compilado or not row_base:
         log.info(f"ℹ️  Sem histórico suficiente para compilar síntese do paciente {id_paciente}.")
         return
+
+    id_registro_compilado = garantir_registro_compilado_paciente_pendente(id_paciente)
+    sql_exec(f"""
+        UPDATE {TABELA} SET
+            status = 'processando',
+            tentativas = tentativas + 1,
+            erro_msg = NULL,
+            datetime_analise_iniciada = NOW(),
+            datetime_analise_concluida = NULL,
+            datetime_ultima_atualizacao_atendimento = NULL
+        WHERE id = {id_registro_compilado}
+    """, reason="marcar_registro_compilado_processando")
 
     log.info(f"🧬 Atualizando síntese compilada do paciente {id_paciente}...")
     contexto = ""
@@ -1732,44 +2173,14 @@ def montar_texto_compilado_paciente(id_paciente: str):
 
 
 def salvar_resultado_compilado_paciente(id_paciente: str, resultado: dict):
-    existente = sql_exec(f"""
-        SELECT id
-        FROM {TABELA}
-        WHERE id_paciente = '{esc(id_paciente)}'
-          AND id_atendimento IS NULL
-          AND id_criador IS NULL
-        ORDER BY id DESC
-        LIMIT 1
-    """, reason="buscar_registro_compilado_paciente").get("data", [])
-
-    if existente:
-        id_registro = int(existente[0]["id"])
-    else:
-        sql_exec(f"""
-            INSERT INTO {TABELA}
-                (id_atendimento, datetime_atendimento_inicio, datetime_ultima_atualizacao_atendimento,
-                 id_paciente, id_criador, status, erro_msg)
-            VALUES
-                (NULL, NULL, NULL, '{esc(id_paciente)}', NULL, 'processando', NULL)
-        """)
-        criado = sql_exec(f"""
-            SELECT id
-            FROM {TABELA}
-            WHERE id_paciente = '{esc(id_paciente)}'
-              AND id_atendimento IS NULL
-              AND id_criador IS NULL
-            ORDER BY id DESC
-            LIMIT 1
-        """, reason="buscar_registro_compilado_criado").get("data", [])
-        if not criado:
-            raise RuntimeError(f"Falha ao criar registro compilado do paciente {id_paciente}")
-        id_registro = int(criado[0]["id"])
+    id_registro = garantir_registro_compilado_paciente_pendente(id_paciente)
 
     sets = [
         "id_atendimento = NULL",
         "datetime_atendimento_inicio = NULL",
         "datetime_ultima_atualizacao_atendimento = NULL",
         "id_criador = NULL",
+        "hash_prontuario = 'analise_compilada_paciente'",
         f"id_paciente = '{esc(id_paciente)}'",
     ] + _montar_sets_resultado(resultado)
 
@@ -1780,11 +2191,17 @@ def salvar_resultado_compilado_paciente(id_paciente: str, resultado: dict):
 
 def atualizar_analise_compilada_paciente(id_paciente: str):
     enfileirados = enfileirar_atendimentos_antigos(id_paciente)
-    pendentes = contar_atendimentos_pendentes_paciente(id_paciente)
+    pendentes = contar_atendimentos_nao_concluidos_paciente(id_paciente)
     if pendentes > 0:
+        try:
+            garantir_registro_compilado_paciente_pendente(id_paciente)
+        except Exception as e:
+            log.warning(
+                f"  ⚠️ Falha ao garantir registro pendente da síntese compilada do paciente {id_paciente}: {e}"
+            )
         log.info(
             f"⏳ Síntese compilada adiada para paciente {id_paciente}: "
-            f"{pendentes} atendimento(s) ainda pendente(s)/processando(s)"
+            f"{pendentes} atendimento(s) ainda não concluído(s)"
             + (f" ({enfileirados} recém-enfileirado(s))" if enfileirados else "")
             + "."
         )
@@ -1795,188 +2212,17 @@ def atualizar_analise_compilada_paciente(id_paciente: str):
         log.info(f"ℹ️  Sem histórico suficiente para compilar síntese do paciente {id_paciente}.")
         return
 
-    log.info(f"🧬 Atualizando síntese compilada do paciente {id_paciente}...")
-    contexto = ""
-    try:
-        contexto = buscar_contexto_clinico({
-            "id_paciente": id_paciente,
-            "id": row_base.get("id_atendimento"),
-            "id_criador": row_base.get("id_criador"),
-        }) or ""
-    except Exception as e:
-        log.warning(f"  ⚠️ Falha ao buscar contexto do paciente compilado {id_paciente}: {e}")
-
-    resultado = analisar_prontuario(texto_compilado[:18000], contexto=contexto)
-    try:
-        resultado = executar_busca_evidencias(
-            resultado,
-            chat_url=resultado.get("_chat_url"),
-            chat_id=resultado.get("_chat_id"),
-        )
-    except Exception as e:
-        log.warning(f"  ⚠️ Enriquecimento da síntese compilada falhou (não fatal): {e}")
-
-    salvar_resultado_compilado_paciente(id_paciente, resultado)
-    log.info(f"✅ Síntese compilada do paciente {id_paciente} atualizada.")
-
-
-def _stringify_compact(value) -> str:
-    try:
-        parsed = json.loads(value) if isinstance(value, str) else value
-    except Exception:
-        parsed = value
-    if isinstance(parsed, list):
-        partes = []
-        for item in parsed:
-            if item in (None, "", [], {}):
-                continue
-            partes.append(json.dumps(item, ensure_ascii=False) if isinstance(item, (dict, list)) else str(item))
-        return "; ".join(partes)
-    if isinstance(parsed, dict):
-        return json.dumps(parsed, ensure_ascii=False)
-    return str(parsed or "").strip()
-
-
-def montar_texto_compilado_paciente(id_paciente: str):
-    rows = sql_exec(f"""
-        SELECT
-            id_atendimento,
-            id_paciente,
-            id_criador,
-            datetime_atendimento_inicio,
-            resumo_texto,
-            gravidade_clinica,
-            diagnosticos_citados,
-            pontos_chave,
-            mudancas_relevantes,
-            sinais_nucleares,
-            eventos_comportamentais,
-            terapias_referidas,
-            exames_citados,
-            pendencias_clinicas,
-            condutas_no_prontuario,
-            medicacoes_em_uso,
-            medicacoes_iniciadas,
-            medicacoes_suspensas,
-            condutas_especificas_sugeridas,
-            condutas_gerais_sugeridas,
-            mensagens_acompanhamento
-        FROM {TABELA}
-        WHERE id_paciente = '{esc(id_paciente)}'
-          AND status = 'concluido'
-          AND id_atendimento IS NOT NULL
-        ORDER BY datetime_atendimento_inicio DESC, id_atendimento DESC
-        LIMIT 25
-    """, reason="carregar_analises_paciente_compilado").get("data", [])
-
-    if not rows:
-        return "", None
-
-    blocos = []
-    for idx, row in enumerate(rows, start=1):
-        linhas = [
-            f"ATENDIMENTO #{idx}",
-            f"id_atendimento: {row.get('id_atendimento')}",
-            f"data_atendimento: {row.get('datetime_atendimento_inicio') or 'sem_data'}",
-        ]
-        if row.get("resumo_texto"):
-            linhas.append(f"resumo_texto: {row['resumo_texto']}")
-
-        for campo in [
-            "gravidade_clinica",
-            "diagnosticos_citados",
-            "pontos_chave",
-            "mudancas_relevantes",
-            "sinais_nucleares",
-            "eventos_comportamentais",
-            "terapias_referidas",
-            "exames_citados",
-            "pendencias_clinicas",
-            "condutas_no_prontuario",
-            "medicacoes_em_uso",
-            "medicacoes_iniciadas",
-            "medicacoes_suspensas",
-            "condutas_especificas_sugeridas",
-            "condutas_gerais_sugeridas",
-            "mensagens_acompanhamento",
-        ]:
-            val = _stringify_compact(row.get(campo))
-            if val:
-                linhas.append(f"{campo}: {val}")
-        blocos.append("\n".join(linhas))
-
-    texto = (
-        f"HISTÓRICO LONGITUDINAL COMPILADO DO PACIENTE {id_paciente}\n"
-        "Os blocos abaixo representam análises estruturadas já concluídas deste paciente.\n"
-        "Consolide o histórico completo do paciente, sintetizando padrões persistentes, mudanças relevantes, terapias, medicações, riscos, pendências e condutas, sem inventar dados.\n\n"
-        + "\n\n" + ("\n\n" + ("=" * 70) + "\n\n").join(blocos)
-    )
-    return texto, rows[0]
-
-
-def salvar_resultado_compilado_paciente(id_paciente: str, resultado: dict):
-    existente = sql_exec(f"""
-        SELECT id
-        FROM {TABELA}
-        WHERE id_paciente = '{esc(id_paciente)}'
-          AND id_atendimento IS NULL
-          AND id_criador IS NULL
-        ORDER BY id DESC
-        LIMIT 1
-    """, reason="buscar_registro_compilado_paciente").get("data", [])
-
-    if existente:
-        id_registro = int(existente[0]["id"])
-    else:
-        sql_exec(f"""
-            INSERT INTO {TABELA}
-                (id_atendimento, datetime_atendimento_inicio, datetime_ultima_atualizacao_atendimento,
-                 id_paciente, id_criador, status, erro_msg)
-            VALUES
-                (NULL, NULL, NULL, '{esc(id_paciente)}', NULL, 'processando', NULL)
-        """)
-        criado = sql_exec(f"""
-            SELECT id
-            FROM {TABELA}
-            WHERE id_paciente = '{esc(id_paciente)}'
-              AND id_atendimento IS NULL
-              AND id_criador IS NULL
-            ORDER BY id DESC
-            LIMIT 1
-        """, reason="buscar_registro_compilado_criado").get("data", [])
-        if not criado:
-            raise RuntimeError(f"Falha ao criar registro compilado do paciente {id_paciente}")
-        id_registro = int(criado[0]["id"])
-
-    sets = [
-        "id_atendimento = NULL",
-        "datetime_atendimento_inicio = NULL",
-        "datetime_ultima_atualizacao_atendimento = NULL",
-        "id_criador = NULL",
-        f"id_paciente = '{esc(id_paciente)}'",
-    ] + _montar_sets_resultado(resultado)
-
-    sql_exec(
-        f"UPDATE {TABELA} SET\n    " + ",\n    ".join(sets) + f"\nWHERE id = {id_registro}"
-    )
-
-
-def atualizar_analise_compilada_paciente(id_paciente: str):
-    enfileirados = enfileirar_atendimentos_antigos(id_paciente)
-    pendentes = contar_atendimentos_pendentes_paciente(id_paciente)
-    if pendentes > 0:
-        log.info(
-            f"⏳ Síntese compilada adiada para paciente {id_paciente}: "
-            f"{pendentes} atendimento(s) ainda pendente(s)/processando(s)"
-            + (f" ({enfileirados} recém-enfileirado(s))" if enfileirados else "")
-            + "."
-        )
-        return
-
-    texto_compilado, row_base = montar_texto_compilado_paciente(id_paciente)
-    if not texto_compilado or not row_base:
-        log.info(f"ℹ️  Sem histórico suficiente para compilar síntese do paciente {id_paciente}.")
-        return
+    id_registro_compilado = garantir_registro_compilado_paciente_pendente(id_paciente)
+    sql_exec(f"""
+        UPDATE {TABELA} SET
+            status = 'processando',
+            tentativas = tentativas + 1,
+            erro_msg = NULL,
+            datetime_analise_iniciada = NOW(),
+            datetime_analise_concluida = NULL,
+            datetime_ultima_atualizacao_atendimento = NULL
+        WHERE id = {id_registro_compilado}
+    """, reason="marcar_registro_compilado_processando")
 
     log.info(f"🧬 Atualizando síntese compilada do paciente {id_paciente}...")
     contexto = ""
@@ -2045,12 +2291,92 @@ def _normalizar_node(nd: dict) -> dict:
 
     A LLM pode retornar variantes em inglês, abreviadas, etc.
     """
+    tipo_bruto = str(
+        nd.get("tipo") or nd.get("node_tipo") or nd.get("type") or nd.get("category") or ""
+    ).strip()
+    valor = str(
+        nd.get("valor") or nd.get("node_valor") or nd.get("value") or nd.get("label") or nd.get("name") or nd.get("nome") or ""
+    ).strip()
+    normalizado = str(
+        nd.get("normalizado") or nd.get("node_normalizado") or nd.get("normalized") or nd.get("normalised") or ""
+    ).strip()
+    contexto = str(
+        nd.get("contexto") or nd.get("node_contexto") or nd.get("context") or nd.get("description") or nd.get("descricao") or ""
+    ).strip()
+
+    tipo_alias = {
+        "patient": "paciente",
+        "paciente": "paciente",
+        "patient_name": "paciente",
+        "diagnosis": "diagnostico",
+        "diagnostico": "diagnostico",
+        "diagnóstico": "diagnostico",
+        "cid": "diagnostico",
+        "symptom": "sintoma",
+        "symptoms": "sintoma",
+        "sintoma": "sintoma",
+        "sinal": "sintoma",
+        "sign": "sintoma",
+        "medication": "medicamento",
+        "medicine": "medicamento",
+        "drug": "medicamento",
+        "medicamento": "medicamento",
+        "medicacao": "medicamento",
+        "medicação": "medicamento",
+        "therapy": "terapia",
+        "terapia": "terapia",
+        "exam": "exame",
+        "test": "exame",
+        "exame": "exame",
+        "gene": "gene",
+        "genetics": "gene",
+        "genetica": "gene",
+        "genética": "gene",
+        "behavior": "comportamento",
+        "behaviour": "comportamento",
+        "comportamento": "comportamento",
+        "conduct": "conduta",
+        "plan": "conduta",
+        "conduta": "conduta",
+        "risk": "risco",
+        "risco": "risco",
+        "pending": "pendencia",
+        "pendencia": "pendencia",
+        "pendência": "pendencia",
+    }
+    tipo = tipo_alias.get(tipo_bruto.lower(), tipo_bruto.lower())
+
+    if not normalizado and valor:
+        normalizado = re.sub(r"[^a-z0-9]+", "_", valor.lower()).strip("_")
+
+    campos_base = {
+        "id", "node_id", "tipo", "node_tipo", "type", "category",
+        "valor", "node_valor", "value", "label", "name", "nome",
+        "normalizado", "node_normalizado", "normalized", "normalised",
+        "contexto", "node_contexto", "context", "description", "descricao",
+    }
+    extras = []
+    for k, v in nd.items():
+        if k in campos_base or v in (None, "", [], {}):
+            continue
+        if isinstance(v, (dict, list)):
+            extras.append(f"{k}={json.dumps(v, ensure_ascii=False)}")
+        else:
+            extras.append(f"{k}={v}")
+    extras_txt = " | ".join(extras[:4])
+    if extras_txt:
+        contexto = f"{contexto} | {extras_txt}".strip(" |") if contexto else extras_txt
+
+    node_id = str(nd.get("id") or nd.get("node_id") or "").strip()
+    if not node_id and tipo and normalizado:
+        node_id = f"{tipo}_{normalizado[:80]}"
+
     return {
-        "id":           nd.get("id") or nd.get("node_id") or "",
-        "tipo":         nd.get("tipo") or nd.get("node_tipo") or nd.get("type") or nd.get("category") or "",
-        "valor":        nd.get("valor") or nd.get("node_valor") or nd.get("value") or nd.get("label") or nd.get("name") or nd.get("nome") or "",
-        "normalizado":  nd.get("normalizado") or nd.get("node_normalizado") or nd.get("normalized") or nd.get("normalised") or "",
-        "contexto":     nd.get("contexto") or nd.get("node_contexto") or nd.get("context") or nd.get("description") or nd.get("descricao") or "",
+        "id":           node_id,
+        "tipo":         tipo,
+        "valor":        valor,
+        "normalizado":  normalizado,
+        "contexto":     contexto,
     }
 
 
@@ -2065,6 +2391,38 @@ def _normalizar_edge(ed: dict) -> dict:
         "relacao_tipo":     ed.get("relacao_tipo") or ed.get("relation") or ed.get("type") or ed.get("tipo") or ed.get("relationship") or "",
         "relacao_contexto": ed.get("relacao_contexto") or ed.get("contexto") or ed.get("context") or ed.get("description") or ed.get("descricao") or "",
     }
+
+
+def _deduplicar_nodes_grafo(nodes: list) -> list:
+    dedup = {}
+    for node in nodes:
+        if not isinstance(node, dict):
+            continue
+        chave = (
+            str(node.get("tipo") or "").strip().lower(),
+            str(node.get("normalizado") or node.get("valor") or "").strip().lower(),
+        )
+        if not chave[1]:
+            continue
+        if chave not in dedup:
+            dedup[chave] = node
+            continue
+        existente = dedup[chave]
+        if not existente.get("id") and node.get("id"):
+            existente["id"] = node["id"]
+        if not existente.get("contexto") and node.get("contexto"):
+            existente["contexto"] = node["contexto"]
+        elif node.get("contexto") and node["contexto"] not in str(existente.get("contexto") or ""):
+            existente["contexto"] = f"{existente.get('contexto','')} | {node['contexto']}".strip(" |")
+    return list(dedup.values())
+
+
+def _primeiro_node_representativo(nodes: list):
+    for tipo_prioritario in ("diagnostico", "medicamento", "terapia", "sintoma", "gene", "risco"):
+        for node in nodes:
+            if (node.get("tipo") or "").lower() == tipo_prioritario:
+                return node
+    return nodes[0] if nodes else None
 
 
 def salvar_auxiliar(idatendimento: int, id_paciente: str, resultado: dict):
@@ -2111,12 +2469,17 @@ def salvar_auxiliar(idatendimento: int, id_paciente: str, resultado: dict):
         if chave_php == "grafo_clinico_nodes" and isinstance(val, list):
             val_original = val
             val = [_normalizar_node(nd) for nd in val if isinstance(nd, dict)]
-            # Log de diagnóstico: mostra primeiro node antes/depois
-            if val_original:
-                log.info(f"  🔬 Primeiro node LLM (original): {json.dumps(val_original[0], ensure_ascii=False)[:200]}")
-                log.info(f"  🔬 Primeiro node (normalizado):   {json.dumps(val[0], ensure_ascii=False)[:200]}")
             # Filtra nodes sem valor (o PHP faria isso de qualquer forma)
             val = [n for n in val if n.get("valor")]
+            val = _deduplicar_nodes_grafo(val)
+            node_original_log = _primeiro_node_representativo([
+                _normalizar_node(nd) for nd in val_original if isinstance(nd, dict)
+            ])
+            node_normalizado_log = _primeiro_node_representativo(val)
+            if node_original_log:
+                log.info(f"  🔬 Node representativo LLM (normalizado): {json.dumps(node_original_log, ensure_ascii=False)[:300]}")
+            if node_normalizado_log:
+                log.info(f"  🔬 Node representativo salvo:           {json.dumps(node_normalizado_log, ensure_ascii=False)[:300]}")
             if not val:
                 log.warning(f"  ⚠️ Todos os nodes do grafo ficaram sem 'valor' após normalização!")
                 continue
@@ -2923,12 +3286,27 @@ def analisar_prontuario(texto: str, chat_url: str = None, chat_id: str = None, c
 
     # Funcao auxiliar para progresso inline (sobrescreve a linha atual no CMD)
     def _inline(msg):
-        sys.stdout.write(f'\r  {msg:<55}')
+        largura_terminal = shutil.get_terminal_size((140, 20)).columns
+        largura_util = max(30, largura_terminal - 2)
+        linha = f"  {str(msg or '')}"
+        sys.stdout.write('\r' + linha.ljust(largura_util))
         sys.stdout.flush()
 
     def _newline():
         sys.stdout.write('\n')
         sys.stdout.flush()
+
+    def _inline_status(prefixo: str, msg: str):
+        texto = re.sub(r"\s+", " ", str(msg or "")).strip()
+        if not texto:
+            return
+
+        largura_terminal = shutil.get_terminal_size((140, 20)).columns
+        largura_util = max(30, largura_terminal - 6)
+        mensagem = f"{prefixo} {texto}"
+        if len(mensagem) > largura_util:
+            mensagem = mensagem[:max(0, largura_util - 3)].rstrip() + "..."
+        _inline(mensagem)
 
     last_status = ""
     inline_active = False  # True quando ha uma linha inline aberta
@@ -2947,16 +3325,8 @@ def analisar_prontuario(texto: str, chat_url: str = None, chat_id: str = None, c
             if msg == last_status:
                 continue
             last_status = msg
-            is_progress = '%' in msg
-            if is_progress:
-                # Progresso com %: escreve inline sobrescrevendo a linha
-                _inline(f'⏳ {msg}')
-                inline_active = True
-            else:
-                if inline_active:
-                    _newline()
-                    inline_active = False
-                log.info(f'  ⏳ {msg}')
+            _inline_status('⏳', msg)
+            inline_active = True
 
         elif t == "log":
             if inline_active:
@@ -2973,8 +3343,7 @@ def analisar_prontuario(texto: str, chat_url: str = None, chat_id: str = None, c
 
         elif t == "markdown":
             markdown = obj.get("content", "")
-            # Progresso de recepcao: inline sobrescrevendo a linha
-            _inline(f'📝 Recebendo: {len(markdown)} chars...')
+            _inline_status('📝', f"Recebendo: {len(markdown)} chars...")
             inline_active = True
 
         elif t == "finish":
@@ -2999,11 +3368,14 @@ def analisar_prontuario(texto: str, chat_url: str = None, chat_id: str = None, c
     if not markdown:
         raise ValueError("Simulador não retornou conteúdo markdown.")
 
-    match = re.search(r'\{[\s\S]*\}', markdown)
-    if not match:
-        raise ValueError(f"LLM não retornou JSON válido: {markdown[:200]}")
+    try:
+        resultado = _parse_json_llm(markdown)
+    except Exception as parse_err:
+        preview = re.sub(r"\s+", " ", _strip_code_fences(markdown))[:500]
+        raise ValueError(
+            f"LLM não retornou JSON válido ({parse_err}). Prévia: {preview}"
+        ) from parse_err
 
-    resultado = json.loads(match.group())
     resultado["_chat_id"]       = new_chat_id
     resultado["_chat_url"]       = new_chat_url
     resultado["_chat_title"]     = new_chat_title
@@ -3042,6 +3414,32 @@ def buscar_web(queries: list) -> list:
         return data.get("results", [])
     except Exception as e:
         log.warning(f"  ⚠️ Busca web falhou: {e}")
+        return []
+
+
+def buscar_uptodate(queries: list) -> list:
+    """
+    Chama o endpoint /api/uptodate_search do ChatGPT Simulator.
+    Retorna lista de dicts: [{query, results: [{title, url, snippet}]}]
+    """
+    if not queries:
+        return []
+
+    try:
+        resp = requests.post(
+            UPTODATE_SEARCH_URL,
+            json={"queries": queries},
+            headers={
+                "Content-Type":  "application/json",
+                "Authorization": f"Bearer {API_KEY}",
+            },
+            timeout=SEARCH_TIMEOUT * len(queries),
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        return data.get("results", [])
+    except Exception as e:
+        log.warning(f"  ⚠️ Busca UpToDate falhou: {e}")
         return []
 
 
@@ -3324,6 +3722,398 @@ def formatar_resultados_busca(resultados_web: list) -> str:
     return "\n".join(blocos)
 
 
+PROMPT_GERAR_PESQUISA = """Com base no caso clínico estruturado abaixo, gere queries de pesquisa web realmente pensadas para ESTE paciente específico.
+
+OBJETIVO:
+- produzir até 3 queries de alta utilidade clínica para apoiar condutas, seguimento, monitorização, terapias e/ou segurança medicamentosa;
+- considerar o perfil do paciente, gravidade, diagnóstico principal, comorbidades, genética, medicações, ausência de fala funcional, terapias e pendências;
+- priorizar evidência científica e diretrizes realmente úteis para o caso concreto.
+
+FORMATO OBRIGATÓRIO:
+{
+  "uptodate_queries": [
+    {
+      "query": "consulta médica apropriada para UpToDate",
+      "reason": "por que pesquisar este tema médico no UpToDate é útil para este paciente"
+    }
+  ],
+  "search_queries": [
+    {
+      "query": "consulta para Google/PubMed",
+      "reason": "por que esta busca é útil para este paciente"
+    }
+  ]
+}
+
+REGRAS:
+- Responder SOMENTE com JSON válido.
+- Máximo de 3 queries por lista.
+- Preferir inglês quando isso melhorar a busca científica.
+- Você PODE usar `uptodate_queries` para temas médicos/clínicos em que o UpToDate tende a ter bons resultados.
+- NÃO usar `uptodate_queries` para pesquisar pessoas, notícias, instituições, temas administrativos ou assuntos não médicos.
+- Quando o tema for claramente médico, clínico, terapêutico, diagnóstico ou de monitorização, considere priorizar `uptodate_queries`.
+- Quando fizer sentido, usar PubMed, diretrizes pediátricas, systematic review, guideline, consensus.
+- Não inventar fatos que não estejam explícitos no caso.
+- Não repetir queries redundantes.
+"""
+
+PROMPT_AUXILIAR_GRAFO_V18 = """ASSISTENTE DE ANÁLISE CLÍNICA DE PRONTUÁRIOS — PROMPT V18
+Compatível com arquitetura SQL + RAG + CDSS
+
+OBJETIVO
+Transformar o caso clínico estruturado abaixo em dados auxiliares confiáveis e específicos,
+compatíveis com:
+- chatgpt_alertas_clinicos
+- chatgpt_clinical_graph_nodes
+- chatgpt_clinical_graph_edges
+
+PRINCÍPIOS
+- PRIORIDADE ABSOLUTA: extração fiel do texto/caso estruturado.
+- Nunca inventar dados ausentes.
+- Nunca criar diagnóstico, medicação, terapia ou exame sem base explícita.
+- Se não houver informação suficiente, devolver lista vazia ou texto vazio.
+
+FOCO PRINCIPAL DESTA ETAPA
+Gerar um grafo clínico útil e ESPECÍFICO para o caso.
+
+REGRAS PARA O GRAFO CLÍNICO
+- Os nodes devem representar entidades clínicas concretas do caso, por exemplo:
+  paciente, diagnóstico, sintoma, comportamento, medicamento, terapia, exame, pendência, risco, gene.
+- Evitar nodes genéricos demais como "paciente", "tratamento", "consulta", "medicação" sem detalhamento.
+- Preferir nodes específicos como:
+  "TEA", "deficiência intelectual", "aripiprazol", "topiramato", "ausência de fala funcional",
+  "avaliação genética pendente", "psicologia", "fácies dismórfica".
+- O campo `normalizado` deve ser estável e curto.
+- O campo `contexto` deve explicar por que aquele node existe no caso concreto.
+- As edges devem ligar entidades reais do caso e usar relações semânticas específicas.
+
+NOVA REGRA — MENSAGENS DE ACOMPANHAMENTO
+Quando houver base suficiente no caso, as mensagens de acompanhamento devem ser humanas,
+acolhedoras, personalizadas e não robóticas.
+
+FORMATO DE RESPOSTA
+Responder SOMENTE com JSON válido, sem markdown, sem explicações e sem campos extras.
+
+SCHEMA OBRIGATÓRIO:
+{
+  "alertas_clinicos": [
+    {
+      "tipo_alerta": "",
+      "descricao": "",
+      "nivel_risco": ""
+    }
+  ],
+  "grafo_clinico_nodes": [
+    {
+      "id": "",
+      "tipo": "",
+      "valor": "",
+      "normalizado": "",
+      "contexto": ""
+    }
+  ],
+  "grafo_clinico_edges": [
+    {
+      "node_origem": "",
+      "node_destino": "",
+      "relacao_tipo": "",
+      "contexto": ""
+    }
+  ],
+  "mensagens_acompanhamento": {
+    "mensagem_1_semana": "",
+    "mensagem_1_mes": "",
+    "mensagem_pre_retorno": ""
+  }
+}
+"""
+
+
+def _ensure_list_local(val):
+    if val is None:
+        return []
+    if isinstance(val, list):
+        return val
+    if isinstance(val, str):
+        try:
+            parsed = json.loads(val)
+            return parsed if isinstance(parsed, list) else []
+        except Exception:
+            return []
+    return []
+
+
+def _grafo_clinico_esta_generico(resultado: dict) -> bool:
+    nodes = _ensure_list_local(
+        resultado.get("grafo_clinico_nodes")
+        or resultado.get("grafo_nodes")
+        or resultado.get("nodes")
+    )
+    if not nodes:
+        return True
+
+    tipos_relevantes = {
+        "diagnostico", "sintoma", "medicamento", "terapia",
+        "exame", "pendencia", "risco", "gene", "comportamento",
+    }
+    nodes_relevantes = [
+        n for n in nodes
+        if isinstance(n, dict)
+        and (n.get("valor") or n.get("node_valor"))
+        and ((n.get("tipo") or n.get("node_tipo") or "").lower() in tipos_relevantes)
+    ]
+    return len(nodes_relevantes) < 2
+
+
+def gerar_dados_auxiliares_llm(resultado: dict, chat_url: str = None, chat_id: str = None) -> dict:
+    """
+    Pede à própria LLM, na mesma conversa do caso, um refinamento dos campos
+    auxiliares mais sensíveis a especificidade semântica (grafo, alertas e
+    mensagens de acompanhamento), usando um prompt dedicado de estilo V18.
+    """
+    contexto_auxiliar = {
+        chave: valor
+        for chave, valor in {
+            "resumo_texto": resultado.get("resumo_texto"),
+            "gravidade_clinica": resultado.get("gravidade_clinica"),
+            "score_risco": resultado.get("score_risco"),
+            "diagnosticos_citados": resultado.get("diagnosticos_citados"),
+            "pontos_chave": resultado.get("pontos_chave"),
+            "mudancas_relevantes": resultado.get("mudancas_relevantes"),
+            "eventos_comportamentais": resultado.get("eventos_comportamentais"),
+            "sinais_nucleares": resultado.get("sinais_nucleares"),
+            "medicacoes_em_uso": resultado.get("medicacoes_em_uso"),
+            "medicacoes_iniciadas": resultado.get("medicacoes_iniciadas"),
+            "medicacoes_suspensas": resultado.get("medicacoes_suspensas"),
+            "terapias_referidas": resultado.get("terapias_referidas"),
+            "exames_citados": resultado.get("exames_citados"),
+            "pendencias_clinicas": resultado.get("pendencias_clinicas"),
+            "condutas_no_prontuario": resultado.get("condutas_no_prontuario"),
+            "condutas_especificas_sugeridas": resultado.get("condutas_especificas_sugeridas"),
+            "condutas_gerais_sugeridas": resultado.get("condutas_gerais_sugeridas"),
+            "seguimento_retorno_estimado": resultado.get("seguimento_retorno_estimado"),
+        }.items()
+        if valor not in (None, "", [], {})
+    }
+
+    if not contexto_auxiliar:
+        return resultado
+
+    user_content = (
+        f"[INICIO_TEXTO_COLADO]\n"
+        f"{PROMPT_AUXILIAR_GRAFO_V18}\n\n"
+        f"CASO CLÍNICO ESTRUTURADO (JSON):\n"
+        f"{json.dumps(contexto_auxiliar, ensure_ascii=False, indent=2)}\n"
+        f"[FIM_TEXTO_COLADO]"
+    )
+
+    payload = {
+        "model": LLM_MODEL,
+        "stream": True,
+        "messages": [
+            {"role": "user", "content": user_content},
+        ],
+    }
+    if chat_url:
+        payload["url"] = chat_url
+    if chat_id:
+        payload["chatid"] = chat_id
+
+    try:
+        log.info("  🕸️ Solicitando refinamento de grafo/alertas à LLM na mesma conversa...")
+        resp = requests.post(
+            LLM_URL,
+            json=payload,
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {API_KEY}",
+            },
+            stream=True,
+            timeout=300,
+        )
+        resp.raise_for_status()
+
+        markdown = ""
+        last_chat_url = chat_url
+        last_chat_id = chat_id
+        for raw_line in resp.iter_lines():
+            if not raw_line:
+                continue
+            try:
+                obj = json.loads(raw_line)
+            except json.JSONDecodeError:
+                continue
+            t = obj.get("type")
+            if t == "markdown":
+                markdown = obj.get("content", "")
+            elif t == "finish":
+                fin = obj.get("content", {}) or {}
+                last_chat_url = fin.get("url") or last_chat_url
+                last_chat_id = fin.get("chat_id") or last_chat_id
+            elif t == "error":
+                log.warning(f"  ⚠️ Refinamento auxiliar: LLM retornou erro: {obj.get('content')}")
+                return resultado
+
+        if not markdown:
+            log.warning("  ⚠️ Refinamento auxiliar: LLM não retornou conteúdo.")
+            return resultado
+
+        extra = _parse_json_llm(markdown)
+        for chave in ("alertas_clinicos", "grafo_clinico_nodes", "grafo_clinico_edges", "mensagens_acompanhamento"):
+            val = extra.get(chave)
+            if val not in (None, "", [], {}):
+                resultado[chave] = val
+        if last_chat_url:
+            resultado["_chat_url"] = last_chat_url
+        if last_chat_id:
+            resultado["_chat_id"] = last_chat_id
+
+        log.info(
+            "  🕸️ Refinamento auxiliar concluído: "
+            f"nodes={len(_ensure_list_local(resultado.get('grafo_clinico_nodes')))} | "
+            f"edges={len(_ensure_list_local(resultado.get('grafo_clinico_edges')))}"
+        )
+        return resultado
+
+    except Exception as e:
+        log.warning(f"  ⚠️ Refinamento auxiliar via LLM falhou: {e}")
+        return resultado
+
+
+def gerar_queries_pesquisa_llm(resultado: dict, chat_url: str = None, chat_id: str = None) -> dict:
+    """
+    Pede à própria LLM que proponha as queries/tópicos de pesquisa mais úteis
+    para o paciente específico analisado.
+    """
+    contexto_pesquisa = {
+        chave: valor
+        for chave, valor in {
+            "resumo_texto": resultado.get("resumo_texto"),
+            "gravidade_clinica": resultado.get("gravidade_clinica"),
+            "diagnosticos_citados": resultado.get("diagnosticos_citados"),
+            "pontos_chave": resultado.get("pontos_chave"),
+            "mudancas_relevantes": resultado.get("mudancas_relevantes"),
+            "eventos_comportamentais": resultado.get("eventos_comportamentais"),
+            "sinais_nucleares": resultado.get("sinais_nucleares"),
+            "medicacoes_em_uso": resultado.get("medicacoes_em_uso"),
+            "medicacoes_iniciadas": resultado.get("medicacoes_iniciadas"),
+            "medicacoes_suspensas": resultado.get("medicacoes_suspensas"),
+            "terapias_referidas": resultado.get("terapias_referidas"),
+            "pendencias_clinicas": resultado.get("pendencias_clinicas"),
+            "seguimento_retorno_estimado": resultado.get("seguimento_retorno_estimado"),
+            "condutas_especificas_sugeridas": resultado.get("condutas_especificas_sugeridas"),
+            "condutas_gerais_sugeridas": resultado.get("condutas_gerais_sugeridas"),
+        }.items()
+        if valor not in (None, "", [], {})
+    }
+
+    if not contexto_pesquisa:
+        return {"search_queries": [], "uptodate_queries": []}
+
+    user_content = (
+        f"[INICIO_TEXTO_COLADO]\n"
+        f"{PROMPT_GERAR_PESQUISA}\n\n"
+        f"CASO CLÍNICO ESTRUTURADO (JSON):\n"
+        f"{json.dumps(contexto_pesquisa, ensure_ascii=False, indent=2)}\n"
+        f"[FIM_TEXTO_COLADO]"
+    )
+
+    payload = {
+        "model": LLM_MODEL,
+        "stream": True,
+        "messages": [
+            {"role": "user", "content": user_content},
+        ],
+    }
+
+    if chat_url:
+        payload["url"] = chat_url
+    if chat_id:
+        payload["chatid"] = chat_id
+
+    try:
+        resp = requests.post(
+            LLM_URL,
+            json=payload,
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {API_KEY}",
+            },
+            stream=True,
+            timeout=300,
+        )
+        resp.raise_for_status()
+
+        markdown = ""
+        for raw_line in resp.iter_lines():
+            if not raw_line:
+                continue
+            try:
+                obj = json.loads(raw_line)
+            except json.JSONDecodeError:
+                continue
+            t = obj.get("type")
+            if t == "markdown":
+                markdown = obj.get("content", "")
+            elif t == "error":
+                log.warning(f"  ⚠️ Planejamento de pesquisa: LLM retornou erro: {obj.get('content')}")
+                return {"search_queries": [], "uptodate_queries": []}
+
+        if not markdown:
+            log.warning("  ⚠️ Planejamento de pesquisa: LLM não retornou conteúdo.")
+            return {"search_queries": [], "uptodate_queries": []}
+
+        try:
+            planejado = _parse_json_llm(markdown)
+            itens_search = planejado.get("search_queries") or []
+            itens_uptodate = planejado.get("uptodate_queries") or []
+        except Exception as parse_err:
+            itens_search = _extrair_queries_pesquisa_fallback(markdown)
+            itens_uptodate = []
+            if itens_search:
+                log.info(f"  ℹ️ Planejamento de pesquisa: JSON fora do formato estrito; extração tolerante aplicada ({parse_err}).")
+            else:
+                preview = re.sub(r"\s+", " ", _strip_code_fences(markdown))[:500]
+                log.warning(f"  ⚠️ Planejamento de pesquisa: não foi possível interpretar a resposta da LLM ({parse_err}). Prévia: {preview}")
+                return {"search_queries": [], "uptodate_queries": []}
+
+        def _normalizar_lista_queries(itens, label_log):
+            queries = []
+            vistos = set()
+            for item in (itens or [])[:SEARCH_MAX_QUERIES]:
+                if not isinstance(item, dict):
+                    continue
+                query = re.sub(r"\s+", " ", str(item.get("query") or "")).strip()
+                reason = re.sub(r"\s+", " ", str(item.get("reason") or "")).strip()
+                if not query:
+                    continue
+                key = query.lower()
+                if key in vistos:
+                    continue
+                vistos.add(key)
+                queries.append(query)
+                log.info(f"     🧠 {label_log}: {query}" + (f" | motivo: {reason}" if reason else ""))
+            return queries[:SEARCH_MAX_QUERIES]
+
+        search_queries = _normalizar_lista_queries(itens_search, "search")
+        uptodate_queries = _normalizar_lista_queries(itens_uptodate, "uptodate")
+
+        if search_queries or uptodate_queries:
+            log.info(
+                "  🧠 LLM planejou "
+                f"{len(search_queries)} search_queries e {len(uptodate_queries)} uptodate_queries."
+            )
+
+        return {
+            "search_queries": search_queries,
+            "uptodate_queries": uptodate_queries,
+        }
+
+    except Exception as e:
+        log.warning(f"  ⚠️ Planejamento de pesquisa via LLM falhou: {e}")
+        return {"search_queries": [], "uptodate_queries": []}
+
+
 PROMPT_ENRIQUECIMENTO = """Com base nos resultados de busca em literatura médica fornecidos abaixo, enriqueça as condutas clínicas sugeridas com referências reais.
 
 REGRAS:
@@ -3453,7 +4243,35 @@ def enriquecer_com_evidencias(resultado: dict, resultados_web: list,
         )
         resp.raise_for_status()
 
+        new_chat_id = chat_id
+        new_chat_url = chat_url
         markdown = ""
+        last_status = ""
+        inline_active = False
+
+        def _inline(msg):
+            largura_terminal = shutil.get_terminal_size((140, 20)).columns
+            largura_util = max(30, largura_terminal - 2)
+            linha = f"  {str(msg or '')}"
+            sys.stdout.write('\r' + linha.ljust(largura_util))
+            sys.stdout.flush()
+
+        def _newline():
+            sys.stdout.write('\n')
+            sys.stdout.flush()
+
+        def _inline_status(prefixo: str, msg: str):
+            texto = re.sub(r"\s+", " ", str(msg or "")).strip()
+            if not texto:
+                return
+
+            largura_terminal = shutil.get_terminal_size((140, 20)).columns
+            largura_util = max(30, largura_terminal - 6)
+            mensagem = f"{prefixo} {texto}"
+            if len(mensagem) > largura_util:
+                mensagem = mensagem[:max(0, largura_util - 3)].rstrip() + "..."
+            _inline(mensagem)
+
         for raw_line in resp.iter_lines():
             if not raw_line:
                 continue
@@ -3462,22 +4280,60 @@ def enriquecer_com_evidencias(resultado: dict, resultados_web: list,
             except json.JSONDecodeError:
                 continue
             t = obj.get("type")
-            if t == "markdown":
+            if t == "status":
+                msg = obj.get("content", "")
+                if msg == last_status:
+                    continue
+                last_status = msg
+                _inline_status('⏳', msg)
+                inline_active = True
+            elif t == "log":
+                if inline_active:
+                    _newline()
+                    inline_active = False
+                log.info(f"  🔧 {obj.get('content', '').strip()}")
+            elif t == "chatid":
+                if inline_active:
+                    _newline()
+                    inline_active = False
+                new_chat_id = obj.get("content") or new_chat_id
+                log.info(f"  📎 chat_id: {new_chat_id}")
+            elif t == "markdown":
                 markdown = obj.get("content", "")
+                _inline_status('📝', f"Recebendo: {len(markdown)} chars...")
+                inline_active = True
+            elif t == "finish":
+                if inline_active:
+                    _newline()
+                    inline_active = False
+                fin = obj.get("content", {})
+                new_chat_url = fin.get("url") or new_chat_url
+                new_chat_id = fin.get("chat_id") or new_chat_id
+                if not new_chat_id and new_chat_url:
+                    new_chat_id = new_chat_url.rstrip('/').split('/')[-1] or new_chat_id
+                log.info(f"  🔗 chat_url: {new_chat_url} | chat_id: {new_chat_id}")
             elif t == "error":
+                if inline_active:
+                    _newline()
+                    inline_active = False
                 log.warning(f"  ⚠️ Enriquecimento: LLM retornou erro: {obj.get('content')}")
                 return resultado
+
+        if inline_active:
+            _newline()
 
         if not markdown:
             log.warning("  ⚠️ Enriquecimento: LLM não retornou conteúdo.")
             return resultado
 
-        match = re.search(r'\{[\s\S]*\}', markdown)
-        if not match:
-            log.warning(f"  ⚠️ Enriquecimento: LLM não retornou JSON válido.")
+        try:
+            enriquecido = _parse_json_llm(markdown)
+        except Exception as parse_err:
+            preview = re.sub(r"\s+", " ", _strip_code_fences(markdown))[:500]
+            log.warning(
+                f"  ⚠️ Enriquecimento: LLM não retornou JSON válido ({parse_err}). Prévia: {preview}"
+            )
             return resultado
-
-        enriquecido = json.loads(match.group())
 
         # Merge: substitui condutas apenas se a LLM retornou algo não-vazio
         condutas_esp = enriquecido.get("condutas_especificas_sugeridas")
@@ -3501,38 +4357,68 @@ def enriquecer_com_evidencias(resultado: dict, resultados_web: list,
 def executar_busca_evidencias(resultado: dict, chat_url: str = None, chat_id: str = None) -> dict:
     """
     Pipeline completo de busca + enriquecimento:
-      1. Extrair termos de busca do resultado da análise
-      2. Buscar no Google via /api/web_search
-      3. Enviar resultados para a LLM enriquecer condutas
+      1. Pedir à LLM um plano estruturado com queries de UpToDate e web
+      2. Priorizar UpToDate para temas clínicos, com fallback para web search
+      3. Enviar os resultados encontrados para a LLM enriquecer condutas
     """
     if not SEARCH_HABILITADA:
         return resultado
 
-    # 1. Extrai termos de busca
-    queries = extrair_termos_busca(resultado)
-    if not queries:
+    def _resumo_resultados(label: str, resultados: list) -> tuple:
+        total_items = sum(
+            len(r.get("results", [])) for r in resultados if r.get("success", True)
+        )
+        tem_html = any(r.get("raw_html") for r in resultados if r.get("success", True))
+        log.info(
+            f"  {label} {total_items} resultado(s) estruturado(s) | HTML bruto: {'sim' if tem_html else 'não'}"
+        )
+        return total_items, tem_html
+
+    plano_pesquisa = gerar_queries_pesquisa_llm(resultado, chat_url=chat_url, chat_id=chat_id) or {}
+    search_queries = list(plano_pesquisa.get("search_queries") or [])
+    uptodate_queries = list(plano_pesquisa.get("uptodate_queries") or [])
+
+    if not search_queries and not uptodate_queries:
+        log.info("  🔄 Fallback: usando extração heurística de termos para montar as queries de web.")
+        search_queries = extrair_termos_busca(resultado)
+
+    if not search_queries and not uptodate_queries:
         log.info("  🔍 Nenhum termo clínico para busca — pulando enriquecimento.")
         return resultado
 
-    log.info(f"  🌐 Busca web: {len(queries)} query(s)")
-    for q in queries:
-        log.info(f"     🔎 {q}")
+    resultados_busca = []
 
-    # 2. Busca no Google
-    resultados_web = buscar_web(queries)
-    total_items = sum(
-        len(r.get("results", [])) for r in resultados_web if r.get("success", True)
-    )
-    tem_html = any(r.get("raw_html") for r in resultados_web if r.get("success", True))
-    log.info(f"  🌐 {total_items} resultado(s) estruturado(s) | HTML bruto: {'sim' if tem_html else 'não'}")
+    if uptodate_queries:
+        log.info(f"  🩺 Busca UpToDate prioritária: {len(uptodate_queries)} query(s)")
+        for q in uptodate_queries:
+            log.info(f"     🩺 {q}")
 
-    if total_items == 0 and not tem_html:
+        resultados_uptodate = buscar_uptodate(uptodate_queries)
+        total_items, tem_html = _resumo_resultados("🩺 UpToDate:", resultados_uptodate)
+
+        if total_items > 0 or tem_html:
+            resultados_busca.extend(resultados_uptodate)
+        else:
+            log.info("  🔄 UpToDate sem resultados úteis — acionando fallback para web search.")
+            if not search_queries:
+                search_queries = uptodate_queries[:SEARCH_MAX_QUERIES]
+
+    if search_queries and not resultados_busca:
+        log.info(f"  🌐 Busca web: {len(search_queries)} query(s)")
+        for q in search_queries:
+            log.info(f"     🔎 {q}")
+
+        resultados_web = buscar_web(search_queries)
+        total_items, tem_html = _resumo_resultados("🌐 Web:", resultados_web)
+        if total_items > 0 or tem_html:
+            resultados_busca.extend(resultados_web)
+
+    if not resultados_busca:
         log.info("  🔍 Nenhum resultado — pulando enriquecimento.")
         return resultado
 
-    # 3. Enriquecer condutas via LLM (Passo 2)
-    log.info(f"  📚 Enviando resultados para LLM enriquecer condutas...")
-    resultado = enriquecer_com_evidencias(resultado, resultados_web, chat_url, chat_id)
+    log.info("  📚 Enviando resultados para LLM enriquecer condutas...")
+    resultado = enriquecer_com_evidencias(resultado, resultados_busca, chat_url, chat_id)
 
     return resultado
 
@@ -3597,6 +4483,14 @@ def processar_lote(pendentes: list):
                 resultado = executar_busca_evidencias(resultado, chat_url=chat_url_atual, chat_id=chat_id_atual)
             except Exception as e:
                 log.warning(f"  ⚠️ Enriquecimento com evidências falhou (não fatal): {e}")
+
+            try:
+                if _grafo_clinico_esta_generico(resultado):
+                    chat_url_aux = resultado.get("_chat_url") or chat_url_prev
+                    chat_id_aux  = resultado.get("_chat_id") or chat_id_prev
+                    resultado = gerar_dados_auxiliares_llm(resultado, chat_url=chat_url_aux, chat_id=chat_id_aux)
+            except Exception as e:
+                log.warning(f"  ⚠️ Refinamento auxiliar do grafo falhou (não fatal): {e}")
 
             salvar_resultado(idat, resultado)
             log.info(
@@ -3676,10 +4570,12 @@ def main():
     garantir_tabela()
     garantir_coluna_dados_json()                 # garante dados_json em tabelas pré-existentes
     garantir_coluna_mensagens_acompanhamento()   # garante mensagens_acompanhamento em tabelas pré-existentes
+    garantir_coluna_datetime_analise_iniciada()  # garante datetime_analise_iniciada em tabelas pré-existentes
     garantir_colunas_v16()                       # garante colunas CDSS/RAG da V16 (modelo_llm, hash_prontuario, score_risco, etc.)
     garantir_schema_analise_compilada_paciente() # permite síntese longitudinal por id_paciente sem id_atendimento
     garantir_migracoes()                         # corrige tipos de colunas em tabelas pré-existentes
     garantir_tabela_embeddings()                 # garante tabelas de embeddings + casos semelhantes
+    resetar_analises_interrompidas_no_startup()  # limpa inícios de análise sem conclusão válida após quedas/interrupções
 
     llm_estava_fora = False   # rastreia se houve queda para logar a reconexão
     ciclo = 0
@@ -3717,6 +4613,7 @@ def main():
 
             log.info(f"── Ciclo #{ciclo} {'─' * 50}")
             log.info(f"   📊 Prontuários na fila : {resultado['total_tabela']}")
+            log.info(f"   🧬 Análises compiladas   : {resultado['total_analises_compiladas_paciente']}")
             log.info(f"   ✅ Concluídos/atualizados : {resultado['total_concluidos']}")
             log.info(f"   🕐 Aguardando análise     : {resultado['total_pendentes']}")
             log.info(f"   🔄 Em processamento       : {resultado['total_processando']}")
