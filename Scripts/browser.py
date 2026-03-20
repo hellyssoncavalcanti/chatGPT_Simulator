@@ -19,6 +19,7 @@
 #   GET_MENU  — lê opções do menu de contexto de um chat
 #   EXEC_MENU — clica em uma opção do menu (ex: Excluir, Renomear)
 #   SEARCH    — abre Google, pesquisa e retorna resultados estruturados
+#   UPTODATE_SEARCH — abre UpToDate Search e retorna resultados estruturados
 #   STOP      — encerra o loop principal
 #
 # MECANISMO DE PASTE:
@@ -879,6 +880,85 @@ def _parse_google_raw_html(raw_html: str, query: str = "") -> list:
     return items
 
 
+def _parse_uptodate_raw_html(raw_html: str, query: str = "") -> list:
+    """
+    Fallback bruto para a busca do UpToDate quando os seletores JS não
+    retornarem itens. Extrai os cards principais da lista de resultados.
+    """
+    import html as html_mod
+
+    def _clean(text):
+        text = re.sub(r'<[^>]+>', ' ', text or '')
+        text = html_mod.unescape(text).strip()
+        return re.sub(r'\s+', ' ', text)
+
+    items = []
+    seen = set()
+    pattern = re.compile(
+        r'<li[^>]+class="[^"]*search-result-list-item[^"]*"[^>]*>.*?'
+        r'<a[^>]+href="(?P<href>/[^"#?][^"]*)"[^>]+class="[^"]*searchResultLink[^"]*"[^>]*>'
+        r'(?P<title>.*?)</a>'
+        r'(?P<tail>.*?)'
+        r'</li>',
+        re.IGNORECASE | re.DOTALL
+    )
+
+    for match in pattern.finditer(raw_html):
+        href = html_mod.unescape(match.group('href') or '').strip()
+        title = _clean(match.group('title'))
+        tail = match.group('tail') or ''
+        if not href or not title:
+            continue
+
+        url = href if href.startswith('http') else f'https://www.uptodate.com{href}'
+        if url in seen:
+            continue
+        seen.add(url)
+
+        snippet_match = re.search(
+            r'<div[^>]+class="[^"]*snippet[^"]*"[^>]*>(.*?)</div>',
+            tail,
+            re.IGNORECASE | re.DOTALL
+        )
+        snippet = _clean(snippet_match.group(1))[:400] if snippet_match else ''
+
+        subhits = []
+        for sm in re.finditer(
+            r'<a[^>]+class="[^"]*search-result-subhit-link[^"]*"[^>]*>(.*?)</a>',
+            tail,
+            re.IGNORECASE | re.DOTALL
+        ):
+            subhit = _clean(sm.group(1))
+            if subhit:
+                subhits.append(subhit)
+
+        li_tag = match.group(0).split('>', 1)[0]
+        class_match = re.search(r'class="([^"]+)"', li_tag, re.IGNORECASE)
+        class_name = class_match.group(1) if class_match else ''
+        item_type = 'topic'
+        if 'ICG' in class_name:
+            item_type = 'pathway'
+        elif 'LAB' in class_name:
+            item_type = 'lab'
+        elif 'medical' in class_name:
+            item_type = 'medical'
+
+        items.append({
+            "position": len(items) + 1,
+            "title": title,
+            "url": url,
+            "snippet": snippet,
+            "type": item_type,
+            "subhits": subhits[:6],
+            "query": query,
+        })
+
+        if len(items) >= 12:
+            break
+
+    return items
+
+
 async def handle_search_task(context, task):
     """
     Ação SEARCH — abre Google, digita a query com typing realista,
@@ -1075,6 +1155,159 @@ async def handle_search_task(context, task):
                 try:
                     await page.close()
                 except:
+                    pass
+            if q:
+                q.put(None)
+
+
+async def handle_uptodate_search_task(context, task):
+    """
+    Ação UPTODATE_SEARCH — abre a busca do UpToDate, pesquisa o termo e
+    retorna os resultados estruturados encontrados na listagem principal.
+    """
+    async with tab_semaphore:
+        q = task.get('stream_queue')
+        query = (task.get('query') or '').strip()
+        page = None
+        try:
+            if not query:
+                emit_event(q, 'searchresult', {
+                    'success': False, 'query': '', 'error': 'Query vazia'
+                })
+                return
+
+            page = await context.new_page()
+            emit_log(q, f"🩺 Pesquisando no UpToDate: {query}")
+
+            await page.goto('https://www.uptodate.com/contents/search', wait_until='domcontentloaded')
+            await asyncio.sleep(random.uniform(1.0, 1.8))
+
+            search_input = page.locator('#tbSearch, input.searchTerm, input[type="search"]').first
+            await search_input.wait_for(state='visible', timeout=15000)
+            await search_input.click()
+            await asyncio.sleep(random.uniform(0.2, 0.5))
+
+            try:
+                await page.locator('#clearSearch').click(timeout=1000)
+                await asyncio.sleep(0.2)
+            except Exception:
+                pass
+
+            emit_event(q, 'status', 'Digitando busca no UpToDate...')
+            await type_realistic(page, query, q)
+            await asyncio.sleep(random.uniform(0.3, 0.8))
+
+            submitted = False
+            submit_selectors = [
+                '.newsearch-submit',
+                'span.newsearch-submit',
+                '[aria-label="Submit search"]',
+            ]
+            for sel in submit_selectors:
+                try:
+                    btn = page.locator(sel).first
+                    if await btn.is_visible(timeout=1000):
+                        await btn.click()
+                        submitted = True
+                        break
+                except Exception:
+                    continue
+
+            if not submitted:
+                await page.keyboard.press('Enter')
+
+            emit_event(q, 'status', 'Aguardando resultados do UpToDate...')
+            try:
+                await page.wait_for_selector(
+                    '#searchresults, #search-results-container, .search-result-list-item',
+                    timeout=20000
+                )
+            except Exception:
+                await asyncio.sleep(4)
+
+            await asyncio.sleep(random.uniform(1.0, 2.0))
+
+            results = await page.evaluate("""() => {
+                const nodes = Array.from(document.querySelectorAll('#search-results-container .search-result-list-item'));
+                const items = [];
+                const seen = new Set();
+                let pos = 1;
+
+                const detectType = (li) => {
+                    const cls = li.className || '';
+                    if (cls.includes('ICG')) return 'pathway';
+                    if (cls.includes('LAB')) return 'lab';
+                    if (cls.includes('medical')) return 'medical';
+                    return 'topic';
+                };
+
+                for (const li of nodes) {
+                    if (pos > 12) break;
+                    const link = li.querySelector('a.searchResultLink[href]');
+                    if (!link) continue;
+
+                    const title = (link.innerText || '').trim();
+                    const href = link.getAttribute('href') || '';
+                    if (!title || !href) continue;
+
+                    const url = new URL(href, window.location.origin).href;
+                    if (seen.has(url)) continue;
+                    seen.add(url);
+
+                    const snippetEl = li.querySelector('.snippet');
+                    const snippet = snippetEl ? (snippetEl.innerText || '').trim().substring(0, 400) : '';
+                    const subhits = Array.from(li.querySelectorAll('.search-result-subhit-link'))
+                        .map(el => (el.innerText || '').trim())
+                        .filter(Boolean)
+                        .slice(0, 6);
+
+                    items.push({
+                        position: pos++,
+                        title,
+                        url,
+                        snippet,
+                        type: detectType(li),
+                        subhits,
+                    });
+                }
+
+                return items;
+            }""")
+
+            raw_html = ""
+            if not results:
+                emit_log(q, "⚠️ Seletores CSS não encontraram resultados no UpToDate — tentando fallback via raw HTML...")
+                try:
+                    raw_html = await page.content()
+                    results = _parse_uptodate_raw_html(raw_html, query)
+                    if results:
+                        emit_log(q, f"✅ Fallback raw HTML UpToDate: {len(results)} resultados extraídos")
+                except Exception as e_raw:
+                    emit_log(q, f"⚠️ Fallback raw HTML UpToDate falhou: {e_raw}")
+
+            emit_log(q, f"✅ {len(results)} resultado(s) UpToDate encontrados para: {query}")
+            emit_event(q, 'searchresult', {
+                'success': True,
+                'query': query,
+                'results': results,
+                'count': len(results),
+                'source': 'uptodate',
+                'raw_html': raw_html[:30000] if raw_html else '',
+            })
+
+        except Exception as e:
+            emit_log(q, f"❌ Erro na busca UpToDate: {e}")
+            emit_event(q, 'searchresult', {
+                'success': False,
+                'query': query,
+                'error': str(e),
+                'source': 'uptodate',
+            })
+        finally:
+            if page:
+                try:
+                    await page.close()
+                except Exception:
                     pass
             if q:
                 q.put(None)
@@ -1363,6 +1596,8 @@ async def browser_loop_async():
                     asyncio.create_task(handle_sync_task(browser, task))
                 elif action == 'SEARCH':
                     asyncio.create_task(handle_search_task(browser, task))
+                elif action == 'UPTODATE_SEARCH':
+                    asyncio.create_task(handle_uptodate_search_task(browser, task))
                 else: 
                     asyncio.create_task(handle_chat_task(browser, task))
                     
@@ -1383,8 +1618,8 @@ def browser_loop():
 # executa a ação e imprime o resultado no terminal.
 # =============================================================================
 
-async def _standalone_search(queries: list):
-    """Executa buscas Google standalone (sem server.py)."""
+async def _standalone_search(queries: list, action: str = 'SEARCH'):
+    """Executa buscas standalone (sem server.py)."""
     async with async_playwright() as p:
         browser = await p.chromium.launch_persistent_context(
             config.DIRS["profile"],
@@ -1394,15 +1629,19 @@ async def _standalone_search(queries: list):
             viewport=None,
         )
         try:
+            action_label = 'UpToDate' if action == 'UPTODATE_SEARCH' else 'Google'
             for i, query_str in enumerate(queries):
                 q = queue.Queue()
-                task = {'action': 'SEARCH', 'query': query_str, 'stream_queue': q}
+                task = {'action': action, 'query': query_str, 'stream_queue': q}
 
                 print(f"\n{'─' * 60}")
-                print(f"🔍 [{i+1}/{len(queries)}] {query_str}")
+                print(f"🔍 [{i+1}/{len(queries)}] {query_str} ({action_label})")
                 print(f"{'─' * 60}")
 
-                await handle_search_task(browser, task)
+                if action == 'UPTODATE_SEARCH':
+                    await handle_uptodate_search_task(browser, task)
+                else:
+                    await handle_search_task(browser, task)
 
                 # Drena a fila e exibe resultado
                 result_data = None
@@ -1466,6 +1705,7 @@ def _cli():
         "Uso:\n"
         "  python browser.py search \"metilfenidato efeitos adversos\"\n"
         "  python browser.py search \"query 1\" \"query 2\" \"query 3\"\n"
+        "  python browser.py uptodate_search \"acute heart failure\"\n"
     )
 
     if len(sys.argv) < 3:
@@ -1478,6 +1718,10 @@ def _cli():
         queries = sys.argv[2:]
         print(f"🌐 Modo standalone — {len(queries)} busca(s) no Google")
         asyncio.run(_standalone_search(queries))
+    elif action == 'uptodate_search':
+        queries = sys.argv[2:]
+        print(f"🩺 Modo standalone — {len(queries)} busca(s) no UpToDate")
+        asyncio.run(_standalone_search(queries, action='UPTODATE_SEARCH'))
     else:
         print(f"Ação desconhecida: '{action}'\n")
         print(usage)
