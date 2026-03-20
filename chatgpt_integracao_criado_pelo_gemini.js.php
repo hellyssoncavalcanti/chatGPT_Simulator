@@ -4174,10 +4174,22 @@ header('Content-Type: application/javascript; charset=utf-8');
     async function fetchAnaliseQueueEstimate(row) {
         const analiseId = Number(row?.id || 0);
         const createdAt = String(row?.datetime_analise_criacao || '').trim();
+        const startedAt = String(row?.datetime_analise_iniciada || '').trim();
         const statusNorm = String(row?.status || '').trim().toLowerCase();
         if (!analiseId || !createdAt || !['pendente', 'processando'].includes(statusNorm)) return null;
 
         const createdAtSql = createdAt.replace(/'/g, "\\'");
+        const parseSqlDate = (value) => {
+            const normalized = String(value || '').trim().replace(' ', 'T');
+            if (!normalized) return null;
+            const dt = new Date(normalized);
+            return Number.isNaN(dt.getTime()) ? null : dt;
+        };
+        const startedAtDate = parseSqlDate(startedAt);
+        const elapsedSeconds = statusNorm === 'processando' && startedAtDate
+            ? Math.max(0, Math.round((Date.now() - startedAtDate.getTime()) / 1000))
+            : 0;
+
         const runSql = async (query, reason) => {
             const res = await fetch("<?php echo $_SERVER['PHP_SELF']; ?>?action=execute_sql", {
                 method: 'POST',
@@ -4208,25 +4220,25 @@ header('Content-Type: application/javascript; charset=utf-8');
                     SELECT
                         COUNT(*) AS total,
                         DATE_FORMAT(CURDATE(), '%d/%m/%y') AS data_base,
-                        AVG(TIMESTAMPDIFF(SECOND, datetime_analise_criacao, datetime_analise_concluida)) AS media_segundos
+                        AVG(TIMESTAMPDIFF(SECOND, datetime_analise_iniciada, datetime_analise_concluida)) AS media_segundos
                     FROM chatgpt_atendimentos_analise
                     WHERE status = 'concluido'
-                      AND datetime_analise_criacao IS NOT NULL
+                      AND datetime_analise_iniciada IS NOT NULL
                       AND datetime_analise_concluida IS NOT NULL
                       AND DATE(datetime_analise_concluida) = CURDATE()
-                      AND TIMESTAMPDIFF(SECOND, datetime_analise_criacao, datetime_analise_concluida) BETWEEN 5 AND 21600
+                      AND TIMESTAMPDIFF(SECOND, datetime_analise_iniciada, datetime_analise_concluida) BETWEEN 5 AND 21600
                 `, 'Média das análises concluídas hoje'),
                 runSql(`
                     SELECT
                         COUNT(*) AS total,
                         COUNT(DISTINCT DATE(datetime_analise_concluida)) AS dias_distintos,
-                        AVG(TIMESTAMPDIFF(SECOND, datetime_analise_criacao, datetime_analise_concluida)) AS media_segundos
+                        AVG(TIMESTAMPDIFF(SECOND, datetime_analise_iniciada, datetime_analise_concluida)) AS media_segundos
                     FROM chatgpt_atendimentos_analise
                     WHERE status = 'concluido'
-                      AND datetime_analise_criacao IS NOT NULL
+                      AND datetime_analise_iniciada IS NOT NULL
                       AND datetime_analise_concluida IS NOT NULL
                       AND DATE(datetime_analise_concluida) < CURDATE()
-                      AND TIMESTAMPDIFF(SECOND, datetime_analise_criacao, datetime_analise_concluida) BETWEEN 5 AND 21600
+                      AND TIMESTAMPDIFF(SECOND, datetime_analise_iniciada, datetime_analise_concluida) BETWEEN 5 AND 21600
                 `, 'Média histórica das análises concluídas')
             ]);
 
@@ -4245,6 +4257,10 @@ header('Content-Type: application/javascript; charset=utf-8');
             const sampleSize = useToday ? todayCount : historicCount;
             const basis = useToday ? 'today' : (historicAvg > 0 ? 'historical' : null);
             const workUnits = statusNorm === 'processando' ? Math.max(0.5, ahead + 0.5) : ahead + 1;
+            const rawEtaSeconds = avgSeconds > 0 ? Math.round(avgSeconds * workUnits) : null;
+            const etaSeconds = rawEtaSeconds == null
+                ? null
+                : (statusNorm === 'processando' ? Math.max(60, rawEtaSeconds - elapsedSeconds) : rawEtaSeconds);
 
             return {
                 aheadCount: ahead,
@@ -4252,11 +4268,12 @@ header('Content-Type: application/javascript; charset=utf-8');
                 pendingAhead,
                 position: ahead + 1,
                 avgSeconds: avgSeconds > 0 ? Math.round(avgSeconds) : null,
-                etaSeconds: avgSeconds > 0 ? Math.round(avgSeconds * workUnits) : null,
+                etaSeconds,
                 basis,
                 sampleSize,
                 todayDate,
-                historicDays
+                historicDays,
+                elapsedSeconds: elapsedSeconds || null
             };
         } catch (e) {
             console.warn('⚠️ Falha ao calcular posição/ETA da análise:', e);
@@ -4378,6 +4395,7 @@ header('Content-Type: application/javascript; charset=utf-8');
                                 id,
                                 status,
                                 datetime_analise_criacao,
+                                datetime_analise_iniciada,
                                 datetime_atendimento_inicio,
                                 datetime_analise_concluida,
                                 resumo_texto,

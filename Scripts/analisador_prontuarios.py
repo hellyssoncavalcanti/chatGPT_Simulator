@@ -260,621 +260,6 @@ def _extrair_queries_pesquisa_fallback(markdown: str) -> list:
     return queries
 
 
-def _strip_code_fences(texto: str) -> str:
-    """Remove cercas Markdown ```...``` mantendo apenas o conteúdo interno."""
-    texto = (texto or "").strip()
-    if texto.startswith("```"):
-        texto = re.sub(r"^```(?:json)?\s*", "", texto, flags=re.IGNORECASE)
-        texto = re.sub(r"\s*```$", "", texto)
-    return texto.strip()
-
-
-def _extrair_bloco_json(texto: str) -> str:
-    """Extrai o primeiro objeto JSON aparente do texto retornado pela LLM."""
-    texto = _strip_code_fences(texto)
-    match = re.search(r'\{[\s\S]*\}', texto)
-    return match.group().strip() if match else ""
-
-
-def _normalizar_json_llm(raw_json: str) -> str:
-    """
-    Corrige problemas comuns de JSON quase-válido retornado por LLMs:
-    - aspas tipográficas;
-    - vírgulas faltando entre pares chave/valor consecutivos;
-    - vírgulas faltando entre objetos de uma lista;
-    - vírgulas sobrando antes de ] ou }.
-    """
-    texto = (raw_json or "").strip()
-    if not texto:
-        return ""
-
-    texto = (
-        texto
-        .replace("“", '"')
-        .replace("”", '"')
-        .replace("’", "'")
-        .replace("‘", "'")
-        .replace("`", '"')
-    )
-
-    # Ex.: "query": "..."   "reason": "..."
-    texto = re.sub(r'("(?:(?:\\.|[^"\\])*)")(\s*)"([A-Za-z0-9_\-]+)"\s*:', r'\1,\2"\3":', texto)
-    # Ex.: } {   ou   ] {
-    texto = re.sub(r'([}\]])(\s*)(\{)', r'\1,\2', texto)
-    # Ex.: } "outra_chave":
-    texto = re.sub(r'([}\]])(\s*)"([A-Za-z0-9_\-]+)"\s*:', r'\1,\2"\3":', texto)
-    # Remove trailing commas antes de fechar objeto/lista
-    texto = re.sub(r',(\s*[}\]])', r'\1', texto)
-    return texto
-
-
-def _parse_json_llm(texto: str) -> dict:
-    """
-    Faz o parse de um objeto JSON retornado pela LLM com pequenas correções
-    tolerantes a formatação imperfeita.
-    """
-    candidato = _extrair_bloco_json(texto)
-    if not candidato:
-        raise ValueError("LLM não retornou bloco JSON.")
-
-    try:
-        return json.loads(candidato)
-    except json.JSONDecodeError:
-        candidato_normalizado = _normalizar_json_llm(candidato)
-        return json.loads(candidato_normalizado)
-
-
-def _decode_json_string_fragment(value: str) -> str:
-    """Decodifica um fragmento de string JSON sem perder caracteres UTF-8."""
-    try:
-        return json.loads(f'"{value}"')
-    except json.JSONDecodeError:
-        return value.replace('\\"', '"').replace("\\n", "\n").replace("\\t", "\t")
-
-
-def _extrair_queries_pesquisa_fallback(markdown: str) -> list:
-    """
-    Extrai queries manualmente quando a LLM não entrega JSON estrito.
-    Aceita objetos quase-JSON e listas em texto contendo campos query/reason.
-    """
-    texto = _strip_code_fences(markdown)
-    if not texto:
-        return []
-
-    queries = []
-    vistos = set()
-
-    # Tenta localizar pares query/reason mesmo quando o JSON veio truncado ou sem vírgulas.
-    pair_pattern = re.compile(
-        r'"query"\s*:\s*"(?P<query>(?:\\.|[^"\\])*)"\s*,?\s*"reason"\s*:\s*"(?P<reason>(?:\\.|[^"\\])*)"',
-        re.IGNORECASE | re.DOTALL,
-    )
-    for match in pair_pattern.finditer(texto):
-        query = re.sub(r"\s+", " ", _decode_json_string_fragment(match.group("query"))).strip()
-        reason = re.sub(r"\s+", " ", _decode_json_string_fragment(match.group("reason"))).strip()
-        if not query:
-            continue
-        chave = query.lower()
-        if chave in vistos:
-            continue
-        vistos.add(chave)
-        queries.append({"query": query, "reason": reason})
-        if len(queries) >= SEARCH_MAX_QUERIES:
-            return queries
-
-    # Fallback mais simples: linhas em lista com query e motivo.
-    line_pattern = re.compile(
-        r'^\s*(?:[-*]|\d+[.)])\s*(?P<query>.+?)(?:\s+[—-]\s+|\s+\|\s+motivo:\s+)(?P<reason>.+?)\s*$',
-        re.IGNORECASE | re.MULTILINE,
-    )
-    for match in line_pattern.finditer(texto):
-        query = re.sub(r"\s+", " ", match.group("query")).strip(' "\'')
-        reason = re.sub(r"\s+", " ", match.group("reason")).strip(' "\'')
-        if not query:
-            continue
-        chave = query.lower()
-        if chave in vistos:
-            continue
-        vistos.add(chave)
-        queries.append({"query": query, "reason": reason})
-        if len(queries) >= SEARCH_MAX_QUERIES:
-            break
-
-    return queries
-
-
-def _strip_code_fences(texto: str) -> str:
-    """Remove cercas Markdown ```...``` mantendo apenas o conteúdo interno."""
-    texto = (texto or "").strip()
-    if texto.startswith("```"):
-        texto = re.sub(r"^```(?:json)?\s*", "", texto, flags=re.IGNORECASE)
-        texto = re.sub(r"\s*```$", "", texto)
-    return texto.strip()
-
-
-def _extrair_bloco_json(texto: str) -> str:
-    """Extrai o primeiro objeto JSON aparente do texto retornado pela LLM."""
-    texto = _strip_code_fences(texto)
-    match = re.search(r'\{[\s\S]*\}', texto)
-    return match.group().strip() if match else ""
-
-
-def _normalizar_json_llm(raw_json: str) -> str:
-    """
-    Corrige problemas comuns de JSON quase-válido retornado por LLMs:
-    - aspas tipográficas;
-    - vírgulas faltando entre pares chave/valor consecutivos;
-    - vírgulas faltando entre objetos de uma lista;
-    - vírgulas sobrando antes de ] ou }.
-    """
-    texto = (raw_json or "").strip()
-    if not texto:
-        return ""
-
-    texto = (
-        texto
-        .replace("“", '"')
-        .replace("”", '"')
-        .replace("’", "'")
-        .replace("‘", "'")
-        .replace("`", '"')
-    )
-
-    # Ex.: "query": "..."   "reason": "..."
-    texto = re.sub(r'("(?:(?:\\.|[^"\\])*)")(\s*)"([A-Za-z0-9_\-]+)"\s*:', r'\1,\2"\3":', texto)
-    # Ex.: } {   ou   ] {
-    texto = re.sub(r'([}\]])(\s*)(\{)', r'\1,\2', texto)
-    # Ex.: } "outra_chave":
-    texto = re.sub(r'([}\]])(\s*)"([A-Za-z0-9_\-]+)"\s*:', r'\1,\2"\3":', texto)
-    # Remove trailing commas antes de fechar objeto/lista
-    texto = re.sub(r',(\s*[}\]])', r'\1', texto)
-    return texto
-
-
-def _parse_json_llm(texto: str) -> dict:
-    """
-    Faz o parse de um objeto JSON retornado pela LLM com pequenas correções
-    tolerantes a formatação imperfeita.
-    """
-    candidato = _extrair_bloco_json(texto)
-    if not candidato:
-        raise ValueError("LLM não retornou bloco JSON.")
-
-    try:
-        return json.loads(candidato)
-    except json.JSONDecodeError:
-        candidato_normalizado = _normalizar_json_llm(candidato)
-        return json.loads(candidato_normalizado)
-
-
-def _decode_json_string_fragment(value: str) -> str:
-    """Decodifica um fragmento de string JSON sem perder caracteres UTF-8."""
-    try:
-        return json.loads(f'"{value}"')
-    except json.JSONDecodeError:
-        return value.replace('\\"', '"').replace("\\n", "\n").replace("\\t", "\t")
-
-
-def _extrair_queries_pesquisa_fallback(markdown: str) -> list:
-    """
-    Extrai queries manualmente quando a LLM não entrega JSON estrito.
-    Aceita objetos quase-JSON e listas em texto contendo campos query/reason.
-    """
-    texto = _strip_code_fences(markdown)
-    if not texto:
-        return []
-
-    queries = []
-    vistos = set()
-
-    # Tenta localizar pares query/reason mesmo quando o JSON veio truncado ou sem vírgulas.
-    pair_pattern = re.compile(
-        r'"query"\s*:\s*"(?P<query>(?:\\.|[^"\\])*)"\s*,?\s*"reason"\s*:\s*"(?P<reason>(?:\\.|[^"\\])*)"',
-        re.IGNORECASE | re.DOTALL,
-    )
-    for match in pair_pattern.finditer(texto):
-        query = re.sub(r"\s+", " ", _decode_json_string_fragment(match.group("query"))).strip()
-        reason = re.sub(r"\s+", " ", _decode_json_string_fragment(match.group("reason"))).strip()
-        if not query:
-            continue
-        chave = query.lower()
-        if chave in vistos:
-            continue
-        vistos.add(chave)
-        queries.append({"query": query, "reason": reason})
-        if len(queries) >= SEARCH_MAX_QUERIES:
-            return queries
-
-    # Fallback mais simples: linhas em lista com query e motivo.
-    line_pattern = re.compile(
-        r'^\s*(?:[-*]|\d+[.)])\s*(?P<query>.+?)(?:\s+[—-]\s+|\s+\|\s+motivo:\s+)(?P<reason>.+?)\s*$',
-        re.IGNORECASE | re.MULTILINE,
-    )
-    for match in line_pattern.finditer(texto):
-        query = re.sub(r"\s+", " ", match.group("query")).strip(' "\'')
-        reason = re.sub(r"\s+", " ", match.group("reason")).strip(' "\'')
-        if not query:
-            continue
-        chave = query.lower()
-        if chave in vistos:
-            continue
-        vistos.add(chave)
-        queries.append({"query": query, "reason": reason})
-        if len(queries) >= SEARCH_MAX_QUERIES:
-            break
-
-    return queries
-
-
-def _strip_code_fences(texto: str) -> str:
-    """Remove cercas Markdown ```...``` mantendo apenas o conteúdo interno."""
-    texto = (texto or "").strip()
-    if texto.startswith("```"):
-        texto = re.sub(r"^```(?:json)?\s*", "", texto, flags=re.IGNORECASE)
-        texto = re.sub(r"\s*```$", "", texto)
-    return texto.strip()
-
-
-def _extrair_bloco_json(texto: str) -> str:
-    """Extrai o primeiro objeto JSON aparente do texto retornado pela LLM."""
-    texto = _strip_code_fences(texto)
-    match = re.search(r'\{[\s\S]*\}', texto)
-    return match.group().strip() if match else ""
-
-
-def _normalizar_json_llm(raw_json: str) -> str:
-    """
-    Corrige problemas comuns de JSON quase-válido retornado por LLMs:
-    - aspas tipográficas;
-    - vírgulas faltando entre pares chave/valor consecutivos;
-    - vírgulas faltando entre objetos de uma lista;
-    - vírgulas sobrando antes de ] ou }.
-    """
-    texto = (raw_json or "").strip()
-    if not texto:
-        return ""
-
-    texto = (
-        texto
-        .replace("“", '"')
-        .replace("”", '"')
-        .replace("’", "'")
-        .replace("‘", "'")
-        .replace("`", '"')
-    )
-
-    # Ex.: "query": "..."   "reason": "..."
-    texto = re.sub(r'("(?:(?:\\.|[^"\\])*)")(\s*)"([A-Za-z0-9_\-]+)"\s*:', r'\1,\2"\3":', texto)
-    # Ex.: } {   ou   ] {
-    texto = re.sub(r'([}\]])(\s*)(\{)', r'\1,\2', texto)
-    # Ex.: } "outra_chave":
-    texto = re.sub(r'([}\]])(\s*)"([A-Za-z0-9_\-]+)"\s*:', r'\1,\2"\3":', texto)
-    # Remove trailing commas antes de fechar objeto/lista
-    texto = re.sub(r',(\s*[}\]])', r'\1', texto)
-    return texto
-
-
-def _parse_json_llm(texto: str) -> dict:
-    """
-    Faz o parse de um objeto JSON retornado pela LLM com pequenas correções
-    tolerantes a formatação imperfeita.
-    """
-    candidato = _extrair_bloco_json(texto)
-    if not candidato:
-        raise ValueError("LLM não retornou bloco JSON.")
-
-    try:
-        return json.loads(candidato)
-    except json.JSONDecodeError:
-        candidato_normalizado = _normalizar_json_llm(candidato)
-        return json.loads(candidato_normalizado)
-
-
-def _decode_json_string_fragment(value: str) -> str:
-    """Decodifica um fragmento de string JSON sem perder caracteres UTF-8."""
-    try:
-        return json.loads(f'"{value}"')
-    except json.JSONDecodeError:
-        return value.replace('\\"', '"').replace("\\n", "\n").replace("\\t", "\t")
-
-
-def _extrair_queries_pesquisa_fallback(markdown: str) -> list:
-    """
-    Extrai queries manualmente quando a LLM não entrega JSON estrito.
-    Aceita objetos quase-JSON e listas em texto contendo campos query/reason.
-    """
-    texto = _strip_code_fences(markdown)
-    if not texto:
-        return []
-
-    queries = []
-    vistos = set()
-
-    # Tenta localizar pares query/reason mesmo quando o JSON veio truncado ou sem vírgulas.
-    pair_pattern = re.compile(
-        r'"query"\s*:\s*"(?P<query>(?:\\.|[^"\\])*)"\s*,?\s*"reason"\s*:\s*"(?P<reason>(?:\\.|[^"\\])*)"',
-        re.IGNORECASE | re.DOTALL,
-    )
-    for match in pair_pattern.finditer(texto):
-        query = re.sub(r"\s+", " ", _decode_json_string_fragment(match.group("query"))).strip()
-        reason = re.sub(r"\s+", " ", _decode_json_string_fragment(match.group("reason"))).strip()
-        if not query:
-            continue
-        chave = query.lower()
-        if chave in vistos:
-            continue
-        vistos.add(chave)
-        queries.append({"query": query, "reason": reason})
-        if len(queries) >= SEARCH_MAX_QUERIES:
-            return queries
-
-    # Fallback mais simples: linhas em lista com query e motivo.
-    line_pattern = re.compile(
-        r'^\s*(?:[-*]|\d+[.)])\s*(?P<query>.+?)(?:\s+[—-]\s+|\s+\|\s+motivo:\s+)(?P<reason>.+?)\s*$',
-        re.IGNORECASE | re.MULTILINE,
-    )
-    for match in line_pattern.finditer(texto):
-        query = re.sub(r"\s+", " ", match.group("query")).strip(' "\'')
-        reason = re.sub(r"\s+", " ", match.group("reason")).strip(' "\'')
-        if not query:
-            continue
-        chave = query.lower()
-        if chave in vistos:
-            continue
-        vistos.add(chave)
-        queries.append({"query": query, "reason": reason})
-        if len(queries) >= SEARCH_MAX_QUERIES:
-            break
-
-    return queries
-
-
-def _strip_code_fences(texto: str) -> str:
-    """Remove cercas Markdown ```...``` mantendo apenas o conteúdo interno."""
-    texto = (texto or "").strip()
-    if texto.startswith("```"):
-        texto = re.sub(r"^```(?:json)?\s*", "", texto, flags=re.IGNORECASE)
-        texto = re.sub(r"\s*```$", "", texto)
-    return texto.strip()
-
-
-def _extrair_bloco_json(texto: str) -> str:
-    """Extrai o primeiro objeto JSON aparente do texto retornado pela LLM."""
-    texto = _strip_code_fences(texto)
-    match = re.search(r'\{[\s\S]*\}', texto)
-    return match.group().strip() if match else ""
-
-
-def _normalizar_json_llm(raw_json: str) -> str:
-    """
-    Corrige problemas comuns de JSON quase-válido retornado por LLMs:
-    - aspas tipográficas;
-    - vírgulas faltando entre pares chave/valor consecutivos;
-    - vírgulas faltando entre objetos de uma lista;
-    - vírgulas sobrando antes de ] ou }.
-    """
-    texto = (raw_json or "").strip()
-    if not texto:
-        return ""
-
-    texto = (
-        texto
-        .replace("“", '"')
-        .replace("”", '"')
-        .replace("’", "'")
-        .replace("‘", "'")
-        .replace("`", '"')
-    )
-
-    # Ex.: "query": "..."   "reason": "..."
-    texto = re.sub(r'("(?:(?:\\.|[^"\\])*)")(\s*)"([A-Za-z0-9_\-]+)"\s*:', r'\1,\2"\3":', texto)
-    # Ex.: } {   ou   ] {
-    texto = re.sub(r'([}\]])(\s*)(\{)', r'\1,\2', texto)
-    # Ex.: } "outra_chave":
-    texto = re.sub(r'([}\]])(\s*)"([A-Za-z0-9_\-]+)"\s*:', r'\1,\2"\3":', texto)
-    # Remove trailing commas antes de fechar objeto/lista
-    texto = re.sub(r',(\s*[}\]])', r'\1', texto)
-    return texto
-
-
-def _parse_json_llm(texto: str) -> dict:
-    """
-    Faz o parse de um objeto JSON retornado pela LLM com pequenas correções
-    tolerantes a formatação imperfeita.
-    """
-    candidato = _extrair_bloco_json(texto)
-    if not candidato:
-        raise ValueError("LLM não retornou bloco JSON.")
-
-    try:
-        return json.loads(candidato)
-    except json.JSONDecodeError:
-        candidato_normalizado = _normalizar_json_llm(candidato)
-        return json.loads(candidato_normalizado)
-
-
-def _decode_json_string_fragment(value: str) -> str:
-    """Decodifica um fragmento de string JSON sem perder caracteres UTF-8."""
-    try:
-        return json.loads(f'"{value}"')
-    except json.JSONDecodeError:
-        return value.replace('\\"', '"').replace("\\n", "\n").replace("\\t", "\t")
-
-
-def _extrair_queries_pesquisa_fallback(markdown: str) -> list:
-    """
-    Extrai queries manualmente quando a LLM não entrega JSON estrito.
-    Aceita objetos quase-JSON e listas em texto contendo campos query/reason.
-    """
-    texto = _strip_code_fences(markdown)
-    if not texto:
-        return []
-
-    queries = []
-    vistos = set()
-
-    # Tenta localizar pares query/reason mesmo quando o JSON veio truncado ou sem vírgulas.
-    pair_pattern = re.compile(
-        r'"query"\s*:\s*"(?P<query>(?:\\.|[^"\\])*)"\s*,?\s*"reason"\s*:\s*"(?P<reason>(?:\\.|[^"\\])*)"',
-        re.IGNORECASE | re.DOTALL,
-    )
-    for match in pair_pattern.finditer(texto):
-        query = re.sub(r"\s+", " ", _decode_json_string_fragment(match.group("query"))).strip()
-        reason = re.sub(r"\s+", " ", _decode_json_string_fragment(match.group("reason"))).strip()
-        if not query:
-            continue
-        chave = query.lower()
-        if chave in vistos:
-            continue
-        vistos.add(chave)
-        queries.append({"query": query, "reason": reason})
-        if len(queries) >= SEARCH_MAX_QUERIES:
-            return queries
-
-    # Fallback mais simples: linhas em lista com query e motivo.
-    line_pattern = re.compile(
-        r'^\s*(?:[-*]|\d+[.)])\s*(?P<query>.+?)(?:\s+[—-]\s+|\s+\|\s+motivo:\s+)(?P<reason>.+?)\s*$',
-        re.IGNORECASE | re.MULTILINE,
-    )
-    for match in line_pattern.finditer(texto):
-        query = re.sub(r"\s+", " ", match.group("query")).strip(' "\'')
-        reason = re.sub(r"\s+", " ", match.group("reason")).strip(' "\'')
-        if not query:
-            continue
-        chave = query.lower()
-        if chave in vistos:
-            continue
-        vistos.add(chave)
-        queries.append({"query": query, "reason": reason})
-        if len(queries) >= SEARCH_MAX_QUERIES:
-            break
-
-    return queries
-
-
-def _strip_code_fences(texto: str) -> str:
-    """Remove cercas Markdown ```...``` mantendo apenas o conteúdo interno."""
-    texto = (texto or "").strip()
-    if texto.startswith("```"):
-        texto = re.sub(r"^```(?:json)?\s*", "", texto, flags=re.IGNORECASE)
-        texto = re.sub(r"\s*```$", "", texto)
-    return texto.strip()
-
-
-def _extrair_bloco_json(texto: str) -> str:
-    """Extrai o primeiro objeto JSON aparente do texto retornado pela LLM."""
-    texto = _strip_code_fences(texto)
-    match = re.search(r'\{[\s\S]*\}', texto)
-    return match.group().strip() if match else ""
-
-
-def _normalizar_json_llm(raw_json: str) -> str:
-    """
-    Corrige problemas comuns de JSON quase-válido retornado por LLMs:
-    - aspas tipográficas;
-    - vírgulas faltando entre pares chave/valor consecutivos;
-    - vírgulas faltando entre objetos de uma lista;
-    - vírgulas sobrando antes de ] ou }.
-    """
-    texto = (raw_json or "").strip()
-    if not texto:
-        return ""
-
-    texto = (
-        texto
-        .replace("“", '"')
-        .replace("”", '"')
-        .replace("’", "'")
-        .replace("‘", "'")
-        .replace("`", '"')
-    )
-
-    # Ex.: "query": "..."   "reason": "..."
-    texto = re.sub(r'("(?:(?:\\.|[^"\\])*)")(\s*)"([A-Za-z0-9_\-]+)"\s*:', r'\1,\2"\3":', texto)
-    # Ex.: } {   ou   ] {
-    texto = re.sub(r'([}\]])(\s*)(\{)', r'\1,\2', texto)
-    # Ex.: } "outra_chave":
-    texto = re.sub(r'([}\]])(\s*)"([A-Za-z0-9_\-]+)"\s*:', r'\1,\2"\3":', texto)
-    # Remove trailing commas antes de fechar objeto/lista
-    texto = re.sub(r',(\s*[}\]])', r'\1', texto)
-    return texto
-
-
-def _parse_json_llm(texto: str) -> dict:
-    """
-    Faz o parse de um objeto JSON retornado pela LLM com pequenas correções
-    tolerantes a formatação imperfeita.
-    """
-    candidato = _extrair_bloco_json(texto)
-    if not candidato:
-        raise ValueError("LLM não retornou bloco JSON.")
-
-    try:
-        return json.loads(candidato)
-    except json.JSONDecodeError:
-        candidato_normalizado = _normalizar_json_llm(candidato)
-        return json.loads(candidato_normalizado)
-
-
-def _decode_json_string_fragment(value: str) -> str:
-    """Decodifica um fragmento de string JSON sem perder caracteres UTF-8."""
-    try:
-        return json.loads(f'"{value}"')
-    except json.JSONDecodeError:
-        return value.replace('\\"', '"').replace("\\n", "\n").replace("\\t", "\t")
-
-
-def _extrair_queries_pesquisa_fallback(markdown: str) -> list:
-    """
-    Extrai queries manualmente quando a LLM não entrega JSON estrito.
-    Aceita objetos quase-JSON e listas em texto contendo campos query/reason.
-    """
-    texto = _strip_code_fences(markdown)
-    if not texto:
-        return []
-
-    queries = []
-    vistos = set()
-
-    # Tenta localizar pares query/reason mesmo quando o JSON veio truncado ou sem vírgulas.
-    pair_pattern = re.compile(
-        r'"query"\s*:\s*"(?P<query>(?:\\.|[^"\\])*)"\s*,?\s*"reason"\s*:\s*"(?P<reason>(?:\\.|[^"\\])*)"',
-        re.IGNORECASE | re.DOTALL,
-    )
-    for match in pair_pattern.finditer(texto):
-        query = re.sub(r"\s+", " ", _decode_json_string_fragment(match.group("query"))).strip()
-        reason = re.sub(r"\s+", " ", _decode_json_string_fragment(match.group("reason"))).strip()
-        if not query:
-            continue
-        chave = query.lower()
-        if chave in vistos:
-            continue
-        vistos.add(chave)
-        queries.append({"query": query, "reason": reason})
-        if len(queries) >= SEARCH_MAX_QUERIES:
-            return queries
-
-    # Fallback mais simples: linhas em lista com query e motivo.
-    line_pattern = re.compile(
-        r'^\s*(?:[-*]|\d+[.)])\s*(?P<query>.+?)(?:\s+[—-]\s+|\s+\|\s+motivo:\s+)(?P<reason>.+?)\s*$',
-        re.IGNORECASE | re.MULTILINE,
-    )
-    for match in line_pattern.finditer(texto):
-        query = re.sub(r"\s+", " ", match.group("query")).strip(' "\'')
-        reason = re.sub(r"\s+", " ", match.group("reason")).strip(' "\'')
-        if not query:
-            continue
-        chave = query.lower()
-        if chave in vistos:
-            continue
-        vistos.add(chave)
-        queries.append({"query": query, "reason": reason})
-        if len(queries) >= SEARCH_MAX_QUERIES:
-            break
-
-    return queries
-
-
 
 # ─────────────────────────────────────────────────────────────
 # CAMADA HTTP → PHP (único ponto de acesso ao banco)
@@ -969,6 +354,8 @@ def garantir_tabela():
                                                         COMMENT 'FK para membros.id do profissional criador. NULL = sintese compilada do paciente.',
                 datetime_analise_criacao                DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
                                                         COMMENT 'Data/hora de insercao do registro.',
+                datetime_analise_iniciada               DATETIME NULL
+                                                        COMMENT 'Data/hora em que o analisador iniciou efetivamente o processamento desta analise.',
                 datetime_analise_concluida              DATETIME NULL
                                                         COMMENT 'Data/hora em que a analise foi concluida com sucesso.',
                 chat_id                                 VARCHAR(100) NULL
@@ -1093,6 +480,27 @@ def garantir_coluna_mensagens_acompanhamento():
     finally:
         global _COLUNAS_TABELA
         _COLUNAS_TABELA = None   # invalida cache para incluir a coluna recem-garantida
+
+
+def garantir_coluna_datetime_analise_iniciada():
+    """
+    Garante a coluna datetime_analise_iniciada em instâncias antigas do schema.
+    Essa coluna marca o início efetivo do processamento pelo analisador e deve
+    ser usada nas métricas de duração reais (início → conclusão).
+    """
+    try:
+        sql_exec(f"""
+            ALTER TABLE {TABELA}
+            ADD COLUMN IF NOT EXISTS datetime_analise_iniciada DATETIME NULL
+            COMMENT 'Data/hora em que o analisador iniciou efetivamente o processamento desta analise.'
+            AFTER datetime_analise_criacao
+        """)
+        log.info("✅ Coluna datetime_analise_iniciada verificada/criada.")
+    except RuntimeError as e:
+        log.warning(f"⚠️  garantir_coluna_datetime_analise_iniciada: {e}")
+    finally:
+        global _COLUNAS_TABELA
+        _COLUNAS_TABELA = None
 
 
 def garantir_colunas_v16():
@@ -1728,6 +1136,32 @@ def enfileirar_atendimentos_antigos(id_paciente: str) -> int:
         log.warning(f"  ⚠️ Erro ao salvar atendimentos antigos do paciente {id_paciente}: {e}")
         return 0
 
+    valores_sql = []
+    for at in atendimentos:
+        id_at  = int(at["id_atendimento"])
+        id_pac = esc(at.get("id_paciente") or id_paciente)
+        id_cri = esc(at.get("id_criador") or "0")
+        dt_ini = esc(at.get("datetime_consulta_inicio") or "0000-00-00 00:00:00")
+        valores_sql.append(
+            f"({id_at}, _utf8mb4'{id_pac}', _utf8mb4'{id_cri}', '{dt_ini}', 'pendente')"
+        )
+
+    if not valores_sql:
+        return 0
+
+    try:
+        resultado_insert = sql_exec(f"""
+            INSERT INTO {TABELA}
+                (id_atendimento, id_paciente, id_criador, datetime_atendimento_inicio, status)
+            VALUES
+                {", ".join(valores_sql)}
+            ON DUPLICATE KEY UPDATE
+                id_atendimento = id_atendimento
+        """)
+    except Exception as e:
+        log.warning(f"  ⚠️ Erro ao salvar atendimentos antigos do paciente {id_paciente}: {e}")
+        return 0
+
     enfileirados = int(resultado_insert.get("affected_rows") or 0)
 
     if enfileirados:
@@ -1830,6 +1264,7 @@ def marcar_processando(row: dict):
         UPDATE {TABELA} SET
             status                                  = 'processando',
             tentativas                              = tentativas + 1,
+            datetime_analise_iniciada               = NOW(),
             datetime_ultima_atualizacao_atendimento = {f"'{dtp}'" if dtp else 'NULL'}
         WHERE id_atendimento = {idat}
     """)
@@ -1845,6 +1280,7 @@ def resetar_travados():
         f"""
         UPDATE {TABELA}
         SET    status    = 'pendente',
+               datetime_analise_iniciada = NULL,
                erro_msg  = CONCAT(
                                COALESCE(erro_msg, ''),
                                ' | [AUTO-RESET] Travado em processando por mais de {TIMEOUT_PROCESSANDO_MIN} min em ',
@@ -1872,6 +1308,7 @@ def _montar_sets_resultado(resultado: dict) -> list:
         f"status                    = 'concluido'",
         f"datetime_analise_concluida = '{now}'",
         f"erro_msg                   = NULL",
+        f"datetime_analise_iniciada  = COALESCE(datetime_analise_iniciada, '{now}')",
         f"chat_id                    = '{chat_id}'",
         f"chat_url                   = '{chat_url}'",
     ]
@@ -1933,6 +1370,18 @@ def _stringify_compact(value) -> str:
     return str(parsed or "").strip()
 
 
+def _valor_compilado_para_prompt(value, max_chars: int = 1200):
+    try:
+        parsed = json.loads(value) if isinstance(value, str) else value
+    except Exception:
+        parsed = value
+
+    if isinstance(parsed, str):
+        texto = re.sub(r"\s+", " ", parsed).strip()
+        return texto[:max_chars]
+    return parsed
+
+
 def montar_texto_compilado_paciente(id_paciente: str):
     rows = sql_exec(f"""
         SELECT
@@ -1961,66 +1410,83 @@ def montar_texto_compilado_paciente(id_paciente: str):
         WHERE id_paciente = '{esc(id_paciente)}'
           AND status = 'concluido'
           AND id_atendimento IS NOT NULL
-        ORDER BY datetime_atendimento_inicio DESC, id_atendimento DESC
-        LIMIT 25
+        ORDER BY datetime_atendimento_inicio ASC, id_atendimento ASC
+        LIMIT 50
     """, reason="carregar_analises_paciente_compilado").get("data", [])
 
     if not rows:
         return "", None
 
-    blocos = []
-    for idx, row in enumerate(rows, start=1):
-        linhas = [
-            f"ATENDIMENTO #{idx}",
-            f"id_atendimento: {row.get('id_atendimento')}",
-            f"data_atendimento: {row.get('datetime_atendimento_inicio') or 'sem_data'}",
-        ]
-        if row.get("resumo_texto"):
-            linhas.append(f"resumo_texto: {row['resumo_texto']}")
+    historico = []
+    datas = []
+    campos_detalhe = [
+        "gravidade_clinica",
+        "diagnosticos_citados",
+        "pontos_chave",
+        "mudancas_relevantes",
+        "sinais_nucleares",
+        "eventos_comportamentais",
+        "terapias_referidas",
+        "exames_citados",
+        "pendencias_clinicas",
+        "condutas_no_prontuario",
+        "medicacoes_em_uso",
+        "medicacoes_iniciadas",
+        "medicacoes_suspensas",
+        "condutas_especificas_sugeridas",
+        "condutas_gerais_sugeridas",
+        "mensagens_acompanhamento",
+    ]
 
-        for campo in [
-            "gravidade_clinica",
-            "diagnosticos_citados",
-            "pontos_chave",
-            "mudancas_relevantes",
-            "sinais_nucleares",
-            "eventos_comportamentais",
-            "terapias_referidas",
-            "exames_citados",
-            "pendencias_clinicas",
-            "condutas_no_prontuario",
-            "medicacoes_em_uso",
-            "medicacoes_iniciadas",
-            "medicacoes_suspensas",
-            "condutas_especificas_sugeridas",
-            "condutas_gerais_sugeridas",
-            "mensagens_acompanhamento",
-        ]:
-            val = _stringify_compact(row.get(campo))
-            if val:
-                linhas.append(f"{campo}: {val}")
-        blocos.append("\n".join(linhas))
+    for idx, row in enumerate(rows, start=1):
+        dt_at = row.get("datetime_atendimento_inicio") or ""
+        if dt_at:
+            datas.append(dt_at)
+
+        item = {
+            "ordem_cronologica": idx,
+            "id_atendimento": row.get("id_atendimento"),
+            "datetime_atendimento_inicio": dt_at or None,
+            "resumo_texto": _valor_compilado_para_prompt(row.get("resumo_texto") or "", max_chars=1500),
+        }
+
+        for campo in campos_detalhe:
+            valor = _valor_compilado_para_prompt(row.get(campo))
+            if valor not in (None, "", [], {}):
+                item[campo] = valor
+
+        historico.append(item)
+
+    payload_compilado = {
+        "id_paciente": id_paciente,
+        "total_atendimentos_analisados": len(historico),
+        "periodo_primeiro_atendimento": datas[0] if datas else None,
+        "periodo_ultimo_atendimento": datas[-1] if datas else None,
+        "atendimentos": historico,
+    }
 
     texto = (
         f"HISTÓRICO LONGITUDINAL COMPILADO DO PACIENTE {id_paciente}\n"
-        "Os blocos abaixo representam análises estruturadas já concluídas deste paciente.\n"
-        "Consolide o histórico completo do paciente, sintetizando padrões persistentes, mudanças relevantes, terapias, medicações, riscos, pendências e condutas, sem inventar dados.\n\n"
-        + "\n\n" + ("\n\n" + ("=" * 70) + "\n\n").join(blocos)
+        "O conteúdo abaixo representa TODOS os atendimentos estruturados já concluídos deste paciente em ordem cronológica.\n"
+        "Sua tarefa é consolidar o histórico longitudinal completo, identificando padrões persistentes, mudanças entre consultas, terapias, medicações, riscos, pendências e condutas.\n"
+        "NÃO copie apenas o último atendimento; compare e sintetize o conjunto completo do histórico abaixo.\n\n"
+        "DADOS COMPILADOS (JSON):\n"
+        + json.dumps(payload_compilado, ensure_ascii=False, indent=2)
     )
-    return texto, rows[0]
+    return texto, rows[-1]
 
 
 def salvar_resultado_compilado_paciente(id_paciente: str, resultado: dict):
     id_registro = garantir_registro_compilado_paciente_pendente(id_paciente)
 
-    sets = [
+    sets = _montar_sets_resultado(resultado) + [
         "id_atendimento = NULL",
         "datetime_atendimento_inicio = NULL",
         "datetime_ultima_atualizacao_atendimento = NULL",
         "id_criador = NULL",
         "hash_prontuario = 'analise_compilada_paciente'",
         f"id_paciente = '{esc(id_paciente)}'",
-    ] + _montar_sets_resultado(resultado)
+    ]
 
     sql_exec(
         f"UPDATE {TABELA} SET\n    " + ",\n    ".join(sets) + f"\nWHERE id = {id_registro}"
@@ -2050,6 +1516,7 @@ def atualizar_analise_compilada_paciente(id_paciente: str):
             status = 'processando',
             tentativas = tentativas + 1,
             erro_msg = NULL,
+            datetime_analise_iniciada = NOW(),
             datetime_analise_concluida = NULL,
             datetime_ultima_atualizacao_atendimento = NULL
         WHERE id = {id_registro_compilado}
@@ -2214,6 +1681,7 @@ def atualizar_analise_compilada_paciente(id_paciente: str):
             status = 'processando',
             tentativas = tentativas + 1,
             erro_msg = NULL,
+            datetime_analise_iniciada = NOW(),
             datetime_analise_concluida = NULL,
             datetime_ultima_atualizacao_atendimento = NULL
         WHERE id = {id_registro_compilado}
@@ -2378,6 +1846,7 @@ def atualizar_analise_compilada_paciente(id_paciente: str):
             status = 'processando',
             tentativas = tentativas + 1,
             erro_msg = NULL,
+            datetime_analise_iniciada = NOW(),
             datetime_analise_concluida = NULL,
             datetime_ultima_atualizacao_atendimento = NULL
         WHERE id = {id_registro_compilado}
@@ -2542,6 +2011,7 @@ def atualizar_analise_compilada_paciente(id_paciente: str):
             status = 'processando',
             tentativas = tentativas + 1,
             erro_msg = NULL,
+            datetime_analise_iniciada = NOW(),
             datetime_analise_concluida = NULL,
             datetime_ultima_atualizacao_atendimento = NULL
         WHERE id = {id_registro_compilado}
@@ -2706,6 +2176,7 @@ def atualizar_analise_compilada_paciente(id_paciente: str):
             status = 'processando',
             tentativas = tentativas + 1,
             erro_msg = NULL,
+            datetime_analise_iniciada = NOW(),
             datetime_analise_concluida = NULL,
             datetime_ultima_atualizacao_atendimento = NULL
         WHERE id = {id_registro_compilado}
@@ -4193,11 +3664,12 @@ def gerar_queries_pesquisa_llm(resultado: dict, chat_url: str = None, chat_id: s
             planejado = _parse_json_llm(markdown)
             itens = planejado.get("search_queries") or []
         except Exception as parse_err:
-            log.warning(f"  ⚠️ Planejamento de pesquisa: JSON inválido, tentando extração tolerante ({parse_err}).")
             itens = _extrair_queries_pesquisa_fallback(markdown)
-            if not itens:
+            if itens:
+                log.info(f"  ℹ️ Planejamento de pesquisa: JSON fora do formato estrito; extração tolerante aplicada ({parse_err}).")
+            else:
                 preview = re.sub(r"\s+", " ", _strip_code_fences(markdown))[:500]
-                log.warning(f"  ⚠️ Planejamento de pesquisa: não foi possível interpretar a resposta da LLM. Prévia: {preview}")
+                log.warning(f"  ⚠️ Planejamento de pesquisa: não foi possível interpretar a resposta da LLM ({parse_err}). Prévia: {preview}")
                 return []
 
         queries = []
@@ -4653,6 +4125,7 @@ def main():
     garantir_tabela()
     garantir_coluna_dados_json()                 # garante dados_json em tabelas pré-existentes
     garantir_coluna_mensagens_acompanhamento()   # garante mensagens_acompanhamento em tabelas pré-existentes
+    garantir_coluna_datetime_analise_iniciada()  # garante datetime_analise_iniciada em tabelas pré-existentes
     garantir_colunas_v16()                       # garante colunas CDSS/RAG da V16 (modelo_llm, hash_prontuario, score_risco, etc.)
     garantir_schema_analise_compilada_paciente() # permite síntese longitudinal por id_paciente sem id_atendimento
     garantir_migracoes()                         # corrige tipos de colunas em tabelas pré-existentes
