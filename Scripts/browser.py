@@ -1315,10 +1315,7 @@ async def handle_search_task(context, task):
     async with tab_semaphore:
         q    = task.get('stream_queue')
         query = (task.get('query') or '').strip()
-        keep_minimized = await _should_keep_context_minimized(context)
         page = None
-        screenshot_stop_event = asyncio.Event()
-        screenshot_task = None
         try:
             if not query:
                 emit_event(q, 'searchresult', {
@@ -1327,15 +1324,10 @@ async def handle_search_task(context, task):
                 return
 
             page = await context.new_page()
-            await _preserve_minimized_if_needed(page, keep_minimized=keep_minimized)
-            screenshot_task = asyncio.create_task(
-                _stream_browser_screenshots(page, q, screenshot_stop_event, label='search')
-            )
             emit_log(q, f"🔍 Pesquisando no Google: {query}")
 
             # ── 1. Abre o Google ──────────────────────────────────────
             await page.goto('https://www.google.com', wait_until='domcontentloaded')
-            await _preserve_minimized_if_needed(page, keep_minimized=keep_minimized)
             await asyncio.sleep(random.uniform(0.8, 1.5))
 
             # ── 2. Aceita cookies/consent se aparecer ─────────────────
@@ -1519,10 +1511,7 @@ async def handle_uptodate_search_task(context, task):
     async with tab_semaphore:
         q = task.get('stream_queue')
         query = (task.get('query') or '').strip()
-        keep_minimized = await _should_keep_context_minimized(context)
         page = None
-        screenshot_stop_event = asyncio.Event()
-        screenshot_task = None
         try:
             if not query:
                 emit_event(q, 'searchresult', {
@@ -1531,14 +1520,9 @@ async def handle_uptodate_search_task(context, task):
                 return
 
             page = await context.new_page()
-            await _preserve_minimized_if_needed(page, keep_minimized=keep_minimized)
-            screenshot_task = asyncio.create_task(
-                _stream_browser_screenshots(page, q, screenshot_stop_event, label='uptodate_search')
-            )
             emit_log(q, f"🩺 Pesquisando no UpToDate: {query}")
 
             await page.goto('https://www.uptodate.com/contents/search', wait_until='domcontentloaded')
-            await _preserve_minimized_if_needed(page, keep_minimized=keep_minimized)
             await asyncio.sleep(random.uniform(1.0, 1.8))
 
             search_input = page.locator('#tbSearch, input.searchTerm, input[type="search"]').first
@@ -1663,13 +1647,6 @@ async def handle_uptodate_search_task(context, task):
                 'source': 'uptodate',
             })
         finally:
-            screenshot_stop_event.set()
-            if screenshot_task:
-                screenshot_task.cancel()
-                try:
-                    await screenshot_task
-                except (asyncio.CancelledError, Exception):
-                    pass
             if page:
                 try:
                     await page.close()
@@ -1684,23 +1661,17 @@ async def handle_chat_task(context, task):
         q          = task.get('stream_queue')
         stop_event = asyncio.Event()
         activityts = [time.time()]
-        keep_minimized = await _should_keep_context_minimized(context)
         page = None
-        screenshot_task = None
         try:
             page = await context.new_page()
-            await _preserve_minimized_if_needed(page, keep_minimized=keep_minimized)
             watchdog_task = asyncio.create_task(
                 watchdog_page(page, q, stop_event,
                               check_interval=15,
                               activity_ts=activityts)  # ✅ era activityts=, corrigido para activity_ts=
             )
-            screenshot_task = asyncio.create_task(
-                _stream_browser_screenshots(page, q, stop_event, label='chat')
-            )
             try:
                 await asyncio.wait_for(
-                    handle_chat_task_inner(task, page, q, stop_event, activityts, keep_minimized=keep_minimized),
+                    handle_chat_task_inner(task, page, q, stop_event, activityts),
                     timeout=660
                 )
             except asyncio.TimeoutError:
@@ -1708,17 +1679,10 @@ async def handle_chat_task(context, task):
             finally:
                 stop_event.set()
                 watchdog_task.cancel()
-                if screenshot_task:
-                    screenshot_task.cancel()
                 try:
                     await watchdog_task
                 except (asyncio.CancelledError, Exception):
                     pass
-                if screenshot_task:
-                    try:
-                        await screenshot_task
-                    except (asyncio.CancelledError, Exception):
-                        pass
         except Exception as e:
             emit_log(q, f'ERRO Chat: {e}')
             emit_event(q, 'error', f'Falha no navegador: {str(e)}')
@@ -1733,7 +1697,7 @@ async def handle_chat_task(context, task):
                 q.put(None)
 
 
-async def handle_chat_task_inner(task, page, q, stop_event: asyncio.Event, activityts: list = None, keep_minimized: bool = False):
+async def handle_chat_task_inner(task, page, q, stop_event: asyncio.Event, activityts: list = None):
     url    = task.get('url')
     chat_id = task.get('chat_id')
     msg    = task.get('message')
@@ -1742,11 +1706,9 @@ async def handle_chat_task_inner(task, page, q, stop_event: asyncio.Event, activ
     if url and url != 'None':
         emit_log(q, f'Abrindo chat existente: {url}')
         await page.goto(url, wait_until='domcontentloaded')
-        await _preserve_minimized_if_needed(page, keep_minimized=keep_minimized)
     else:
         emit_log(q, 'Iniciando nova aba de chat...')
         await page.goto('https://chatgpt.com', wait_until='domcontentloaded')
-        await _preserve_minimized_if_needed(page, keep_minimized=keep_minimized)
         await asyncio.sleep(2)
 
     if stop_event.is_set():
@@ -1766,7 +1728,6 @@ async def handle_chat_task_inner(task, page, q, stop_event: asyncio.Event, activ
                 emit_log(q, "Projeto 'ConexaoVida' encontrado. Criando novo chat no projeto...")
                 await project_loc.click()
                 await page.wait_for_selector('#prompt-textarea', timeout=10000)
-                await _preserve_minimized_if_needed(page, keep_minimized=keep_minimized)
                 await asyncio.sleep(1)
             else:
                 print("DICA: Projeto ConexaoVida não encontrado na barra lateral.")
@@ -1803,9 +1764,17 @@ async def handle_chat_task_inner(task, page, q, stop_event: asyncio.Event, activ
         raise RuntimeError("Watchdog sinalizou falha após digitação.")
 
     emit_event(q, "status", "Enviando...")
-    sent = await _submit_prompt(page, q=q, timeout=20.0)
+    sent = False
+    try:
+        btn = page.locator('button[data-testid="send-button"]').first
+        if await btn.is_visible() and not await btn.is_disabled():
+            await btn.click()
+            sent = True
+    except:
+        pass
+
     if not sent:
-        raise RuntimeError("Não foi possível submeter a mensagem/anexos no ChatGPT.")
+        await page.keyboard.press("Enter")
 
     emit_event(q, "status", "Aguardando resposta...")
 
@@ -1929,14 +1898,7 @@ async def handle_chat_task_inner(task, page, q, stop_event: asyncio.Event, activ
         if not is_gen and not status_txt:
             idle_ready_count += 1
             if len(last_html) > 0:
-                if _response_looks_incomplete_json(last_html):
-                    if loop_count % 10 == 0:
-                        emit_event(q, "status", "Aguardando conclusão do JSON da resposta...")
-                    if stuck_count > 80 and idle_ready_count > 12:
-                        break
-                else:
-                    if stuck_count > 20 and idle_ready_count > 8:
-                        break
+                if stuck_count > 20 and idle_ready_count > 8: break
             else:
                 if time.time() - start_time > 60 and idle_ready_count > 8: break
         else:
@@ -1953,21 +1915,19 @@ async def handle_chat_task_inner(task, page, q, stop_event: asyncio.Event, activ
 async def browser_loop_async():
     file_log("browser.py", "⚡ Iniciando Loop Async (Playwright)...")
     async with async_playwright() as p:
-
+        
         # Função interna para iniciar o browser evitando repetição de código
         async def start_browser():
             b = await p.chromium.launch_persistent_context(
                 config.DIRS["profile"],
                 headless=False,
-                args=["--start-minimized", "--disable-blink-features=AutomationControlled", "--disable-infobars"],
+                args=["--start-maximized", "--disable-blink-features=AutomationControlled", "--disable-infobars"],
                 user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
                 viewport=None
             )
             try:
                 dp = await b.new_page()
                 await dp.goto("https://chatgpt.com")
-                await _set_window_state(dp, "minimized")
-                file_log("browser.py", "🪟 Chromium iniciado minimizado.")
             except: pass
             return b
 
@@ -1979,9 +1939,9 @@ async def browser_loop_async():
             try:
                 loop = asyncio.get_running_loop()
                 task = await loop.run_in_executor(None, browser_queue.get)
-
+                
                 if task.get('action') == 'STOP': break
-
+                
                 # =======================================================
                 # AUTO-RECOVERY: TESTA SE O BROWSER AINDA ESTÁ VIVO
                 # =======================================================
@@ -1989,22 +1949,22 @@ async def browser_loop_async():
                     # 1. Se o usuário fechou todas as abas, consideramos fechado
                     if len(browser.pages) == 0:
                         raise Exception("Sem abas")
-
+                    
                     # 2. Faz um "Ping" real no Chromium. Se ele foi fechado no X, isso vai dar erro na hora!
                     await browser.pages[0].evaluate("1")
-
+                    
                 except Exception:
                     file_log("browser.py", "⚠️ Navegador fechado ou desconectado detectado! Recriando...")
                     try: await browser.close()
                     except: pass
-
+                    
                     # Reabre o navegador usando a função interna
                     browser = await start_browser()
                     file_log("browser.py", "✅ Navegador reaberto com sucesso!")
                 # =======================================================
 
                 action = task.get('action', 'CHAT')
-
+                
                 if action in ['GET_MENU', 'EXEC_MENU']:
                     asyncio.create_task(handle_menu_task(browser, task))
                 elif action == 'SYNC':
@@ -2013,9 +1973,9 @@ async def browser_loop_async():
                     asyncio.create_task(handle_search_task(browser, task))
                 elif action == 'UPTODATE_SEARCH':
                     asyncio.create_task(handle_uptodate_search_task(browser, task))
-                else:
+                else: 
                     asyncio.create_task(handle_chat_task(browser, task))
-
+                    
             except Exception as e:
                 print(f"Erro no loop principal: {e}")
                 await asyncio.sleep(1)
@@ -2039,7 +1999,7 @@ async def _standalone_search(queries: list, action: str = 'SEARCH'):
         browser = await p.chromium.launch_persistent_context(
             config.DIRS["profile"],
             headless=False,
-            args=["--start-minimized", "--disable-blink-features=AutomationControlled", "--disable-infobars"],
+            args=["--start-maximized", "--disable-blink-features=AutomationControlled", "--disable-infobars"],
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
             viewport=None,
         )

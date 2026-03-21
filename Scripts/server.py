@@ -216,8 +216,6 @@ def _execute_single_browser_search(query_str, browser_action, source_label, phas
                 return content
             if msg.get('type') == 'error':
                 return {'success': False, 'query': query_str, 'error': msg.get('content'), 'source': source_label}
-            if stream_queue is not None:
-                stream_queue.put(json.dumps(msg, ensure_ascii=False))
     except queue.Empty:
         return {'success': False, 'query': query_str, 'error': f'Timeout na busca {source_label}', 'source': source_label}
     except Exception as e:
