@@ -37,7 +37,7 @@ import os
 import queue
 from playwright.async_api import async_playwright
 import config
-from shared import browser_queue
+from shared import browser_queue, register_file
 from utils import log as file_log
 from markdownify import markdownify as md
 
@@ -674,27 +674,52 @@ def clean_html(html_content):
     return html
 
 
-async def _download_chatgpt_files(page, markdown_text, q=None):
-    """
-    Detecta links de download no markdown da resposta do ChatGPT,
-    baixa os arquivos via fetch no contexto do navegador e salva
-    localmente, retornando o markdown com URLs reescritas para o proxy.
-    """
-    downloads_dir = config.DIRS.get("downloads", os.path.join(config.BASE_DIR, "downloads"))
-    os.makedirs(downloads_dir, exist_ok=True)
+def _resolve_chatgpt_download_url(raw_url: str) -> str:
+    """Normaliza URL de download do ChatGPT para forma absoluta."""
+    if raw_url.startswith("/"):
+        return f"https://chatgpt.com{raw_url}"
+    return raw_url
 
+
+async def _detect_and_register_files(page, markdown_text, q=None):
+    """
+    Detecta links de download no markdown da resposta do ChatGPT e
+    registra as URLs originais em shared.file_registry para proxy
+    sob demanda (sem baixar o arquivo agora).
+    Retorna o markdown com URLs reescritas para /api/downloads/<file_id>.
+    """
     # Padrões de URL de download do ChatGPT:
-    # 1) /backend-api/files/.../download
-    # 2) sandbox:/mnt/data/...
-    # 3) https://files.oaiusercontent.com/...
-    # 4) blob: URLs (não baixáveis via fetch)
-    # Markdown links: [filename](url)
+    # [filename](url) onde url é:
+    #   /backend-api/files/.../download
+    #   https://files.oaiusercontent.com/...
+    #   sandbox:/mnt/data/...
     link_pattern = re.compile(
         r'\[([^\]]+)\]\(((?:https?://(?:files\.oaiusercontent\.com|cdn-uploads\.[^)]+)|/backend-api/files/[^)]+|sandbox:/[^)]+))\)'
     )
 
     matches = list(link_pattern.finditer(markdown_text))
     if not matches:
+        # Fallback: tenta detectar links de download na página (botões removidos pelo clean_html)
+        try:
+            page_links = await page.evaluate("""() => {
+                const links = [];
+                document.querySelectorAll('a[href*="/backend-api/files/"]').forEach(a => {
+                    const href = a.getAttribute('href') || '';
+                    const text = (a.textContent || '').trim();
+                    if (href && text) links.push({href, text});
+                });
+                return links;
+            }""")
+            if page_links:
+                for pl in page_links:
+                    safe_name = re.sub(r'[^\w.\-]', '_', pl['text']) or "file"
+                    file_id = f"{int(time.time() * 1000)}_{safe_name}"
+                    full_url = _resolve_chatgpt_download_url(pl['href'])
+                    register_file(file_id, full_url, pl['text'])
+                    markdown_text += f"\n\n📎 Arquivo: [{pl['text']}](/api/downloads/{file_id})"
+                    emit_log(q, f"📎 Arquivo registrado (da página): {pl['text']} → {file_id}")
+        except Exception as e:
+            emit_log(q, f"⚠️ Erro ao detectar links na página: {e}")
         return markdown_text
 
     result = markdown_text
@@ -702,64 +727,32 @@ async def _download_chatgpt_files(page, markdown_text, q=None):
         display_name = m.group(1).strip()
         raw_url = m.group(2).strip()
 
-        # Gera nome de arquivo seguro
         safe_name = re.sub(r'[^\w.\-]', '_', display_name) or "file"
-        ts = int(time.time() * 1000)
-        local_name = f"{ts}_{safe_name}"
-        local_path = os.path.join(downloads_dir, local_name)
+        file_id = f"{int(time.time() * 1000)}_{safe_name}"
 
-        try:
-            if raw_url.startswith("sandbox:"):
-                # Sandbox URL: usar interação JS para obter o conteúdo
-                # O ChatGPT apresenta sandbox como link, mas o download real
-                # acontece via o botão "Download" que vira /backend-api/files/...
-                # Tentamos buscar via page.evaluate
-                emit_log(q, f"⬇️ Sandbox file detectado: {display_name} — tentando download...")
-                file_data = await page.evaluate("""async (url) => {
-                    try {
-                        // Tenta encontrar link de download real na página
-                        const anchors = Array.from(document.querySelectorAll('a[href*="/backend-api/files/"]'));
-                        for (const a of anchors) {
-                            if (a.textContent.includes(url.split('/').pop())) {
-                                const resp = await fetch(a.href);
-                                if (resp.ok) {
-                                    const buf = await resp.arrayBuffer();
-                                    return Array.from(new Uint8Array(buf));
-                                }
-                            }
-                        }
-                        return null;
-                    } catch(e) { return null; }
-                }""", raw_url)
+        if raw_url.startswith("sandbox:"):
+            # Sandbox URL: tenta resolver para URL real na página
+            try:
+                real_url = await page.evaluate("""(filename) => {
+                    const anchors = Array.from(document.querySelectorAll('a[href*="/backend-api/files/"]'));
+                    for (const a of anchors) {
+                        if (a.textContent.includes(filename)) return a.href;
+                    }
+                    return null;
+                }""", raw_url.split('/')[-1])
+                if real_url:
+                    raw_url = real_url
+                else:
+                    emit_log(q, f"⚠️ Sandbox URL sem link real: {display_name}")
+                    continue
+            except Exception:
+                emit_log(q, f"⚠️ Não foi possível resolver sandbox URL: {display_name}")
+                continue
 
-            elif raw_url.startswith("/backend-api/") or raw_url.startswith("https://"):
-                # URL absoluta ou relativa do backend-api — fetch direto
-                fetch_url = raw_url
-                if raw_url.startswith("/"):
-                    fetch_url = f"https://chatgpt.com{raw_url}"
-                emit_log(q, f"⬇️ Baixando arquivo: {display_name} de {fetch_url[:100]}...")
-                file_data = await page.evaluate("""async (url) => {
-                    try {
-                        const resp = await fetch(url);
-                        if (!resp.ok) return null;
-                        const buf = await resp.arrayBuffer();
-                        return Array.from(new Uint8Array(buf));
-                    } catch(e) { return null; }
-                }""", fetch_url)
-            else:
-                file_data = None
-
-            if file_data and len(file_data) > 0:
-                with open(local_path, "wb") as f:
-                    f.write(bytes(file_data))
-                proxy_url = f"/api/downloads/{local_name}"
-                result = result.replace(m.group(0), f"[{display_name}]({proxy_url})")
-                emit_log(q, f"✅ Arquivo salvo: {local_name} ({len(file_data)} bytes)")
-            else:
-                emit_log(q, f"⚠️ Não foi possível baixar: {display_name}")
-
-        except Exception as e:
-            emit_log(q, f"⚠️ Erro ao baixar {display_name}: {e}")
+        full_url = _resolve_chatgpt_download_url(raw_url)
+        register_file(file_id, full_url, display_name)
+        result = result.replace(m.group(0), f"[{display_name}](/api/downloads/{file_id})")
+        emit_log(q, f"📎 Arquivo registrado: {display_name} → {file_id}")
 
     return result
 
@@ -2030,27 +2023,29 @@ async def handle_chat_task_inner(task, page, q, stop_event: asyncio.Event, activ
         if time.time() - start_time > 600: break
         await asyncio.sleep(0.3)
 
-    # Após resposta completa: detectar e baixar arquivos gerados pelo ChatGPT
+    # Após resposta completa: registrar URLs de arquivos para proxy sob demanda
     changed = False
     if markdown_text:
         try:
-            rewritten = await _download_chatgpt_files(page, markdown_text, q)
+            rewritten = await _detect_and_register_files(page, markdown_text, q)
             if rewritten != markdown_text:
                 markdown_text = rewritten
                 changed = True
         except Exception as e:
-            emit_log(q, f"⚠️ Falha ao processar downloads: {e}")
+            emit_log(q, f"⚠️ Falha ao registrar arquivos: {e}")
 
-    # Aguarda auto-downloads pendentes (máx 3s)
-    if _auto_downloads or True:
-        await asyncio.sleep(1)
-    # Anexa auto-downloads que não tenham sido capturados pela detecção de links
+    # Auto-downloads capturados pelo Playwright: registra para proxy
+    if _auto_downloads:
+        await asyncio.sleep(1)  # aguarda downloads pendentes
     for dl in _auto_downloads:
-        proxy_url = f"/api/downloads/{dl['local']}"
-        link_md = f"\n\n📎 Arquivo: [{dl['name']}]({proxy_url})"
-        if proxy_url not in markdown_text:
+        file_id = dl['local']
+        # Auto-downloads já foram salvos em disco pelo handler; registra o path local
+        register_file(file_id, f"local:{dl['path']}", dl['name'])
+        link_md = f"\n\n📎 Arquivo: [{dl['name']}](/api/downloads/{file_id})"
+        if file_id not in markdown_text:
             markdown_text += link_md
             changed = True
+        emit_log(q, f"📎 Auto-download registrado: {dl['name']} → {file_id}")
 
     if changed:
         emit_event(q, "markdown", markdown_text)
@@ -2058,6 +2053,75 @@ async def handle_chat_task_inner(task, page, q, stop_event: asyncio.Event, activ
     final_title = await get_chat_title(page)
     final_url   = page.url
     emit_event(q, "finish", {"chat_id": chat_id, "title": final_title, "url": final_url})  # ✅ era chat_id, corrigido para chat_id
+
+async def handle_download_file(context, task):
+    """
+    Baixa um arquivo do ChatGPT sob demanda (proxy puro).
+    Usa o contexto do browser (com cookies/auth) para fazer fetch
+    da URL original e retorna os bytes via stream_queue.
+    """
+    q = task.get('stream_queue')
+    file_url = task.get('file_url', '')
+    file_name = task.get('file_name', 'download')
+
+    page = None
+    try:
+        if file_url.startswith("local:"):
+            # Auto-download: arquivo já salvo em disco pelo Playwright
+            local_path = file_url[6:]  # remove "local:" prefix
+            if os.path.isfile(local_path):
+                with open(local_path, "rb") as f:
+                    data = f.read()
+                emit_event(q, "file_data", {
+                    "name": file_name,
+                    "size": len(data),
+                    "data_b64": __import__('base64').b64encode(data).decode('ascii')
+                })
+            else:
+                emit_event(q, "error", f"Arquivo local não encontrado: {local_path}")
+            return
+
+        page = await context.new_page()
+        await page.goto("https://chatgpt.com", wait_until='domcontentloaded', timeout=15000)
+        await asyncio.sleep(1)
+
+        file_log("browser.py", f"⬇️ Download sob demanda: {file_name} de {file_url[:100]}")
+
+        file_data = await page.evaluate("""async (url) => {
+            try {
+                const resp = await fetch(url, { credentials: 'include' });
+                if (!resp.ok) return { error: resp.status + ' ' + resp.statusText };
+                const buf = await resp.arrayBuffer();
+                const bytes = Array.from(new Uint8Array(buf));
+                const ct = resp.headers.get('content-type') || 'application/octet-stream';
+                return { data: bytes, content_type: ct };
+            } catch(e) { return { error: e.message }; }
+        }""", file_url)
+
+        if not file_data or file_data.get('error'):
+            err = file_data.get('error', 'Resposta vazia') if file_data else 'Resposta vazia'
+            emit_event(q, "error", f"Falha ao baixar: {err}")
+            return
+
+        raw_bytes = bytes(file_data['data'])
+        emit_event(q, "file_data", {
+            "name": file_name,
+            "size": len(raw_bytes),
+            "content_type": file_data.get('content_type', 'application/octet-stream'),
+            "data_b64": __import__('base64').b64encode(raw_bytes).decode('ascii')
+        })
+        file_log("browser.py", f"✅ Download concluído: {file_name} ({len(raw_bytes)} bytes)")
+
+    except Exception as e:
+        file_log("browser.py", f"❌ Erro no download: {e}")
+        emit_event(q, "error", f"Erro no download: {str(e)}")
+    finally:
+        if page:
+            try: await page.close()
+            except: pass
+        if q:
+            q.put(None)
+
 
 # --- LOOP PRINCIPAL ASYNC ---
 async def browser_loop_async():
@@ -2122,7 +2186,9 @@ async def browser_loop_async():
                     asyncio.create_task(handle_search_task(browser, task))
                 elif action == 'UPTODATE_SEARCH':
                     asyncio.create_task(handle_uptodate_search_task(browser, task))
-                else: 
+                elif action == 'DOWNLOAD_FILE':
+                    asyncio.create_task(handle_download_file(browser, task))
+                else:
                     asyncio.create_task(handle_chat_task(browser, task))
                     
             except Exception as e:

@@ -2449,7 +2449,7 @@ if (isset($_GET['action']) && $_GET['action'] === 'download_file') {
     $ch = curl_init($download_url);
     curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
     curl_setopt($ch, CURLOPT_FOLLOWLOCATION, true);
-    curl_setopt($ch, CURLOPT_TIMEOUT, 30);
+    curl_setopt($ch, CURLOPT_TIMEOUT, 90); // Timeout longo: browser.py faz proxy sob demanda via ChatGPT
     curl_setopt($ch, CURLOPT_HEADER, true);
     $response = curl_exec($ch);
     $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
