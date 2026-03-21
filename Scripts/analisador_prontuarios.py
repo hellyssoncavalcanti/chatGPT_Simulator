@@ -1004,6 +1004,34 @@ def _normalizar_motivo_esgotado(erro_msg: str) -> str:
     ]
     motivo = (partes_validas[-1] if partes_validas else partes[-1] if partes else texto).strip()
     motivo = re.sub(r"\s+", " ", motivo)
+    motivo_lower = motivo.lower()
+
+    if "texto insuficiente após remoção de html" in motivo_lower:
+        return "Prontuário ficou insuficiente após limpeza/remoção de HTML."
+
+    if (
+        "simulador não retornou conteúdo markdown" in motivo_lower
+        or "llm não retornou conteúdo markdown" in motivo_lower
+    ):
+        return "LLM não retornou resposta final em markdown utilizável."
+
+    if (
+        "llm não retornou json válido" in motivo_lower
+        or "llm não retornou bloco json" in motivo_lower
+        or "expecting ',' delimiter" in motivo_lower
+        or "expecting property name enclosed in double quotes" in motivo_lower
+        or "unterminated string" in motivo_lower
+        or "invalid control character" in motivo_lower
+        or "extra data" in motivo_lower
+    ):
+        return "LLM retornou JSON inválido/malformado para o schema esperado."
+
+    if "api_exec recusou" in motivo_lower or "execute_sql recusou" in motivo_lower:
+        return "Falha de persistência/execução SQL ao salvar ou consultar a análise."
+
+    if "simulador retornou erro" in motivo_lower:
+        return "ChatGPT Simulator retornou erro durante a análise."
+
     return motivo[:180] + ("..." if len(motivo) > 180 else "")
 
 
@@ -1392,6 +1420,45 @@ def resetar_analises_interrompidas_no_startup():
     return afetados
 
 
+def resetar_analises_interrompidas_no_startup():
+    """
+    Ao subir o analisador, limpa datetime_analise_iniciada de registros que
+    ficaram interrompidos sem conclusão válida na execução anterior.
+
+    Isso evita que o sistema trate como "análise já iniciada" algo que será
+    reprocessado do zero após uma parada/queda do processo Python.
+    """
+    resultado = sql_exec(
+        f"""
+        UPDATE {TABELA}
+        SET
+            status = CASE
+                        WHEN status = 'processando' THEN 'pendente'
+                        ELSE status
+                     END,
+            datetime_analise_iniciada = NULL,
+            erro_msg = CONCAT(
+                COALESCE(erro_msg, ''),
+                ' | [AUTO-RESET-STARTUP] datetime_analise_iniciada zerado em ',
+                NOW(),
+                ' após interrupção anterior sem conclusão válida'
+            )
+        WHERE
+            datetime_analise_iniciada IS NOT NULL
+            AND (
+                datetime_analise_concluida IS NULL
+                OR datetime_analise_concluida = '0000-00-00 00:00:00'
+            )
+        """
+    )
+    afetados = resultado.get('affected_rows', 0)
+    if afetados:
+        log.warning(
+            f"⚠️  {afetados} registro(s) com análise interrompida tiveram datetime_analise_iniciada resetado no startup."
+        )
+    return afetados
+
+
 def _montar_sets_resultado(resultado: dict) -> list:
     colunas  = _get_colunas_tabela()
     chat_id  = esc(resultado.get("_chat_id")  or "")
@@ -1445,6 +1512,216 @@ def salvar_resultado(idatendimento: int, resultado: dict):
     )
     log.debug(f"[salvar_resultado] {len(sets)} campos → id_atendimento={idatendimento}")
     sql_exec(sql)
+
+
+def _stringify_compact(value) -> str:
+    try:
+        parsed = json.loads(value) if isinstance(value, str) else value
+    except Exception:
+        parsed = value
+    if isinstance(parsed, list):
+        partes = []
+        for item in parsed:
+            if item in (None, "", [], {}):
+                continue
+            partes.append(json.dumps(item, ensure_ascii=False) if isinstance(item, (dict, list)) else str(item))
+        return "; ".join(partes)
+    if isinstance(parsed, dict):
+        return json.dumps(parsed, ensure_ascii=False)
+    return str(parsed or "").strip()
+
+
+def _valor_compilado_para_prompt(value, max_chars: int = 1200):
+    try:
+        parsed = json.loads(value) if isinstance(value, str) else value
+    except Exception:
+        parsed = value
+
+    if isinstance(parsed, str):
+        texto = re.sub(r"\s+", " ", parsed).strip()
+        return texto[:max_chars]
+    return parsed
+
+
+def montar_texto_compilado_paciente(id_paciente: str):
+    rows = sql_exec(f"""
+        SELECT
+            id_atendimento,
+            id_paciente,
+            id_criador,
+            datetime_atendimento_inicio,
+            resumo_texto,
+            gravidade_clinica,
+            diagnosticos_citados,
+            pontos_chave,
+            mudancas_relevantes,
+            sinais_nucleares,
+            eventos_comportamentais,
+            terapias_referidas,
+            exames_citados,
+            pendencias_clinicas,
+            condutas_no_prontuario,
+            medicacoes_em_uso,
+            medicacoes_iniciadas,
+            medicacoes_suspensas,
+            condutas_especificas_sugeridas,
+            condutas_gerais_sugeridas,
+            mensagens_acompanhamento
+        FROM {TABELA}
+        WHERE id_paciente = '{esc(id_paciente)}'
+          AND status = 'concluido'
+          AND id_atendimento IS NOT NULL
+        ORDER BY datetime_atendimento_inicio ASC, id_atendimento ASC
+        LIMIT 50
+    """, reason="carregar_analises_paciente_compilado").get("data", [])
+
+    if not rows:
+        return "", None
+
+    historico = []
+    datas = []
+    campos_detalhe = [
+        "gravidade_clinica",
+        "diagnosticos_citados",
+        "pontos_chave",
+        "mudancas_relevantes",
+        "sinais_nucleares",
+        "eventos_comportamentais",
+        "terapias_referidas",
+        "exames_citados",
+        "pendencias_clinicas",
+        "condutas_no_prontuario",
+        "medicacoes_em_uso",
+        "medicacoes_iniciadas",
+        "medicacoes_suspensas",
+        "condutas_especificas_sugeridas",
+        "condutas_gerais_sugeridas",
+        "mensagens_acompanhamento",
+    ]
+
+    for idx, row in enumerate(rows, start=1):
+        dt_at = row.get("datetime_atendimento_inicio") or ""
+        if dt_at:
+            datas.append(dt_at)
+
+        item = {
+            "ordem_cronologica": idx,
+            "id_atendimento": row.get("id_atendimento"),
+            "datetime_atendimento_inicio": dt_at or None,
+            "resumo_texto": _valor_compilado_para_prompt(row.get("resumo_texto") or "", max_chars=1500),
+        }
+
+        for campo in campos_detalhe:
+            valor = _valor_compilado_para_prompt(row.get(campo))
+            if valor not in (None, "", [], {}):
+                item[campo] = valor
+
+        historico.append(item)
+
+    payload_compilado = {
+        "id_paciente": id_paciente,
+        "total_atendimentos_analisados": len(historico),
+        "periodo_primeiro_atendimento": datas[0] if datas else None,
+        "periodo_ultimo_atendimento": datas[-1] if datas else None,
+        "atendimentos": historico,
+    }
+
+    texto = (
+        f"HISTÓRICO LONGITUDINAL COMPILADO DO PACIENTE {id_paciente}\n"
+        "O conteúdo abaixo representa TODOS os atendimentos estruturados já concluídos deste paciente em ordem cronológica.\n"
+        "Sua tarefa é consolidar o histórico longitudinal completo, identificando padrões persistentes, mudanças entre consultas, terapias, medicações, riscos, pendências e condutas.\n"
+        "NÃO copie apenas o último atendimento; compare e sintetize o conjunto completo do histórico abaixo.\n\n"
+        "DADOS COMPILADOS (JSON):\n"
+        + json.dumps(payload_compilado, ensure_ascii=False, indent=2)
+    )
+    return texto, rows[-1]
+
+
+def salvar_resultado_compilado_paciente(id_paciente: str, resultado: dict):
+    id_registro = garantir_registro_compilado_paciente_pendente(id_paciente)
+
+    sets = _montar_sets_resultado(resultado) + [
+        "id_atendimento = NULL",
+        "datetime_atendimento_inicio = NULL",
+        "datetime_ultima_atualizacao_atendimento = NULL",
+        "id_criador = NULL",
+        "hash_prontuario = 'analise_compilada_paciente'",
+        f"id_paciente = '{esc(id_paciente)}'",
+    ]
+
+    sql_exec(
+        f"UPDATE {TABELA} SET\n    " + ",\n    ".join(sets) + f"\nWHERE id = {id_registro}"
+    )
+
+
+def atualizar_analise_compilada_paciente(id_paciente: str):
+    enfileirados = enfileirar_atendimentos_antigos(id_paciente)
+    pendentes = contar_atendimentos_nao_concluidos_paciente(id_paciente)
+    if pendentes > 0:
+        try:
+            garantir_registro_compilado_paciente_pendente(id_paciente)
+        except Exception as e:
+            log.warning(
+                f"  ⚠️ Falha ao garantir registro pendente da síntese compilada do paciente {id_paciente}: {e}"
+            )
+        log.info(
+            f"⏳ Síntese compilada adiada para paciente {id_paciente}: "
+            f"{pendentes} atendimento(s) ainda não concluído(s)"
+            + (f" ({enfileirados} recém-enfileirado(s))" if enfileirados else "")
+            + "."
+        )
+        return
+
+    texto_compilado, row_base = montar_texto_compilado_paciente(id_paciente)
+    if not texto_compilado or not row_base:
+        log.info(f"ℹ️  Sem histórico suficiente para compilar síntese do paciente {id_paciente}.")
+        return
+
+    id_registro_compilado = garantir_registro_compilado_paciente_pendente(id_paciente)
+    sql_exec(f"""
+        UPDATE {TABELA} SET
+            status = 'processando',
+            tentativas = tentativas + 1,
+            erro_msg = NULL,
+            datetime_analise_iniciada = NOW(),
+            datetime_analise_concluida = NULL,
+            datetime_ultima_atualizacao_atendimento = NULL
+        WHERE id = {id_registro_compilado}
+    """, reason="marcar_registro_compilado_processando")
+
+    log.info(f"🧬 Atualizando síntese compilada do paciente {id_paciente}...")
+    contexto = ""
+    try:
+        contexto = buscar_contexto_clinico({
+            "id_paciente": id_paciente,
+            "id": row_base.get("id_atendimento"),
+            "id_criador": row_base.get("id_criador"),
+        }) or ""
+    except Exception as e:
+        log.warning(f"  ⚠️ Falha ao buscar contexto do paciente compilado {id_paciente}: {e}")
+
+    resultado = analisar_prontuario(texto_compilado[:18000], contexto=contexto)
+    try:
+        resultado = executar_busca_evidencias(
+            resultado,
+            chat_url=resultado.get("_chat_url"),
+            chat_id=resultado.get("_chat_id"),
+        )
+    except Exception as e:
+        log.warning(f"  ⚠️ Enriquecimento da síntese compilada falhou (não fatal): {e}")
+
+    try:
+        if _grafo_clinico_esta_generico(resultado):
+            resultado = gerar_dados_auxiliares_llm(
+                resultado,
+                chat_url=resultado.get("_chat_url"),
+                chat_id=resultado.get("_chat_id"),
+            )
+    except Exception as e:
+        log.warning(f"  ⚠️ Refinamento auxiliar da síntese compilada falhou (não fatal): {e}")
+
+    salvar_resultado_compilado_paciente(id_paciente, resultado)
+    log.info(f"✅ Síntese compilada do paciente {id_paciente} atualizada.")
 
 
 def _stringify_compact(value) -> str:
@@ -2537,6 +2814,38 @@ def _primeiro_node_representativo(nodes: list):
     return nodes[0] if nodes else None
 
 
+def _deduplicar_nodes_grafo(nodes: list) -> list:
+    dedup = {}
+    for node in nodes:
+        if not isinstance(node, dict):
+            continue
+        chave = (
+            str(node.get("tipo") or "").strip().lower(),
+            str(node.get("normalizado") or node.get("valor") or "").strip().lower(),
+        )
+        if not chave[1]:
+            continue
+        if chave not in dedup:
+            dedup[chave] = node
+            continue
+        existente = dedup[chave]
+        if not existente.get("id") and node.get("id"):
+            existente["id"] = node["id"]
+        if not existente.get("contexto") and node.get("contexto"):
+            existente["contexto"] = node["contexto"]
+        elif node.get("contexto") and node["contexto"] not in str(existente.get("contexto") or ""):
+            existente["contexto"] = f"{existente.get('contexto','')} | {node['contexto']}".strip(" |")
+    return list(dedup.values())
+
+
+def _primeiro_node_representativo(nodes: list):
+    for tipo_prioritario in ("diagnostico", "medicamento", "terapia", "sintoma", "gene", "risco"):
+        for node in nodes:
+            if (node.get("tipo") or "").lower() == tipo_prioritario:
+                return node
+    return nodes[0] if nodes else None
+
+
 def salvar_auxiliar(idatendimento: int, id_paciente: str, resultado: dict):
     """
     Chama o endpoint PHP salvar_analise_auxiliar para popular tabelas auxiliares
@@ -3407,6 +3716,18 @@ def analisar_prontuario(texto: str, chat_url: str = None, chat_id: str = None, c
     def _newline():
         sys.stdout.write('\n')
         sys.stdout.flush()
+
+    def _inline_status(prefixo: str, msg: str):
+        texto = re.sub(r"\s+", " ", str(msg or "")).strip()
+        if not texto:
+            return
+
+        largura_terminal = shutil.get_terminal_size((140, 20)).columns
+        largura_util = max(30, largura_terminal - 6)
+        mensagem = f"{prefixo} {texto}"
+        if len(mensagem) > largura_util:
+            mensagem = mensagem[:max(0, largura_util - 3)].rstrip() + "..."
+        _inline(mensagem)
 
     def _inline_status(prefixo: str, msg: str):
         texto = re.sub(r"\s+", " ", str(msg or "")).strip()
