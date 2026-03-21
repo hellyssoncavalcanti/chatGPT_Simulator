@@ -4,38 +4,203 @@
 #
 # RESPONSABILIDADE:
 #   Inicializa todos os componentes do sistema em threads separadas e sobe
-#   os servidores Flask. É o único arquivo executado diretamente pelo usuário
-#   (via 0__start.bat).
-#
-# RELAÇÕES:
-#   • Importa e orquestra: config, server, browser, utils, shared
-#
-# THREADS INICIADAS:
-#   t_browser  — executa browser.browser_loop() (Playwright assíncrono)
-#   t_http     — servidor HTTP na porta 3003 (acesso remoto sem TLS)
-#   main       — servidor HTTPS na porta 3002 (acesso local com TLS)
-#
-# FLUXO DE INICIALIZAÇÃO:
-#   1. Gera certificados TLS (utils.ensure_certificates)
-#   2. Sobe thread do browser (Playwright + Chromium)
-#   3. Sobe thread HTTP auxiliar (porta 3003)
-#   4. Prepara frontend (utils.setup_frontend)
-#   5. Sobe HTTPS principal (porta 3002) no processo principal
+#   os servidores Flask. Também garante que a .venv exista/esteja saudável,
+#   instala dependências ausentes e prepara o Chromium do Playwright antes
+#   de importar os módulos principais.
 # =============================================================================
+import os
+import shutil
+import socket
+import subprocess
+import sys
 import threading
 import time
-import socket
-import sys
-import os
-import ssl
+import webbrowser
 
-sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+SCRIPTS_DIR = os.path.dirname(os.path.abspath(__file__))
+BASE_DIR = os.path.dirname(SCRIPTS_DIR)
+VENV_DIR = os.path.join(BASE_DIR, ".venv")
+VENV_PYVENV_CFG = os.path.join(VENV_DIR, "pyvenv.cfg")
+IS_WINDOWS = os.name == "nt"
+VENV_PYTHON = os.path.join(VENV_DIR, "Scripts" if IS_WINDOWS else "bin", "python.exe" if IS_WINDOWS else "python")
+CORE_DEPENDENCIES = [
+    ("flask", "flask"),
+    ("flask-cors", "flask_cors"),
+    ("playwright", "playwright"),
+    ("markdownify", "markdownify"),
+    ("requests", "requests"),
+    ("pystray", "pystray"),
+    ("pillow", "PIL"),
+    ("cryptography", "cryptography"),
+]
+REPAIR_FLAG = "--repair-venv"
+SKIP_BOOTSTRAP_FLAG = "--skip-bootstrap"
 
-import config
-import server
-import browser
-import utils
-from shared import browser_queue
+
+def _same_path(path_a: str, path_b: str) -> bool:
+    return os.path.normcase(os.path.abspath(path_a)) == os.path.normcase(os.path.abspath(path_b))
+
+
+def _current_python_is_venv() -> bool:
+    try:
+        return _same_path(sys.executable, VENV_PYTHON)
+    except Exception:
+        return False
+
+
+def _venv_is_healthy() -> bool:
+    return all(
+        os.path.exists(path)
+        for path in (VENV_DIR, VENV_PYVENV_CFG, VENV_PYTHON)
+    )
+
+
+def _resolve_bootstrap_python_cmd() -> list:
+    candidates = []
+
+    base_executable = getattr(sys, "_base_executable", None)
+    if base_executable and os.path.exists(base_executable):
+        candidates.append([base_executable])
+
+    if sys.executable and os.path.exists(sys.executable) and not _current_python_is_venv():
+        candidates.append([sys.executable])
+
+    py_launcher = shutil.which("py") if IS_WINDOWS else None
+    if py_launcher:
+        candidates.append([py_launcher, "-3"])
+
+    python_cmd = shutil.which("python3") or shutil.which("python")
+    if python_cmd:
+        candidates.append([python_cmd])
+
+    seen = set()
+    for candidate in candidates:
+        key = tuple(candidate)
+        if key in seen:
+            continue
+        seen.add(key)
+        try:
+            proc = subprocess.run(
+                candidate + ["-c", "import sys; print(sys.executable)"],
+                cwd=BASE_DIR,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=True,
+            )
+            resolved = proc.stdout.strip()
+            if resolved:
+                return [resolved]
+            return candidate
+        except Exception:
+            continue
+
+    raise RuntimeError(
+        "Nenhum interpretador Python base foi encontrado para recriar a .venv. "
+        "Instale o Python 3 e garanta que `python`, `python3` ou `py -3` estejam disponíveis no PATH."
+    )
+
+
+def _run_checked(cmd: list, description: str, quiet: bool = False):
+    print(f"[BOOT] {description}...")
+    stdout = subprocess.DEVNULL if quiet else None
+    stderr = subprocess.DEVNULL if quiet else None
+    subprocess.check_call(cmd, cwd=BASE_DIR, stdout=stdout, stderr=stderr)
+
+
+def _recreate_venv(base_python_cmd: list):
+    print("[BOOT] Ambiente virtual ausente/corrompido. Recriando .venv...")
+    subprocess.check_call(base_python_cmd + ["-m", "venv", VENV_DIR, "--clear"], cwd=BASE_DIR)
+
+
+def _missing_dependencies(python_cmd: list) -> list:
+    missing = []
+    for package, import_name in CORE_DEPENDENCIES:
+        try:
+            proc = subprocess.run(
+                python_cmd + ["-c", f"import importlib.util, sys; sys.exit(0 if importlib.util.find_spec({import_name!r}) else 1)"],
+                cwd=BASE_DIR,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            if proc.returncode != 0:
+                missing.append(package)
+        except Exception:
+            missing.append(package)
+    return missing
+
+
+def _ensure_dependencies(python_cmd: list):
+    missing = _missing_dependencies(python_cmd)
+    if missing:
+        _run_checked(
+            python_cmd + ["-m", "pip", "install", "--upgrade", "pip"],
+            "Atualizando pip da .venv",
+            quiet=True,
+        )
+        _run_checked(
+            python_cmd + ["-m", "pip", "install", "--upgrade", *missing],
+            f"Instalando/atualizando dependências ({', '.join(missing)})",
+        )
+    else:
+        print("[BOOT] Dependências Python já estão instaladas.")
+
+
+def _ensure_playwright_browser(python_cmd: list):
+    try:
+        subprocess.run(
+            python_cmd + ["-m", "playwright", "install", "chromium"],
+            cwd=BASE_DIR,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=True,
+        )
+        print("[BOOT] Chromium do Playwright verificado.")
+    except Exception:
+        print("[BOOT] Aviso: não foi possível validar/instalar o Chromium automaticamente.")
+
+
+def _relaunch_into_venv(argv: list):
+    cmd = [VENV_PYTHON, os.path.abspath(__file__), SKIP_BOOTSTRAP_FLAG, *argv]
+    print("[BOOT] Reiniciando o ChatGPT Simulator dentro da .venv...")
+    raise SystemExit(subprocess.call(cmd, cwd=BASE_DIR))
+
+
+def ensure_runtime_environment():
+    argv = [arg for arg in sys.argv[1:] if arg not in {REPAIR_FLAG, SKIP_BOOTSTRAP_FLAG}]
+    if SKIP_BOOTSTRAP_FLAG in sys.argv:
+        return argv
+
+    current_is_venv = _current_python_is_venv()
+    venv_is_healthy = _venv_is_healthy()
+
+    if REPAIR_FLAG in sys.argv:
+        base_python_cmd = _resolve_bootstrap_python_cmd()
+        _recreate_venv(base_python_cmd)
+        _ensure_dependencies([VENV_PYTHON])
+        _ensure_playwright_browser([VENV_PYTHON])
+        _relaunch_into_venv(argv)
+
+    if not venv_is_healthy:
+        if current_is_venv:
+            base_python_cmd = _resolve_bootstrap_python_cmd()
+            print("[BOOT] .venv inválida detectada durante a inicialização. Delegando reparo ao Python base...")
+            raise SystemExit(
+                subprocess.call(base_python_cmd + [os.path.abspath(__file__), REPAIR_FLAG, *argv], cwd=BASE_DIR)
+            )
+
+        base_python_cmd = _resolve_bootstrap_python_cmd()
+        _recreate_venv(base_python_cmd)
+        current_is_venv = False
+
+    _ensure_dependencies([VENV_PYTHON])
+    _ensure_playwright_browser([VENV_PYTHON])
+
+    if not current_is_venv:
+        _relaunch_into_venv(argv)
+
+    return argv
+
 
 def get_local_ip():
     try:
@@ -44,46 +209,84 @@ def get_local_ip():
         ip = s.getsockname()[0]
         s.close()
         return ip
-    except:
+    except Exception:
         return "127.0.0.1"
 
-def start_browser_thread():
-    # Inicia o loop do navegador (agora assíncrono internamente)
-    browser.browser_loop()
 
-def start_http_server():
-    http_port = config.PORT + 1
-    # Servidor HTTP auxiliar
-    server.app.run(host="0.0.0.0", port=http_port, debug=False, use_reloader=False)
+def start_browser_thread(browser_module):
+    browser_module.browser_loop()
+
+
+def start_http_server(config_module, server_module):
+    http_port = config_module.PORT + 1
+    server_module.app.run(host="0.0.0.0", port=http_port, debug=False, use_reloader=False)
+
+
+def _wait_for_port(host: str, port: int, timeout: int = 180, interval: float = 0.5) -> bool:
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            with socket.create_connection((host, port), timeout=2):
+                return True
+        except OSError:
+            time.sleep(interval)
+    return False
+
+
+def open_urls_when_server_is_ready(port: int, urls: list, startup_timeout: int = 180):
+    def _worker():
+        if not _wait_for_port("127.0.0.1", port, timeout=startup_timeout):
+            print(f"[BOOT] Aviso: servidor HTTPS na porta {port} não ficou pronto a tempo; navegador não será aberto automaticamente.")
+            return
+
+        time.sleep(1.0)
+        for url in urls:
+            try:
+                webbrowser.open_new(url)
+            except Exception as exc:
+                print(f"[BOOT] Aviso: falha ao abrir {url}: {exc}")
+
+    t_open = threading.Thread(target=_worker, daemon=True)
+    t_open.start()
+
 
 if __name__ == "__main__":
+    ensure_runtime_environment()
+
+    sys.path.append(SCRIPTS_DIR)
+
+    import config
+    import server
+    import browser
+    import utils
+
     os.system('cls' if os.name == 'nt' else 'clear')
-    
+
     print(f"\n=== CHATGPT SIMULATOR v{config.VERSION} (Async Tabs) ===")
     print("[INFO] Inicializando sistema...")
 
     utils.ensure_certificates()
 
-    # 1. Thread do Navegador (Playwright Async)
-    t_browser = threading.Thread(target=start_browser_thread)
+    t_browser = threading.Thread(target=start_browser_thread, args=(browser,))
     t_browser.daemon = True
     t_browser.start()
 
-    # 2. Thread do Servidor HTTP (Porta 3003)
-    t_http = threading.Thread(target=start_http_server)
+    t_http = threading.Thread(target=start_http_server, args=(config, server))
     t_http.daemon = True
     t_http.start()
 
     utils.setup_frontend()
 
     local_ip = get_local_ip()
-    print(f"\n[SERVIDOR ONLINE]")
-    print(f" 🔒 HTTPS (Seguro):   https://localhost:{config.PORT}")
+    local_https_url = f"https://localhost:{config.PORT}"
+    print("\n[SERVIDOR ONLINE]")
+    print(f" 🔒 HTTPS (Seguro):   {local_https_url}")
     print(f" 🌍 HTTP (Remoto):    http://{local_ip}:{config.PORT + 1}")
-    print(f"\n[ADMIN] User: admin | Pass: 32713091")
+    print("\n[ADMIN] User: admin | Pass: 32713091")
     print("--------------------------------------------------\n")
 
-    # 3. Processo Principal: Servidor HTTPS (Porta 3002)
+    open_urls_when_server_is_ready(config.PORT, [local_https_url])
+
     try:
         ssl_context = (config.CERT_FILE, config.KEY_FILE)
         server.app.run(host="0.0.0.0", port=config.PORT, debug=False, use_reloader=False, ssl_context=ssl_context)
