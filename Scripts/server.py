@@ -41,7 +41,7 @@ import logging
 from flask import Flask, request, jsonify, Response, send_from_directory, stream_with_context, make_response
 from flask_cors import CORS
 import config
-from shared import browser_queue
+from shared import browser_queue, get_file_info
 import storage
 import auth
 from utils import log as file_log
@@ -368,6 +368,84 @@ def upload_avatar():
 @app.route("/api/user/avatar/<filename>")
 def get_avatar(filename):
     return send_from_directory(config.DIRS["users"], filename)
+
+@app.route("/api/downloads/<file_id>")
+def serve_download(file_id):
+    """
+    Proxy sob demanda: busca o arquivo do ChatGPT via browser.py
+    (usando cookies/auth do Playwright) e faz streaming para o cliente.
+    Nenhum arquivo é armazenado permanentemente em disco.
+    """
+    info = get_file_info(file_id)
+    if not info:
+        return jsonify({"error": "Arquivo não registrado. O link pode ter expirado."}), 404
+
+    file_url = info["url"]
+    file_name = info["name"]
+
+    # Cria fila de resposta para esta requisição
+    response_queue = queue.Queue()
+
+    # Envia tarefa de download para browser.py
+    browser_queue.put({
+        "action": "DOWNLOAD_FILE",
+        "file_url": file_url,
+        "file_name": file_name,
+        "stream_queue": response_queue,
+    })
+
+    # Aguarda resposta do browser.py (timeout: 60s)
+    result_data = None
+    error_msg = None
+    deadline = time.time() + 60
+
+    while time.time() < deadline:
+        try:
+            raw = response_queue.get(timeout=2)
+            if raw is None:
+                break  # Sentinel: browser.py terminou
+            evt = json.loads(raw) if isinstance(raw, str) else raw
+            evt_type = evt.get("type", "")
+            content = evt.get("content", "")
+
+            if evt_type == "file_data":
+                result_data = content
+                break
+            elif evt_type == "error":
+                error_msg = content
+                break
+        except queue.Empty:
+            continue
+
+    if error_msg:
+        return jsonify({"error": error_msg}), 502
+
+    if not result_data:
+        return jsonify({"error": "Timeout ao baixar arquivo do ChatGPT."}), 504
+
+    # Decodifica dados base64 e envia ao cliente
+    raw_bytes = base64.b64decode(result_data["data_b64"])
+    content_type = result_data.get("content_type", "application/octet-stream")
+    display_name = result_data.get("name", file_name)
+
+    # Extensão → mime fallback
+    ext = os.path.splitext(display_name)[1].lower().lstrip('.')
+    mime_map = {
+        'xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        'xls': 'application/vnd.ms-excel', 'csv': 'text/csv',
+        'pdf': 'application/pdf', 'png': 'image/png',
+        'jpg': 'image/jpeg', 'jpeg': 'image/jpeg',
+        'zip': 'application/zip', 'json': 'application/json',
+    }
+    if content_type == 'application/octet-stream' and ext in mime_map:
+        content_type = mime_map[ext]
+
+    resp = make_response(raw_bytes)
+    resp.headers['Content-Type'] = content_type
+    resp.headers['Content-Disposition'] = f'attachment; filename="{display_name}"'
+    resp.headers['Content-Length'] = len(raw_bytes)
+    resp.headers['Cache-Control'] = 'no-cache'
+    return resp
 
 # --- ROTAS GERAIS ---
 

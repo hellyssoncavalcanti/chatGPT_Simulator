@@ -79,7 +79,7 @@ _ensure("numpy")
 # ─────────────────────────────────────────────────────────────
 # IMPORTS NORMAIS
 # ─────────────────────────────────────────────────────────────
-import time, json, logging, re, html as html_mod, requests, hashlib, shutil
+import time, json, logging, re, html as html_mod, requests, hashlib, shutil, os
 from collections import Counter
 from html.parser import HTMLParser
 from datetime import datetime
@@ -201,6 +201,110 @@ def _parse_json_llm(texto: str) -> dict:
     except json.JSONDecodeError:
         candidato_normalizado = _normalizar_json_llm(candidato)
         return json.loads(candidato_normalizado)
+
+
+def _json_parece_incompleto(texto: str) -> bool:
+    """Heurística para identificar respostas JSON possivelmente truncadas/incompletas."""
+    bruto = _strip_code_fences(texto or "").strip()
+    if not bruto or not bruto.startswith('{'):
+        return False
+
+    depth_obj = 0
+    depth_arr = 0
+    in_string = False
+    escape = False
+    for ch in bruto:
+        if in_string:
+            if escape:
+                escape = False
+            elif ch == '\\':
+                escape = True
+            elif ch == '"':
+                in_string = False
+            continue
+
+        if ch == '"':
+            in_string = True
+        elif ch == '{':
+            depth_obj += 1
+        elif ch == '}':
+            depth_obj -= 1
+        elif ch == '[':
+            depth_arr += 1
+        elif ch == ']':
+            depth_arr -= 1
+
+    return in_string or depth_obj > 0 or depth_arr > 0 or not bruto.rstrip().endswith('}')
+
+
+def _salvar_debug_json_falha(id_atendimento: int | None, etapa: str, markdown: str, erro: Exception | str):
+    """Salva artefatos para depurar falhas de parse JSON da resposta da LLM."""
+    os.makedirs('logs/json_debug', exist_ok=True)
+    ts = datetime.now().strftime('%d_%m_%Y-%H_%M_%S')
+    prefix = f"{id_atendimento or 'sem_id'}-{etapa}-{ts}"
+    path_md = os.path.join('logs', 'json_debug', f'{prefix}.md.txt')
+    path_meta = os.path.join('logs', 'json_debug', f'{prefix}.meta.json')
+
+    bruto = markdown or ''
+    candidato = _extrair_bloco_json(bruto)
+    normalizado = _normalizar_json_llm(candidato) if candidato else ''
+    meta = {
+        'id_atendimento': id_atendimento,
+        'etapa': etapa,
+        'erro': str(erro),
+        'json_parece_incompleto': _json_parece_incompleto(bruto),
+        'tem_bloco_json': bool(candidato),
+        'tamanho_markdown': len(bruto),
+        'tamanho_candidato_json': len(candidato),
+        'tamanho_json_normalizado': len(normalizado),
+        'markdown_preview': re.sub(r'\s+', ' ', _strip_code_fences(bruto))[:1200],
+        'json_preview': re.sub(r'\s+', ' ', candidato)[:1200],
+    }
+
+    with open(path_md, 'w', encoding='utf-8') as f:
+        f.write(bruto)
+    with open(path_meta, 'w', encoding='utf-8') as f:
+        json.dump(meta, f, ensure_ascii=False, indent=2)
+
+    return path_md, path_meta, meta
+
+
+def _reativar_esgotados_recuperaveis_no_startup():
+    """Reprocessa automaticamente erros esgotados com alta chance de recuperação."""
+    resultado = sql_exec(
+        f"""
+        UPDATE {TABELA}
+        SET
+            status = 'pendente',
+            tentativas = 0,
+            datetime_analise_iniciada = NULL,
+            erro_msg = CONCAT(
+                COALESCE(erro_msg, ''),
+                ' | [AUTO-REQUEUE-RECOVERABLE] ',
+                NOW(),
+                ' recolocado em pendente para nova tentativa de parse/stream'
+            )
+        WHERE
+            id_atendimento IS NOT NULL
+            AND status = 'erro'
+            AND tentativas >= {MAX_TENTATIVAS}
+            AND COALESCE(erro_msg, '') NOT LIKE '%[AUTO-REQUEUE-RECOVERABLE]%'
+            AND (
+                LOWER(COALESCE(erro_msg, '')) LIKE '%simulador não retornou conteúdo markdown%'
+                OR LOWER(COALESCE(erro_msg, '')) LIKE '%llm não retornou json válido%'
+                OR LOWER(COALESCE(erro_msg, '')) LIKE '%llm não retornou bloco json%'
+                OR LOWER(COALESCE(erro_msg, '')) LIKE '%expecting '', delimiter%'
+                OR LOWER(COALESCE(erro_msg, '')) LIKE '%expecting property name enclosed in double quotes%'
+                OR LOWER(COALESCE(erro_msg, '')) LIKE '%unterminated string%'
+                OR LOWER(COALESCE(erro_msg, '')) LIKE '%invalid control character%'
+                OR LOWER(COALESCE(erro_msg, '')) LIKE '%extra data%'
+            )
+        """
+    )
+    afetados = resultado.get('affected_rows', 0)
+    if afetados:
+        log.warning(f"♻️ {afetados} registro(s) esgotado(s) com erro recuperável foram recolocados em pendente no startup.")
+    return afetados
 
 
 def _decode_json_string_fragment(value: str) -> str:
@@ -1004,6 +1108,34 @@ def _normalizar_motivo_esgotado(erro_msg: str) -> str:
     ]
     motivo = (partes_validas[-1] if partes_validas else partes[-1] if partes else texto).strip()
     motivo = re.sub(r"\s+", " ", motivo)
+    motivo_lower = motivo.lower()
+
+    if "texto insuficiente após remoção de html" in motivo_lower:
+        return "Prontuário ficou insuficiente após limpeza/remoção de HTML."
+
+    if (
+        "simulador não retornou conteúdo markdown" in motivo_lower
+        or "llm não retornou conteúdo markdown" in motivo_lower
+    ):
+        return "LLM não retornou resposta final em markdown utilizável."
+
+    if (
+        "llm não retornou json válido" in motivo_lower
+        or "llm não retornou bloco json" in motivo_lower
+        or "expecting ',' delimiter" in motivo_lower
+        or "expecting property name enclosed in double quotes" in motivo_lower
+        or "unterminated string" in motivo_lower
+        or "invalid control character" in motivo_lower
+        or "extra data" in motivo_lower
+    ):
+        return "LLM retornou JSON inválido/malformado para o schema esperado."
+
+    if "api_exec recusou" in motivo_lower or "execute_sql recusou" in motivo_lower:
+        return "Falha de persistência/execução SQL ao salvar ou consultar a análise."
+
+    if "simulador retornou erro" in motivo_lower:
+        return "ChatGPT Simulator retornou erro durante a análise."
+
     return motivo[:180] + ("..." if len(motivo) > 180 else "")
 
 
@@ -1023,6 +1155,7 @@ def buscar_pendentes() -> dict:
         SELECT
             COUNT(*) AS total_tabela,
             SUM(la.id_atendimento IS NULL) AS total_analises_compiladas_paciente,
+            SUM(la.id_atendimento IS NULL AND la.status IN ('pendente', 'erro') AND (la.status = 'pendente' OR la.tentativas < {MAX_TENTATIVAS})) AS total_compiladas_pendentes,
             SUM(
                 la.id_atendimento IS NOT NULL
                 AND la.status = 'concluido'
@@ -1099,10 +1232,25 @@ def buscar_pendentes() -> dict:
         LIMIT 200
     """)
 
+    # Buscar sínteses compiladas de pacientes pendentes (id_atendimento IS NULL)
+    compiladas_pendentes = sql_exec(f"""
+        SELECT la.id, la.id_paciente
+        FROM {TABELA} la
+        WHERE
+            la.id_atendimento IS NULL
+            AND la.id_criador IS NULL
+            AND la.status IN ('pendente', 'erro')
+            AND (la.status = 'pendente' OR la.tentativas < {MAX_TENTATIVAS})
+        ORDER BY la.datetime_analise_criacao ASC
+        LIMIT {BATCH_SIZE}
+    """, reason="buscar_compiladas_pendentes")
+
     return {
         "pendentes":            data.get("data", []),
+        "compiladas_pendentes": compiladas_pendentes.get("data", []),
         "total_tabela":         int(row.get("total_tabela")         or 0),
         "total_analises_compiladas_paciente": int(row.get("total_analises_compiladas_paciente") or 0),
+        "total_compiladas_pendentes": int(row.get("total_compiladas_pendentes") or 0),
         "total_concluidos":     int(row.get("total_concluidos")     or 0),
         "total_pendentes":      int(row.get("total_pendentes")      or 0),
         "total_processando":    int(row.get("total_processando")    or 0),
@@ -1192,14 +1340,19 @@ def enfileirar_atendimentos_antigos(id_paciente: str) -> int:
 
 
 def contar_atendimentos_nao_concluidos_paciente(id_paciente: str) -> int:
-    """Conta atendimentos do paciente que ainda não chegaram ao status concluído."""
+    """Conta atendimentos do paciente que ainda não chegaram ao status concluído.
+    Exclui análises com erro esgotado (tentativas >= MAX_TENTATIVAS) que nunca serão
+    reprocessadas automaticamente — essas não devem bloquear a síntese compilada."""
     try:
         resp = sql_exec(f"""
             SELECT COUNT(*) AS total
             FROM {TABELA}
             WHERE id_paciente = '{esc(id_paciente)}'
               AND id_atendimento IS NOT NULL
-              AND status IN ('pendente', 'processando', 'erro')
+              AND (
+                  status IN ('pendente', 'processando')
+                  OR (status = 'erro' AND tentativas < {MAX_TENTATIVAS})
+              )
         """, reason="contar_atendimentos_nao_concluidos_paciente")
         data = resp.get("data") or []
         if not data:
@@ -3412,9 +3565,16 @@ def analisar_prontuario(texto: str, chat_url: str = None, chat_id: str = None, c
     try:
         resultado = _parse_json_llm(markdown)
     except Exception as parse_err:
+        path_md, path_meta, meta = _salvar_debug_json_falha(
+            idatendimento,
+            "analise_principal",
+            markdown,
+            parse_err,
+        )
         preview = re.sub(r"\s+", " ", _strip_code_fences(markdown))[:500]
         raise ValueError(
-            f"LLM não retornou JSON válido ({parse_err}). Prévia: {preview}"
+            f"LLM não retornou JSON válido ({parse_err}). "
+            f"incompleto={meta['json_parece_incompleto']} | debug: {path_md} | {path_meta} | Prévia: {preview}"
         ) from parse_err
 
     resultado["_chat_id"]       = new_chat_id
@@ -4370,9 +4530,16 @@ def enriquecer_com_evidencias(resultado: dict, resultados_web: list,
         try:
             enriquecido = _parse_json_llm(markdown)
         except Exception as parse_err:
+            path_md, path_meta, meta = _salvar_debug_json_falha(
+                resultado.get('_id_atendimento'),
+                "enriquecimento_evidencias",
+                markdown,
+                parse_err,
+            )
             preview = re.sub(r"\s+", " ", _strip_code_fences(markdown))[:500]
             log.warning(
-                f"  ⚠️ Enriquecimento: LLM não retornou JSON válido ({parse_err}). Prévia: {preview}"
+                f"  ⚠️ Enriquecimento: LLM não retornou JSON válido ({parse_err}). "
+                f"incompleto={meta['json_parece_incompleto']} | debug: {path_md} | {path_meta} | Prévia: {preview}"
             )
             return resultado
 
@@ -4617,6 +4784,7 @@ def main():
     garantir_migracoes()                         # corrige tipos de colunas em tabelas pré-existentes
     garantir_tabela_embeddings()                 # garante tabelas de embeddings + casos semelhantes
     resetar_analises_interrompidas_no_startup()  # limpa inícios de análise sem conclusão válida após quedas/interrupções
+    _reativar_esgotados_recuperaveis_no_startup() # recoloca erros recuperáveis em pendente para nova tentativa
 
     llm_estava_fora = False   # rastreia se houve queda para logar a reconexão
     ciclo = 0
@@ -4656,6 +4824,7 @@ def main():
             log.info(f"   📊 Prontuários na fila : {resultado['total_tabela']}")
             log.info(f"   🧬 Análises compiladas   : {resultado['total_analises_compiladas_paciente']}")
             log.info(f"   ✅ Concluídos/atualizados : {resultado['total_concluidos']}")
+            compiladas_pendentes = resultado.get("compiladas_pendentes", [])
             log.info(f"   🕐 Aguardando análise     : {resultado['total_pendentes']}")
             log.info(f"   🔄 Em processamento       : {resultado['total_processando']}")
             log.info(f"   🔁 Prontuários editados   : {resultado['total_desatualizados']}  (reanálise pendente)")
@@ -4663,10 +4832,22 @@ def main():
             log.info(f"   🚫 Esgotados (sem retentativa): {resultado['total_esgotados']}")
             for item in resultado.get("motivos_esgotados", []):
                 log.info(f"      ↳ {item['total']}x motivo: {item['motivo']}")
+            if compiladas_pendentes:
+                log.info(f"   🧬 Sínteses compiladas pendentes: {len(compiladas_pendentes)}")
 
             if pendentes:
                 log.info(f"   ▶  {len(pendentes)} prontuário(s) serão processados agora.")
                 processar_lote(pendentes)
+            elif compiladas_pendentes:
+                log.info(f"   🧬 Nenhum prontuário individual pendente. Processando {len(compiladas_pendentes)} síntese(s) compilada(s)...")
+                for comp in compiladas_pendentes:
+                    id_pac = comp.get("id_paciente")
+                    if not id_pac:
+                        continue
+                    try:
+                        atualizar_analise_compilada_paciente(str(id_pac))
+                    except Exception as e:
+                        log.warning(f"  ⚠️ Síntese compilada do paciente {id_pac} falhou: {e}")
             else:
                 log.info(f"   💤 Nenhum prontuário pendente. Próxima verificação em {POLL_INTERVAL}s.")
 

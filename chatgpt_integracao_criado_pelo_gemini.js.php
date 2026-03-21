@@ -2406,6 +2406,99 @@ if (isset($_GET['action']) && $_GET['action'] === 'delete_simulator_chat') {
 }
 
 // -----------------------------------------------------
+// PROXY HANDLER: DOWNLOAD DE ARQUIVOS DO CHATGPT SIMULATOR
+// -----------------------------------------------------
+if (isset($_GET['action']) && $_GET['action'] === 'download_file') {
+    while (ob_get_level()) ob_end_clean();
+
+    $filename = basename($_GET['name'] ?? '');
+    if (empty($filename) || preg_match('/[^a-zA-Z0-9._\-]/', $filename)) {
+        http_response_code(400);
+        header('Content-Type: application/json');
+        echo json_encode(['error' => 'Nome de arquivo inválido']); exit;
+    }
+
+    // Resolve IP do ChatGPT Simulator (porta 3003)
+    global $ollama_manual_ip;
+    $sim_base = '';
+    if (!empty($ollama_manual_ip)) {
+        $sim_base = preg_replace('/:\d+$/', ':3003', rtrim($ollama_manual_ip, '/'));
+    } else {
+        $url_monitor = "http://conexaovida.org/no-ip-dynamic_ip.php?port=3003";
+        $ch = curl_init($url_monitor);
+        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+        curl_setopt($ch, CURLOPT_FOLLOWLOCATION, true);
+        curl_setopt($ch, CURLOPT_HEADER, true);
+        curl_setopt($ch, CURLOPT_TIMEOUT, 5);
+        $raw = curl_exec($ch);
+        $eff = curl_getinfo($ch, CURLINFO_EFFECTIVE_URL);
+        curl_close($ch);
+        $ip = null;
+        if (preg_match('/(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})/', $eff, $m)) $ip = $m[1];
+        elseif (preg_match('/(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})/', $raw ?? '', $m)) $ip = $m[1];
+        if ($ip && filter_var($ip, FILTER_VALIDATE_IP)) $sim_base = "http://{$ip}:3003";
+    }
+
+    if (empty($sim_base)) {
+        http_response_code(502);
+        header('Content-Type: application/json');
+        echo json_encode(['error' => 'ChatGPT Simulator não disponível']); exit;
+    }
+
+    $download_url = rtrim($sim_base, '/') . "/api/downloads/" . urlencode($filename);
+    $ch = curl_init($download_url);
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($ch, CURLOPT_FOLLOWLOCATION, true);
+    curl_setopt($ch, CURLOPT_TIMEOUT, 90); // Timeout longo: browser.py faz proxy sob demanda via ChatGPT
+    curl_setopt($ch, CURLOPT_HEADER, true);
+    $response = curl_exec($ch);
+    $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    $header_size = curl_getinfo($ch, CURLINFO_HEADER_SIZE);
+    curl_close($ch);
+
+    if ($http_code !== 200 || $response === false) {
+        http_response_code($http_code ?: 502);
+        header('Content-Type: application/json');
+        echo json_encode(['error' => 'Arquivo não encontrado no servidor']); exit;
+    }
+
+    $headers_raw = substr($response, 0, $header_size);
+    $body = substr($response, $header_size);
+
+    // Detectar content-type do arquivo
+    $content_type = 'application/octet-stream';
+    if (preg_match('/Content-Type:\s*([^\r\n]+)/i', $headers_raw, $ct)) {
+        $content_type = trim($ct[1]);
+    }
+
+    // Extensão → mime fallback
+    $ext = strtolower(pathinfo($filename, PATHINFO_EXTENSION));
+    $mime_map = [
+        'xlsx' => 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        'xls'  => 'application/vnd.ms-excel',
+        'csv'  => 'text/csv',
+        'pdf'  => 'application/pdf',
+        'png'  => 'image/png',
+        'jpg'  => 'image/jpeg',
+        'jpeg' => 'image/jpeg',
+        'gif'  => 'image/gif',
+        'zip'  => 'application/zip',
+        'txt'  => 'text/plain',
+        'json' => 'application/json',
+    ];
+    if ($content_type === 'application/octet-stream' && isset($mime_map[$ext])) {
+        $content_type = $mime_map[$ext];
+    }
+
+    header("Content-Type: {$content_type}");
+    header("Content-Disposition: attachment; filename=\"{$filename}\"");
+    header("Content-Length: " . strlen($body));
+    header("Cache-Control: no-cache");
+    echo $body;
+    exit;
+}
+
+// -----------------------------------------------------
 // PROXY HANDLER (CHAT MODE)
 // -----------------------------------------------------
 if (isset($_GET['action']) && $_GET['action'] === 'proxy') {
@@ -3348,6 +3441,165 @@ header('Content-Type: application/javascript; charset=utf-8');
         .sb-view { display: none; animation: fadeIn 0.3s; }
         .sb-view.active { display: block; }
         @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+
+        /* ── Tabelas renderizadas pelo marked.js (planilhas, etc.) ── */
+        .msg-ai .ow-table-scroll {
+            overflow-x: auto;
+            -webkit-overflow-scrolling: touch;
+            margin: 8px 0;
+            max-width: 100%;
+        }
+        .msg-ai table {
+            border-collapse: collapse;
+            min-width: 100%;
+            font-size: 13px;
+            white-space: nowrap;
+        }
+        .msg-ai th, .msg-ai td {
+            border: 1px solid #d0d0d0;
+            padding: 6px 10px;
+            text-align: left;
+        }
+        .msg-ai th {
+            background: #1e3a5f;
+            color: #fff;
+            font-weight: 600;
+            position: sticky;
+            top: 0;
+        }
+        .msg-ai tr:nth-child(even) { background: #f5f7fa; }
+        .msg-ai tr:hover { background: #e8f0fe; }
+
+        /* ── Link de download de arquivo ── */
+        .msg-ai .ow-file-download {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            background: #f0f4ff;
+            border: 1px solid #c2d4f0;
+            border-radius: 8px;
+            padding: 8px 14px;
+            margin: 6px 0;
+            color: #1a5bb5;
+            text-decoration: none;
+            font-size: 13px;
+            font-weight: 500;
+            transition: background 0.15s;
+        }
+        .msg-ai .ow-file-download:hover { background: #dce6f8; }
+        .msg-ai .ow-file-download::before { content: '📎'; font-size: 16px; }
+
+        /* ── Screenshot thumbnails ── */
+        .ow-screenshot-strip {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 6px;
+            margin-top: 8px;
+            padding: 6px 0;
+        }
+        .ow-screenshot-thumb {
+            width: 120px;
+            height: 68px;
+            object-fit: cover;
+            border-radius: 6px;
+            border: 2px solid #c2d4f0;
+            cursor: pointer;
+            transition: transform 0.15s ease, box-shadow 0.15s ease;
+            flex-shrink: 0;
+        }
+        .ow-screenshot-thumb:hover {
+            transform: scale(1.05);
+            box-shadow: 0 2px 8px rgba(0,0,0,0.2);
+            border-color: #1a73e8;
+        }
+
+        /* ── Screenshot fullscreen overlay ── */
+        #ow-screenshot-overlay {
+            position: fixed;
+            top: 0; left: 0; right: 0; bottom: 0;
+            z-index: 999999;
+            background: rgba(0,0,0,0.85);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            opacity: 0;
+            pointer-events: none;
+            transition: opacity 0.25s ease;
+        }
+        #ow-screenshot-overlay.active {
+            opacity: 1;
+            pointer-events: auto;
+        }
+        #ow-screenshot-overlay img {
+            max-width: 92vw;
+            max-height: 90vh;
+            border-radius: 8px;
+            box-shadow: 0 4px 24px rgba(0,0,0,0.5);
+            transform: scale(0.3);
+            transition: transform 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
+        }
+        #ow-screenshot-overlay.active img {
+            transform: scale(1);
+        }
+        #ow-screenshot-overlay .ow-overlay-close {
+            position: absolute;
+            top: 16px;
+            right: 20px;
+            width: 40px;
+            height: 40px;
+            border-radius: 50%;
+            border: none;
+            background: rgba(255,255,255,0.2);
+            color: #fff;
+            font-size: 24px;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: background 0.2s;
+        }
+        #ow-screenshot-overlay .ow-overlay-close:hover {
+            background: rgba(255,255,255,0.4);
+        }
+
+        /* ── Mobile: portrait ── */
+        @media (max-width: 480px) {
+            #ow-window {
+                width: calc(100vw - 16px) !important;
+                height: 70vh !important;
+                right: -12px !important;
+                bottom: 70px !important;
+                border-radius: 10px;
+            }
+            #ow-toggle-btn { width: 50px; height: 50px; font-size: 20px; }
+            #ow-input { font-size: 16px; }
+        }
+
+        /* ── Mobile: landscape ── */
+        @media (max-height: 500px) and (orientation: landscape) {
+            #ow-widget { bottom: 8px; right: 8px; }
+            #ow-window {
+                width: 70vw !important;
+                height: calc(100vh - 16px) !important;
+                bottom: -8px !important;
+                right: 0 !important;
+                border-radius: 10px;
+            }
+            #ow-window.maximized {
+                width: 98vw !important;
+                height: calc(100vh - 8px) !important;
+                bottom: 4px !important;
+                right: 1vw !important;
+            }
+            #ow-header { padding: 8px 12px; }
+            #ow-messages { padding: 10px; gap: 8px; }
+            #ow-input-area { padding: 8px 10px; gap: 6px; }
+            #ow-input { height: 36px; padding: 8px; font-size: 14px; }
+            #ow-send { height: 36px; padding: 0 14px; font-size: 13px; }
+            #ow-mic { width: 36px; height: 36px; font-size: 16px; }
+            #ow-toggle-btn { width: 44px; height: 44px; font-size: 18px; }
+            .msg { font-size: 13px; padding: 8px 10px; }
+        }
     `;
     const stTag = document.createElement("style"); stTag.innerHTML = css; document.head.appendChild(stTag);
 
@@ -3816,6 +4068,10 @@ header('Content-Type: application/javascript; charset=utf-8');
                         Session.setChat(fd.chat_id, fd.url, null);
                         return;
                     }
+                    else if (chunk.type === 'screenshot') {
+                        if (typeof updateScreenshotThumb === 'function') updateScreenshotThumb(uiNew.mID, chunk.content);
+                        return;
+                    }
                     if (c) {
                         const mEl = document.getElementById(uiNew.mID);
                         if (mEl) mEl.innerHTML = formatMarkdown(fullC);
@@ -4077,13 +4333,36 @@ header('Content-Type: application/javascript; charset=utf-8');
         return text.replace(/\x00IC(\d+)\x00/g, (_, i) => ic[i]);
     }
 
+    /**
+     * Pós-processamento: tabelas em container scrollável + links de download estilizados.
+     */
+    const _phpSelf = "<?php echo $_SERVER['PHP_SELF']; ?>";
+    function _postProcessHtml(html) {
+        // 1) Envolve <table> em div scrollável horizontalmente
+        html = html.replace(/<table\b/g, '<div class="ow-table-scroll"><table')
+                   .replace(/<\/table>/g, '</table></div>');
+
+        // 2) Reescreve URLs /api/downloads/ para usar o proxy PHP
+        html = html.replace(
+            /href="\/api\/downloads\/([^"]+)"/gi,
+            (_, fname) => `href="${_phpSelf}?action=download_file&name=${encodeURIComponent(fname)}"`
+        );
+
+        // 3) Links de download de arquivos → botão estilizado
+        html = html.replace(
+            /<a\s+href="([^"]*action=download_file[^"]+)"[^>]*>([^<]+)<\/a>/gi,
+            '<a class="ow-file-download" href="$1" target="_blank" download>$2</a>'
+        );
+        return html;
+    }
+
     function formatMarkdown(text) {
         if (!text) return '';
 
         // ── Prioridade: marked.js (confiável, full CommonMark + GFM) ───────────
         if (typeof marked !== 'undefined') {
             try {
-                return marked.parse(text, { breaks: true, gfm: true });
+                return _postProcessHtml(marked.parse(text, { breaks: true, gfm: true }));
             } catch(e) {
                 console.warn('[formatMarkdown] marked.js erro, usando fallback:', e.message);
             }
@@ -4617,7 +4896,10 @@ header('Content-Type: application/javascript; charset=utf-8');
                     }
                 } else if (row.status === 'pendente' || row.status === 'processando') {
                     // Se há erro_msg de tentativa anterior, exibe o erro prévio junto ao aviso de pendente
-                    const priorError = extractAnaliseRetryReason(row.erro_msg || '');
+                    const _erroMsgRaw = String(row.erro_msg || '').trim();
+                    const priorError = typeof extractAnaliseRetryReason === 'function'
+                        ? extractAnaliseRetryReason(_erroMsgRaw)
+                        : _erroMsgRaw;
                     if (priorError) {
                         row.retryRequested = true;
                         row.previousError  = priorError;
@@ -4732,7 +5014,10 @@ header('Content-Type: application/javascript; charset=utf-8');
                     }
                 } else if (row.status === 'pendente' || row.status === 'processando') {
                     // Se há erro_msg de tentativa anterior, exibe o erro prévio junto ao aviso de pendente
-                    const priorError = extractAnaliseRetryReason(row.erro_msg || '');
+                    const _erroMsgRaw2 = String(row.erro_msg || '').trim();
+                    const priorError = typeof extractAnaliseRetryReason === 'function'
+                        ? extractAnaliseRetryReason(_erroMsgRaw2)
+                        : _erroMsgRaw2;
                     if (priorError) {
                         row.retryRequested = true;
                         row.previousError  = priorError;
@@ -5597,6 +5882,71 @@ header('Content-Type: application/javascript; charset=utf-8');
             </div>
             <div id="${mID}" class="cursor-blink"></div>`;
         b.appendChild(wrap); return { tID, mID, hID };
+    }
+
+    // ── Screenshot overlay (singleton) ──────────────────────────────────
+    (function _initScreenshotOverlay() {
+        if (document.getElementById('ow-screenshot-overlay')) return;
+        const ov = document.createElement('div');
+        ov.id = 'ow-screenshot-overlay';
+        ov.innerHTML = `<button class="ow-overlay-close" title="Fechar">&times;</button><img src="" alt="screenshot"/>`;
+        ov.querySelector('.ow-overlay-close').onclick = () => ov.classList.remove('active');
+        ov.addEventListener('click', (e) => { if (e.target === ov) ov.classList.remove('active'); });
+        document.body.appendChild(ov);
+    })();
+
+    /**
+     * Exibe/atualiza thumbnail de screenshot dentro da mensagem AI corrente.
+     * @param {string} mID - ID do elemento .cursor-blink da mensagem
+     * @param {{label:string, format:string, data_base64:string, url:string, captured_at:number}} data
+     */
+    function updateScreenshotThumb(mID, data) {
+        const mEl = document.getElementById(mID);
+        if (!mEl) return;
+        const wrap = mEl.closest('.msg-ai') || mEl.parentElement;
+        if (!wrap) return;
+
+        // Garante strip container
+        let strip = wrap.querySelector('.ow-screenshot-strip');
+        if (!strip) {
+            strip = document.createElement('div');
+            strip.className = 'ow-screenshot-strip';
+            wrap.appendChild(strip);
+        }
+
+        const src = 'data:image/jpeg;base64,' + data.data_base64;
+
+        // Atualiza a última thumb se for do mesmo label e < 3s de diferença, senão cria nova
+        const existing = strip.querySelectorAll('.ow-screenshot-thumb');
+        const last = existing.length ? existing[existing.length - 1] : null;
+        if (last && last.dataset.label === data.label) {
+            last.src = src;
+            last.dataset.ts = data.captured_at;
+        } else {
+            const img = document.createElement('img');
+            img.className = 'ow-screenshot-thumb';
+            img.src = src;
+            img.dataset.label = data.label;
+            img.dataset.ts = data.captured_at;
+            img.title = data.url ? data.url.substring(0, 80) : data.label;
+            img.onclick = () => _expandScreenshot(img);
+            strip.appendChild(img);
+        }
+        scroll();
+    }
+
+    function _expandScreenshot(thumbEl) {
+        const ov = document.getElementById('ow-screenshot-overlay');
+        if (!ov) return;
+        const ovImg = ov.querySelector('img');
+        ovImg.src = thumbEl.src;
+
+        // Calcula posição inicial do thumb para animação de origem
+        const rect = thumbEl.getBoundingClientRect();
+        const cx = rect.left + rect.width / 2;
+        const cy = rect.top + rect.height / 2;
+        ovImg.style.transformOrigin = `${cx}px ${cy}px`;
+        ov.classList.add('active');
     }
 
     function appendAssistantMarkdown(markdown) {
@@ -6954,6 +7304,7 @@ header('Content-Type: application/javascript; charset=utf-8');
                 if (chunk.type === 'markdown' || chunk.type === 'html') { fullC = chunk.content; c = fullC; }
                 else if (chunk.choices?.[0]?.delta?.content) { c = chunk.choices[0].delta.content; fullC += c; }
                 else if (chunk.type === 'finish') { const fd = chunk.content||{}; Session.setChat(fd.chat_id, fd.url, null); return; }
+                else if (chunk.type === 'screenshot') { if (typeof updateScreenshotThumb === 'function') updateScreenshotThumb(uiNew.mID, chunk.content); return; }
                 if (c) { const mEl = document.getElementById(uiNew.mID); if (mEl) mEl.innerHTML = formatMarkdown(fullC); scroll(); }
             }, currentAbortController?.signal);
 
@@ -7045,6 +7396,7 @@ header('Content-Type: application/javascript; charset=utf-8');
                     if (chunk.type === 'markdown' || chunk.type === 'html') { fullC = chunk.content; c = fullC; }
                     else if (chunk.choices?.[0]?.delta?.content) { c = chunk.choices[0].delta.content; fullC += c; }
                     else if (chunk.type === 'finish') { const fd = chunk.content||{}; Session.setChat(fd.chat_id, fd.url, null); return; }
+                    else if (chunk.type === 'screenshot') { if (typeof updateScreenshotThumb === 'function') updateScreenshotThumb(uiNew.mID, chunk.content); return; }
                     if (c) { const mEl = document.getElementById(uiNew.mID); if (mEl) mEl.innerHTML = formatMarkdown(fullC); scroll(); }
                 }, currentAbortController?.signal);
 
@@ -7485,6 +7837,10 @@ header('Content-Type: application/javascript; charset=utf-8');
                         Session.setChat(fd.chat_id, fd.url, null);
                         return;
 
+                    } else if (chunk.type === 'screenshot') {
+                        if (typeof updateScreenshotThumb === 'function') updateScreenshotThumb(ui.mID, chunk.content);
+                        return;
+
                     } else if (chunk.choices?.[0]?.delta) {
                         c = chunk.choices[0].delta.content || '';
                         const r = chunk.choices[0].delta.reasoning_content || '';
@@ -7510,7 +7866,7 @@ header('Content-Type: application/javascript; charset=utf-8');
 
                     const mEl = document.getElementById(ui.mID);
                     if (mEl) {
-                        mEl.innerHTML = fullC.trim().startsWith(('<div>').slice(0, -1)) ? fullC : formatMarkdown(fullC);
+                        mEl.innerHTML = fullC.trim().startsWith(('<div>').slice(0, -1)) ? _postProcessHtml(fullC) : formatMarkdown(fullC);
                     }
                     scroll();
                 }
@@ -7547,7 +7903,7 @@ header('Content-Type: application/javascript; charset=utf-8');
             const mEl = document.getElementById(ui.mID);
             if (mEl) {
                 mEl.classList.remove('cursor-blink');
-                mEl.innerHTML = fullC.trim().startsWith(('<div>').slice(0, -1)) ? fullC : formatMarkdown(fullC);
+                mEl.innerHTML = fullC.trim().startsWith(('<div>').slice(0, -1)) ? _postProcessHtml(fullC) : formatMarkdown(fullC);
             }
             if (typeof injectSearchButtons === 'function') setTimeout(() => injectSearchButtons(), 0);
             if (fullT) document.getElementById(ui.tID).innerText = fullT;

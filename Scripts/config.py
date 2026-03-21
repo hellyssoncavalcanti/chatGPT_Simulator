@@ -38,7 +38,8 @@ DIRS = {
     "users": os.path.join(BASE_DIR, "db", "users"), # Novo diretório
     "logs": os.path.join(BASE_DIR, "logs"),
     "profile": os.path.join(BASE_DIR, "chrome_profile"),
-    "temp": os.path.join(BASE_DIR, "temp")
+    "temp": os.path.join(BASE_DIR, "temp"),
+    "downloads": os.path.join(BASE_DIR, "downloads")
 }
 
 CHATS_FILE = os.path.join(DIRS["db"], "history.json")
