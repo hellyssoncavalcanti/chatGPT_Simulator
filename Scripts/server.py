@@ -38,6 +38,7 @@ import shutil
 import time
 import copy
 import logging
+from urllib.parse import urlparse
 from flask import Flask, request, jsonify, Response, send_from_directory, stream_with_context, make_response
 from flask_cors import CORS
 import config
@@ -243,6 +244,24 @@ def _execute_single_uptodate_search(query_str, stream_queue=None):
         stream_queue=stream_queue,
     )
 
+def _is_allowed_chatgpt_file_url(raw_url: str) -> bool:
+    try:
+        parsed = urlparse(raw_url or '')
+    except Exception:
+        return False
+
+    if parsed.scheme not in ('http', 'https'):
+        return False
+
+    host = (parsed.netloc or '').lower()
+    allowed_hosts = (
+        'chatgpt.com',
+        'files.oaiusercontent.com',
+        'persistent.oaistatic.com',
+        'oaiusercontent.com',
+    )
+    return any(host == allowed or host.endswith('.' + allowed) for allowed in allowed_hosts)
+
 # --- BLOQUEIO DE SEGURANÇA POR DOMÍNIO E IP ---
 @app.before_request
 def enforce_domain_origin():
@@ -368,6 +387,62 @@ def upload_avatar():
 @app.route("/api/user/avatar/<filename>")
 def get_avatar(filename):
     return send_from_directory(config.DIRS["users"], filename)
+
+@app.route("/api/proxy_download", methods=["GET"])
+def proxy_authenticated_download():
+    if not check_auth():
+        return jsonify({"error": "Unauthorized"}), 401
+
+    file_url = (request.args.get("url") or "").strip()
+    requested_filename = (request.args.get("filename") or "").strip()
+    force_download = str(request.args.get("download", "0")).lower() in {"1", "true", "yes"}
+
+    if not file_url:
+        return jsonify({"error": "URL do arquivo nao informada."}), 400
+
+    if not _is_allowed_chatgpt_file_url(file_url):
+        return jsonify({"error": "URL de arquivo nao permitida."}), 400
+
+    q = queue.Queue()
+    browser_queue.put({
+        'action': 'AUTH_DOWNLOAD',
+        'url': file_url,
+        'filename': requested_filename or None,
+        'stream_queue': q,
+    })
+
+    try:
+        while True:
+            raw_msg = q.get(timeout=180)
+            if raw_msg is None:
+                break
+
+            msg_obj = json.loads(raw_msg)
+            if msg_obj.get('type') == 'error':
+                return jsonify({"error": msg_obj.get('content') or 'Falha ao baixar arquivo autenticado.'}), 502
+
+            if msg_obj.get('type') == 'download':
+                content = msg_obj.get('content') or {}
+                body_b64 = content.get('body_base64') or ''
+                filename = requested_filename or content.get('filename') or 'arquivo_chatgpt'
+                content_type = content.get('content_type') or 'application/octet-stream'
+                disposition_type = 'attachment' if force_download else 'inline'
+
+                try:
+                    body = base64.b64decode(body_b64)
+                except Exception:
+                    return jsonify({"error": "Falha ao decodificar o arquivo autenticado."}), 502
+
+                response = Response(body, status=content.get('status') or 200, mimetype=content_type)
+                response.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
+                response.headers['Pragma'] = 'no-cache'
+                response.headers['Content-Disposition'] = f'{disposition_type}; filename="{filename}"'
+                response.headers['X-ChatGPT-Proxy-Download'] = '1'
+                return response
+
+        return jsonify({"error": "Download autenticado encerrado sem resposta."}), 504
+    except queue.Empty:
+        return jsonify({"error": "Timeout ao aguardar o download autenticado."}), 504
 
 # --- ROTAS GERAIS ---
 
