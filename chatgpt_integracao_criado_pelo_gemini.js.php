@@ -3489,6 +3489,79 @@ header('Content-Type: application/javascript; charset=utf-8');
         .msg-ai .ow-file-download:hover { background: #dce6f8; }
         .msg-ai .ow-file-download::before { content: '📎'; font-size: 16px; }
 
+        /* ── Screenshot thumbnails ── */
+        .ow-screenshot-strip {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 6px;
+            margin-top: 8px;
+            padding: 6px 0;
+        }
+        .ow-screenshot-thumb {
+            width: 120px;
+            height: 68px;
+            object-fit: cover;
+            border-radius: 6px;
+            border: 2px solid #c2d4f0;
+            cursor: pointer;
+            transition: transform 0.15s ease, box-shadow 0.15s ease;
+            flex-shrink: 0;
+        }
+        .ow-screenshot-thumb:hover {
+            transform: scale(1.05);
+            box-shadow: 0 2px 8px rgba(0,0,0,0.2);
+            border-color: #1a73e8;
+        }
+
+        /* ── Screenshot fullscreen overlay ── */
+        #ow-screenshot-overlay {
+            position: fixed;
+            top: 0; left: 0; right: 0; bottom: 0;
+            z-index: 999999;
+            background: rgba(0,0,0,0.85);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            opacity: 0;
+            pointer-events: none;
+            transition: opacity 0.25s ease;
+        }
+        #ow-screenshot-overlay.active {
+            opacity: 1;
+            pointer-events: auto;
+        }
+        #ow-screenshot-overlay img {
+            max-width: 92vw;
+            max-height: 90vh;
+            border-radius: 8px;
+            box-shadow: 0 4px 24px rgba(0,0,0,0.5);
+            transform: scale(0.3);
+            transition: transform 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
+        }
+        #ow-screenshot-overlay.active img {
+            transform: scale(1);
+        }
+        #ow-screenshot-overlay .ow-overlay-close {
+            position: absolute;
+            top: 16px;
+            right: 20px;
+            width: 40px;
+            height: 40px;
+            border-radius: 50%;
+            border: none;
+            background: rgba(255,255,255,0.2);
+            color: #fff;
+            font-size: 24px;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: background 0.2s;
+        }
+        #ow-screenshot-overlay .ow-overlay-close:hover {
+            background: rgba(255,255,255,0.4);
+        }
+
         /* ── Mobile: portrait ── */
         @media (max-width: 480px) {
             #ow-window {
@@ -3993,6 +4066,10 @@ header('Content-Type: application/javascript; charset=utf-8');
                     else if (chunk.type === 'finish') {
                         const fd = chunk.content;
                         Session.setChat(fd.chat_id, fd.url, null);
+                        return;
+                    }
+                    else if (chunk.type === 'screenshot') {
+                        if (typeof updateScreenshotThumb === 'function') updateScreenshotThumb(uiNew.mID, chunk.content);
                         return;
                     }
                     if (c) {
@@ -5807,6 +5884,71 @@ header('Content-Type: application/javascript; charset=utf-8');
         b.appendChild(wrap); return { tID, mID, hID };
     }
 
+    // ── Screenshot overlay (singleton) ──────────────────────────────────
+    (function _initScreenshotOverlay() {
+        if (document.getElementById('ow-screenshot-overlay')) return;
+        const ov = document.createElement('div');
+        ov.id = 'ow-screenshot-overlay';
+        ov.innerHTML = `<button class="ow-overlay-close" title="Fechar">&times;</button><img src="" alt="screenshot"/>`;
+        ov.querySelector('.ow-overlay-close').onclick = () => ov.classList.remove('active');
+        ov.addEventListener('click', (e) => { if (e.target === ov) ov.classList.remove('active'); });
+        document.body.appendChild(ov);
+    })();
+
+    /**
+     * Exibe/atualiza thumbnail de screenshot dentro da mensagem AI corrente.
+     * @param {string} mID - ID do elemento .cursor-blink da mensagem
+     * @param {{label:string, format:string, data_base64:string, url:string, captured_at:number}} data
+     */
+    function updateScreenshotThumb(mID, data) {
+        const mEl = document.getElementById(mID);
+        if (!mEl) return;
+        const wrap = mEl.closest('.msg-ai') || mEl.parentElement;
+        if (!wrap) return;
+
+        // Garante strip container
+        let strip = wrap.querySelector('.ow-screenshot-strip');
+        if (!strip) {
+            strip = document.createElement('div');
+            strip.className = 'ow-screenshot-strip';
+            wrap.appendChild(strip);
+        }
+
+        const src = 'data:image/jpeg;base64,' + data.data_base64;
+
+        // Atualiza a última thumb se for do mesmo label e < 3s de diferença, senão cria nova
+        const existing = strip.querySelectorAll('.ow-screenshot-thumb');
+        const last = existing.length ? existing[existing.length - 1] : null;
+        if (last && last.dataset.label === data.label) {
+            last.src = src;
+            last.dataset.ts = data.captured_at;
+        } else {
+            const img = document.createElement('img');
+            img.className = 'ow-screenshot-thumb';
+            img.src = src;
+            img.dataset.label = data.label;
+            img.dataset.ts = data.captured_at;
+            img.title = data.url ? data.url.substring(0, 80) : data.label;
+            img.onclick = () => _expandScreenshot(img);
+            strip.appendChild(img);
+        }
+        scroll();
+    }
+
+    function _expandScreenshot(thumbEl) {
+        const ov = document.getElementById('ow-screenshot-overlay');
+        if (!ov) return;
+        const ovImg = ov.querySelector('img');
+        ovImg.src = thumbEl.src;
+
+        // Calcula posição inicial do thumb para animação de origem
+        const rect = thumbEl.getBoundingClientRect();
+        const cx = rect.left + rect.width / 2;
+        const cy = rect.top + rect.height / 2;
+        ovImg.style.transformOrigin = `${cx}px ${cy}px`;
+        ov.classList.add('active');
+    }
+
     function appendAssistantMarkdown(markdown) {
         const safeMd = String(markdown || '').trim();
         if (!safeMd) return;
@@ -7162,6 +7304,7 @@ header('Content-Type: application/javascript; charset=utf-8');
                 if (chunk.type === 'markdown' || chunk.type === 'html') { fullC = chunk.content; c = fullC; }
                 else if (chunk.choices?.[0]?.delta?.content) { c = chunk.choices[0].delta.content; fullC += c; }
                 else if (chunk.type === 'finish') { const fd = chunk.content||{}; Session.setChat(fd.chat_id, fd.url, null); return; }
+                else if (chunk.type === 'screenshot') { if (typeof updateScreenshotThumb === 'function') updateScreenshotThumb(uiNew.mID, chunk.content); return; }
                 if (c) { const mEl = document.getElementById(uiNew.mID); if (mEl) mEl.innerHTML = formatMarkdown(fullC); scroll(); }
             }, currentAbortController?.signal);
 
@@ -7253,6 +7396,7 @@ header('Content-Type: application/javascript; charset=utf-8');
                     if (chunk.type === 'markdown' || chunk.type === 'html') { fullC = chunk.content; c = fullC; }
                     else if (chunk.choices?.[0]?.delta?.content) { c = chunk.choices[0].delta.content; fullC += c; }
                     else if (chunk.type === 'finish') { const fd = chunk.content||{}; Session.setChat(fd.chat_id, fd.url, null); return; }
+                    else if (chunk.type === 'screenshot') { if (typeof updateScreenshotThumb === 'function') updateScreenshotThumb(uiNew.mID, chunk.content); return; }
                     if (c) { const mEl = document.getElementById(uiNew.mID); if (mEl) mEl.innerHTML = formatMarkdown(fullC); scroll(); }
                 }, currentAbortController?.signal);
 
@@ -7691,6 +7835,10 @@ header('Content-Type: application/javascript; charset=utf-8');
                         // ── Metadados finais: usa Session.setChat ──────────
                         const fd = chunk.content || {};
                         Session.setChat(fd.chat_id, fd.url, null);
+                        return;
+
+                    } else if (chunk.type === 'screenshot') {
+                        if (typeof updateScreenshotThumb === 'function') updateScreenshotThumb(ui.mID, chunk.content);
                         return;
 
                     } else if (chunk.choices?.[0]?.delta) {

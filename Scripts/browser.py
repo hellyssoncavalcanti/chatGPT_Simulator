@@ -128,6 +128,9 @@ async def _emit_browser_screenshot(page, q, label: str = "browser"):
             return
         if len(raw) > SCREENSHOT_STREAM_MAX_BYTES:
             return
+        kb = len(raw) / 1024
+        print(f"📸 Screenshot stream [{label}]: {kb:.1f} KB — {page.url[:80]}", flush=True)
+        emit_log(q, f"📸 Screenshot stream [{label}]: {kb:.1f} KB — {page.url[:80]}")
         emit_event(q, "screenshot", {
             "label": label,
             "format": "jpeg",
