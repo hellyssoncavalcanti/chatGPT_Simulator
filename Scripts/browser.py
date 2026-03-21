@@ -19,6 +19,7 @@
 #   GET_MENU  — lê opções do menu de contexto de um chat
 #   EXEC_MENU — clica em uma opção do menu (ex: Excluir, Renomear)
 #   SEARCH    — abre Google, pesquisa e retorna resultados estruturados
+#   UPTODATE_SEARCH — abre UpToDate Search e retorna resultados estruturados
 #   STOP      — encerra o loop principal
 #
 # MECANISMO DE PASTE:
@@ -27,6 +28,7 @@
 #   é digitado caractere a caractere via type_realistic().
 # =============================================================================
 import asyncio
+import base64
 import json
 import random
 import time
@@ -43,16 +45,278 @@ from markdownify import markdownify as md
 MAX_TABS = 5
 tab_semaphore = asyncio.Semaphore(MAX_TABS)
 
+SCREENSHOT_STREAM_INTERVAL_SEC = 2.0
+SCREENSHOT_STREAM_JPEG_QUALITY = 45
+SCREENSHOT_STREAM_MAX_BYTES = 300_000
+
 def emit_log(q, msg):
     if q: q.put(json.dumps({"type": "log", "content": f"[browser.py] {msg}"}) + "\n")
     file_log("browser.py", msg)
 
 def emit_event(q, type_, content):
-    if q: 
+    if q:
         # Cria o dicionário e garante que o dumps mantenha tudo em uma linha
         # O \n final é estritamente o separador do stream
         payload = json.dumps({"type": type_, "content": content}, separators=(',', ':'))
         q.put(payload + "\n")
+
+async def _get_window_state(page):
+    try:
+        session = await page.context.new_cdp_session(page)
+        info = await session.send("Browser.getWindowForTarget")
+        bounds = info.get("bounds", {}) or {}
+        state = bounds.get("windowState") or bounds.get("state") or "normal"
+        return session, info.get("windowId"), state
+    except Exception:
+        return None, None, None
+
+
+async def _set_window_state(page, state: str) -> bool:
+    session, window_id, current_state = await _get_window_state(page)
+    if not session or not window_id:
+        return False
+    if current_state == state:
+        return True
+    try:
+        await session.send("Browser.setWindowBounds", {
+            "windowId": window_id,
+            "bounds": {"windowState": state},
+        })
+        return True
+    except Exception:
+        return False
+
+
+async def _preserve_minimized_if_needed(page, keep_minimized: bool | None = None):
+    _session, _window_id, state = await _get_window_state(page)
+    if keep_minimized is None:
+        keep_minimized = (state == "minimized")
+    if keep_minimized and state != "minimized":
+        await _set_window_state(page, "minimized")
+        return "minimized"
+    return state
+
+
+async def _get_context_window_state(context):
+    for candidate in list(getattr(context, "pages", []) or []):
+        try:
+            _session, _window_id, state = await _get_window_state(candidate)
+            if state:
+                return state
+        except Exception:
+            continue
+    return None
+
+
+async def _should_keep_context_minimized(context) -> bool:
+    state = await _get_context_window_state(context)
+    return state == "minimized"
+
+
+async def _emit_browser_screenshot(page, q, label: str = "browser"):
+    if not q:
+        return
+    try:
+        raw = await page.screenshot(
+            type="jpeg",
+            quality=SCREENSHOT_STREAM_JPEG_QUALITY,
+            caret="hide",
+            animations="disabled",
+            scale="css",
+        )
+        if not raw:
+            return
+        if len(raw) > SCREENSHOT_STREAM_MAX_BYTES:
+            return
+        emit_event(q, "screenshot", {
+            "label": label,
+            "format": "jpeg",
+            "data_base64": base64.b64encode(raw).decode("ascii"),
+            "url": page.url,
+            "captured_at": int(time.time()),
+        })
+    except Exception:
+        return
+
+
+async def _stream_browser_screenshots(page, q, stop_event: asyncio.Event, label: str = "browser"):
+    if not q:
+        return
+    try:
+        await _emit_browser_screenshot(page, q, label=label)
+        while not stop_event.is_set():
+            try:
+                await asyncio.wait_for(stop_event.wait(), timeout=SCREENSHOT_STREAM_INTERVAL_SEC)
+            except asyncio.TimeoutError:
+                await _emit_browser_screenshot(page, q, label=label)
+    except asyncio.CancelledError:
+        raise
+
+
+def _composer_state_script():
+    return r"""() => {
+        const composerRoot = document.querySelector('form')
+            || document.querySelector('[data-testid="composer"]')
+            || document.querySelector('main');
+        const ta = document.querySelector('#prompt-textarea');
+        const sendBtn = document.querySelector('button[data-testid="send-button"]');
+        const stopBtn = document.querySelector('button[aria-label="Stop generating"], button[data-testid="stop-button"]');
+        const attachmentNodes = Array.from(document.querySelectorAll(
+            'button[aria-label="Remove file"], [data-testid*="attachment"], [data-testid*="file-preview"], [data-testid*="composer-attachment"], [data-testid*="upload-preview"], [data-testid*="file-chip"]'
+        ));
+        const attachmentTitles = attachmentNodes
+            .map((node) => (node.innerText || node.getAttribute('aria-label') || '').trim())
+            .filter(Boolean)
+            .slice(0, 6);
+        const busyNodes = Array.from(document.querySelectorAll('[aria-busy="true"], progress, [data-testid*="uploading"], [data-testid*="spinner"], svg.animate-spin'));
+        const textValue = ta ? ((ta.innerText || ta.value || '').trim()) : '';
+        const textLength = textValue.length;
+        const sendVisible = !!(sendBtn && sendBtn.offsetParent !== null);
+        const sendEnabled = !!(sendBtn && sendVisible && !sendBtn.disabled && sendBtn.getAttribute('aria-disabled') !== 'true');
+        const stopVisible = !!(stopBtn && stopBtn.offsetParent !== null);
+        const textReady = textLength > 0;
+        const attachmentCount = attachmentNodes.length;
+        const hasAttachments = attachmentCount > 0;
+        const uploading = busyNodes.some((node) => {
+            if (!node) return false;
+            const txt = (node.innerText || node.getAttribute?.('aria-label') || '').toLowerCase();
+            return !txt || txt.includes('upload') || txt.includes('carreg') || txt.includes('process') || txt.includes('analys');
+        });
+        return {
+            textLength,
+            textReady,
+            hasAttachments,
+            attachmentCount,
+            attachmentTitles,
+            sendVisible,
+            sendEnabled,
+            stopVisible,
+            uploading,
+            ariaBusy: !!(ta && ta.getAttribute('aria-busy') === 'true'),
+            composerVisible: !!(composerRoot && composerRoot.offsetParent !== null),
+        };
+    }"""
+
+
+async def _get_composer_state(page):
+    try:
+        return await page.evaluate(_composer_state_script())
+    except Exception:
+        return {
+            'textLength': 0,
+            'textReady': False,
+            'hasAttachments': False,
+            'attachmentCount': 0,
+            'attachmentTitles': [],
+            'sendVisible': False,
+            'sendEnabled': False,
+            'stopVisible': False,
+            'uploading': False,
+            'ariaBusy': False,
+            'composerVisible': False,
+        }
+
+
+async def _wait_for_composer_ready(page, q=None, timeout: float = 20.0):
+    deadline = time.time() + timeout
+    last_state = None
+    while time.time() < deadline:
+        state = await _get_composer_state(page)
+        last_state = state
+        has_payload = bool(state.get('textReady') or state.get('hasAttachments'))
+        if has_payload and state.get('sendEnabled') and not state.get('uploading'):
+            return state
+        await asyncio.sleep(0.25)
+
+    if q and last_state:
+        emit_log(
+            q,
+            "⚠️ Composer não ficou pronto a tempo; tentando enviar assim mesmo "
+            f"(texto={last_state.get('textLength')}, anexos={last_state.get('attachmentCount')}, "
+            f"sendEnabled={last_state.get('sendEnabled')}, uploading={last_state.get('uploading')})."
+        )
+    return last_state or {}
+
+
+async def _submit_prompt(page, q=None, timeout: float = 12.0) -> bool:
+    state = await _wait_for_composer_ready(page, q=q, timeout=timeout)
+    if q and state.get('hasAttachments') and not state.get('textReady'):
+        emit_log(q,
+                 f"ChatGPT converteu a cola em {state.get('attachmentCount')} anexo(s); enviando pelo botão.")
+
+    submit_attempts = [
+        ('click', lambda: page.locator('button[data-testid="send-button"]').first.click(timeout=2000)),
+        ('force_click', lambda: page.locator('button[data-testid="send-button"]').first.click(timeout=2000, force=True)),
+        ('dom_click', lambda: page.evaluate("""() => {
+            const btn = document.querySelector('button[data-testid=\"send-button\"]');
+            if (!btn) return false;
+            btn.click();
+            return true;
+        }""")),
+        ('enter', lambda: page.keyboard.press('Enter')),
+        ('mod_enter', lambda: page.keyboard.press('Control+Enter')),
+    ]
+
+    for label, submitter in submit_attempts:
+        try:
+            await submitter()
+        except Exception as exc:
+            emit_log(q, f"Tentativa de envio '{label}' falhou: {exc}")
+            continue
+
+        verify_deadline = time.time() + 4.0
+        while time.time() < verify_deadline:
+            current = await _get_composer_state(page)
+            if current.get('stopVisible'):
+                return True
+            if not current.get('sendEnabled') and (current.get('ariaBusy') or current.get('uploading')):
+                return True
+            if (state.get('textReady') or state.get('hasAttachments')) and not current.get('textReady') and not current.get('hasAttachments'):
+                return True
+            await asyncio.sleep(0.2)
+
+    return False
+
+
+def _response_looks_incomplete_json(markdown_text: str) -> bool:
+    texto = (markdown_text or '').strip()
+    if not texto:
+        return False
+
+    if texto.startswith('```'):
+        texto = re.sub(r'^```(?:json)?\s*', '', texto, flags=re.IGNORECASE)
+        texto = re.sub(r'\s*```$', '', texto)
+    texto = texto.strip()
+    if not texto.startswith('{'):
+        return False
+
+    depth_obj = 0
+    depth_arr = 0
+    in_string = False
+    escape = False
+    for ch in texto:
+        if in_string:
+            if escape:
+                escape = False
+            elif ch == '\\':
+                escape = True
+            elif ch == '"':
+                in_string = False
+            continue
+
+        if ch == '"':
+            in_string = True
+        elif ch == '{':
+            depth_obj += 1
+        elif ch == '}':
+            depth_obj -= 1
+        elif ch == '[':
+            depth_arr += 1
+        elif ch == ']':
+            depth_arr -= 1
+
+    return in_string or depth_obj > 0 or depth_arr > 0 or not texto.rstrip().endswith('}')
+
 
 async def smart_input(page, message, q=None, activityts=None):
     import re
@@ -103,14 +367,12 @@ async def smart_input(page, message, q=None, activityts=None):
         await page.keyboard.press('Control+V')
         await asyncio.sleep(0.3)
 
-        # Verifica se colou corretamente
-        inserted = await page.evaluate("""
-            () => {
-                const ta = document.getElementById('prompt-textarea')
-                        || document.querySelector('#prompt-textarea');
-                return ta ? (ta.innerText || ta.value || '').length : 0;
-            }
-        """)
+        # Verifica se colou corretamente ou se o ChatGPT converteu a cola em anexo.
+        state = await _get_composer_state(page)
+        inserted = int(state.get('textLength') or 0)
+        if inserted == 0 and state.get('hasAttachments'):
+            emit_log(q, f"{label}: ChatGPT converteu a cola em {state.get('attachmentCount')} anexo(s).")
+            inserted = total
 
         if activityts:
             activityts[0] = time.time()
@@ -133,50 +395,61 @@ async def smart_input(page, message, q=None, activityts=None):
                 inner = segment[len(start_marker):-len(end_marker)]
                 if inner.strip():
                     emit_log(q, f'Colando bloco ({len(inner)} chars)...')
-                    try:
-                        # Tenta colar via clipboard (Ctrl+V) -- rapido como humano
-                        total = await _paste_clipboard(inner, 'Colando')
-                    except Exception as clipboard_err:
-                        # Fallback: chunks com execCommand se clipboard falhar
-                        emit_log(q, f'Clipboard falhou ({clipboard_err}), usando fallback por chunks...')
-                        CHUNK_SIZE = 300
-                        js_inject = """(text) => {
-                            const ta = document.getElementById('prompt-textarea')
-                                     || document.querySelector('#prompt-textarea');
-                            if (!ta) throw new Error('prompt-textarea nao encontrado');
-                            if (ta.isContentEditable) {
-                                ta.focus();
-                                const sel = window.getSelection();
-                                const range = document.createRange();
-                                range.selectNodeContents(ta);
-                                range.collapse(false);
-                                sel.removeAllRanges();
-                                sel.addRange(range);
-                                document.execCommand('insertText', false, text);
-                                return ta.innerText.length;
-                            }
-                            const setter = Object.getOwnPropertyDescriptor(
-                                window.HTMLTextAreaElement.prototype, 'value').set;
-                            setter.call(ta, (ta.value || '') + text);
-                            ta.dispatchEvent(new InputEvent('input', {
-                                bubbles: true, cancelable: true, inputType: 'insertText', data: text
-                            }));
-                            return ta.value.length;
-                        }"""
-                        txt = inner.replace('\r\n', '\n').replace('\r', '\n')
-                        total_chars = len(txt)
-                        inserted = 0
-                        while inserted < total_chars:
-                            chunk = txt[inserted:inserted + CHUNK_SIZE]
-                            await page.evaluate(js_inject, chunk)
-                            inserted += len(chunk)
-                            pct = int(inserted / total_chars * 100)
-                            if q: emit_event(q, 'status', f'Colando (fallback)... {pct}%')
-                            if activityts: activityts[0] = time.time()
-                            await asyncio.sleep(0.08)
-                        total = inserted
-                    if total < len(inner.replace('\r\n','\n')) * 0.9:
+                    txt = inner.replace('\r\n', '\n').replace('\r', '\n')
+                    paste_chunk_size = 3500
+                    paste_chunks = [txt[i:i + paste_chunk_size] for i in range(0, len(txt), paste_chunk_size)] or ['']
+                    total = 0
+                    for chunk_index, paste_chunk in enumerate(paste_chunks, start=1):
+                        label = 'Colando' if len(paste_chunks) == 1 else f'Colando parte {chunk_index}/{len(paste_chunks)}'
+                        try:
+                            # Tenta colar via clipboard (Ctrl+V) -- rápido, mas em sub-blocos para evitar anexos automáticos.
+                            inserted_now = await _paste_clipboard(paste_chunk, label)
+                        except Exception as clipboard_err:
+                            # Fallback: chunks com execCommand se clipboard falhar
+                            emit_log(q, f'Clipboard falhou ({clipboard_err}), usando fallback por chunks...')
+                            CHUNK_SIZE = 300
+                            js_inject = """(text) => {
+                                const ta = document.getElementById('prompt-textarea')
+                                         || document.querySelector('#prompt-textarea');
+                                if (!ta) throw new Error('prompt-textarea nao encontrado');
+                                if (ta.isContentEditable) {
+                                    ta.focus();
+                                    const sel = window.getSelection();
+                                    const range = document.createRange();
+                                    range.selectNodeContents(ta);
+                                    range.collapse(false);
+                                    sel.removeAllRanges();
+                                    sel.addRange(range);
+                                    document.execCommand('insertText', false, text);
+                                    return ta.innerText.length;
+                                }
+                                const setter = Object.getOwnPropertyDescriptor(
+                                    window.HTMLTextAreaElement.prototype, 'value').set;
+                                setter.call(ta, (ta.value || '') + text);
+                                ta.dispatchEvent(new InputEvent('input', {
+                                    bubbles: true, cancelable: true, inputType: 'insertText', data: text
+                                }));
+                                return ta.value.length;
+                            }"""
+                            total_chars = len(paste_chunk)
+                            inserted_now = 0
+                            while inserted_now < total_chars:
+                                chunk = paste_chunk[inserted_now:inserted_now + CHUNK_SIZE]
+                                await page.evaluate(js_inject, chunk)
+                                inserted_now += len(chunk)
+                                pct = int(inserted_now / total_chars * 100)
+                                if q: emit_event(q, 'status', f'Colando (fallback)... {pct}%')
+                                if activityts: activityts[0] = time.time()
+                                await asyncio.sleep(0.08)
+                        total += inserted_now if inserted_now else len(paste_chunk)
+                        await asyncio.sleep(0.15)
+                    expected_len = len(txt)
+                    state_after_paste = await _get_composer_state(page)
+                    if total < expected_len * 0.9 and not state_after_paste.get('hasAttachments'):
                         emit_log(q, f'Aviso: colados {total} de ~{len(inner)} chars')
+                    elif state_after_paste.get('hasAttachments'):
+                        emit_log(q,
+                                 f"Bloco aceito como anexo(s): {state_after_paste.get('attachmentCount')} item(ns).")
                     await asyncio.sleep(0.3)
             else:
                 if segment.strip():
@@ -200,7 +473,7 @@ async def type_realistic(page, text, q=None):
             await page.keyboard.type(char)
             # Variabilidade ajustada: 10ms a 80ms
             await asyncio.sleep(random.uniform(0.01, 0.08))
-            
+
         # --- KEEP-ALIVE: Emite status a cada 2 segundos ---
         current_time = time.time()
         if q and (current_time - last_status_time) >= 2.0:
@@ -449,16 +722,16 @@ async def check_for_dialogs(page, q=None):
 async def open_sidebar_menu(page, url, q=None):
     try:
         if "/c/" not in url: return []
-        
+
         # Extrai o UUID corretamente, mesmo se a URL for de projeto
         chat_uuid = url.split("/c/")[1].split("?")[0]
-        
+
         # Tiramos o "nav" do seletor para que ele ache o chat tanto na barra lateral quanto no centro da página (Projetos)
         link_selector = f'a[href*="{chat_uuid}"]'
-        
+
         if 'check_for_dialogs' in globals():
             await check_for_dialogs(page, q)
-            
+
         # Se o menu já estiver aberto na tela, pega logo e devolve
         if await page.is_visible('div[role="menu"]'):
             return await page.evaluate("""() => {
@@ -472,24 +745,24 @@ async def open_sidebar_menu(page, url, q=None):
             await link_locator.scroll_into_view_if_needed()
             await link_locator.hover(force=True)
             await asyncio.sleep(0.5)
-            
+
             menu_btn = link_locator.locator('button[aria-haspopup="menu"]').first
             if not await menu_btn.is_visible():
                 menu_btn = link_locator.locator("xpath=..").locator('button[aria-haspopup="menu"]').first
-            
+
             if await menu_btn.count() > 0:
                 await menu_btn.click(force=True)
-                
+
                 emit_log(q, "Aguardando div[role='menu']...")
                 await page.wait_for_selector('div[role="menu"]', timeout=5000)
                 await asyncio.sleep(0.5) # Aguarda a animação
-                
+
                 # Executa o seu JS original (Aprimorado com textContent)
                 options = await page.evaluate("""() => {
                     const items = Array.from(document.querySelectorAll('[role="menuitem"]'));
                     return items.map(el => el.textContent.trim()).filter(t => t.length > 0);
                 }""")
-                
+
                 emit_log(q, f"Opções encontradas: {options}")
                 print(f"\n[DEBUG CMD] Menu lido com sucesso via JS: {options}\n")
                 return options
@@ -497,7 +770,7 @@ async def open_sidebar_menu(page, url, q=None):
             emit_log(q, "❌ Chat ou menu não encontrado.")
             print(f"[DEBUG CMD] Erro ao buscar link_locator: {e}")
             return []
-            
+
         return []
     except Exception as e:
         emit_log(q, f"❌ Erro menu: {e}")
@@ -508,7 +781,7 @@ async def execute_menu_option(page, option_text, url, new_name=None, q=None):
         # 1. Encontra o link do chat ativo na tela (já foi carregado via page.goto na handle_menu_task)
         chat_id = url.rstrip('/').split('/')[-1]
         chat_link = page.locator(f'a[href*="{chat_id}"]').first
-        
+
         await chat_link.wait_for(state="attached", timeout=10000)
         await chat_link.scroll_into_view_if_needed()
         await chat_link.hover(force=True)
@@ -518,7 +791,7 @@ async def execute_menu_option(page, option_text, url, new_name=None, q=None):
         menu_btn = chat_link.locator('button[aria-haspopup="menu"]').first
         if not await menu_btn.is_visible():
             menu_btn = chat_link.locator("xpath=..").locator('button[aria-haspopup="menu"]').first
-            
+
         if await menu_btn.count() > 0:
             await menu_btn.click(force=True)
             await page.wait_for_selector('div[role="menu"]', timeout=5000)
@@ -547,7 +820,7 @@ async def execute_menu_option(page, option_text, url, new_name=None, q=None):
                         await page.keyboard.press("Enter")
                         emit_log(q, "✅ Renomeado com sucesso na OpenAI.")
                         return True
-                except Exception as ex: 
+                except Exception as ex:
                     emit_log(q, f"❌ Erro ao digitar novo nome: {ex}")
             else:
                 emit_log(q, "❌ Opção Renomear não visível no menu remoto.")
@@ -557,11 +830,11 @@ async def execute_menu_option(page, option_text, url, new_name=None, q=None):
             if await delete_btn.is_visible():
                 await delete_btn.click(force=True)
                 emit_log(q, "🗑️ Confirmando exclusão...")
-                
+
                 # Busca o botão vermelho de confirmação
                 confirm_btn = page.locator('button.btn-danger, button[data-testid="confirm-delete-chat-button"]').first
                 await confirm_btn.wait_for(timeout=3000)
-                
+
                 if await confirm_btn.is_visible():
                     await confirm_btn.click(force=True)
                     await asyncio.sleep(3)
@@ -571,7 +844,7 @@ async def execute_menu_option(page, option_text, url, new_name=None, q=None):
                 emit_log(q, "❌ Opção Excluir não visível no menu remoto.")
 
         return False
-        
+
     except Exception as e:
         emit_log(q, f"❌ Erro exec: {e}")
         return False
@@ -580,42 +853,44 @@ async def execute_menu_option(page, option_text, url, new_name=None, q=None):
 
 async def handle_menu_task(context, task):
     q = task.get('stream_queue')
+    keep_minimized = await _should_keep_context_minimized(context)
     page = await context.new_page()
+    await _preserve_minimized_if_needed(page, keep_minimized=keep_minimized)
     try:
         url = task.get('url')
         action = task.get('action')
-        
+
         if not url:
             raise ValueError("URL do chat não fornecida.")
-            
+
         emit_log(q, f"Abrindo chat diretamente: {url}")
         await page.goto(url, wait_until="domcontentloaded")
-        
+
         # --- TRAVA DE CARREGAMENTO (O SEGREDO ESTÁ AQUI) ---
         # Extrai o ID e obriga o script a esperar o elemento existir na tela antes de continuar
         chat_id = url.rstrip('/').split('/')[-1]
         chat_link = page.locator(f'a[href*="{chat_id}"]').first
-        
+
         emit_log(q, "Aguardando interface estabilizar...")
         await chat_link.wait_for(state="visible", timeout=20000)
         await asyncio.sleep(1) # Pausa extra para os scripts do ChatGPT terminarem de rodar
-        
+
         # Execução das ações
         if action == 'GET_MENU':
             options = await open_sidebar_menu(page, url, q)
             emit_event(q, "menu_result", {"success": True, "options": options})
-        
+
         elif action == 'EXEC_MENU':
             opt = task.get('option')
             nn = task.get('new_name')
             success = await execute_menu_option(page, opt, url, nn, q)
             emit_event(q, "exec_result", {"success": success})
-            
+
     except Exception as e:
         emit_log(q, f"Erro Menu: {e}")
-        if action == 'GET_MENU': 
+        if action == 'GET_MENU':
             emit_event(q, "menu_result", {"success": False, "error": str(e)})
-        else: 
+        else:
             emit_event(q, "exec_result", {"success": False, "error": str(e)})
     finally:
         await page.close()
@@ -623,12 +898,15 @@ async def handle_menu_task(context, task):
 
 async def handle_sync_task(context, task):
     q       = task.get('stream_queue')
+    keep_minimized = await _should_keep_context_minimized(context)
     page    = await context.new_page()
+    await _preserve_minimized_if_needed(page, keep_minimized=keep_minimized)
     try:
         url    = task.get('url')
         chat_id = task.get('chat_id')
         emit_log(q, f"🔄 Sync iniciado para {url}")
         await page.goto(url, wait_until='domcontentloaded')
+        await _preserve_minimized_if_needed(page, keep_minimized=keep_minimized)
 
         # Aguarda React renderizar as mensagens
         try:
@@ -879,6 +1157,85 @@ def _parse_google_raw_html(raw_html: str, query: str = "") -> list:
     return items
 
 
+def _parse_uptodate_raw_html(raw_html: str, query: str = "") -> list:
+    """
+    Fallback bruto para a busca do UpToDate quando os seletores JS não
+    retornarem itens. Extrai os cards principais da lista de resultados.
+    """
+    import html as html_mod
+
+    def _clean(text):
+        text = re.sub(r'<[^>]+>', ' ', text or '')
+        text = html_mod.unescape(text).strip()
+        return re.sub(r'\s+', ' ', text)
+
+    items = []
+    seen = set()
+    pattern = re.compile(
+        r'<li[^>]+class="[^"]*search-result-list-item[^"]*"[^>]*>.*?'
+        r'<a[^>]+href="(?P<href>/[^"#?][^"]*)"[^>]+class="[^"]*searchResultLink[^"]*"[^>]*>'
+        r'(?P<title>.*?)</a>'
+        r'(?P<tail>.*?)'
+        r'</li>',
+        re.IGNORECASE | re.DOTALL
+    )
+
+    for match in pattern.finditer(raw_html):
+        href = html_mod.unescape(match.group('href') or '').strip()
+        title = _clean(match.group('title'))
+        tail = match.group('tail') or ''
+        if not href or not title:
+            continue
+
+        url = href if href.startswith('http') else f'https://www.uptodate.com{href}'
+        if url in seen:
+            continue
+        seen.add(url)
+
+        snippet_match = re.search(
+            r'<div[^>]+class="[^"]*snippet[^"]*"[^>]*>(.*?)</div>',
+            tail,
+            re.IGNORECASE | re.DOTALL
+        )
+        snippet = _clean(snippet_match.group(1))[:400] if snippet_match else ''
+
+        subhits = []
+        for sm in re.finditer(
+            r'<a[^>]+class="[^"]*search-result-subhit-link[^"]*"[^>]*>(.*?)</a>',
+            tail,
+            re.IGNORECASE | re.DOTALL
+        ):
+            subhit = _clean(sm.group(1))
+            if subhit:
+                subhits.append(subhit)
+
+        li_tag = match.group(0).split('>', 1)[0]
+        class_match = re.search(r'class="([^"]+)"', li_tag, re.IGNORECASE)
+        class_name = class_match.group(1) if class_match else ''
+        item_type = 'topic'
+        if 'ICG' in class_name:
+            item_type = 'pathway'
+        elif 'LAB' in class_name:
+            item_type = 'lab'
+        elif 'medical' in class_name:
+            item_type = 'medical'
+
+        items.append({
+            "position": len(items) + 1,
+            "title": title,
+            "url": url,
+            "snippet": snippet,
+            "type": item_type,
+            "subhits": subhits[:6],
+            "query": query,
+        })
+
+        if len(items) >= 12:
+            break
+
+    return items
+
+
 async def handle_search_task(context, task):
     """
     Ação SEARCH — abre Google, digita a query com typing realista,
@@ -892,7 +1249,10 @@ async def handle_search_task(context, task):
     async with tab_semaphore:
         q    = task.get('stream_queue')
         query = (task.get('query') or '').strip()
+        keep_minimized = await _should_keep_context_minimized(context)
         page = None
+        screenshot_stop_event = asyncio.Event()
+        screenshot_task = None
         try:
             if not query:
                 emit_event(q, 'searchresult', {
@@ -901,10 +1261,15 @@ async def handle_search_task(context, task):
                 return
 
             page = await context.new_page()
+            await _preserve_minimized_if_needed(page, keep_minimized=keep_minimized)
+            screenshot_task = asyncio.create_task(
+                _stream_browser_screenshots(page, q, screenshot_stop_event, label='search')
+            )
             emit_log(q, f"🔍 Pesquisando no Google: {query}")
 
             # ── 1. Abre o Google ──────────────────────────────────────
             await page.goto('https://www.google.com', wait_until='domcontentloaded')
+            await _preserve_minimized_if_needed(page, keep_minimized=keep_minimized)
             await asyncio.sleep(random.uniform(0.8, 1.5))
 
             # ── 2. Aceita cookies/consent se aparecer ─────────────────
@@ -1080,22 +1445,196 @@ async def handle_search_task(context, task):
                 q.put(None)
 
 
+async def handle_uptodate_search_task(context, task):
+    """
+    Ação UPTODATE_SEARCH — abre a busca do UpToDate, pesquisa o termo e
+    retorna os resultados estruturados encontrados na listagem principal.
+    """
+    async with tab_semaphore:
+        q = task.get('stream_queue')
+        query = (task.get('query') or '').strip()
+        keep_minimized = await _should_keep_context_minimized(context)
+        page = None
+        screenshot_stop_event = asyncio.Event()
+        screenshot_task = None
+        try:
+            if not query:
+                emit_event(q, 'searchresult', {
+                    'success': False, 'query': '', 'error': 'Query vazia'
+                })
+                return
+
+            page = await context.new_page()
+            await _preserve_minimized_if_needed(page, keep_minimized=keep_minimized)
+            screenshot_task = asyncio.create_task(
+                _stream_browser_screenshots(page, q, screenshot_stop_event, label='uptodate_search')
+            )
+            emit_log(q, f"🩺 Pesquisando no UpToDate: {query}")
+
+            await page.goto('https://www.uptodate.com/contents/search', wait_until='domcontentloaded')
+            await _preserve_minimized_if_needed(page, keep_minimized=keep_minimized)
+            await asyncio.sleep(random.uniform(1.0, 1.8))
+
+            search_input = page.locator('#tbSearch, input.searchTerm, input[type="search"]').first
+            await search_input.wait_for(state='visible', timeout=15000)
+            await search_input.click()
+            await asyncio.sleep(random.uniform(0.2, 0.5))
+
+            try:
+                await page.locator('#clearSearch').click(timeout=1000)
+                await asyncio.sleep(0.2)
+            except Exception:
+                pass
+
+            emit_event(q, 'status', 'Digitando busca no UpToDate...')
+            await type_realistic(page, query, q)
+            await asyncio.sleep(random.uniform(0.3, 0.8))
+
+            submitted = False
+            submit_selectors = [
+                '.newsearch-submit',
+                'span.newsearch-submit',
+                '[aria-label="Submit search"]',
+            ]
+            for sel in submit_selectors:
+                try:
+                    btn = page.locator(sel).first
+                    if await btn.is_visible(timeout=1000):
+                        await btn.click()
+                        submitted = True
+                        break
+                except Exception:
+                    continue
+
+            if not submitted:
+                await page.keyboard.press('Enter')
+
+            emit_event(q, 'status', 'Aguardando resultados do UpToDate...')
+            try:
+                await page.wait_for_selector(
+                    '#searchresults, #search-results-container, .search-result-list-item',
+                    timeout=20000
+                )
+            except Exception:
+                await asyncio.sleep(4)
+
+            await asyncio.sleep(random.uniform(1.0, 2.0))
+
+            results = await page.evaluate("""() => {
+                const nodes = Array.from(document.querySelectorAll('#search-results-container .search-result-list-item'));
+                const items = [];
+                const seen = new Set();
+                let pos = 1;
+
+                const detectType = (li) => {
+                    const cls = li.className || '';
+                    if (cls.includes('ICG')) return 'pathway';
+                    if (cls.includes('LAB')) return 'lab';
+                    if (cls.includes('medical')) return 'medical';
+                    return 'topic';
+                };
+
+                for (const li of nodes) {
+                    if (pos > 12) break;
+                    const link = li.querySelector('a.searchResultLink[href]');
+                    if (!link) continue;
+
+                    const title = (link.innerText || '').trim();
+                    const href = link.getAttribute('href') || '';
+                    if (!title || !href) continue;
+
+                    const url = new URL(href, window.location.origin).href;
+                    if (seen.has(url)) continue;
+                    seen.add(url);
+
+                    const snippetEl = li.querySelector('.snippet');
+                    const snippet = snippetEl ? (snippetEl.innerText || '').trim().substring(0, 400) : '';
+                    const subhits = Array.from(li.querySelectorAll('.search-result-subhit-link'))
+                        .map(el => (el.innerText || '').trim())
+                        .filter(Boolean)
+                        .slice(0, 6);
+
+                    items.push({
+                        position: pos++,
+                        title,
+                        url,
+                        snippet,
+                        type: detectType(li),
+                        subhits,
+                    });
+                }
+
+                return items;
+            }""")
+
+            raw_html = ""
+            if not results:
+                emit_log(q, "⚠️ Seletores CSS não encontraram resultados no UpToDate — tentando fallback via raw HTML...")
+                try:
+                    raw_html = await page.content()
+                    results = _parse_uptodate_raw_html(raw_html, query)
+                    if results:
+                        emit_log(q, f"✅ Fallback raw HTML UpToDate: {len(results)} resultados extraídos")
+                except Exception as e_raw:
+                    emit_log(q, f"⚠️ Fallback raw HTML UpToDate falhou: {e_raw}")
+
+            emit_log(q, f"✅ {len(results)} resultado(s) UpToDate encontrados para: {query}")
+            emit_event(q, 'searchresult', {
+                'success': True,
+                'query': query,
+                'results': results,
+                'count': len(results),
+                'source': 'uptodate',
+                'raw_html': raw_html[:30000] if raw_html else '',
+            })
+
+        except Exception as e:
+            emit_log(q, f"❌ Erro na busca UpToDate: {e}")
+            emit_event(q, 'searchresult', {
+                'success': False,
+                'query': query,
+                'error': str(e),
+                'source': 'uptodate',
+            })
+        finally:
+            screenshot_stop_event.set()
+            if screenshot_task:
+                screenshot_task.cancel()
+                try:
+                    await screenshot_task
+                except (asyncio.CancelledError, Exception):
+                    pass
+            if page:
+                try:
+                    await page.close()
+                except Exception:
+                    pass
+            if q:
+                q.put(None)
+
+
 async def handle_chat_task(context, task):
     async with tab_semaphore:
         q          = task.get('stream_queue')
         stop_event = asyncio.Event()
         activityts = [time.time()]
+        keep_minimized = await _should_keep_context_minimized(context)
         page = None
+        screenshot_task = None
         try:
             page = await context.new_page()
+            await _preserve_minimized_if_needed(page, keep_minimized=keep_minimized)
             watchdog_task = asyncio.create_task(
                 watchdog_page(page, q, stop_event,
                               check_interval=15,
                               activity_ts=activityts)  # ✅ era activityts=, corrigido para activity_ts=
             )
+            screenshot_task = asyncio.create_task(
+                _stream_browser_screenshots(page, q, stop_event, label='chat')
+            )
             try:
                 await asyncio.wait_for(
-                    handle_chat_task_inner(task, page, q, stop_event, activityts),
+                    handle_chat_task_inner(task, page, q, stop_event, activityts, keep_minimized=keep_minimized),
                     timeout=660
                 )
             except asyncio.TimeoutError:
@@ -1103,10 +1642,17 @@ async def handle_chat_task(context, task):
             finally:
                 stop_event.set()
                 watchdog_task.cancel()
+                if screenshot_task:
+                    screenshot_task.cancel()
                 try:
                     await watchdog_task
                 except (asyncio.CancelledError, Exception):
                     pass
+                if screenshot_task:
+                    try:
+                        await screenshot_task
+                    except (asyncio.CancelledError, Exception):
+                        pass
         except Exception as e:
             emit_log(q, f'ERRO Chat: {e}')
             emit_event(q, 'error', f'Falha no navegador: {str(e)}')
@@ -1121,7 +1667,7 @@ async def handle_chat_task(context, task):
                 q.put(None)
 
 
-async def handle_chat_task_inner(task, page, q, stop_event: asyncio.Event, activityts: list = None):
+async def handle_chat_task_inner(task, page, q, stop_event: asyncio.Event, activityts: list = None, keep_minimized: bool = False):
     url    = task.get('url')
     chat_id = task.get('chat_id')
     msg    = task.get('message')
@@ -1130,9 +1676,11 @@ async def handle_chat_task_inner(task, page, q, stop_event: asyncio.Event, activ
     if url and url != 'None':
         emit_log(q, f'Abrindo chat existente: {url}')
         await page.goto(url, wait_until='domcontentloaded')
+        await _preserve_minimized_if_needed(page, keep_minimized=keep_minimized)
     else:
         emit_log(q, 'Iniciando nova aba de chat...')
         await page.goto('https://chatgpt.com', wait_until='domcontentloaded')
+        await _preserve_minimized_if_needed(page, keep_minimized=keep_minimized)
         await asyncio.sleep(2)
 
     if stop_event.is_set():
@@ -1152,6 +1700,7 @@ async def handle_chat_task_inner(task, page, q, stop_event: asyncio.Event, activ
                 emit_log(q, "Projeto 'ConexaoVida' encontrado. Criando novo chat no projeto...")
                 await project_loc.click()
                 await page.wait_for_selector('#prompt-textarea', timeout=10000)
+                await _preserve_minimized_if_needed(page, keep_minimized=keep_minimized)
                 await asyncio.sleep(1)
             else:
                 print("DICA: Projeto ConexaoVida não encontrado na barra lateral.")
@@ -1188,23 +1737,16 @@ async def handle_chat_task_inner(task, page, q, stop_event: asyncio.Event, activ
         raise RuntimeError("Watchdog sinalizou falha após digitação.")
 
     emit_event(q, "status", "Enviando...")
-    sent = False
-    try:
-        btn = page.locator('button[data-testid="send-button"]').first
-        if await btn.is_visible() and not await btn.is_disabled():
-            await btn.click()
-            sent = True
-    except:
-        pass
-
+    sent = await _submit_prompt(page, q=q, timeout=20.0)
     if not sent:
-        await page.keyboard.press("Enter")
+        raise RuntimeError("Não foi possível submeter a mensagem/anexos no ChatGPT.")
 
     emit_event(q, "status", "Aguardando resposta...")
 
     start_time  = time.time()
     started     = False
     last_html   = ""
+    last_status_text = ""
     stuck_count = 0
     loop_count  = 0
     idle_ready_count = 0
@@ -1255,6 +1797,7 @@ async def handle_chat_task_inner(task, page, q, stop_event: asyncio.Event, activ
 
         if status_txt:
             emit_event(q, "status", status_txt)
+            last_status_text = status_txt
             started     = True
             stuck_count = 0
             idle_ready_count = 0
@@ -1269,12 +1812,41 @@ async def handle_chat_task_inner(task, page, q, stop_event: asyncio.Event, activ
 
         responses = await page.locator("div[data-message-author-role='assistant']").all()
         curr_html = ""
+        curr_text = ""
         if responses:
             curr_html = await responses[-1].inner_html()
             curr_html = clean_html(curr_html)
+            try:
+                curr_text = re.sub(r"\s+", " ", (await responses[-1].inner_text()) or "").strip()
+            except Exception:
+                curr_text = ""
 
         markdown_text = md(curr_html, heading_style="ATX").strip()
         markdown_text = markdown_text.replace("\\_", "_").replace("\\*", "*")
+
+        plain_markdown = re.sub(r"\s+", " ", markdown_text).strip()
+        visible_status_txt = curr_text
+        if visible_status_txt and plain_markdown:
+            if visible_status_txt.endswith(plain_markdown):
+                visible_status_txt = visible_status_txt[:-len(plain_markdown)].strip()
+            elif visible_status_txt == plain_markdown:
+                visible_status_txt = ""
+
+        # Só reaproveita o texto visível do balão como "status" enquanto ainda não
+        # há resposta markdown consolidada. Depois que o markdown começa a surgir,
+        # o texto do balão já representa a resposta final e não deve vazar no CMD
+        # como se fosse pensamento da LLM.
+        if (
+            not status_txt
+            and visible_status_txt
+            and not plain_markdown
+            and visible_status_txt != last_status_text
+        ):
+            emit_event(q, "status", visible_status_txt[:800])
+            last_status_text = visible_status_txt
+            started = True
+            stuck_count = 0
+            idle_ready_count = 0
 
         if markdown_text != last_html:
             if not started:
@@ -1282,6 +1854,7 @@ async def handle_chat_task_inner(task, page, q, stop_event: asyncio.Event, activ
                 started = True
             emit_event(q, "markdown", markdown_text)
             last_html   = markdown_text
+            last_status_text = ""
             stuck_count = 0
             idle_ready_count = 0
         else:
@@ -1290,7 +1863,14 @@ async def handle_chat_task_inner(task, page, q, stop_event: asyncio.Event, activ
         if not is_gen and not status_txt:
             idle_ready_count += 1
             if len(last_html) > 0:
-                if stuck_count > 20 and idle_ready_count > 8: break
+                if _response_looks_incomplete_json(last_html):
+                    if loop_count % 10 == 0:
+                        emit_event(q, "status", "Aguardando conclusão do JSON da resposta...")
+                    if stuck_count > 80 and idle_ready_count > 12:
+                        break
+                else:
+                    if stuck_count > 20 and idle_ready_count > 8:
+                        break
             else:
                 if time.time() - start_time > 60 and idle_ready_count > 8: break
         else:
@@ -1307,19 +1887,21 @@ async def handle_chat_task_inner(task, page, q, stop_event: asyncio.Event, activ
 async def browser_loop_async():
     file_log("browser.py", "⚡ Iniciando Loop Async (Playwright)...")
     async with async_playwright() as p:
-        
+
         # Função interna para iniciar o browser evitando repetição de código
         async def start_browser():
             b = await p.chromium.launch_persistent_context(
                 config.DIRS["profile"],
                 headless=False,
-                args=["--start-maximized", "--disable-blink-features=AutomationControlled", "--disable-infobars"],
+                args=["--start-minimized", "--disable-blink-features=AutomationControlled", "--disable-infobars"],
                 user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
                 viewport=None
             )
             try:
                 dp = await b.new_page()
                 await dp.goto("https://chatgpt.com")
+                await _set_window_state(dp, "minimized")
+                file_log("browser.py", "🪟 Chromium iniciado minimizado.")
             except: pass
             return b
 
@@ -1331,9 +1913,9 @@ async def browser_loop_async():
             try:
                 loop = asyncio.get_running_loop()
                 task = await loop.run_in_executor(None, browser_queue.get)
-                
+
                 if task.get('action') == 'STOP': break
-                
+
                 # =======================================================
                 # AUTO-RECOVERY: TESTA SE O BROWSER AINDA ESTÁ VIVO
                 # =======================================================
@@ -1341,31 +1923,33 @@ async def browser_loop_async():
                     # 1. Se o usuário fechou todas as abas, consideramos fechado
                     if len(browser.pages) == 0:
                         raise Exception("Sem abas")
-                    
+
                     # 2. Faz um "Ping" real no Chromium. Se ele foi fechado no X, isso vai dar erro na hora!
                     await browser.pages[0].evaluate("1")
-                    
+
                 except Exception:
                     file_log("browser.py", "⚠️ Navegador fechado ou desconectado detectado! Recriando...")
                     try: await browser.close()
                     except: pass
-                    
+
                     # Reabre o navegador usando a função interna
                     browser = await start_browser()
                     file_log("browser.py", "✅ Navegador reaberto com sucesso!")
                 # =======================================================
 
                 action = task.get('action', 'CHAT')
-                
+
                 if action in ['GET_MENU', 'EXEC_MENU']:
                     asyncio.create_task(handle_menu_task(browser, task))
                 elif action == 'SYNC':
                     asyncio.create_task(handle_sync_task(browser, task))
                 elif action == 'SEARCH':
                     asyncio.create_task(handle_search_task(browser, task))
-                else: 
+                elif action == 'UPTODATE_SEARCH':
+                    asyncio.create_task(handle_uptodate_search_task(browser, task))
+                else:
                     asyncio.create_task(handle_chat_task(browser, task))
-                    
+
             except Exception as e:
                 print(f"Erro no loop principal: {e}")
                 await asyncio.sleep(1)
@@ -1383,26 +1967,30 @@ def browser_loop():
 # executa a ação e imprime o resultado no terminal.
 # =============================================================================
 
-async def _standalone_search(queries: list):
-    """Executa buscas Google standalone (sem server.py)."""
+async def _standalone_search(queries: list, action: str = 'SEARCH'):
+    """Executa buscas standalone (sem server.py)."""
     async with async_playwright() as p:
         browser = await p.chromium.launch_persistent_context(
             config.DIRS["profile"],
             headless=False,
-            args=["--start-maximized", "--disable-blink-features=AutomationControlled", "--disable-infobars"],
+            args=["--start-minimized", "--disable-blink-features=AutomationControlled", "--disable-infobars"],
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
             viewport=None,
         )
         try:
+            action_label = 'UpToDate' if action == 'UPTODATE_SEARCH' else 'Google'
             for i, query_str in enumerate(queries):
                 q = queue.Queue()
-                task = {'action': 'SEARCH', 'query': query_str, 'stream_queue': q}
+                task = {'action': action, 'query': query_str, 'stream_queue': q}
 
                 print(f"\n{'─' * 60}")
-                print(f"🔍 [{i+1}/{len(queries)}] {query_str}")
+                print(f"🔍 [{i+1}/{len(queries)}] {query_str} ({action_label})")
                 print(f"{'─' * 60}")
 
-                await handle_search_task(browser, task)
+                if action == 'UPTODATE_SEARCH':
+                    await handle_uptodate_search_task(browser, task)
+                else:
+                    await handle_search_task(browser, task)
 
                 # Drena a fila e exibe resultado
                 result_data = None
@@ -1466,6 +2054,7 @@ def _cli():
         "Uso:\n"
         "  python browser.py search \"metilfenidato efeitos adversos\"\n"
         "  python browser.py search \"query 1\" \"query 2\" \"query 3\"\n"
+        "  python browser.py uptodate_search \"acute heart failure\"\n"
     )
 
     if len(sys.argv) < 3:
@@ -1478,6 +2067,10 @@ def _cli():
         queries = sys.argv[2:]
         print(f"🌐 Modo standalone — {len(queries)} busca(s) no Google")
         asyncio.run(_standalone_search(queries))
+    elif action == 'uptodate_search':
+        queries = sys.argv[2:]
+        print(f"🩺 Modo standalone — {len(queries)} busca(s) no UpToDate")
+        asyncio.run(_standalone_search(queries, action='UPTODATE_SEARCH'))
     else:
         print(f"Ação desconhecida: '{action}'\n")
         print(usage)
