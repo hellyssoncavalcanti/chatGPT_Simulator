@@ -28,12 +28,14 @@
 #   é digitado caractere a caractere via type_realistic().
 # =============================================================================
 import asyncio
+import base64
 import json
 import random
 import time
 import re
 import os
 import queue
+from urllib.parse import urlparse, unquote
 from playwright.async_api import async_playwright
 import config
 from shared import browser_queue
@@ -54,6 +56,58 @@ def emit_event(q, type_, content):
         # O \n final é estritamente o separador do stream
         payload = json.dumps({"type": type_, "content": content}, separators=(',', ':'))
         q.put(payload + "\n")
+
+def _guess_download_filename(url, headers):
+    disposition = (headers or {}).get('content-disposition', '') or ''
+    match = re.search(r"filename\\*=UTF-8''([^;]+)|filename=\"?([^\";]+)\"?", disposition, re.IGNORECASE)
+    if match:
+        raw_name = match.group(1) or match.group(2)
+        if raw_name:
+            return unquote(raw_name).strip()
+
+    try:
+        parsed = urlparse(url or '')
+        name = os.path.basename(parsed.path)
+        if name:
+            return name
+    except Exception:
+        pass
+
+    return 'arquivo_chatgpt'
+
+async def handle_authenticated_download_task(browser, task):
+    q = task.get('stream_queue')
+    file_url = (task.get('url') or '').strip()
+
+    if not file_url:
+        emit_event(q, 'error', 'URL do arquivo nao informada.')
+        if q: q.put(None)
+        return
+
+    try:
+        response = await browser.request.get(file_url, fail_on_status_code=False, timeout=120000)
+        status = response.status
+        headers = await response.all_headers()
+        body = await response.body()
+
+        if status >= 400:
+            emit_event(q, 'error', f'Falha ao baixar arquivo autenticado (HTTP {status}).')
+            if q: q.put(None)
+            return
+
+        filename = task.get('filename') or _guess_download_filename(file_url, headers)
+        emit_event(q, 'download', {
+            'status': status,
+            'filename': filename,
+            'content_type': headers.get('content-type') or 'application/octet-stream',
+            'content_disposition': headers.get('content-disposition') or '',
+            'body_base64': base64.b64encode(body).decode('ascii'),
+            'source_url': file_url,
+        })
+    except Exception as e:
+        emit_event(q, 'error', f'Erro ao baixar arquivo autenticado: {e}')
+    finally:
+        if q: q.put(None)
 
 async def smart_input(page, message, q=None, activityts=None):
     import re
@@ -1626,6 +1680,8 @@ async def browser_loop_async():
                     asyncio.create_task(handle_menu_task(browser, task))
                 elif action == 'SYNC':
                     asyncio.create_task(handle_sync_task(browser, task))
+                elif action == 'AUTH_DOWNLOAD':
+                    asyncio.create_task(handle_authenticated_download_task(browser, task))
                 elif action == 'SEARCH':
                     asyncio.create_task(handle_search_task(browser, task))
                 elif action == 'UPTODATE_SEARCH':

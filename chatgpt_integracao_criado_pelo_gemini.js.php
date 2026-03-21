@@ -461,6 +461,13 @@ if (isset($_GET['action']) && $_GET['action'] === 'api_exec') {
 // -----------------------------------------------------
 // HANDLER: EXECUÇÃO DE SQL DO FRONTEND (FIX 9.2)
 // -----------------------------------------------------
+if (!function_exists('chatgpt_query_contains_statement_command')) {
+    function chatgpt_query_contains_statement_command($query, $command) {
+        $pattern = '/(?:^|;)\s*' . preg_quote($command, '/') . '\b/i';
+        return preg_match($pattern, (string) $query) === 1;
+    }
+}
+
 if (isset($_GET['action']) && $_GET['action'] === 'execute_sql') {
     while (ob_get_level()) ob_end_clean();
     header('Content-Type: application/json; charset=utf-8');
@@ -496,7 +503,7 @@ if (isset($_GET['action']) && $_GET['action'] === 'execute_sql') {
     $isChatgptTableOnly = (bool) preg_match('/^\s*(DELETE\s+FROM|INSERT\s+INTO|UPDATE|REPLACE\s+INTO)\s+`?chatgpt_\w+`?\s/i', $query);
 
     foreach ($forbidden as $bad) {
-        if (stripos($query, $bad) !== false) {
+        if (chatgpt_query_contains_statement_command($query, $bad)) {
             // Permite o comando se for escrita exclusiva em tabela chatgpt_
             if ($isChatgptTableOnly && in_array($bad, ['DELETE', 'INSERT', 'UPDATE', 'REPLACE'])) {
                 continue;
@@ -2346,6 +2353,95 @@ if (isset($_GET['action']) && $_GET['action'] === 'sync_simulator') {
 // -----------------------------------------------------
 // PROXY HANDLER (CHAT MODE)
 // -----------------------------------------------------
+if (isset($_GET['action']) && $_GET['action'] === 'proxy_chatgpt_file') {
+    while (ob_get_level()) ob_end_clean();
+    header("Cache-Control: no-store, no-cache, must-revalidate, max-age=0");
+    header("Pragma: no-cache");
+
+    $rawUrl = trim($_GET['url'] ?? '');
+    $filename = trim($_GET['filename'] ?? '');
+    $download = trim($_GET['download'] ?? '0');
+
+    if ($rawUrl === '' || !filter_var($rawUrl, FILTER_VALIDATE_URL)) {
+        http_response_code(400);
+        echo "URL de arquivo inválida.";
+        exit;
+    }
+
+    global $ollama_manual_ip, $CHATGPT_VIA_API_KEY;
+    $ip_final = "";
+
+    if (!empty($ollama_manual_ip)) {
+        $ip_final = $ollama_manual_ip;
+    } else {
+        $url_monitor = "http://conexaovida.org/no-ip-dynamic_ip.php?port=11434";
+        $ch = curl_init($url_monitor);
+        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+        curl_setopt($ch, CURLOPT_FOLLOWLOCATION, true);
+        curl_setopt($ch, CURLOPT_HEADER, true);
+        curl_setopt($ch, CURLOPT_TIMEOUT, 5);
+        $raw_response = curl_exec($ch);
+        $effective_url = curl_getinfo($ch, CURLINFO_EFFECTIVE_URL);
+        curl_close($ch);
+
+        $ip_found = null;
+        if (preg_match('/(\d{1,3}(?:\.\d{1,3}){3})/', $effective_url, $matches)) { $ip_found = $matches[1]; }
+        else if (preg_match('/(\d{1,3}(?:\.\d{1,3}){3})/', $raw_response ?? '', $matches)) { $ip_found = $matches[1]; }
+        if ($ip_found && filter_var($ip_found, FILTER_VALIDATE_IP)) { $ip_final = "http://" . $ip_found . ":3003"; }
+    }
+
+    if (!empty($ip_final) && strpos($ip_final, ':11434') !== false) {
+        $ip_final = str_replace(':11434', ':3003', $ip_final);
+    }
+
+    if (empty($ip_final) || !filter_var(rtrim($ip_final, '/'), FILTER_VALIDATE_URL)) {
+        http_response_code(502);
+        echo "Não foi possível localizar o ChatGPT Simulator.";
+        exit;
+    }
+
+    $proxyUrl = rtrim($ip_final, '/') . '/api/proxy_download?api_key=' . urlencode($CHATGPT_VIA_API_KEY)
+        . '&url=' . urlencode($rawUrl)
+        . ($filename !== '' ? '&filename=' . urlencode($filename) : '')
+        . '&download=' . urlencode($download);
+
+    $ch = curl_init($proxyUrl);
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($ch, CURLOPT_FOLLOWLOCATION, true);
+    curl_setopt($ch, CURLOPT_HEADER, true);
+    curl_setopt($ch, CURLOPT_TIMEOUT, 180);
+    $response = curl_exec($ch);
+    $headerSize = curl_getinfo($ch, CURLINFO_HEADER_SIZE);
+    $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    $contentType = curl_getinfo($ch, CURLINFO_CONTENT_TYPE);
+    curl_close($ch);
+
+    if ($response === false) {
+        http_response_code(502);
+        echo "Falha ao obter o arquivo autenticado.";
+        exit;
+    }
+
+    $rawHeaders = substr($response, 0, $headerSize);
+    $body = substr($response, $headerSize);
+    http_response_code($httpCode ?: 200);
+
+    $forwardHeaders = ['content-type', 'content-disposition', 'cache-control', 'pragma'];
+    foreach (explode("\r\n", $rawHeaders) as $headerLine) {
+        if (strpos($headerLine, ':') === false) continue;
+        [$name, $value] = array_map('trim', explode(':', $headerLine, 2));
+        if (in_array(strtolower($name), $forwardHeaders, true)) {
+            header($name . ': ' . $value, true);
+        }
+    }
+
+    if (!headers_sent() && $contentType) {
+        header('Content-Type: ' . $contentType, true);
+    }
+    echo $body;
+    exit;
+}
+
 if (isset($_GET['action']) && $_GET['action'] === 'proxy') {
     
     ignore_user_abort(true); 
@@ -2596,7 +2692,7 @@ if (isset($_GET['action']) && $_GET['action'] === 'proxy') {
                     $cmd = strtoupper(strtok($query, ' '));
                     $isSafe = true;
                     foreach($forbidden as $bad) {
-                        if (stripos($query, $bad) !== false) {
+                        if (chatgpt_query_contains_statement_command($query, $bad)) {
                             $sqlResults[] = ["query" => $query, "error" => "SEGURANÇA: '$bad' proibido."];
                             $isSafe = false;
                             break;
@@ -3216,6 +3312,22 @@ header('Content-Type: application/javascript; charset=utf-8');
         .msg-ai li{margin:2px 0}
         .msg-ai hr{border:none;border-top:1px solid #ccc;margin:8px 0}
         .msg-ai em{font-style:italic}
+        .msg-ai img{max-width:100%;height:auto;border-radius:10px;display:block}
+        .ow-file-rich-card{margin-top:10px;border:1px solid #dbe3ef;border-radius:12px;overflow:hidden;background:#fff;box-shadow:0 2px 8px rgba(15,23,42,.06)}
+        .ow-file-rich-actions{display:flex;justify-content:space-between;align-items:center;gap:10px;padding:10px 12px;background:#f8fafc;border-bottom:1px solid #e2e8f0;flex-wrap:wrap}
+        .ow-file-rich-meta{font-size:12px;color:#334155;min-width:0;overflow-wrap:anywhere}
+        .ow-file-rich-buttons{display:flex;gap:8px;flex-wrap:wrap}
+        .ow-file-rich-btn{appearance:none;border:1px solid #cbd5e1;background:#fff;color:#0f172a;border-radius:8px;padding:6px 10px;font-size:12px;font-weight:600;cursor:pointer;text-decoration:none}
+        .ow-file-rich-preview{max-height:320px;overflow:auto;background:#fff;-webkit-overflow-scrolling:touch;touch-action:pan-x pan-y}
+        .ow-file-rich-preview img{max-width:none;width:auto;min-width:100%;border-radius:0}
+        .ow-file-viewer{position:fixed;inset:0;background:rgba(15,23,42,.78);z-index:100001;display:none;align-items:center;justify-content:center;padding:20px}
+        .ow-file-viewer.open{display:flex}
+        .ow-file-viewer-panel{width:min(96vw,1200px);height:min(92vh,900px);background:#fff;border-radius:16px;overflow:hidden;display:flex;flex-direction:column;box-shadow:0 20px 50px rgba(0,0,0,.35)}
+        .ow-file-viewer-header{display:flex;justify-content:space-between;align-items:center;gap:10px;padding:12px 14px;border-bottom:1px solid #e2e8f0;background:#f8fafc}
+        .ow-file-viewer-title{font-size:13px;font-weight:700;color:#0f172a;min-width:0;overflow-wrap:anywhere}
+        .ow-file-viewer-body{flex:1;overflow:auto;background:#fff;-webkit-overflow-scrolling:touch;touch-action:pan-x pan-y}
+        .ow-file-viewer-body img{display:block;max-width:none;width:auto;min-width:100%}
+        .ow-file-link-card{margin-top:10px;border:1px solid #dbe3ef;border-radius:12px;background:#fff;padding:12px;display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap}
         
         
         pre {
@@ -3752,13 +3864,13 @@ header('Content-Type: application/javascript; charset=utf-8');
                     }
                     if (c) {
                         const mEl = document.getElementById(uiNew.mID);
-                        if (mEl) mEl.innerHTML = formatMarkdown(fullC);
+                        if (mEl) renderAssistantContent(mEl, fullC);
                         scroll();
                     }
                 }, currentAbortController.signal);
 
                 const mEl = document.getElementById(uiNew.mID);
-                if (mEl) { mEl.classList.remove('cursor-blink'); mEl.innerHTML = formatMarkdown(fullC); }
+                if (mEl) { mEl.classList.remove('cursor-blink'); renderAssistantContent(mEl, fullC); }
                 if (fullC) {
                     state.messages.push({ role: 'assistant', content: fullC });
                     saveLocal();
@@ -4077,6 +4189,130 @@ header('Content-Type: application/javascript; charset=utf-8');
         out = out.replace(/\x00CODE(\d+)\x00/g, (_, i) => codeBlocks[i]);
         out = out.replace(/\x00INLINE(\d+)\x00/g, (_, i) => inlineCodes[i]);
         return out;
+    }
+
+    const CHATGPT_FILE_PROXY_URL = "<?php echo $_SERVER['PHP_SELF']; ?>?action=proxy_chatgpt_file";
+    const CHATGPT_FILE_HOST_RE = /^(https?:)?\/\/([^/]+\.)?(chatgpt\.com|files\.oaiusercontent\.com|persistent\.oaistatic\.com|oaiusercontent\.com)\//i;
+
+    function isChatGptProtectedFileUrl(rawUrl) {
+        return CHATGPT_FILE_HOST_RE.test(String(rawUrl || '').trim());
+    }
+
+    function guessProtectedFilename(rawUrl, fallback = 'arquivo_chatgpt') {
+        try {
+            const url = new URL(rawUrl, window.location.href);
+            const pathname = decodeURIComponent(url.pathname || '');
+            const name = pathname.split('/').filter(Boolean).pop();
+            return name || fallback;
+        } catch (_) {
+            return fallback;
+        }
+    }
+
+    function buildChatGptFileProxyUrl(rawUrl, filename = '', download = false) {
+        const target = new URL(CHATGPT_FILE_PROXY_URL, window.location.href);
+        target.searchParams.set('url', rawUrl);
+        target.searchParams.set('download', download ? '1' : '0');
+        if (filename) target.searchParams.set('filename', filename);
+        return target.toString();
+    }
+
+    function ensureChatGptFileViewer() {
+        let overlay = document.getElementById('ow-file-viewer');
+        if (overlay) return overlay;
+
+        overlay = document.createElement('div');
+        overlay.id = 'ow-file-viewer';
+        overlay.className = 'ow-file-viewer';
+        overlay.innerHTML = `
+            <div class="ow-file-viewer-panel">
+                <div class="ow-file-viewer-header">
+                    <div class="ow-file-viewer-title" id="ow-file-viewer-title">Arquivo</div>
+                    <div class="ow-file-rich-buttons">
+                        <a id="ow-file-viewer-download" class="ow-file-rich-btn" href="#" target="_blank" rel="noopener">Baixar</a>
+                        <button type="button" id="ow-file-viewer-close" class="ow-file-rich-btn">Fechar</button>
+                    </div>
+                </div>
+                <div class="ow-file-viewer-body" id="ow-file-viewer-body"></div>
+            </div>`;
+        document.body.appendChild(overlay);
+
+        overlay.addEventListener('click', (ev) => {
+            if (ev.target === overlay) overlay.classList.remove('open');
+        });
+        overlay.querySelector('#ow-file-viewer-close').onclick = () => overlay.classList.remove('open');
+        return overlay;
+    }
+
+    window.openChatGptFileViewer = function(imageUrl, downloadUrl, filename) {
+        const overlay = ensureChatGptFileViewer();
+        overlay.querySelector('#ow-file-viewer-title').innerText = filename || 'Arquivo';
+        overlay.querySelector('#ow-file-viewer-download').href = downloadUrl || imageUrl;
+        overlay.querySelector('#ow-file-viewer-body').innerHTML = `<img src="${escapeHtmlAttr(imageUrl)}" alt="${escapeHtmlAttr(filename || 'Arquivo')}">`;
+        overlay.classList.add('open');
+    };
+
+    function enhanceChatGptFileBlocks(root) {
+        if (!root) return;
+
+        root.querySelectorAll('img[src]').forEach(img => {
+            if (img.closest('.ow-file-rich-card')) return;
+            const parentAnchor = img.closest('a[href]');
+            const originalUrl = parentAnchor?.getAttribute('href') || img.getAttribute('src') || '';
+            if (!isChatGptProtectedFileUrl(originalUrl)) return;
+
+            const filename = (parentAnchor?.textContent || img.getAttribute('alt') || guessProtectedFilename(originalUrl)).trim() || 'arquivo_chatgpt';
+            const inlineUrl = buildChatGptFileProxyUrl(originalUrl, filename, false);
+            const downloadUrl = buildChatGptFileProxyUrl(originalUrl, filename, true);
+            const wrapper = document.createElement('div');
+            wrapper.className = 'ow-file-rich-card';
+            wrapper.innerHTML = `
+                <div class="ow-file-rich-actions">
+                    <div class="ow-file-rich-meta"><strong>Arquivo:</strong> ${escapeDirectResultText(filename)}</div>
+                    <div class="ow-file-rich-buttons">
+                        <a class="ow-file-rich-btn" href="${escapeHtmlAttr(downloadUrl)}" target="_blank" rel="noopener">Baixar</a>
+                        <button type="button" class="ow-file-rich-btn">Expandir</button>
+                    </div>
+                </div>
+                <div class="ow-file-rich-preview"></div>`;
+
+            img.setAttribute('src', inlineUrl);
+            img.setAttribute('loading', 'lazy');
+            const preview = wrapper.querySelector('.ow-file-rich-preview');
+            preview.appendChild(img);
+            wrapper.querySelector('button').onclick = () => openChatGptFileViewer(inlineUrl, downloadUrl, filename);
+
+            if (parentAnchor) {
+                parentAnchor.replaceWith(wrapper);
+            } else {
+                img.replaceWith(wrapper);
+            }
+        });
+
+        root.querySelectorAll('a[href]').forEach(anchor => {
+            if (anchor.closest('.ow-file-rich-card') || anchor.closest('.ow-file-link-card')) return;
+            const originalUrl = anchor.getAttribute('href') || '';
+            if (!isChatGptProtectedFileUrl(originalUrl)) return;
+
+            const filename = anchor.textContent.trim() || guessProtectedFilename(originalUrl);
+            const inlineUrl = buildChatGptFileProxyUrl(originalUrl, filename, false);
+            const downloadUrl = buildChatGptFileProxyUrl(originalUrl, filename, true);
+            const card = document.createElement('div');
+            card.className = 'ow-file-link-card';
+            card.innerHTML = `
+                <div class="ow-file-rich-meta"><strong>Arquivo:</strong> ${escapeDirectResultText(filename)}</div>
+                <div class="ow-file-rich-buttons">
+                    <a class="ow-file-rich-btn" href="${escapeHtmlAttr(inlineUrl)}" target="_blank" rel="noopener">Abrir</a>
+                    <a class="ow-file-rich-btn" href="${escapeHtmlAttr(downloadUrl)}" target="_blank" rel="noopener">Baixar</a>
+                </div>`;
+            anchor.replaceWith(card);
+        });
+    }
+
+    function renderAssistantContent(targetEl, rawContent, isHtml = false) {
+        if (!targetEl) return;
+        targetEl.innerHTML = isHtml ? rawContent : formatMarkdown(rawContent);
+        enhanceChatGptFileBlocks(targetEl);
     }
     
     function normalizeSQL(sql) {
@@ -4840,7 +5076,7 @@ header('Content-Type: application/javascript; charset=utf-8');
                     const ui = addAiMarkup();
                     document.getElementById(ui.tID).parentElement.style.display = 'block';
                     document.getElementById(ui.tID).innerText = parts[0].replace('<think>','').trim();
-                    document.getElementById(ui.mID).innerHTML = formatMarkdown(parts[1].trim());
+                    renderAssistantContent(document.getElementById(ui.mID), parts[1].trim());
                     document.getElementById(ui.mID).classList.remove('cursor-blink');
                 } else if (m.content.includes(('<div>').slice(0, -1)) && m.content.includes('class=')) { 
                     // Simulador em HTML puro
@@ -5403,7 +5639,7 @@ header('Content-Type: application/javascript; charset=utf-8');
         // ── Mensagem da IA (inalterada) ──────────────────────────────────────
         const d = document.createElement('div');
         d.className = `msg msg-${role}`;
-        d.innerHTML = formatMarkdown(txt);
+        renderAssistantContent(d, txt);
         b.appendChild(d);
     }
     function addAiMarkup() {
@@ -5656,7 +5892,7 @@ header('Content-Type: application/javascript; charset=utf-8');
             const markdown = `❌ **Erro ao executar ${parsed.type === 'sql' ? 'sql_queries' : 'search_queries'}:**\n\n\`${e.message}\``;
             if (mEl) {
                 mEl.classList.remove('cursor-blink');
-                mEl.innerHTML = formatMarkdown(markdown);
+                renderAssistantContent(mEl, markdown);
             }
             state.messages.push({ role: 'assistant', content: markdown });
             saveLocal();
@@ -6774,11 +7010,11 @@ header('Content-Type: application/javascript; charset=utf-8');
                 if (chunk.type === 'markdown' || chunk.type === 'html') { fullC = chunk.content; c = fullC; }
                 else if (chunk.choices?.[0]?.delta?.content) { c = chunk.choices[0].delta.content; fullC += c; }
                 else if (chunk.type === 'finish') { const fd = chunk.content||{}; Session.setChat(fd.chat_id, fd.url, null); return; }
-                if (c) { const mEl = document.getElementById(uiNew.mID); if (mEl) mEl.innerHTML = formatMarkdown(fullC); scroll(); }
+                if (c) { const mEl = document.getElementById(uiNew.mID); if (mEl) renderAssistantContent(mEl, fullC); scroll(); }
             }, currentAbortController?.signal);
 
             const mEl = document.getElementById(uiNew.mID);
-            if (mEl) { mEl.classList.remove('cursor-blink'); mEl.innerHTML = formatMarkdown(fullC); }
+            if (mEl) { mEl.classList.remove('cursor-blink'); renderAssistantContent(mEl, fullC); }
             if (typeof injectSearchButtons === 'function') setTimeout(() => injectSearchButtons(), 0);
 
             if (fullC) {
@@ -6865,11 +7101,11 @@ header('Content-Type: application/javascript; charset=utf-8');
                     if (chunk.type === 'markdown' || chunk.type === 'html') { fullC = chunk.content; c = fullC; }
                     else if (chunk.choices?.[0]?.delta?.content) { c = chunk.choices[0].delta.content; fullC += c; }
                     else if (chunk.type === 'finish') { const fd = chunk.content||{}; Session.setChat(fd.chat_id, fd.url, null); return; }
-                    if (c) { const mEl = document.getElementById(uiNew.mID); if (mEl) mEl.innerHTML = formatMarkdown(fullC); scroll(); }
+                    if (c) { const mEl = document.getElementById(uiNew.mID); if (mEl) renderAssistantContent(mEl, fullC); scroll(); }
                 }, currentAbortController?.signal);
 
                 const mEl = document.getElementById(uiNew.mID);
-                if (mEl) { mEl.classList.remove('cursor-blink'); mEl.innerHTML = formatMarkdown(fullC); }
+                if (mEl) { mEl.classList.remove('cursor-blink'); renderAssistantContent(mEl, fullC); }
                 if (typeof injectSearchButtons === 'function') setTimeout(() => injectSearchButtons(), 0);
                 if (fullC) {
                     const chainedSearchDetected = await detectAndExecuteSearch(fullC, lastUserMsg, uiNew, 1);
@@ -7265,10 +7501,12 @@ header('Content-Type: application/javascript; charset=utf-8');
         let fullC = partialContent, fullT = '', openedT = false;
 
         if (partialContent) {
-            document.getElementById(ui.mID).innerHTML = formatMarkdown(partialContent) +
+            const partialEl = document.getElementById(ui.mID);
+            partialEl.innerHTML = formatMarkdown(partialContent) +
                 `<div style="color:#ff9800;margin-top:10px;padding:10px;background:#fff3e0;border-left:4px solid #ff9800;border-radius:4px;">
                     <strong>🔄 Recuperando...</strong> Tentando continuar...
                 </div>`;
+            enhanceChatGptFileBlocks(partialEl);
         }
         try {
             await apiCallStream('/v1/chat/completions', 'POST', {
@@ -7330,7 +7568,7 @@ header('Content-Type: application/javascript; charset=utf-8');
 
                     const mEl = document.getElementById(ui.mID);
                     if (mEl) {
-                        mEl.innerHTML = fullC.trim().startsWith(('<div>').slice(0, -1)) ? fullC : formatMarkdown(fullC);
+                        renderAssistantContent(mEl, fullC, fullC.trim().startsWith(('<div>').slice(0, -1)));
                     }
                     scroll();
                 }
@@ -7367,7 +7605,7 @@ header('Content-Type: application/javascript; charset=utf-8');
             const mEl = document.getElementById(ui.mID);
             if (mEl) {
                 mEl.classList.remove('cursor-blink');
-                mEl.innerHTML = fullC.trim().startsWith(('<div>').slice(0, -1)) ? fullC : formatMarkdown(fullC);
+                renderAssistantContent(mEl, fullC, fullC.trim().startsWith(('<div>').slice(0, -1)));
             }
             if (typeof injectSearchButtons === 'function') setTimeout(() => injectSearchButtons(), 0);
             if (fullT) document.getElementById(ui.tID).innerText = fullT;

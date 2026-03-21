@@ -326,6 +326,12 @@ O projeto também foi desenhado para ser consumido por um frontend/proxy PHP ext
 
 Na prática, esse PHP parece funcionar como ponte entre a aplicação principal do site e o simulador, incluindo chamadas SQL e envio de prompts para a LLM via backend local.
 
+Pontos importantes dessa ponte PHP para outra LLM:
+
+- o proxy PHP encaminha chamadas de chat para o `server.py` na porta 3003;
+- downloads de arquivos protegidos do ChatGPT podem precisar passar por proxy/autenticação compartilhada com o `browser.py`;
+- no endpoint `execute_sql`, funções como `REPLACE(...)` e `REGEXP_REPLACE(...)` dentro de consultas `SELECT` devem ser tratadas como leitura, não como escrita SQL, desde que não exista comando real `REPLACE INTO`/`UPDATE`/etc. no início de uma instrução.
+
 ---
 
 ## Diretórios importantes
