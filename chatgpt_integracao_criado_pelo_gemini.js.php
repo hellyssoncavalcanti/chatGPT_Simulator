@@ -3216,6 +3216,7 @@ header('Content-Type: application/javascript; charset=utf-8');
         #ow-analise-pendente .iap-badge{font-size:11px;font-weight:800;padding:4px 10px;border-radius:999px;color:#fff}
         #ow-analise-pendente .iap-badge.pendente{background:#d97706}
         #ow-analise-pendente .iap-badge.processando{background:#2563eb}
+        #ow-analise-pendente .iap-badge.erro{background:#dc2626}
         #ow-analise-pendente .iap-item-text{font-size:12px;line-height:1.5;color:#7c5a10;margin-top:7px}
         #ow-analise-pendente .iap-retry-note{margin-top:10px;padding:10px 11px;border-radius:10px;background:#fff8e1;border:1px dashed #f59e0b;color:#92400e;font-size:12px;line-height:1.45}
         #ow-analise-pendente .iap-retry-note strong{color:#78350f}
@@ -4505,6 +4506,8 @@ header('Content-Type: application/javascript; charset=utf-8');
         const notices = Object.entries(pendingAnaliseCtx).filter(([, cfg]) => cfg && ['pendente', 'processando'].includes(cfg.status));
         if (!notices.length) return;
 
+        const hasRetry = notices.some(([, cfg]) => cfg?.row?.retryRequested && cfg?.row?.previousError);
+
         const meta = {
             atendimento: {
                 titulo: 'Atendimento atual',
@@ -4522,19 +4525,31 @@ header('Content-Type: application/javascript; charset=utf-8');
             }
         };
 
+        const headerTitle = hasRetry
+            ? '⚠️ Erro na análise clínica — aguardando nova tentativa'
+            : '⏳ Análise clínica pendente';
+        const headerSubtitle = hasRetry
+            ? 'A análise anterior falhou. Uma nova tentativa foi solicitada automaticamente.'
+            : 'Aviso contextual da fila de processamento — não entra no histórico do chat.';
+
         const html = `
             <div id="ow-analise-pendente">
                 <div class="iap-header">
                     <div>
-                        <div class="iap-title">⏳ Análise clínica pendente</div>
-                        <div class="iap-subtitle">Aviso contextual da fila de processamento — não entra no histórico do chat.</div>
+                        <div class="iap-title">${headerTitle}</div>
+                        <div class="iap-subtitle">${headerSubtitle}</div>
                     </div>
                 </div>
                 <div class="iap-list">
                     ${notices.map(([scopeKey, cfg]) => {
                         const scopeMeta = meta[scopeKey] || meta.atendimento;
-                        const statusLabel = cfg.status === 'processando' ? 'PROCESSANDO' : 'PENDENTE';
-                        const statusText = scopeMeta.descricao[cfg.status] || 'A análise ainda não está disponível.';
+                        const isRetry = cfg?.row?.retryRequested && cfg?.row?.previousError;
+                        const statusLabel = isRetry
+                            ? 'REANÁLISE'
+                            : (cfg.status === 'processando' ? 'PROCESSANDO' : 'PENDENTE');
+                        const statusText = isRetry
+                            ? `A tentativa anterior falhou. O sistema solicitou uma nova análise automaticamente.`
+                            : (scopeMeta.descricao[cfg.status] || 'A análise ainda não está disponível.');
                         const queueInfo = cfg?.row?.queueInfo || null;
                         const avgLabel = queueInfo?.avgSeconds ? formatDurationEstimate(queueInfo.avgSeconds) : '';
                         const basisLabel = queueInfo?.basis === 'today'
@@ -4544,12 +4559,12 @@ header('Content-Type: application/javascript; charset=utf-8');
                                 : queueInfo?.basis === 'in_progress'
                                     ? 'média do tempo já transcorrido nas análises em andamento'
                                 : '';
-                        const retryNote = cfg?.row?.retryRequested && cfg?.row?.previousError
+                        const retryNote = isRetry
                             ? `
                                 <div class="iap-retry-note">
-                                    <strong>♻️ Nova tentativa solicitada pelo chat.</strong><br>
-                                    A análise anterior falhou com o motivo: <strong>${cfg.row.previousError}</strong>.<br>
-                                    O PHP recolocou esta análise em <strong>pendente</strong> para que o analisador tente novamente.
+                                    <strong>❌ Erro na tentativa anterior:</strong> ${cfg.row.previousError}<br>
+                                    <strong>♻️ Nova tentativa solicitada.</strong>
+                                    O sistema recolocou esta análise na fila para que o analisador tente novamente.
                                 </div>
                             `
                             : '';
@@ -4566,7 +4581,7 @@ header('Content-Type: application/javascript; charset=utf-8');
                             <div class="iap-item">
                                 <div class="iap-item-head">
                                     <div class="iap-item-title">${scopeMeta.titulo}</div>
-                                    <span class="iap-badge ${cfg.status}">${statusLabel}</span>
+                                    <span class="iap-badge ${isRetry ? 'erro' : cfg.status}">${statusLabel}</span>
                                 </div>
                                 <div class="iap-item-text">${statusText}</div>
                                 ${retryNote}
@@ -4666,9 +4681,20 @@ header('Content-Type: application/javascript; charset=utf-8');
                         clearPendingAnaliseNotice('atendimento');
                     }
                 } else if (row.status === 'pendente' || row.status === 'processando') {
-                    row.queueInfo = await fetchAnaliseQueueEstimate(row);
-                    setPendingAnaliseNotice('atendimento', row.status, row);
-                    notifyAnalisePreviaPendente(row.status, 'atendimento');
+                    // Se há erro_msg de tentativa anterior, exibe o erro prévio junto ao aviso de pendente
+                    const priorError = extractAnaliseRetryReason(row.erro_msg || '');
+                    if (priorError) {
+                        row.retryRequested = true;
+                        row.previousError  = priorError;
+                        console.warn(`⚠️ Análise 'pendente' com erro prévio: ${priorError} — solicitando reanálise.`);
+                        // Re-enfileira para garantir que o analisador tente novamente
+                        try { await requestAnaliseRetry(row, 'atendimento', 'atendimento atual'); }
+                        catch(e) { console.warn('Falha ao solicitar reanálise:', e.message); }
+                    } else {
+                        row.queueInfo = await fetchAnaliseQueueEstimate(row);
+                        setPendingAnaliseNotice('atendimento', row.status, row);
+                        notifyAnalisePreviaPendente(row.status, 'atendimento');
+                    }
                 } else {
                     clearPendingAnaliseNotice('atendimento');
                 }
@@ -4773,9 +4799,20 @@ header('Content-Type: application/javascript; charset=utf-8');
                         clearPendingAnaliseNotice('paciente_compilado');
                     }
                 } else if (row.status === 'pendente' || row.status === 'processando') {
-                    row.queueInfo = await fetchAnaliseQueueEstimate(row);
-                    setPendingAnaliseNotice('paciente_compilado', row.status, row);
-                    notifyAnalisePreviaPendente(row.status, 'síntese do paciente');
+                    // Se há erro_msg de tentativa anterior, exibe o erro prévio junto ao aviso de pendente
+                    const priorError = extractAnaliseRetryReason(row.erro_msg || '');
+                    if (priorError) {
+                        row.retryRequested = true;
+                        row.previousError  = priorError;
+                        console.warn(`⚠️ Síntese 'pendente' com erro prévio: ${priorError} — solicitando reanálise.`);
+                        // Re-enfileira para garantir que o analisador tente novamente
+                        try { await requestAnaliseRetry(row, 'paciente_compilado', 'síntese do paciente'); }
+                        catch(e) { console.warn('Falha ao solicitar reanálise:', e.message); }
+                    } else {
+                        row.queueInfo = await fetchAnaliseQueueEstimate(row);
+                        setPendingAnaliseNotice('paciente_compilado', row.status, row);
+                        notifyAnalisePreviaPendente(row.status, 'síntese do paciente');
+                    }
                 } else {
                     clearPendingAnaliseNotice('paciente_compilado');
                 }
