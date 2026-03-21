@@ -3042,6 +3042,9 @@ header('Content-Type: application/javascript; charset=utf-8');
     
     // Análise clínica pré-carregada em background
     let analiseAtendimentoCtx = null;
+    let analisePreviaChatUrl = null;   // URL do chat da análise prévia (para reutilização de contexto)
+    let analisePreviaChatId = null;    // ID do chat da análise prévia
+    let analisePreviaDadosJson = null; // dados_json bruto da análise prévia (fallback quando URL indisponível)
     let pendingAnaliseCtx = { atendimento: null, paciente_compilado: null };
 
     let recognition = null;
@@ -4144,6 +4147,20 @@ header('Content-Type: application/javascript; charset=utf-8');
         );
 
         analiseAtendimentoCtx = JSON.stringify({ analise_clinica_previa: analise }, null, 2);
+
+        // Armazena URL/ID do chat da análise prévia (para reutilização de contexto)
+        if (row.chat_url) {
+            analisePreviaChatUrl = row.chat_url;
+            analisePreviaChatId  = row.chat_id || row.chat_url.replace(/\/$/, '').split('/').pop() || null;
+            console.log(`%c🔗 URL da análise prévia disponível: ${analisePreviaChatUrl}`, 'color: #2196f3; font-weight: bold');
+        }
+        // Armazena dados_json bruto (fallback quando URL indisponível)
+        if (row.dados_json) {
+            try {
+                analisePreviaDadosJson = typeof row.dados_json === 'string' ? row.dados_json : JSON.stringify(row.dados_json);
+            } catch(e) { analisePreviaDadosJson = null; }
+        }
+
         renderAnalisePrevia(true);
 
         if (!window.__analiseObserver) {
@@ -4158,6 +4175,37 @@ header('Content-Type: application/javascript; charset=utf-8');
                 });
                 window.__analiseObserver.observe(owMessages, { childList: true });
             }
+        }
+    }
+
+    /**
+     * Valida se a URL do chat da análise prévia ainda existe no ChatGPT.
+     * Se excluída (detecção via browser.py / sync_simulator), limpa as variáveis
+     * para que o fallback (envio de dados_json + evolução) seja utilizado.
+     */
+    async function _validateAnalisePreviaUrl() {
+        if (!analisePreviaChatUrl || !analisePreviaChatUrl.includes('chatgpt.com')) return;
+        if (!analisePreviaChatId) return;
+
+        try {
+            console.log(`%c${FILE_PREFIX} 🔍 Validando URL da análise prévia: ${analisePreviaChatUrl}`, 'color: #9c27b0');
+            const res = await fetch("<?php echo $_SERVER['PHP_SELF']; ?>?action=sync_simulator", {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ chat_id: analisePreviaChatId, url: analisePreviaChatUrl })
+            });
+            const data = await res.json();
+
+            if (data && data.error && (data.error === 'chat_not_found' || String(data.error).includes('não encontrado'))) {
+                console.warn(`%c${FILE_PREFIX} 🗑️ URL da análise prévia foi excluída do ChatGPT. Usando fallback (dados_json).`, 'color: #f44336; font-weight: bold');
+                analisePreviaChatUrl = null;
+                analisePreviaChatId  = null;
+            } else if (data && data.success) {
+                console.log(`%c${FILE_PREFIX} ✅ URL da análise prévia validada com sucesso.`, 'color: #4caf50; font-weight: bold');
+            }
+        } catch (e) {
+            console.warn(`${FILE_PREFIX} ⚠️ Falha ao validar URL da análise prévia:`, e.message);
+            // Em caso de erro de rede, mantém a URL (será verificada novamente no envio)
         }
     }
 
@@ -4518,7 +4566,9 @@ header('Content-Type: application/javascript; charset=utf-8');
                                 medicacoes_suspensas,
                                 condutas_especificas_sugeridas,
                                 condutas_gerais_sugeridas,
-                                mensagens_acompanhamento
+                                mensagens_acompanhamento,
+                                chat_url,
+                                chat_id
                             FROM chatgpt_atendimentos_analise
                             WHERE id_atendimento = ${idAtendimento}
                             LIMIT 1
@@ -4566,6 +4616,9 @@ header('Content-Type: application/javascript; charset=utf-8');
             clearPendingAnaliseNotice('atendimento');
             const analise = parseAnalisePreviaRow(row);
             applyAnalisePrevia(analise, row, 'atendimento');
+
+            // Verifica se a URL da análise prévia ainda existe no ChatGPT (detecção de exclusão)
+            await _validateAnalisePreviaUrl();
 
         } catch (e) {
             console.error('🚨 Falha ao buscar análise:', e.message);
@@ -4616,7 +4669,9 @@ header('Content-Type: application/javascript; charset=utf-8');
                             medicacoes_suspensas,
                             condutas_especificas_sugeridas,
                             condutas_gerais_sugeridas,
-                            mensagens_acompanhamento
+                            mensagens_acompanhamento,
+                            chat_url,
+                            chat_id
                         FROM chatgpt_atendimentos_analise
                         WHERE id_paciente = ${idPaciente}
                           AND id_atendimento IS NULL
@@ -4669,6 +4724,9 @@ header('Content-Type: application/javascript; charset=utf-8');
             clearPendingAnaliseNotice('paciente_compilado');
             const analise = parseAnalisePreviaRow(row);
             applyAnalisePrevia(analise, row, 'paciente_compilado');
+
+            // Verifica se a URL da análise prévia ainda existe no ChatGPT (detecção de exclusão)
+            await _validateAnalisePreviaUrl();
         } catch (e) {
             console.error('🚨 Falha ao buscar síntese compilada do paciente:', e.message);
         }
@@ -7549,7 +7607,33 @@ header('Content-Type: application/javascript; charset=utf-8');
             if(val) ctx += `\n[${cb.parentElement.innerText.toUpperCase()}]:\n${val}\n`;
         });
         
-        if (analiseAtendimentoCtx) {
+        // ── Lógica de contexto da análise prévia ─────────────────────────
+        // Se análise prévia concluída E modelo "ChatGPT Simulator" E temos a URL
+        // do chat da análise → reutiliza essa URL (contexto já existe lá).
+        // Caso contrário → envia dados_json + evolução (já coletada acima no ctx).
+        const _isSimulatorModel = document.getElementById('ow-model-sel')?.value === 'ChatGPT Simulator';
+        const _hasAnaliseUrl    = analisePreviaChatUrl && analisePreviaChatUrl.includes('chatgpt.com');
+        const _noExistingChat   = !Session.chatId;
+
+        if (analiseAtendimentoCtx && _isSimulatorModel && _hasAnaliseUrl && _noExistingChat) {
+            // Reutiliza a URL da análise prévia → LLM já possui o contexto do paciente
+            // (evolução, prontuário, etc. já estão no histórico daquele chat)
+            Session.setChat(analisePreviaChatId, analisePreviaChatUrl, null);
+            ctx = "";  // Limpa contexto — já está no chat da análise
+            console.log(
+                `%c${PREFIX} 🔗 Reutilizando URL da análise prévia: ${analisePreviaChatUrl}`,
+                'color: #2196f3; font-weight: bold'
+            );
+        } else if (analiseAtendimentoCtx && (!_isSimulatorModel || !_hasAnaliseUrl)) {
+            // Fallback: URL não disponível ou modelo não é ChatGPT Simulator
+            // → Envia dados_json da análise prévia + evolução (se selecionada, já está em ctx)
+            const dadosCtx = analisePreviaDadosJson || analiseAtendimentoCtx;
+            ctx = (ctx ? ctx + '\n\n' : '') +
+                  '[ANÁLISE CLÍNICA GERADA POR IA - CONFERIR COM O PRONTUÁRIO]\n' +
+                  dadosCtx;
+            console.log(`%c${PREFIX} 🧠 Análise clínica (dados_json) injetada no ctx (fallback)`, 'color: #4caf50; font-weight: bold');
+        } else if (analiseAtendimentoCtx) {
+            // Chat já existente (não é primeiro envio) — injeta análise normalmente
             ctx = (ctx ? ctx + '\n\n' : '') +
                   '[ANÁLISE CLÍNICA GERADA POR IA - CONFERIR COM O PRONTUÁRIO]\n' +
                   analiseAtendimentoCtx;
