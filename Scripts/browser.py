@@ -164,7 +164,38 @@ def _composer_state_script():
         const attachmentNodes = Array.from(document.querySelectorAll(
             'button[aria-label="Remove file"], [data-testid*="attachment"], [data-testid*="file-preview"], [data-testid*="composer-attachment"], [data-testid*="upload-preview"], [data-testid*="file-chip"]'
         ));
-        const attachmentTitles = attachmentNodes
+
+        // Detecção da nova funcionalidade do ChatGPT: "Colagens grandes agora viram anexos"
+        // Quando o ChatGPT converte texto colado em anexo, cria um card/chip na área do composer
+        // com "Exibir no campo de texto" como link. Detectamos isso verificando:
+        // 1. Links/botões com texto "Exibir no campo de texto" / "Show in text field"
+        // 2. Botões de remover o anexo criado automaticamente (ícone X no card)
+        // 3. Elementos com role de "apresentação" que contenham ícone de arquivo
+        const pasteAsAttachmentNodes = [];
+        const allComposerBtns = composerRoot
+            ? Array.from(composerRoot.querySelectorAll('button, a, [role="button"]'))
+            : [];
+        for (const el of allComposerBtns) {
+            const txt = (el.innerText || el.textContent || '').trim().toLowerCase();
+            if (txt.includes('exibir no campo de texto') || txt.includes('show in text field')) {
+                pasteAsAttachmentNodes.push(el);
+            }
+        }
+        // Também procura cards de anexo automático: divs próximos ao textarea que contenham
+        // o botão "Exibir" e/ou tenham ícone de documento/arquivo (svg com path de arquivo)
+        if (composerRoot && pasteAsAttachmentNodes.length === 0) {
+            const candidates = composerRoot.querySelectorAll('[class*="group"], [class*="attach"], [class*="block"]');
+            for (const c of candidates) {
+                const inner = (c.innerText || '').toLowerCase();
+                if ((inner.includes('exibir no campo') || inner.includes('show in text'))
+                    && c.closest('form, [data-testid="composer"], main')) {
+                    pasteAsAttachmentNodes.push(c);
+                }
+            }
+        }
+
+        const allAttachmentNodes = [...attachmentNodes, ...pasteAsAttachmentNodes];
+        const attachmentTitles = allAttachmentNodes
             .map((node) => (node.innerText || node.getAttribute('aria-label') || '').trim())
             .filter(Boolean)
             .slice(0, 6);
@@ -175,8 +206,13 @@ def _composer_state_script():
         const sendEnabled = !!(sendBtn && sendVisible && !sendBtn.disabled && sendBtn.getAttribute('aria-disabled') !== 'true');
         const stopVisible = !!(stopBtn && stopBtn.offsetParent !== null);
         const textReady = textLength > 0;
-        const attachmentCount = attachmentNodes.length;
+        const attachmentCount = allAttachmentNodes.length;
         const hasAttachments = attachmentCount > 0;
+
+        // Detecção adicional: se sendBtn está habilitado mas não há texto nem anexos detectados,
+        // verifica se o ChatGPT aceitou conteúdo (possível anexo não detectado pelos seletores)
+        const sendEnabledNoContent = sendEnabled && !textReady && !hasAttachments;
+
         const uploading = busyNodes.some((node) => {
             if (!node) return false;
             const txt = (node.innerText || node.getAttribute?.('aria-label') || '').toLowerCase();
@@ -185,8 +221,8 @@ def _composer_state_script():
         return {
             textLength,
             textReady,
-            hasAttachments,
-            attachmentCount,
+            hasAttachments: hasAttachments || sendEnabledNoContent,
+            attachmentCount: hasAttachments ? attachmentCount : (sendEnabledNoContent ? 1 : 0),
             attachmentTitles,
             sendVisible,
             sendEnabled,
@@ -194,6 +230,7 @@ def _composer_state_script():
             uploading,
             ariaBusy: !!(ta && ta.getAttribute('aria-busy') === 'true'),
             composerVisible: !!(composerRoot && composerRoot.offsetParent !== null),
+            pasteAsAttachment: pasteAsAttachmentNodes.length > 0 || sendEnabledNoContent,
         };
     }"""
 
@@ -368,11 +405,25 @@ async def smart_input(page, message, q=None, activityts=None):
         await asyncio.sleep(0.3)
 
         # Verifica se colou corretamente ou se o ChatGPT converteu a cola em anexo.
+        # A conversão para anexo pode demorar um instante, então faz polling com retry.
         state = await _get_composer_state(page)
         inserted = int(state.get('textLength') or 0)
-        if inserted == 0 and state.get('hasAttachments'):
-            emit_log(q, f"{label}: ChatGPT converteu a cola em {state.get('attachmentCount')} anexo(s).")
-            inserted = total
+
+        if inserted == 0:
+            # Texto não apareceu no textarea — pode ser conversão em anexo.
+            # Aguarda até 3s com polling para detectar o anexo criado automaticamente.
+            for _retry in range(6):
+                if state.get('hasAttachments') or state.get('pasteAsAttachment'):
+                    break
+                await asyncio.sleep(0.5)
+                state = await _get_composer_state(page)
+                inserted = int(state.get('textLength') or 0)
+                if inserted > 0:
+                    break
+
+            if inserted == 0 and (state.get('hasAttachments') or state.get('pasteAsAttachment')):
+                emit_log(q, f"{label}: ChatGPT converteu a cola em anexo ({state.get('attachmentCount')} item(ns)).")
+                inserted = total
 
         if activityts:
             activityts[0] = time.time()
@@ -399,11 +450,26 @@ async def smart_input(page, message, q=None, activityts=None):
                     paste_chunk_size = 3500
                     paste_chunks = [txt[i:i + paste_chunk_size] for i in range(0, len(txt), paste_chunk_size)] or ['']
                     total = 0
+                    paste_became_attachment = False
                     for chunk_index, paste_chunk in enumerate(paste_chunks, start=1):
+                        # Se um chunk anterior já virou anexo, o ChatGPT já tem o conteúdo.
+                        # Colar mais chunks geraria anexos duplicados — pula os restantes.
+                        if paste_became_attachment:
+                            total += len(paste_chunk)
+                            continue
                         label = 'Colando' if len(paste_chunks) == 1 else f'Colando parte {chunk_index}/{len(paste_chunks)}'
                         try:
                             # Tenta colar via clipboard (Ctrl+V) -- rápido, mas em sub-blocos para evitar anexos automáticos.
                             inserted_now = await _paste_clipboard(paste_chunk, label)
+                            # Detecta se este chunk virou anexo (0 chars no textarea mas retornou total)
+                            check_state = await _get_composer_state(page)
+                            if int(check_state.get('textLength') or 0) == 0 and (check_state.get('hasAttachments') or check_state.get('pasteAsAttachment')):
+                                paste_became_attachment = True
+                                # Contabiliza todos os chars restantes como "colados via anexo"
+                                remaining = sum(len(paste_chunks[i]) for i in range(chunk_index, len(paste_chunks)))
+                                total += inserted_now + remaining
+                                emit_log(q, f"ChatGPT converteu todo o bloco em anexo. Pulando {len(paste_chunks) - chunk_index} chunk(s) restante(s).")
+                                continue
                         except Exception as clipboard_err:
                             # Fallback: chunks com execCommand se clipboard falhar
                             emit_log(q, f'Clipboard falhou ({clipboard_err}), usando fallback por chunks...')
@@ -447,7 +513,7 @@ async def smart_input(page, message, q=None, activityts=None):
                     state_after_paste = await _get_composer_state(page)
                     if total < expected_len * 0.9 and not state_after_paste.get('hasAttachments'):
                         emit_log(q, f'Aviso: colados {total} de ~{len(inner)} chars')
-                    elif state_after_paste.get('hasAttachments'):
+                    elif state_after_paste.get('hasAttachments') or paste_became_attachment:
                         emit_log(q,
                                  f"Bloco aceito como anexo(s): {state_after_paste.get('attachmentCount')} item(ns).")
                     await asyncio.sleep(0.3)
