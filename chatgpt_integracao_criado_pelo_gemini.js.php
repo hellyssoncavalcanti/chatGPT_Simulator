@@ -2344,6 +2344,68 @@ if (isset($_GET['action']) && $_GET['action'] === 'sync_simulator') {
 }
 
 // -----------------------------------------------------
+// DELETE LOCAL CHAT (PYTHON SERVER STORAGE)
+// Remove o chat do history.json no servidor Python,
+// sem excluir do ChatGPT — apenas do storage local.
+// -----------------------------------------------------
+if (isset($_GET['action']) && $_GET['action'] === 'delete_simulator_chat') {
+    while (ob_get_level()) ob_end_clean();
+    header('Content-Type: application/json; charset=utf-8');
+    global $ollama_manual_ip;
+
+    $json_input = file_get_contents('php://input');
+    $req = json_decode($json_input, true);
+
+    $chat_id    = $req['chat_id']    ?? '';
+    $origin_url = $req['origin_url'] ?? '';
+
+    // Identifica o IP base (mesma lógica do sync)
+    $ip_final = "";
+    if (!empty($ollama_manual_ip)) {
+        $ip_final = str_replace('11434', '3003', rtrim($ollama_manual_ip, '/'));
+    } else {
+        $url_monitor = "http://conexaovida.org/no-ip-dynamic_ip.php?port=3003";
+        $ch = curl_init($url_monitor);
+        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+        curl_setopt($ch, CURLOPT_FOLLOWLOCATION, true);
+        curl_setopt($ch, CURLOPT_HEADER, true);
+        curl_setopt($ch, CURLOPT_TIMEOUT, 10);
+        $raw_response = curl_exec($ch);
+        $effective_url = curl_getinfo($ch, CURLINFO_EFFECTIVE_URL);
+        curl_close($ch);
+        $ip_found = null;
+        if (preg_match('/(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})/', $effective_url, $matches)) $ip_found = $matches[1];
+        else if (preg_match('/(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})/', $raw_response ?? '', $matches)) $ip_found = $matches[1];
+        if ($ip_found && filter_var($ip_found, FILTER_VALIDATE_IP)) $ip_final = "http://{$ip_found}:3003";
+    }
+
+    if (empty($ip_final) || !filter_var($ip_final, FILTER_VALIDATE_URL)) {
+        echo json_encode(["success" => false, "error" => "IP_ERROR"]);
+        exit;
+    }
+
+    $payload = json_encode([
+        'chat_id'    => $chat_id,
+        'origin_url' => $origin_url
+    ]);
+
+    $ch = curl_init(rtrim($ip_final, '/') . '/api/chat_delete_local');
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($ch, CURLOPT_POST, true);
+    curl_setopt($ch, CURLOPT_POSTFIELDS, $payload);
+    curl_setopt($ch, CURLOPT_TIMEOUT, 15);
+    curl_setopt($ch, CURLOPT_HTTPHEADER, [
+        'Authorization: Bearer ' . ($GLOBALS['CHATGPT_VIA_API_KEY'] ?? ''),
+        'Content-Type: application/json'
+    ]);
+    $response = curl_exec($ch);
+    curl_close($ch);
+
+    echo $response ?: json_encode(['success' => false, 'error' => 'Sem resposta do servidor']);
+    exit;
+}
+
+// -----------------------------------------------------
 // PROXY HANDLER (CHAT MODE)
 // -----------------------------------------------------
 if (isset($_GET['action']) && $_GET['action'] === 'proxy') {
@@ -3042,6 +3104,9 @@ header('Content-Type: application/javascript; charset=utf-8');
     
     // Análise clínica pré-carregada em background
     let analiseAtendimentoCtx = null;
+    let analisePreviaChatUrl = null;   // URL do chat da análise prévia (para reutilização de contexto)
+    let analisePreviaChatId = null;    // ID do chat da análise prévia
+    let analisePreviaDadosJson = null; // dados_json bruto da análise prévia (fallback quando URL indisponível)
     let pendingAnaliseCtx = { atendimento: null, paciente_compilado: null };
 
     let recognition = null;
@@ -3151,6 +3216,7 @@ header('Content-Type: application/javascript; charset=utf-8');
         #ow-analise-pendente .iap-badge{font-size:11px;font-weight:800;padding:4px 10px;border-radius:999px;color:#fff}
         #ow-analise-pendente .iap-badge.pendente{background:#d97706}
         #ow-analise-pendente .iap-badge.processando{background:#2563eb}
+        #ow-analise-pendente .iap-badge.erro{background:#dc2626}
         #ow-analise-pendente .iap-item-text{font-size:12px;line-height:1.5;color:#7c5a10;margin-top:7px}
         /* === ANÁLISE PRÉVIA DA LLM EXPOSTA NO CHAT — DESIGN SYSTEM = FIM === */
         
@@ -4142,6 +4208,20 @@ header('Content-Type: application/javascript; charset=utf-8');
         );
 
         analiseAtendimentoCtx = JSON.stringify({ analise_clinica_previa: analise }, null, 2);
+
+        // Armazena URL/ID do chat da análise prévia (para reutilização de contexto)
+        if (row.chat_url) {
+            analisePreviaChatUrl = row.chat_url;
+            analisePreviaChatId  = row.chat_id || row.chat_url.replace(/\/$/, '').split('/').pop() || null;
+            console.log(`%c🔗 URL da análise prévia disponível: ${analisePreviaChatUrl}`, 'color: #2196f3; font-weight: bold');
+        }
+        // Armazena dados_json bruto (fallback quando URL indisponível)
+        if (row.dados_json) {
+            try {
+                analisePreviaDadosJson = typeof row.dados_json === 'string' ? row.dados_json : JSON.stringify(row.dados_json);
+            } catch(e) { analisePreviaDadosJson = null; }
+        }
+
         renderAnalisePrevia(true);
 
         if (!window.__analiseObserver) {
@@ -4156,6 +4236,37 @@ header('Content-Type: application/javascript; charset=utf-8');
                 });
                 window.__analiseObserver.observe(owMessages, { childList: true });
             }
+        }
+    }
+
+    /**
+     * Valida se a URL do chat da análise prévia ainda existe no ChatGPT.
+     * Se excluída (detecção via browser.py / sync_simulator), limpa as variáveis
+     * para que o fallback (envio de dados_json + evolução) seja utilizado.
+     */
+    async function _validateAnalisePreviaUrl() {
+        if (!analisePreviaChatUrl || !analisePreviaChatUrl.includes('chatgpt.com')) return;
+        if (!analisePreviaChatId) return;
+
+        try {
+            console.log(`%c${FILE_PREFIX} 🔍 Validando URL da análise prévia: ${analisePreviaChatUrl}`, 'color: #9c27b0');
+            const res = await fetch("<?php echo $_SERVER['PHP_SELF']; ?>?action=sync_simulator", {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ chat_id: analisePreviaChatId, url: analisePreviaChatUrl })
+            });
+            const data = await res.json();
+
+            if (data && data.error && (data.error === 'chat_not_found' || String(data.error).includes('não encontrado'))) {
+                console.warn(`%c${FILE_PREFIX} 🗑️ URL da análise prévia foi excluída do ChatGPT. Usando fallback (dados_json).`, 'color: #f44336; font-weight: bold');
+                analisePreviaChatUrl = null;
+                analisePreviaChatId  = null;
+            } else if (data && data.success) {
+                console.log(`%c${FILE_PREFIX} ✅ URL da análise prévia validada com sucesso.`, 'color: #4caf50; font-weight: bold');
+            }
+        } catch (e) {
+            console.warn(`${FILE_PREFIX} ⚠️ Falha ao validar URL da análise prévia:`, e.message);
+            // Em caso de erro de rede, mantém a URL (será verificada novamente no envio)
         }
     }
 
@@ -4333,6 +4444,8 @@ header('Content-Type: application/javascript; charset=utf-8');
         const notices = Object.entries(pendingAnaliseCtx).filter(([, cfg]) => cfg && ['pendente', 'processando'].includes(cfg.status));
         if (!notices.length) return;
 
+        const hasRetry = notices.some(([, cfg]) => cfg?.row?.retryRequested && cfg?.row?.previousError);
+
         const meta = {
             atendimento: {
                 titulo: 'Atendimento atual',
@@ -4350,19 +4463,31 @@ header('Content-Type: application/javascript; charset=utf-8');
             }
         };
 
+        const headerTitle = hasRetry
+            ? '⚠️ Erro na análise clínica — aguardando nova tentativa'
+            : '⏳ Análise clínica pendente';
+        const headerSubtitle = hasRetry
+            ? 'A análise anterior falhou. Uma nova tentativa foi solicitada automaticamente.'
+            : 'Aviso contextual da fila de processamento — não entra no histórico do chat.';
+
         const html = `
             <div id="ow-analise-pendente">
                 <div class="iap-header">
                     <div>
-                        <div class="iap-title">⏳ Análise clínica pendente</div>
-                        <div class="iap-subtitle">Aviso contextual da fila de processamento — não entra no histórico do chat.</div>
+                        <div class="iap-title">${headerTitle}</div>
+                        <div class="iap-subtitle">${headerSubtitle}</div>
                     </div>
                 </div>
                 <div class="iap-list">
                     ${notices.map(([scopeKey, cfg]) => {
                         const scopeMeta = meta[scopeKey] || meta.atendimento;
-                        const statusLabel = cfg.status === 'processando' ? 'PROCESSANDO' : 'PENDENTE';
-                        const statusText = scopeMeta.descricao[cfg.status] || 'A análise ainda não está disponível.';
+                        const isRetry = cfg?.row?.retryRequested && cfg?.row?.previousError;
+                        const statusLabel = isRetry
+                            ? 'REANÁLISE'
+                            : (cfg.status === 'processando' ? 'PROCESSANDO' : 'PENDENTE');
+                        const statusText = isRetry
+                            ? `A tentativa anterior falhou. O sistema solicitou uma nova análise automaticamente.`
+                            : (scopeMeta.descricao[cfg.status] || 'A análise ainda não está disponível.');
                         const queueInfo = cfg?.row?.queueInfo || null;
                         const avgLabel = queueInfo?.avgSeconds ? formatDurationEstimate(queueInfo.avgSeconds) : '';
                         const basisLabel = queueInfo?.basis === 'today'
@@ -4372,6 +4497,15 @@ header('Content-Type: application/javascript; charset=utf-8');
                                 : queueInfo?.basis === 'in_progress'
                                     ? 'média do tempo já transcorrido nas análises em andamento'
                                 : '';
+                        const retryNote = isRetry
+                            ? `
+                                <div class="iap-retry-note">
+                                    <strong>❌ Erro na tentativa anterior:</strong> ${cfg.row.previousError}<br>
+                                    <strong>♻️ Nova tentativa solicitada.</strong>
+                                    O sistema recolocou esta análise na fila para que o analisador tente novamente.
+                                </div>
+                            `
+                            : '';
                         const queueHtml = queueInfo
                             ? `
                                 <div class="iap-item-text" style="margin-top:10px;padding-top:10px;border-top:1px dashed #fcd34d;">
@@ -4385,7 +4519,7 @@ header('Content-Type: application/javascript; charset=utf-8');
                             <div class="iap-item">
                                 <div class="iap-item-head">
                                     <div class="iap-item-title">${scopeMeta.titulo}</div>
-                                    <span class="iap-badge ${cfg.status}">${statusLabel}</span>
+                                    <span class="iap-badge ${isRetry ? 'erro' : cfg.status}">${statusLabel}</span>
                                 </div>
                                 <div class="iap-item-text">${statusText}</div>
                                 ${queueHtml}
@@ -4444,7 +4578,9 @@ header('Content-Type: application/javascript; charset=utf-8');
                                 medicacoes_suspensas,
                                 condutas_especificas_sugeridas,
                                 condutas_gerais_sugeridas,
-                                mensagens_acompanhamento
+                                mensagens_acompanhamento,
+                                chat_url,
+                                chat_id
                             FROM chatgpt_atendimentos_analise
                             WHERE id_atendimento = ${idAtendimento}
                             LIMIT 1
@@ -4471,11 +4607,29 @@ header('Content-Type: application/javascript; charset=utf-8');
             const row = data.data[0];
 
             if (row.status !== 'concluido') {
-                console.log(`%cℹ️  Análise existe mas status='${row.status}' — ignorando.`, 'color: #ff9800');
-                if (row.status === 'pendente' || row.status === 'processando') {
-                    row.queueInfo = await fetchAnaliseQueueEstimate(row);
-                    setPendingAnaliseNotice('atendimento', row.status, row);
-                    notifyAnalisePreviaPendente(row.status, 'atendimento');
+                console.log(`%cℹ️  Análise existe mas status='${row.status}' — tratando conforme o estado.`, 'color: #ff9800');
+                if (row.status === 'erro') {
+                    const retriedRow = await requestAnaliseRetry(row, 'atendimento', 'atendimento atual');
+                    if (retriedRow) {
+                        console.info('♻️ Reanálise do atendimento solicitada após erro prévio.');
+                    } else {
+                        clearPendingAnaliseNotice('atendimento');
+                    }
+                } else if (row.status === 'pendente' || row.status === 'processando') {
+                    // Se há erro_msg de tentativa anterior, exibe o erro prévio junto ao aviso de pendente
+                    const priorError = extractAnaliseRetryReason(row.erro_msg || '');
+                    if (priorError) {
+                        row.retryRequested = true;
+                        row.previousError  = priorError;
+                        console.warn(`⚠️ Análise 'pendente' com erro prévio: ${priorError} — solicitando reanálise.`);
+                        // Re-enfileira para garantir que o analisador tente novamente
+                        try { await requestAnaliseRetry(row, 'atendimento', 'atendimento atual'); }
+                        catch(e) { console.warn('Falha ao solicitar reanálise:', e.message); }
+                    } else {
+                        row.queueInfo = await fetchAnaliseQueueEstimate(row);
+                        setPendingAnaliseNotice('atendimento', row.status, row);
+                        notifyAnalisePreviaPendente(row.status, 'atendimento');
+                    }
                 } else {
                     clearPendingAnaliseNotice('atendimento');
                 }
@@ -4485,6 +4639,9 @@ header('Content-Type: application/javascript; charset=utf-8');
             clearPendingAnaliseNotice('atendimento');
             const analise = parseAnalisePreviaRow(row);
             applyAnalisePrevia(analise, row, 'atendimento');
+
+            // Verifica se a URL da análise prévia ainda existe no ChatGPT (detecção de exclusão)
+            await _validateAnalisePreviaUrl();
 
         } catch (e) {
             console.error('🚨 Falha ao buscar análise:', e.message);
@@ -4532,7 +4689,9 @@ header('Content-Type: application/javascript; charset=utf-8');
                             medicacoes_suspensas,
                             condutas_especificas_sugeridas,
                             condutas_gerais_sugeridas,
-                            mensagens_acompanhamento
+                            mensagens_acompanhamento,
+                            chat_url,
+                            chat_id
                         FROM chatgpt_atendimentos_analise
                         WHERE id_paciente = ${idPaciente}
                           AND id_atendimento IS NULL
@@ -4563,11 +4722,29 @@ header('Content-Type: application/javascript; charset=utf-8');
 
             const row = data.data[0];
             if (row.status !== 'concluido') {
-                console.log(`%cℹ️  Síntese compilada existe mas status='${row.status}' — ignorando.`, 'color: #ff9800');
-                if (row.status === 'pendente' || row.status === 'processando') {
-                    row.queueInfo = await fetchAnaliseQueueEstimate(row);
-                    setPendingAnaliseNotice('paciente_compilado', row.status, row);
-                    notifyAnalisePreviaPendente(row.status, 'síntese do paciente');
+                console.log(`%cℹ️  Síntese compilada existe mas status='${row.status}' — tratando conforme o estado.`, 'color: #ff9800');
+                if (row.status === 'erro') {
+                    const retriedRow = await requestAnaliseRetry(row, 'paciente_compilado', 'síntese do paciente');
+                    if (retriedRow) {
+                        console.info('♻️ Reanálise da síntese do paciente solicitada após erro prévio.');
+                    } else {
+                        clearPendingAnaliseNotice('paciente_compilado');
+                    }
+                } else if (row.status === 'pendente' || row.status === 'processando') {
+                    // Se há erro_msg de tentativa anterior, exibe o erro prévio junto ao aviso de pendente
+                    const priorError = extractAnaliseRetryReason(row.erro_msg || '');
+                    if (priorError) {
+                        row.retryRequested = true;
+                        row.previousError  = priorError;
+                        console.warn(`⚠️ Síntese 'pendente' com erro prévio: ${priorError} — solicitando reanálise.`);
+                        // Re-enfileira para garantir que o analisador tente novamente
+                        try { await requestAnaliseRetry(row, 'paciente_compilado', 'síntese do paciente'); }
+                        catch(e) { console.warn('Falha ao solicitar reanálise:', e.message); }
+                    } else {
+                        row.queueInfo = await fetchAnaliseQueueEstimate(row);
+                        setPendingAnaliseNotice('paciente_compilado', row.status, row);
+                        notifyAnalisePreviaPendente(row.status, 'síntese do paciente');
+                    }
                 } else {
                     clearPendingAnaliseNotice('paciente_compilado');
                 }
@@ -4578,6 +4755,9 @@ header('Content-Type: application/javascript; charset=utf-8');
             clearPendingAnaliseNotice('paciente_compilado');
             const analise = parseAnalisePreviaRow(row);
             applyAnalisePrevia(analise, row, 'paciente_compilado');
+
+            // Verifica se a URL da análise prévia ainda existe no ChatGPT (detecção de exclusão)
+            await _validateAnalisePreviaUrl();
         } catch (e) {
             console.error('🚨 Falha ao buscar síntese compilada do paciente:', e.message);
         }
@@ -7458,7 +7638,33 @@ header('Content-Type: application/javascript; charset=utf-8');
             if(val) ctx += `\n[${cb.parentElement.innerText.toUpperCase()}]:\n${val}\n`;
         });
         
-        if (analiseAtendimentoCtx) {
+        // ── Lógica de contexto da análise prévia ─────────────────────────
+        // Se análise prévia concluída E modelo "ChatGPT Simulator" E temos a URL
+        // do chat da análise → reutiliza essa URL (contexto já existe lá).
+        // Caso contrário → envia dados_json + evolução (já coletada acima no ctx).
+        const _isSimulatorModel = document.getElementById('ow-model-sel')?.value === 'ChatGPT Simulator';
+        const _hasAnaliseUrl    = analisePreviaChatUrl && analisePreviaChatUrl.includes('chatgpt.com');
+        const _noExistingChat   = !Session.chatId;
+
+        if (analiseAtendimentoCtx && _isSimulatorModel && _hasAnaliseUrl && _noExistingChat) {
+            // Reutiliza a URL da análise prévia → LLM já possui o contexto do paciente
+            // (evolução, prontuário, etc. já estão no histórico daquele chat)
+            Session.setChat(analisePreviaChatId, analisePreviaChatUrl, null);
+            ctx = "";  // Limpa contexto — já está no chat da análise
+            console.log(
+                `%c${PREFIX} 🔗 Reutilizando URL da análise prévia: ${analisePreviaChatUrl}`,
+                'color: #2196f3; font-weight: bold'
+            );
+        } else if (analiseAtendimentoCtx && (!_isSimulatorModel || !_hasAnaliseUrl)) {
+            // Fallback: URL não disponível ou modelo não é ChatGPT Simulator
+            // → Envia dados_json da análise prévia + evolução (se selecionada, já está em ctx)
+            const dadosCtx = analisePreviaDadosJson || analiseAtendimentoCtx;
+            ctx = (ctx ? ctx + '\n\n' : '') +
+                  '[ANÁLISE CLÍNICA GERADA POR IA - CONFERIR COM O PRONTUÁRIO]\n' +
+                  dadosCtx;
+            console.log(`%c${PREFIX} 🧠 Análise clínica (dados_json) injetada no ctx (fallback)`, 'color: #4caf50; font-weight: bold');
+        } else if (analiseAtendimentoCtx) {
+            // Chat já existente (não é primeiro envio) — injeta análise normalmente
             ctx = (ctx ? ctx + '\n\n' : '') +
                   '[ANÁLISE CLÍNICA GERADA POR IA - CONFERIR COM O PRONTUÁRIO]\n' +
                   analiseAtendimentoCtx;
@@ -7593,13 +7799,34 @@ header('Content-Type: application/javascript; charset=utf-8');
 
                 if (!deletou) return; // Aborta limpeza visual se exclusão falhou
 
-                document.getElementById('ow-messages').innerHTML = ''; 
-                state.messages = []; 
+                // Também remove do histórico do servidor Python (history.json)
+                // para evitar que get_chat_meta recupere o chat via fallback chat_lookup.
+                try {
+                    const chatIdToDelete = state.currentChatId || '';
+                    await fetch(`<?php echo $_SERVER['PHP_SELF']; ?>?action=delete_simulator_chat`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            chat_id:    chatIdToDelete,
+                            origin_url: window.location.href
+                        })
+                    });
+                    console.log(`%c${FILE_PREFIX} 🗑️ Chat removido do storage do servidor Python.`, 'color: #f44336; font-weight: bold');
+                } catch(e) {
+                    console.warn(`${FILE_PREFIX} ⚠️ Falha ao remover chat do servidor Python:`, e.message);
+                }
+
+                // Limpa também as variáveis da análise prévia (evita reutilizar URL de chat excluído)
+                analisePreviaChatUrl = null;
+                analisePreviaChatId  = null;
+
+                document.getElementById('ow-messages').innerHTML = '';
+                state.messages = [];
                 state.currentChatId = null;
                 state.currentChatTitle = buildDefaultChatTitle(currentModeSql);
                 state.currentChatUrl = null;
                 currentUserQuestion = '';
-                localStorage.removeItem(getHistoryKey(currentModeSql)); 
+                localStorage.removeItem(getHistoryKey(currentModeSql));
                 updateTitleUI();
                 renderAnalisePrevia();  // ← Renderiza a analise prévia da LLM diretamente no chat, para o usuário ver, como ele limpou/zerou o chat.
                 if (isDirectMode) {

@@ -28,6 +28,7 @@
 #   é digitado caractere a caractere via type_realistic().
 # =============================================================================
 import asyncio
+import base64
 import json
 import random
 import time
@@ -44,16 +45,315 @@ from markdownify import markdownify as md
 MAX_TABS = 5
 tab_semaphore = asyncio.Semaphore(MAX_TABS)
 
+SCREENSHOT_STREAM_INTERVAL_SEC = 2.0
+SCREENSHOT_STREAM_JPEG_QUALITY = 45
+SCREENSHOT_STREAM_MAX_BYTES = 300_000
+
 def emit_log(q, msg):
     if q: q.put(json.dumps({"type": "log", "content": f"[browser.py] {msg}"}) + "\n")
     file_log("browser.py", msg)
 
 def emit_event(q, type_, content):
-    if q: 
+    if q:
         # Cria o dicionário e garante que o dumps mantenha tudo em uma linha
         # O \n final é estritamente o separador do stream
         payload = json.dumps({"type": type_, "content": content}, separators=(',', ':'))
         q.put(payload + "\n")
+
+async def _get_window_state(page):
+    try:
+        session = await page.context.new_cdp_session(page)
+        info = await session.send("Browser.getWindowForTarget")
+        bounds = info.get("bounds", {}) or {}
+        state = bounds.get("windowState") or bounds.get("state") or "normal"
+        return session, info.get("windowId"), state
+    except Exception:
+        return None, None, None
+
+
+async def _set_window_state(page, state: str) -> bool:
+    session, window_id, current_state = await _get_window_state(page)
+    if not session or not window_id:
+        return False
+    if current_state == state:
+        return True
+    try:
+        await session.send("Browser.setWindowBounds", {
+            "windowId": window_id,
+            "bounds": {"windowState": state},
+        })
+        return True
+    except Exception:
+        return False
+
+
+async def _preserve_minimized_if_needed(page, keep_minimized: bool | None = None):
+    _session, _window_id, state = await _get_window_state(page)
+    if keep_minimized is None:
+        keep_minimized = (state == "minimized")
+    if keep_minimized and state != "minimized":
+        await _set_window_state(page, "minimized")
+        return "minimized"
+    return state
+
+
+async def _get_context_window_state(context):
+    for candidate in list(getattr(context, "pages", []) or []):
+        try:
+            _session, _window_id, state = await _get_window_state(candidate)
+            if state:
+                return state
+        except Exception:
+            continue
+    return None
+
+
+async def _should_keep_context_minimized(context) -> bool:
+    state = await _get_context_window_state(context)
+    return state == "minimized"
+
+
+async def _emit_browser_screenshot(page, q, label: str = "browser"):
+    if not q:
+        return
+    try:
+        raw = await page.screenshot(
+            type="jpeg",
+            quality=SCREENSHOT_STREAM_JPEG_QUALITY,
+            caret="hide",
+            animations="disabled",
+            scale="css",
+        )
+        if not raw:
+            return
+        if len(raw) > SCREENSHOT_STREAM_MAX_BYTES:
+            return
+        emit_event(q, "screenshot", {
+            "label": label,
+            "format": "jpeg",
+            "data_base64": base64.b64encode(raw).decode("ascii"),
+            "url": page.url,
+            "captured_at": int(time.time()),
+        })
+    except Exception:
+        return
+
+
+async def _stream_browser_screenshots(page, q, stop_event: asyncio.Event, label: str = "browser"):
+    if not q:
+        return
+    try:
+        await _emit_browser_screenshot(page, q, label=label)
+        while not stop_event.is_set():
+            try:
+                await asyncio.wait_for(stop_event.wait(), timeout=SCREENSHOT_STREAM_INTERVAL_SEC)
+            except asyncio.TimeoutError:
+                await _emit_browser_screenshot(page, q, label=label)
+    except asyncio.CancelledError:
+        raise
+
+
+def _composer_state_script():
+    return r"""() => {
+        const composerRoot = document.querySelector('form')
+            || document.querySelector('[data-testid="composer"]')
+            || document.querySelector('main');
+        const ta = document.querySelector('#prompt-textarea');
+        const sendBtn = document.querySelector('button[data-testid="send-button"]');
+        const stopBtn = document.querySelector('button[aria-label="Stop generating"], button[data-testid="stop-button"]');
+        const attachmentNodes = Array.from(document.querySelectorAll(
+            'button[aria-label="Remove file"], [data-testid*="attachment"], [data-testid*="file-preview"], [data-testid*="composer-attachment"], [data-testid*="upload-preview"], [data-testid*="file-chip"]'
+        ));
+
+        // Detecção da nova funcionalidade do ChatGPT: "Colagens grandes agora viram anexos"
+        // Quando o ChatGPT converte texto colado em anexo, cria um card/chip na área do composer
+        // com "Exibir no campo de texto" como link. Detectamos isso verificando:
+        // 1. Links/botões com texto "Exibir no campo de texto" / "Show in text field"
+        // 2. Botões de remover o anexo criado automaticamente (ícone X no card)
+        // 3. Elementos com role de "apresentação" que contenham ícone de arquivo
+        const pasteAsAttachmentNodes = [];
+        const allComposerBtns = composerRoot
+            ? Array.from(composerRoot.querySelectorAll('button, a, [role="button"]'))
+            : [];
+        for (const el of allComposerBtns) {
+            const txt = (el.innerText || el.textContent || '').trim().toLowerCase();
+            if (txt.includes('exibir no campo de texto') || txt.includes('show in text field')) {
+                pasteAsAttachmentNodes.push(el);
+            }
+        }
+        // Também procura cards de anexo automático: divs próximos ao textarea que contenham
+        // o botão "Exibir" e/ou tenham ícone de documento/arquivo (svg com path de arquivo)
+        if (composerRoot && pasteAsAttachmentNodes.length === 0) {
+            const candidates = composerRoot.querySelectorAll('[class*="group"], [class*="attach"], [class*="block"]');
+            for (const c of candidates) {
+                const inner = (c.innerText || '').toLowerCase();
+                if ((inner.includes('exibir no campo') || inner.includes('show in text'))
+                    && c.closest('form, [data-testid="composer"], main')) {
+                    pasteAsAttachmentNodes.push(c);
+                }
+            }
+        }
+
+        const allAttachmentNodes = [...attachmentNodes, ...pasteAsAttachmentNodes];
+        const attachmentTitles = allAttachmentNodes
+            .map((node) => (node.innerText || node.getAttribute('aria-label') || '').trim())
+            .filter(Boolean)
+            .slice(0, 6);
+        const busyNodes = Array.from(document.querySelectorAll('[aria-busy="true"], progress, [data-testid*="uploading"], [data-testid*="spinner"], svg.animate-spin'));
+        const textValue = ta ? ((ta.innerText || ta.value || '').trim()) : '';
+        const textLength = textValue.length;
+        const sendVisible = !!(sendBtn && sendBtn.offsetParent !== null);
+        const sendEnabled = !!(sendBtn && sendVisible && !sendBtn.disabled && sendBtn.getAttribute('aria-disabled') !== 'true');
+        const stopVisible = !!(stopBtn && stopBtn.offsetParent !== null);
+        const textReady = textLength > 0;
+        const attachmentCount = allAttachmentNodes.length;
+        const hasAttachments = attachmentCount > 0;
+
+        // Detecção adicional: se sendBtn está habilitado mas não há texto nem anexos detectados,
+        // verifica se o ChatGPT aceitou conteúdo (possível anexo não detectado pelos seletores)
+        const sendEnabledNoContent = sendEnabled && !textReady && !hasAttachments;
+
+        const uploading = busyNodes.some((node) => {
+            if (!node) return false;
+            const txt = (node.innerText || node.getAttribute?.('aria-label') || '').toLowerCase();
+            return !txt || txt.includes('upload') || txt.includes('carreg') || txt.includes('process') || txt.includes('analys');
+        });
+        return {
+            textLength,
+            textReady,
+            hasAttachments: hasAttachments || sendEnabledNoContent,
+            attachmentCount: hasAttachments ? attachmentCount : (sendEnabledNoContent ? 1 : 0),
+            attachmentTitles,
+            sendVisible,
+            sendEnabled,
+            stopVisible,
+            uploading,
+            ariaBusy: !!(ta && ta.getAttribute('aria-busy') === 'true'),
+            composerVisible: !!(composerRoot && composerRoot.offsetParent !== null),
+            pasteAsAttachment: pasteAsAttachmentNodes.length > 0 || sendEnabledNoContent,
+        };
+    }"""
+
+
+async def _get_composer_state(page):
+    try:
+        return await page.evaluate(_composer_state_script())
+    except Exception:
+        return {
+            'textLength': 0,
+            'textReady': False,
+            'hasAttachments': False,
+            'attachmentCount': 0,
+            'attachmentTitles': [],
+            'sendVisible': False,
+            'sendEnabled': False,
+            'stopVisible': False,
+            'uploading': False,
+            'ariaBusy': False,
+            'composerVisible': False,
+        }
+
+
+async def _wait_for_composer_ready(page, q=None, timeout: float = 20.0):
+    deadline = time.time() + timeout
+    last_state = None
+    while time.time() < deadline:
+        state = await _get_composer_state(page)
+        last_state = state
+        has_payload = bool(state.get('textReady') or state.get('hasAttachments'))
+        if has_payload and state.get('sendEnabled') and not state.get('uploading'):
+            return state
+        await asyncio.sleep(0.25)
+
+    if q and last_state:
+        emit_log(
+            q,
+            "⚠️ Composer não ficou pronto a tempo; tentando enviar assim mesmo "
+            f"(texto={last_state.get('textLength')}, anexos={last_state.get('attachmentCount')}, "
+            f"sendEnabled={last_state.get('sendEnabled')}, uploading={last_state.get('uploading')})."
+        )
+    return last_state or {}
+
+
+async def _submit_prompt(page, q=None, timeout: float = 12.0) -> bool:
+    state = await _wait_for_composer_ready(page, q=q, timeout=timeout)
+    if q and state.get('hasAttachments') and not state.get('textReady'):
+        emit_log(q,
+                 f"ChatGPT converteu a cola em {state.get('attachmentCount')} anexo(s); enviando pelo botão.")
+
+    submit_attempts = [
+        ('click', lambda: page.locator('button[data-testid="send-button"]').first.click(timeout=2000)),
+        ('force_click', lambda: page.locator('button[data-testid="send-button"]').first.click(timeout=2000, force=True)),
+        ('dom_click', lambda: page.evaluate("""() => {
+            const btn = document.querySelector('button[data-testid=\"send-button\"]');
+            if (!btn) return false;
+            btn.click();
+            return true;
+        }""")),
+        ('enter', lambda: page.keyboard.press('Enter')),
+        ('mod_enter', lambda: page.keyboard.press('Control+Enter')),
+    ]
+
+    for label, submitter in submit_attempts:
+        try:
+            await submitter()
+        except Exception as exc:
+            emit_log(q, f"Tentativa de envio '{label}' falhou: {exc}")
+            continue
+
+        verify_deadline = time.time() + 4.0
+        while time.time() < verify_deadline:
+            current = await _get_composer_state(page)
+            if current.get('stopVisible'):
+                return True
+            if not current.get('sendEnabled') and (current.get('ariaBusy') or current.get('uploading')):
+                return True
+            if (state.get('textReady') or state.get('hasAttachments')) and not current.get('textReady') and not current.get('hasAttachments'):
+                return True
+            await asyncio.sleep(0.2)
+
+    return False
+
+
+def _response_looks_incomplete_json(markdown_text: str) -> bool:
+    texto = (markdown_text or '').strip()
+    if not texto:
+        return False
+
+    if texto.startswith('```'):
+        texto = re.sub(r'^```(?:json)?\s*', '', texto, flags=re.IGNORECASE)
+        texto = re.sub(r'\s*```$', '', texto)
+    texto = texto.strip()
+    if not texto.startswith('{'):
+        return False
+
+    depth_obj = 0
+    depth_arr = 0
+    in_string = False
+    escape = False
+    for ch in texto:
+        if in_string:
+            if escape:
+                escape = False
+            elif ch == '\\':
+                escape = True
+            elif ch == '"':
+                in_string = False
+            continue
+
+        if ch == '"':
+            in_string = True
+        elif ch == '{':
+            depth_obj += 1
+        elif ch == '}':
+            depth_obj -= 1
+        elif ch == '[':
+            depth_arr += 1
+        elif ch == ']':
+            depth_arr -= 1
+
+    return in_string or depth_obj > 0 or depth_arr > 0 or not texto.rstrip().endswith('}')
+
 
 async def smart_input(page, message, q=None, activityts=None):
     import re
@@ -104,14 +404,26 @@ async def smart_input(page, message, q=None, activityts=None):
         await page.keyboard.press('Control+V')
         await asyncio.sleep(0.3)
 
-        # Verifica se colou corretamente
-        inserted = await page.evaluate("""
-            () => {
-                const ta = document.getElementById('prompt-textarea')
-                        || document.querySelector('#prompt-textarea');
-                return ta ? (ta.innerText || ta.value || '').length : 0;
-            }
-        """)
+        # Verifica se colou corretamente ou se o ChatGPT converteu a cola em anexo.
+        # A conversão para anexo pode demorar um instante, então faz polling com retry.
+        state = await _get_composer_state(page)
+        inserted = int(state.get('textLength') or 0)
+
+        if inserted == 0:
+            # Texto não apareceu no textarea — pode ser conversão em anexo.
+            # Aguarda até 3s com polling para detectar o anexo criado automaticamente.
+            for _retry in range(6):
+                if state.get('hasAttachments') or state.get('pasteAsAttachment'):
+                    break
+                await asyncio.sleep(0.5)
+                state = await _get_composer_state(page)
+                inserted = int(state.get('textLength') or 0)
+                if inserted > 0:
+                    break
+
+            if inserted == 0 and (state.get('hasAttachments') or state.get('pasteAsAttachment')):
+                emit_log(q, f"{label}: ChatGPT converteu a cola em anexo ({state.get('attachmentCount')} item(ns)).")
+                inserted = total
 
         if activityts:
             activityts[0] = time.time()
@@ -134,50 +446,76 @@ async def smart_input(page, message, q=None, activityts=None):
                 inner = segment[len(start_marker):-len(end_marker)]
                 if inner.strip():
                     emit_log(q, f'Colando bloco ({len(inner)} chars)...')
-                    try:
-                        # Tenta colar via clipboard (Ctrl+V) -- rapido como humano
-                        total = await _paste_clipboard(inner, 'Colando')
-                    except Exception as clipboard_err:
-                        # Fallback: chunks com execCommand se clipboard falhar
-                        emit_log(q, f'Clipboard falhou ({clipboard_err}), usando fallback por chunks...')
-                        CHUNK_SIZE = 300
-                        js_inject = """(text) => {
-                            const ta = document.getElementById('prompt-textarea')
-                                     || document.querySelector('#prompt-textarea');
-                            if (!ta) throw new Error('prompt-textarea nao encontrado');
-                            if (ta.isContentEditable) {
-                                ta.focus();
-                                const sel = window.getSelection();
-                                const range = document.createRange();
-                                range.selectNodeContents(ta);
-                                range.collapse(false);
-                                sel.removeAllRanges();
-                                sel.addRange(range);
-                                document.execCommand('insertText', false, text);
-                                return ta.innerText.length;
-                            }
-                            const setter = Object.getOwnPropertyDescriptor(
-                                window.HTMLTextAreaElement.prototype, 'value').set;
-                            setter.call(ta, (ta.value || '') + text);
-                            ta.dispatchEvent(new InputEvent('input', {
-                                bubbles: true, cancelable: true, inputType: 'insertText', data: text
-                            }));
-                            return ta.value.length;
-                        }"""
-                        txt = inner.replace('\r\n', '\n').replace('\r', '\n')
-                        total_chars = len(txt)
-                        inserted = 0
-                        while inserted < total_chars:
-                            chunk = txt[inserted:inserted + CHUNK_SIZE]
-                            await page.evaluate(js_inject, chunk)
-                            inserted += len(chunk)
-                            pct = int(inserted / total_chars * 100)
-                            if q: emit_event(q, 'status', f'Colando (fallback)... {pct}%')
-                            if activityts: activityts[0] = time.time()
-                            await asyncio.sleep(0.08)
-                        total = inserted
-                    if total < len(inner.replace('\r\n','\n')) * 0.9:
+                    txt = inner.replace('\r\n', '\n').replace('\r', '\n')
+                    paste_chunk_size = 3500
+                    paste_chunks = [txt[i:i + paste_chunk_size] for i in range(0, len(txt), paste_chunk_size)] or ['']
+                    total = 0
+                    paste_became_attachment = False
+                    for chunk_index, paste_chunk in enumerate(paste_chunks, start=1):
+                        # Se um chunk anterior já virou anexo, o ChatGPT já tem o conteúdo.
+                        # Colar mais chunks geraria anexos duplicados — pula os restantes.
+                        if paste_became_attachment:
+                            total += len(paste_chunk)
+                            continue
+                        label = 'Colando' if len(paste_chunks) == 1 else f'Colando parte {chunk_index}/{len(paste_chunks)}'
+                        try:
+                            # Tenta colar via clipboard (Ctrl+V) -- rápido, mas em sub-blocos para evitar anexos automáticos.
+                            inserted_now = await _paste_clipboard(paste_chunk, label)
+                            # Detecta se este chunk virou anexo (0 chars no textarea mas retornou total)
+                            check_state = await _get_composer_state(page)
+                            if int(check_state.get('textLength') or 0) == 0 and (check_state.get('hasAttachments') or check_state.get('pasteAsAttachment')):
+                                paste_became_attachment = True
+                                # Contabiliza todos os chars restantes como "colados via anexo"
+                                remaining = sum(len(paste_chunks[i]) for i in range(chunk_index, len(paste_chunks)))
+                                total += inserted_now + remaining
+                                emit_log(q, f"ChatGPT converteu todo o bloco em anexo. Pulando {len(paste_chunks) - chunk_index} chunk(s) restante(s).")
+                                continue
+                        except Exception as clipboard_err:
+                            # Fallback: chunks com execCommand se clipboard falhar
+                            emit_log(q, f'Clipboard falhou ({clipboard_err}), usando fallback por chunks...')
+                            CHUNK_SIZE = 300
+                            js_inject = """(text) => {
+                                const ta = document.getElementById('prompt-textarea')
+                                         || document.querySelector('#prompt-textarea');
+                                if (!ta) throw new Error('prompt-textarea nao encontrado');
+                                if (ta.isContentEditable) {
+                                    ta.focus();
+                                    const sel = window.getSelection();
+                                    const range = document.createRange();
+                                    range.selectNodeContents(ta);
+                                    range.collapse(false);
+                                    sel.removeAllRanges();
+                                    sel.addRange(range);
+                                    document.execCommand('insertText', false, text);
+                                    return ta.innerText.length;
+                                }
+                                const setter = Object.getOwnPropertyDescriptor(
+                                    window.HTMLTextAreaElement.prototype, 'value').set;
+                                setter.call(ta, (ta.value || '') + text);
+                                ta.dispatchEvent(new InputEvent('input', {
+                                    bubbles: true, cancelable: true, inputType: 'insertText', data: text
+                                }));
+                                return ta.value.length;
+                            }"""
+                            total_chars = len(paste_chunk)
+                            inserted_now = 0
+                            while inserted_now < total_chars:
+                                chunk = paste_chunk[inserted_now:inserted_now + CHUNK_SIZE]
+                                await page.evaluate(js_inject, chunk)
+                                inserted_now += len(chunk)
+                                pct = int(inserted_now / total_chars * 100)
+                                if q: emit_event(q, 'status', f'Colando (fallback)... {pct}%')
+                                if activityts: activityts[0] = time.time()
+                                await asyncio.sleep(0.08)
+                        total += inserted_now if inserted_now else len(paste_chunk)
+                        await asyncio.sleep(0.15)
+                    expected_len = len(txt)
+                    state_after_paste = await _get_composer_state(page)
+                    if total < expected_len * 0.9 and not state_after_paste.get('hasAttachments'):
                         emit_log(q, f'Aviso: colados {total} de ~{len(inner)} chars')
+                    elif state_after_paste.get('hasAttachments') or paste_became_attachment:
+                        emit_log(q,
+                                 f"Bloco aceito como anexo(s): {state_after_paste.get('attachmentCount')} item(ns).")
                     await asyncio.sleep(0.3)
             else:
                 if segment.strip():
@@ -201,7 +539,7 @@ async def type_realistic(page, text, q=None):
             await page.keyboard.type(char)
             # Variabilidade ajustada: 10ms a 80ms
             await asyncio.sleep(random.uniform(0.01, 0.08))
-            
+
         # --- KEEP-ALIVE: Emite status a cada 2 segundos ---
         current_time = time.time()
         if q and (current_time - last_status_time) >= 2.0:
@@ -450,16 +788,16 @@ async def check_for_dialogs(page, q=None):
 async def open_sidebar_menu(page, url, q=None):
     try:
         if "/c/" not in url: return []
-        
+
         # Extrai o UUID corretamente, mesmo se a URL for de projeto
         chat_uuid = url.split("/c/")[1].split("?")[0]
-        
+
         # Tiramos o "nav" do seletor para que ele ache o chat tanto na barra lateral quanto no centro da página (Projetos)
         link_selector = f'a[href*="{chat_uuid}"]'
-        
+
         if 'check_for_dialogs' in globals():
             await check_for_dialogs(page, q)
-            
+
         # Se o menu já estiver aberto na tela, pega logo e devolve
         if await page.is_visible('div[role="menu"]'):
             return await page.evaluate("""() => {
@@ -473,24 +811,24 @@ async def open_sidebar_menu(page, url, q=None):
             await link_locator.scroll_into_view_if_needed()
             await link_locator.hover(force=True)
             await asyncio.sleep(0.5)
-            
+
             menu_btn = link_locator.locator('button[aria-haspopup="menu"]').first
             if not await menu_btn.is_visible():
                 menu_btn = link_locator.locator("xpath=..").locator('button[aria-haspopup="menu"]').first
-            
+
             if await menu_btn.count() > 0:
                 await menu_btn.click(force=True)
-                
+
                 emit_log(q, "Aguardando div[role='menu']...")
                 await page.wait_for_selector('div[role="menu"]', timeout=5000)
                 await asyncio.sleep(0.5) # Aguarda a animação
-                
+
                 # Executa o seu JS original (Aprimorado com textContent)
                 options = await page.evaluate("""() => {
                     const items = Array.from(document.querySelectorAll('[role="menuitem"]'));
                     return items.map(el => el.textContent.trim()).filter(t => t.length > 0);
                 }""")
-                
+
                 emit_log(q, f"Opções encontradas: {options}")
                 print(f"\n[DEBUG CMD] Menu lido com sucesso via JS: {options}\n")
                 return options
@@ -498,7 +836,7 @@ async def open_sidebar_menu(page, url, q=None):
             emit_log(q, "❌ Chat ou menu não encontrado.")
             print(f"[DEBUG CMD] Erro ao buscar link_locator: {e}")
             return []
-            
+
         return []
     except Exception as e:
         emit_log(q, f"❌ Erro menu: {e}")
@@ -509,7 +847,7 @@ async def execute_menu_option(page, option_text, url, new_name=None, q=None):
         # 1. Encontra o link do chat ativo na tela (já foi carregado via page.goto na handle_menu_task)
         chat_id = url.rstrip('/').split('/')[-1]
         chat_link = page.locator(f'a[href*="{chat_id}"]').first
-        
+
         await chat_link.wait_for(state="attached", timeout=10000)
         await chat_link.scroll_into_view_if_needed()
         await chat_link.hover(force=True)
@@ -519,7 +857,7 @@ async def execute_menu_option(page, option_text, url, new_name=None, q=None):
         menu_btn = chat_link.locator('button[aria-haspopup="menu"]').first
         if not await menu_btn.is_visible():
             menu_btn = chat_link.locator("xpath=..").locator('button[aria-haspopup="menu"]').first
-            
+
         if await menu_btn.count() > 0:
             await menu_btn.click(force=True)
             await page.wait_for_selector('div[role="menu"]', timeout=5000)
@@ -548,7 +886,7 @@ async def execute_menu_option(page, option_text, url, new_name=None, q=None):
                         await page.keyboard.press("Enter")
                         emit_log(q, "✅ Renomeado com sucesso na OpenAI.")
                         return True
-                except Exception as ex: 
+                except Exception as ex:
                     emit_log(q, f"❌ Erro ao digitar novo nome: {ex}")
             else:
                 emit_log(q, "❌ Opção Renomear não visível no menu remoto.")
@@ -558,11 +896,11 @@ async def execute_menu_option(page, option_text, url, new_name=None, q=None):
             if await delete_btn.is_visible():
                 await delete_btn.click(force=True)
                 emit_log(q, "🗑️ Confirmando exclusão...")
-                
+
                 # Busca o botão vermelho de confirmação
                 confirm_btn = page.locator('button.btn-danger, button[data-testid="confirm-delete-chat-button"]').first
                 await confirm_btn.wait_for(timeout=3000)
-                
+
                 if await confirm_btn.is_visible():
                     await confirm_btn.click(force=True)
                     await asyncio.sleep(3)
@@ -572,7 +910,7 @@ async def execute_menu_option(page, option_text, url, new_name=None, q=None):
                 emit_log(q, "❌ Opção Excluir não visível no menu remoto.")
 
         return False
-        
+
     except Exception as e:
         emit_log(q, f"❌ Erro exec: {e}")
         return False
@@ -581,42 +919,44 @@ async def execute_menu_option(page, option_text, url, new_name=None, q=None):
 
 async def handle_menu_task(context, task):
     q = task.get('stream_queue')
+    keep_minimized = await _should_keep_context_minimized(context)
     page = await context.new_page()
+    await _preserve_minimized_if_needed(page, keep_minimized=keep_minimized)
     try:
         url = task.get('url')
         action = task.get('action')
-        
+
         if not url:
             raise ValueError("URL do chat não fornecida.")
-            
+
         emit_log(q, f"Abrindo chat diretamente: {url}")
         await page.goto(url, wait_until="domcontentloaded")
-        
+
         # --- TRAVA DE CARREGAMENTO (O SEGREDO ESTÁ AQUI) ---
         # Extrai o ID e obriga o script a esperar o elemento existir na tela antes de continuar
         chat_id = url.rstrip('/').split('/')[-1]
         chat_link = page.locator(f'a[href*="{chat_id}"]').first
-        
+
         emit_log(q, "Aguardando interface estabilizar...")
         await chat_link.wait_for(state="visible", timeout=20000)
         await asyncio.sleep(1) # Pausa extra para os scripts do ChatGPT terminarem de rodar
-        
+
         # Execução das ações
         if action == 'GET_MENU':
             options = await open_sidebar_menu(page, url, q)
             emit_event(q, "menu_result", {"success": True, "options": options})
-        
+
         elif action == 'EXEC_MENU':
             opt = task.get('option')
             nn = task.get('new_name')
             success = await execute_menu_option(page, opt, url, nn, q)
             emit_event(q, "exec_result", {"success": success})
-            
+
     except Exception as e:
         emit_log(q, f"Erro Menu: {e}")
-        if action == 'GET_MENU': 
+        if action == 'GET_MENU':
             emit_event(q, "menu_result", {"success": False, "error": str(e)})
-        else: 
+        else:
             emit_event(q, "exec_result", {"success": False, "error": str(e)})
     finally:
         await page.close()
@@ -624,12 +964,15 @@ async def handle_menu_task(context, task):
 
 async def handle_sync_task(context, task):
     q       = task.get('stream_queue')
+    keep_minimized = await _should_keep_context_minimized(context)
     page    = await context.new_page()
+    await _preserve_minimized_if_needed(page, keep_minimized=keep_minimized)
     try:
         url    = task.get('url')
         chat_id = task.get('chat_id')
         emit_log(q, f"🔄 Sync iniciado para {url}")
         await page.goto(url, wait_until='domcontentloaded')
+        await _preserve_minimized_if_needed(page, keep_minimized=keep_minimized)
 
         # Aguarda React renderizar as mensagens
         try:

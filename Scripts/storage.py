@@ -223,3 +223,48 @@ def find_chat_by_origin(origin_url: str):
         'messages': chat.get('messages') or [],
         'updated_at': chat.get('updated_at') or chat.get('created_at') or '',
     }
+
+
+def delete_chat(chat_id: str) -> bool:
+    """Remove um chat do histórico local por chat_id."""
+    if not chat_id:
+        return False
+    with _lock:
+        data = _load_chats_unlocked()
+        if chat_id in data:
+            del data[chat_id]
+            _write_chats_unlocked(data)
+            log("storage.py", f"Chat {chat_id} removido do histórico local.")
+            return True
+    return False
+
+
+def delete_chats_by_origin(origin_url: str) -> int:
+    """Remove todos os chats associados a uma origin_url. Retorna a quantidade removida."""
+    if not origin_url:
+        return 0
+
+    target_ids = _extract_origin_lookup_ids(origin_url)
+    has_target_ids = any(v is not None for v in target_ids.values())
+
+    with _lock:
+        data = _load_chats_unlocked()
+        to_delete = []
+        for chat_id, chat in data.items():
+            chat_origin_url = chat.get('origin_url') or ''
+            chat_ids = _extract_origin_lookup_ids(chat_origin_url)
+
+            if has_target_ids:
+                if chat_ids == target_ids:
+                    to_delete.append(chat_id)
+            elif chat_origin_url == origin_url:
+                to_delete.append(chat_id)
+
+        for cid in to_delete:
+            del data[cid]
+
+        if to_delete:
+            _write_chats_unlocked(data)
+            log("storage.py", f"{len(to_delete)} chat(s) removido(s) por origin_url.")
+
+    return len(to_delete)

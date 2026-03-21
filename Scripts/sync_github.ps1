@@ -327,7 +327,7 @@ function Get-RepoUrlForClone {
 function Invoke-GitHubApi {
     param(
         [Parameter(Mandatory = $true)][string]$Uri,
-        [ValidateSet('Get','Post','Put','Patch')][string]$Method = 'Get',
+        [ValidateSet('Get','Post','Put','Patch','Delete')][string]$Method = 'Get',
         $Body = $null
     )
 
@@ -348,6 +348,158 @@ function Invoke-GitHubApi {
     return Invoke-RestMethod @params
 }
 
+function New-PullRequestsForPendingBranches {
+    <#
+    .SYNOPSIS
+        Detecta branches sem PR aberto (prefixos claude/, codex/, chatgpt/) e cria PRs
+        automaticamente com titulo e corpo baseados nos commits reais da branch.
+    #>
+    if (-not $script:Config.githubToken) { return }
+
+    try {
+        $prsResponse = Invoke-GitHubApi -Uri "$($script:Config.apiBase)/pulls?state=open&base=$($script:Config.branch)&per_page=100"
+    } catch { return }
+
+    $prsArray = @($prsResponse)
+    if ($prsArray.Count -eq 1 -and $prsArray[0] -is [System.Array]) { $prsArray = @($prsArray[0]) }
+    $branchesComPr = @()
+    foreach ($p in $prsArray) {
+        if ($p -and $p.head -and $p.head.ref) { $branchesComPr += $p.head.ref }
+    }
+
+    try {
+        $branchesResponse = Invoke-GitHubApi -Uri "$($script:Config.apiBase)/branches?per_page=100"
+    } catch { return }
+
+    $todasBranches = @($branchesResponse)
+    if ($todasBranches.Count -eq 1 -and $todasBranches[0] -is [System.Array]) { $todasBranches = @($todasBranches[0]) }
+
+    $candidatas = @($todasBranches | Where-Object {
+        -not [string]::IsNullOrWhiteSpace($_.name) -and
+        $_.name -ne $script:Config.branch -and
+        $branchesComPr -notcontains $_.name -and
+        $_.name -match '^(claude|codex|chatgpt)/'
+    })
+
+    if ($candidatas.Count -eq 0) {
+        Write-Info 'Nenhuma branch pendente de PR encontrada.'
+        return
+    }
+
+    Write-Info "Avaliando $($candidatas.Count) branch(es) candidata(s) para PR automatico..."
+
+    # Obter datas de cada branch para ordenar e identificar a mais recente
+    $listaComDatas = @()
+    $i = 0
+    foreach ($br in $candidatas) {
+        $i++
+        $pct = [math]::Floor(($i / $candidatas.Count) * 100)
+        $blocks = [math]::Floor($pct / 5); $spaces = 20 - $blocks
+        $bar = ('█' * $blocks) + ('░' * $spaces)
+        Write-Host -NoNewline "`r[INFO] Processando branches [$bar] $pct%       " -ForegroundColor Cyan
+        try {
+            $commitData = Invoke-GitHubApi -Uri $br.commit.url -ErrorAction SilentlyContinue
+            $data = [datetime]::Parse($commitData.commit.committer.date)
+            $listaComDatas += @{ name = $br.name; date = $data }
+        } catch {}
+    }
+    Write-Host ""
+
+    if ($listaComDatas.Count -eq 0) { return }
+
+    $listaOrdenada = $listaComDatas | Sort-Object date -Descending
+    $maisRecente = $listaOrdenada[0]
+    $nomeBranch = $maisRecente.name
+
+    if ([string]::IsNullOrWhiteSpace($nomeBranch)) { return }
+
+    Write-Info "Branch mais recente sem PR: '$nomeBranch' ($($maisRecente.date))." -Color Cyan
+
+    # Buscar commits da branch em relacao ao base para montar titulo e corpo do PR
+    $prTitle = "Merge automatico: $nomeBranch"
+    $prBodyLines = @("PR gerado automaticamente pelo sync para a branch ``$nomeBranch``.", "")
+
+    try {
+        $compare = Invoke-GitHubApi -Uri "$($script:Config.apiBase)/compare/$($script:Config.branch)...$($nomeBranch)"
+        $commits = @($compare.commits)
+
+        if ($commits.Count -gt 0) {
+            # Titulo: usar a mensagem do primeiro commit (primeira linha)
+            $firstMsg = ($commits[0].commit.message -split "`n")[0].Trim()
+            if ($commits.Count -eq 1) {
+                $prTitle = $firstMsg
+            } else {
+                # Multiplos commits: titulo resumido
+                $prTitle = $firstMsg
+                if ($prTitle.Length -gt 65) {
+                    $prTitle = $prTitle.Substring(0, 62) + '...'
+                }
+                $prTitle = "$prTitle (+$($commits.Count - 1))"
+            }
+
+            $prBodyLines += "## Commits"
+            $prBodyLines += ""
+            foreach ($c in $commits) {
+                $msg = ($c.commit.message -split "`n")[0].Trim()
+                $sha = $c.sha.Substring(0, 7)
+                $prBodyLines += "- ``$sha`` $msg"
+            }
+            $prBodyLines += ""
+
+            # Listar arquivos alterados
+            $files = @($compare.files)
+            if ($files.Count -gt 0) {
+                $prBodyLines += "## Arquivos alterados ($($files.Count))"
+                $prBodyLines += ""
+                foreach ($f in $files) {
+                    $statusIcon = switch ($f.status) {
+                        'added'    { '🆕' }
+                        'removed'  { '🗑️' }
+                        'modified' { '✏️' }
+                        'renamed'  { '📝' }
+                        default    { '📄' }
+                    }
+                    $prBodyLines += "- $statusIcon ``$($f.filename)`` (+$($f.additions) -$($f.deletions))"
+                }
+            }
+        }
+    } catch {
+        Write-Warn "Nao foi possivel obter commits da branch: $($_.Exception.Message)"
+    }
+
+    $prBody = $prBodyLines -join "`n"
+
+    try {
+        $newPr = Invoke-GitHubApi -Uri "$($script:Config.apiBase)/pulls" -Method Post -Body @{
+            title = $prTitle
+            head  = $nomeBranch
+            base  = $script:Config.branch
+            body  = $prBody
+        }
+        Write-Ok "PR #$($newPr.number) criado: $prTitle"
+    } catch {
+        $errMsg = $_.Exception.Message
+        if ($errMsg -match 'No commits between' -or $errMsg -match 'already exists' -or $errMsg -match 'A pull request already exists') {
+            Write-Info "Branch '$nomeBranch' sem modificacoes reais ou PR ja existe." -Color DarkGray
+        } else {
+            Write-Warn "Falha ao criar PR para '$nomeBranch': $errMsg"
+        }
+    }
+
+    # Faxina: deletar branches mais antigas que nao sao a mais recente
+    $outras = $listaOrdenada | Select-Object -Skip 1
+    $lixoRemovido = 0
+    foreach ($velha in $outras) {
+        if ($velha.name -match '^(claude|codex|chatgpt)/') {
+            try {
+                Invoke-GitHubApi -Uri "$($script:Config.apiBase)/git/refs/heads/$($velha.name)" -Method Delete -ErrorAction SilentlyContinue | Out-Null
+                $lixoRemovido++
+            } catch {}
+        }
+    }
+    if ($lixoRemovido -gt 0) { Write-Ok "Faxina: $lixoRemovido branch(es) antiga(s) deletada(s)." }
+}
+
 function Merge-NewestPullRequest {
     Write-Section 'PULL REQUESTS'
 
@@ -356,6 +508,9 @@ function Merge-NewestPullRequest {
         Write-Warn 'Token GitHub nao configurado; etapa de PR sera ignorada, mas o sync dos arquivos ainda sera tentado.'
         return
     }
+
+    # Criar PRs automaticamente para branches pendentes (claude/, codex/, chatgpt/)
+    New-PullRequestsForPendingBranches
 
     try {
         $prsResponse = Invoke-GitHubApi -Uri "$($script:Config.apiBase)/pulls?state=open&base=$($script:Config.branch)&per_page=100&sort=created&direction=desc"
