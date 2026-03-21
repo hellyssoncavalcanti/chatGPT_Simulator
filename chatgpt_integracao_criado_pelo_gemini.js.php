@@ -3319,7 +3319,7 @@ header('Content-Type: application/javascript; charset=utf-8');
         .thinking-header { cursor: pointer; color: #777; font-style: italic; padding: 5px 0; display: flex; align-items: center; gap: 6px; }
         .thinking-content { display: none; color: #666; white-space: pre-wrap; padding-bottom: 8px; }
         .thinking-content.open { display: block; }
-        .msg { max-width: 85%; padding: 10px 14px; border-radius: 12px; font-size: 14px; line-height: 1.5; word-wrap: break-word; box-sizing: border-box; }
+        .msg { max-width: 85%; padding: 10px 14px; border-radius: 12px; font-size: 14px; line-height: 1.5; word-wrap: break-word; overflow-wrap: break-word; box-sizing: border-box; overflow: hidden; }
         .msg-user { background: #e8f0fe; color: #1a1a1a; align-self: flex-end; border-bottom-right-radius: 2px; }
 
         /* ── Wrapper de linha da mensagem do usuário ── */
@@ -3442,12 +3442,33 @@ header('Content-Type: application/javascript; charset=utf-8');
         .sb-view.active { display: block; }
         @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
 
-        /* ── Tabelas renderizadas pelo marked.js (planilhas, etc.) ── */
-        .msg-ai .ow-table-scroll {
+        /* ── Imagens dentro de mensagens da IA ── */
+        .msg-ai img {
+            max-width: 100%;
+            height: auto;
+            border-radius: 6px;
+            cursor: pointer;
+        }
+        /* Wrapper scrollável para imagens largas (tabelas em imagem, etc.) */
+        .msg-ai .ow-img-scroll {
             overflow-x: auto;
             -webkit-overflow-scrolling: touch;
             margin: 8px 0;
             max-width: 100%;
+        }
+        .msg-ai .ow-img-scroll img {
+            max-width: none;
+            min-width: 100%;
+        }
+
+        /* ── Tabelas renderizadas pelo marked.js (planilhas, etc.) ── */
+        .msg-ai .ow-table-scroll {
+            overflow-x: auto;
+            overflow-y: auto;
+            -webkit-overflow-scrolling: touch;
+            margin: 8px 0;
+            max-width: 100%;
+            max-height: 320px;
         }
         .msg-ai table {
             border-collapse: collapse;
@@ -3466,6 +3487,7 @@ header('Content-Type: application/javascript; charset=utf-8');
             font-weight: 600;
             position: sticky;
             top: 0;
+            z-index: 1;
         }
         .msg-ai tr:nth-child(even) { background: #f5f7fa; }
         .msg-ai tr:hover { background: #e8f0fe; }
@@ -4338,9 +4360,15 @@ header('Content-Type: application/javascript; charset=utf-8');
      */
     const _phpSelf = "<?php echo $_SERVER['PHP_SELF']; ?>";
     function _postProcessHtml(html) {
-        // 1) Envolve <table> em div scrollável horizontalmente
+        // 1) Envolve <table> em div scrollável horizontal e verticalmente
         html = html.replace(/<table\b/g, '<div class="ow-table-scroll"><table')
                    .replace(/<\/table>/g, '</table></div>');
+
+        // 1b) Envolve imagens grandes (base64 ou externas) em container scrollável
+        html = html.replace(
+            /<img\s+([^>]*src="data:image\/[^"]+")[^>]*>/gi,
+            '<div class="ow-img-scroll"><img $1></div>'
+        );
 
         // 2) Reescreve URLs /api/downloads/ para usar o proxy PHP
         html = html.replace(

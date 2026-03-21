@@ -667,6 +667,24 @@ def clean_html(html_content):
         r'<a\s+[^>]*href="([^"]*(?:/backend-api/files/|files\.oaiusercontent\.com|sandbox:/)[^"]*)"[^>]*>([^<]*)</a>',
         html, re.IGNORECASE
     )
+    # Também captura links com atributo download
+    download_links += re.findall(
+        r'<a\s+[^>]*download[^>]*href="([^"]+)"[^>]*>([^<]*)</a>',
+        html, re.IGNORECASE
+    )
+    download_links += re.findall(
+        r'<a\s+[^>]*href="([^"]+)"[^>]*download[^>]*>([^<]*)</a>',
+        html, re.IGNORECASE
+    )
+    # Deduplica
+    seen_hrefs = set()
+    unique_dl = []
+    for href, text in download_links:
+        if href not in seen_hrefs and not href.startswith('#'):
+            seen_hrefs.add(href)
+            unique_dl.append((href, text))
+    download_links = unique_dl
+
     html = re.sub(r'<button.*?</button>', '', html, flags=re.DOTALL)
     html = re.sub(r'<div class="flex gap-1.*?</div>', '', html, flags=re.DOTALL)
     # Reinsere links de download que podem ter sido perdidos
@@ -702,14 +720,35 @@ async def _detect_and_register_files(page, markdown_text, q=None):
 
     matches = list(link_pattern.finditer(markdown_text))
     if not matches:
-        # Fallback: tenta detectar links de download na página (botões removidos pelo clean_html)
+        # Fallback: tenta detectar links de download na página via múltiplos seletores
         try:
             page_links = await page.evaluate("""() => {
                 const links = [];
+                const seen = new Set();
+                // Seletor 1: links com /backend-api/files/
                 document.querySelectorAll('a[href*="/backend-api/files/"]').forEach(a => {
                     const href = a.getAttribute('href') || '';
                     const text = (a.textContent || '').trim();
-                    if (href && text) links.push({href, text});
+                    if (href && text && !seen.has(href)) { seen.add(href); links.push({href, text}); }
+                });
+                // Seletor 2: links com files.oaiusercontent.com
+                document.querySelectorAll('a[href*="files.oaiusercontent.com"]').forEach(a => {
+                    const href = a.getAttribute('href') || '';
+                    const text = (a.textContent || '').trim();
+                    if (href && text && !seen.has(href)) { seen.add(href); links.push({href, text}); }
+                });
+                // Seletor 3: links com atributo download
+                document.querySelectorAll('a[download]').forEach(a => {
+                    const href = a.getAttribute('href') || '';
+                    const text = (a.textContent || a.getAttribute('download') || '').trim();
+                    if (href && !href.startsWith('#') && !seen.has(href)) { seen.add(href); links.push({href, text: text || href.split('/').pop()}); }
+                });
+                // Seletor 4: botões/links em cards de arquivo do code interpreter
+                // ChatGPT renderiza como <a> dentro de containers com data-testid ou classes específicas
+                document.querySelectorAll('[data-testid*="file"] a, .sandbox-result a, .code-output a').forEach(a => {
+                    const href = a.getAttribute('href') || '';
+                    const text = (a.textContent || '').trim();
+                    if (href && text && !seen.has(href)) { seen.add(href); links.push({href, text}); }
                 });
                 return links;
             }""")
@@ -723,6 +762,16 @@ async def _detect_and_register_files(page, markdown_text, q=None):
                     emit_log(q, f"📎 Arquivo registrado (da página): {pl['text']} → {file_id}")
         except Exception as e:
             emit_log(q, f"⚠️ Erro ao detectar links na página: {e}")
+
+        # Fallback 2: clica em elementos de download do code interpreter para capturar via auto-download
+        if not page_links:
+            try:
+                clicked = await _click_chatgpt_download_elements(page, q)
+                if clicked:
+                    await asyncio.sleep(2)  # aguarda downloads serem capturados pelo handler _on_download
+            except Exception as e:
+                emit_log(q, f"⚠️ Erro ao clicar elementos de download: {e}")
+
         return markdown_text
 
     result = markdown_text
@@ -741,6 +790,12 @@ async def _detect_and_register_files(page, markdown_text, q=None):
                     for (const a of anchors) {
                         if (a.textContent.includes(filename)) return a.href;
                     }
+                    // Fallback: qualquer <a> com download que contenha o filename
+                    const dlLinks = Array.from(document.querySelectorAll('a[download]'));
+                    for (const a of dlLinks) {
+                        if (a.textContent.includes(filename) || (a.getAttribute('download') || '').includes(filename))
+                            return a.href;
+                    }
                     return null;
                 }""", raw_url.split('/')[-1])
                 if real_url:
@@ -758,6 +813,64 @@ async def _detect_and_register_files(page, markdown_text, q=None):
         emit_log(q, f"📎 Arquivo registrado: {display_name} → {file_id}")
 
     return result
+
+
+async def _click_chatgpt_download_elements(page, q=None):
+    """
+    Detecta e clica elementos de download de arquivo do ChatGPT code interpreter.
+    Isso dispara o evento 'download' do Playwright que é capturado por _on_download.
+    Retorna True se algum elemento foi clicado.
+    """
+    try:
+        # Procura elementos clicáveis que representam downloads de arquivo do code interpreter
+        download_elements = await page.evaluate("""() => {
+            const results = [];
+            // Padrão 1: links com texto contendo extensões de arquivo comuns
+            const fileExts = /\.(xlsx|xls|csv|pdf|docx|doc|pptx|ppt|zip|rar|json|xml|txt|png|jpg|jpeg|gif|svg)$/i;
+            document.querySelectorAll('a').forEach((a, i) => {
+                const text = (a.textContent || '').trim();
+                const href = a.getAttribute('href') || '';
+                const dl = a.getAttribute('download') || '';
+                if ((fileExts.test(text) || fileExts.test(dl) || fileExts.test(href)) && !href.startsWith('#')) {
+                    results.push({index: i, text: text || dl || href.split('/').pop(), selector: 'a'});
+                }
+            });
+            // Padrão 2: botões dentro da última resposta do assistant que contenham texto de arquivo
+            const lastMsg = [...document.querySelectorAll('[data-message-author-role="assistant"]')].pop();
+            if (lastMsg) {
+                lastMsg.querySelectorAll('button, [role="button"]').forEach((btn, i) => {
+                    const text = (btn.textContent || '').trim();
+                    if (fileExts.test(text)) {
+                        results.push({index: i, text, selector: 'button_in_last'});
+                    }
+                });
+            }
+            return results;
+        }""")
+
+        if not download_elements:
+            return False
+
+        clicked = False
+        for el in download_elements:
+            try:
+                if el['selector'] == 'button_in_last':
+                    last_msg = page.locator('[data-message-author-role="assistant"]').last
+                    btn = last_msg.locator('button, [role="button"]').nth(el['index'])
+                    await btn.click(timeout=3000)
+                else:
+                    link = page.locator('a').nth(el['index'])
+                    await link.click(timeout=3000)
+                emit_log(q, f"📎 Clicou elemento de download: {el['text']}")
+                clicked = True
+                await asyncio.sleep(1)
+            except Exception as e:
+                emit_log(q, f"⚠️ Falha ao clicar download '{el['text']}': {e}")
+
+        return clicked
+    except Exception as e:
+        emit_log(q, f"⚠️ Erro ao detectar elementos de download clicáveis: {e}")
+        return False
 
 async def get_chat_title(page):
     try:
