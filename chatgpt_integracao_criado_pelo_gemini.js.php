@@ -2344,6 +2344,68 @@ if (isset($_GET['action']) && $_GET['action'] === 'sync_simulator') {
 }
 
 // -----------------------------------------------------
+// DELETE LOCAL CHAT (PYTHON SERVER STORAGE)
+// Remove o chat do history.json no servidor Python,
+// sem excluir do ChatGPT — apenas do storage local.
+// -----------------------------------------------------
+if (isset($_GET['action']) && $_GET['action'] === 'delete_simulator_chat') {
+    while (ob_get_level()) ob_end_clean();
+    header('Content-Type: application/json; charset=utf-8');
+    global $ollama_manual_ip;
+
+    $json_input = file_get_contents('php://input');
+    $req = json_decode($json_input, true);
+
+    $chat_id    = $req['chat_id']    ?? '';
+    $origin_url = $req['origin_url'] ?? '';
+
+    // Identifica o IP base (mesma lógica do sync)
+    $ip_final = "";
+    if (!empty($ollama_manual_ip)) {
+        $ip_final = str_replace('11434', '3003', rtrim($ollama_manual_ip, '/'));
+    } else {
+        $url_monitor = "http://conexaovida.org/no-ip-dynamic_ip.php?port=3003";
+        $ch = curl_init($url_monitor);
+        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+        curl_setopt($ch, CURLOPT_FOLLOWLOCATION, true);
+        curl_setopt($ch, CURLOPT_HEADER, true);
+        curl_setopt($ch, CURLOPT_TIMEOUT, 10);
+        $raw_response = curl_exec($ch);
+        $effective_url = curl_getinfo($ch, CURLINFO_EFFECTIVE_URL);
+        curl_close($ch);
+        $ip_found = null;
+        if (preg_match('/(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})/', $effective_url, $matches)) $ip_found = $matches[1];
+        else if (preg_match('/(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})/', $raw_response ?? '', $matches)) $ip_found = $matches[1];
+        if ($ip_found && filter_var($ip_found, FILTER_VALIDATE_IP)) $ip_final = "http://{$ip_found}:3003";
+    }
+
+    if (empty($ip_final) || !filter_var($ip_final, FILTER_VALIDATE_URL)) {
+        echo json_encode(["success" => false, "error" => "IP_ERROR"]);
+        exit;
+    }
+
+    $payload = json_encode([
+        'chat_id'    => $chat_id,
+        'origin_url' => $origin_url
+    ]);
+
+    $ch = curl_init(rtrim($ip_final, '/') . '/api/chat_delete_local');
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($ch, CURLOPT_POST, true);
+    curl_setopt($ch, CURLOPT_POSTFIELDS, $payload);
+    curl_setopt($ch, CURLOPT_TIMEOUT, 15);
+    curl_setopt($ch, CURLOPT_HTTPHEADER, [
+        'Authorization: Bearer ' . ($GLOBALS['CHATGPT_VIA_API_KEY'] ?? ''),
+        'Content-Type: application/json'
+    ]);
+    $response = curl_exec($ch);
+    curl_close($ch);
+
+    echo $response ?: json_encode(['success' => false, 'error' => 'Sem resposta do servidor']);
+    exit;
+}
+
+// -----------------------------------------------------
 // PROXY HANDLER (CHAT MODE)
 // -----------------------------------------------------
 if (isset($_GET['action']) && $_GET['action'] === 'proxy') {
@@ -7768,13 +7830,34 @@ header('Content-Type: application/javascript; charset=utf-8');
 
                 if (!deletou) return; // Aborta limpeza visual se exclusão falhou
 
-                document.getElementById('ow-messages').innerHTML = ''; 
-                state.messages = []; 
+                // Também remove do histórico do servidor Python (history.json)
+                // para evitar que get_chat_meta recupere o chat via fallback chat_lookup.
+                try {
+                    const chatIdToDelete = state.currentChatId || '';
+                    await fetch(`<?php echo $_SERVER['PHP_SELF']; ?>?action=delete_simulator_chat`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            chat_id:    chatIdToDelete,
+                            origin_url: window.location.href
+                        })
+                    });
+                    console.log(`%c${FILE_PREFIX} 🗑️ Chat removido do storage do servidor Python.`, 'color: #f44336; font-weight: bold');
+                } catch(e) {
+                    console.warn(`${FILE_PREFIX} ⚠️ Falha ao remover chat do servidor Python:`, e.message);
+                }
+
+                // Limpa também as variáveis da análise prévia (evita reutilizar URL de chat excluído)
+                analisePreviaChatUrl = null;
+                analisePreviaChatId  = null;
+
+                document.getElementById('ow-messages').innerHTML = '';
+                state.messages = [];
                 state.currentChatId = null;
                 state.currentChatTitle = buildDefaultChatTitle(currentModeSql);
                 state.currentChatUrl = null;
                 currentUserQuestion = '';
-                localStorage.removeItem(getHistoryKey(currentModeSql)); 
+                localStorage.removeItem(getHistoryKey(currentModeSql));
                 updateTitleUI();
                 renderAnalisePrevia();  // ← Renderiza a analise prévia da LLM diretamente no chat, para o usuário ver, como ele limpou/zerou o chat.
                 if (isDirectMode) {

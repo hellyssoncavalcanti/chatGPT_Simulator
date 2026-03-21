@@ -425,6 +425,28 @@ def api_chat_lookup():
 
     return jsonify({"success": True, "chat": chat})
 
+
+@app.route('/api/chat_delete_local', methods=['POST'])
+def api_chat_delete_local():
+    """Remove chat(s) do histórico local (history.json) por chat_id e/ou origin_url.
+    Não exclui do ChatGPT — apenas do storage local do servidor Python."""
+    if not check_auth():
+        return jsonify({"error": "Unauthorized"}), 401
+
+    data = request.get_json() or {}
+    chat_id = data.get('chat_id') or ''
+    origin_url = data.get('origin_url') or ''
+
+    deleted_count = 0
+    if chat_id:
+        if storage.delete_chat(chat_id):
+            deleted_count += 1
+    if origin_url:
+        deleted_count += storage.delete_chats_by_origin(origin_url)
+
+    return jsonify({"success": True, "deleted_count": deleted_count})
+
+
 @app.route("/api/menu/options", methods=["POST"])
 def menu_options():
     data = request.get_json() or {}
