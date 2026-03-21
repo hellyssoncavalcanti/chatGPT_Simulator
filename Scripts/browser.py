@@ -28,12 +28,14 @@
 #   é digitado caractere a caractere via type_realistic().
 # =============================================================================
 import asyncio
+import base64
 import json
 import random
 import time
 import re
 import os
 import queue
+from urllib.parse import urlparse, unquote
 from playwright.async_api import async_playwright
 import config
 from shared import browser_queue
@@ -54,6 +56,58 @@ def emit_event(q, type_, content):
         # O \n final é estritamente o separador do stream
         payload = json.dumps({"type": type_, "content": content}, separators=(',', ':'))
         q.put(payload + "\n")
+
+def _guess_download_filename(url, headers):
+    disposition = (headers or {}).get('content-disposition', '') or ''
+    match = re.search(r"filename\\*=UTF-8''([^;]+)|filename=\"?([^\";]+)\"?", disposition, re.IGNORECASE)
+    if match:
+        raw_name = match.group(1) or match.group(2)
+        if raw_name:
+            return unquote(raw_name).strip()
+
+    try:
+        parsed = urlparse(url or '')
+        name = os.path.basename(parsed.path)
+        if name:
+            return name
+    except Exception:
+        pass
+
+    return 'arquivo_chatgpt'
+
+async def handle_authenticated_download_task(browser, task):
+    q = task.get('stream_queue')
+    file_url = (task.get('url') or '').strip()
+
+    if not file_url:
+        emit_event(q, 'error', 'URL do arquivo nao informada.')
+        if q: q.put(None)
+        return
+
+    try:
+        response = await browser.request.get(file_url, fail_on_status_code=False, timeout=120000)
+        status = response.status
+        headers = await response.all_headers()
+        body = await response.body()
+
+        if status >= 400:
+            emit_event(q, 'error', f'Falha ao baixar arquivo autenticado (HTTP {status}).')
+            if q: q.put(None)
+            return
+
+        filename = task.get('filename') or _guess_download_filename(file_url, headers)
+        emit_event(q, 'download', {
+            'status': status,
+            'filename': filename,
+            'content_type': headers.get('content-type') or 'application/octet-stream',
+            'content_disposition': headers.get('content-disposition') or '',
+            'body_base64': base64.b64encode(body).decode('ascii'),
+            'source_url': file_url,
+        })
+    except Exception as e:
+        emit_event(q, 'error', f'Erro ao baixar arquivo autenticado: {e}')
+    finally:
+        if q: q.put(None)
 
 async def smart_input(page, message, q=None, activityts=None):
     import re
@@ -1155,6 +1209,159 @@ async def handle_search_task(context, task):
                 try:
                     await page.close()
                 except:
+                    pass
+            if q:
+                q.put(None)
+
+
+async def handle_uptodate_search_task(context, task):
+    """
+    Ação UPTODATE_SEARCH — abre a busca do UpToDate, pesquisa o termo e
+    retorna os resultados estruturados encontrados na listagem principal.
+    """
+    async with tab_semaphore:
+        q = task.get('stream_queue')
+        query = (task.get('query') or '').strip()
+        page = None
+        try:
+            if not query:
+                emit_event(q, 'searchresult', {
+                    'success': False, 'query': '', 'error': 'Query vazia'
+                })
+                return
+
+            page = await context.new_page()
+            emit_log(q, f"🩺 Pesquisando no UpToDate: {query}")
+
+            await page.goto('https://www.uptodate.com/contents/search', wait_until='domcontentloaded')
+            await asyncio.sleep(random.uniform(1.0, 1.8))
+
+            search_input = page.locator('#tbSearch, input.searchTerm, input[type="search"]').first
+            await search_input.wait_for(state='visible', timeout=15000)
+            await search_input.click()
+            await asyncio.sleep(random.uniform(0.2, 0.5))
+
+            try:
+                await page.locator('#clearSearch').click(timeout=1000)
+                await asyncio.sleep(0.2)
+            except Exception:
+                pass
+
+            emit_event(q, 'status', 'Digitando busca no UpToDate...')
+            await type_realistic(page, query, q)
+            await asyncio.sleep(random.uniform(0.3, 0.8))
+
+            submitted = False
+            submit_selectors = [
+                '.newsearch-submit',
+                'span.newsearch-submit',
+                '[aria-label="Submit search"]',
+            ]
+            for sel in submit_selectors:
+                try:
+                    btn = page.locator(sel).first
+                    if await btn.is_visible(timeout=1000):
+                        await btn.click()
+                        submitted = True
+                        break
+                except Exception:
+                    continue
+
+            if not submitted:
+                await page.keyboard.press('Enter')
+
+            emit_event(q, 'status', 'Aguardando resultados do UpToDate...')
+            try:
+                await page.wait_for_selector(
+                    '#searchresults, #search-results-container, .search-result-list-item',
+                    timeout=20000
+                )
+            except Exception:
+                await asyncio.sleep(4)
+
+            await asyncio.sleep(random.uniform(1.0, 2.0))
+
+            results = await page.evaluate("""() => {
+                const nodes = Array.from(document.querySelectorAll('#search-results-container .search-result-list-item'));
+                const items = [];
+                const seen = new Set();
+                let pos = 1;
+
+                const detectType = (li) => {
+                    const cls = li.className || '';
+                    if (cls.includes('ICG')) return 'pathway';
+                    if (cls.includes('LAB')) return 'lab';
+                    if (cls.includes('medical')) return 'medical';
+                    return 'topic';
+                };
+
+                for (const li of nodes) {
+                    if (pos > 12) break;
+                    const link = li.querySelector('a.searchResultLink[href]');
+                    if (!link) continue;
+
+                    const title = (link.innerText || '').trim();
+                    const href = link.getAttribute('href') || '';
+                    if (!title || !href) continue;
+
+                    const url = new URL(href, window.location.origin).href;
+                    if (seen.has(url)) continue;
+                    seen.add(url);
+
+                    const snippetEl = li.querySelector('.snippet');
+                    const snippet = snippetEl ? (snippetEl.innerText || '').trim().substring(0, 400) : '';
+                    const subhits = Array.from(li.querySelectorAll('.search-result-subhit-link'))
+                        .map(el => (el.innerText || '').trim())
+                        .filter(Boolean)
+                        .slice(0, 6);
+
+                    items.push({
+                        position: pos++,
+                        title,
+                        url,
+                        snippet,
+                        type: detectType(li),
+                        subhits,
+                    });
+                }
+
+                return items;
+            }""")
+
+            raw_html = ""
+            if not results:
+                emit_log(q, "⚠️ Seletores CSS não encontraram resultados no UpToDate — tentando fallback via raw HTML...")
+                try:
+                    raw_html = await page.content()
+                    results = _parse_uptodate_raw_html(raw_html, query)
+                    if results:
+                        emit_log(q, f"✅ Fallback raw HTML UpToDate: {len(results)} resultados extraídos")
+                except Exception as e_raw:
+                    emit_log(q, f"⚠️ Fallback raw HTML UpToDate falhou: {e_raw}")
+
+            emit_log(q, f"✅ {len(results)} resultado(s) UpToDate encontrados para: {query}")
+            emit_event(q, 'searchresult', {
+                'success': True,
+                'query': query,
+                'results': results,
+                'count': len(results),
+                'source': 'uptodate',
+                'raw_html': raw_html[:30000] if raw_html else '',
+            })
+
+        except Exception as e:
+            emit_log(q, f"❌ Erro na busca UpToDate: {e}")
+            emit_event(q, 'searchresult', {
+                'success': False,
+                'query': query,
+                'error': str(e),
+                'source': 'uptodate',
+            })
+        finally:
+            if page:
+                try:
+                    await page.close()
+                except Exception:
                     pass
             if q:
                 q.put(None)

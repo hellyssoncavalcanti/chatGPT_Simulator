@@ -1353,6 +1353,45 @@ def resetar_analises_interrompidas_no_startup():
     return afetados
 
 
+def resetar_analises_interrompidas_no_startup():
+    """
+    Ao subir o analisador, limpa datetime_analise_iniciada de registros que
+    ficaram interrompidos sem conclusão válida na execução anterior.
+
+    Isso evita que o sistema trate como "análise já iniciada" algo que será
+    reprocessado do zero após uma parada/queda do processo Python.
+    """
+    resultado = sql_exec(
+        f"""
+        UPDATE {TABELA}
+        SET
+            status = CASE
+                        WHEN status = 'processando' THEN 'pendente'
+                        ELSE status
+                     END,
+            datetime_analise_iniciada = NULL,
+            erro_msg = CONCAT(
+                COALESCE(erro_msg, ''),
+                ' | [AUTO-RESET-STARTUP] datetime_analise_iniciada zerado em ',
+                NOW(),
+                ' após interrupção anterior sem conclusão válida'
+            )
+        WHERE
+            datetime_analise_iniciada IS NOT NULL
+            AND (
+                datetime_analise_concluida IS NULL
+                OR datetime_analise_concluida = '0000-00-00 00:00:00'
+            )
+        """
+    )
+    afetados = resultado.get('affected_rows', 0)
+    if afetados:
+        log.warning(
+            f"⚠️  {afetados} registro(s) com análise interrompida tiveram datetime_analise_iniciada resetado no startup."
+        )
+    return afetados
+
+
 def _montar_sets_resultado(resultado: dict) -> list:
     colunas  = _get_colunas_tabela()
     chat_id  = esc(resultado.get("_chat_id")  or "")
@@ -2466,6 +2505,38 @@ def _primeiro_node_representativo(nodes: list):
     return nodes[0] if nodes else None
 
 
+def _deduplicar_nodes_grafo(nodes: list) -> list:
+    dedup = {}
+    for node in nodes:
+        if not isinstance(node, dict):
+            continue
+        chave = (
+            str(node.get("tipo") or "").strip().lower(),
+            str(node.get("normalizado") or node.get("valor") or "").strip().lower(),
+        )
+        if not chave[1]:
+            continue
+        if chave not in dedup:
+            dedup[chave] = node
+            continue
+        existente = dedup[chave]
+        if not existente.get("id") and node.get("id"):
+            existente["id"] = node["id"]
+        if not existente.get("contexto") and node.get("contexto"):
+            existente["contexto"] = node["contexto"]
+        elif node.get("contexto") and node["contexto"] not in str(existente.get("contexto") or ""):
+            existente["contexto"] = f"{existente.get('contexto','')} | {node['contexto']}".strip(" |")
+    return list(dedup.values())
+
+
+def _primeiro_node_representativo(nodes: list):
+    for tipo_prioritario in ("diagnostico", "medicamento", "terapia", "sintoma", "gene", "risco"):
+        for node in nodes:
+            if (node.get("tipo") or "").lower() == tipo_prioritario:
+                return node
+    return nodes[0] if nodes else None
+
+
 def salvar_auxiliar(idatendimento: int, id_paciente: str, resultado: dict):
     """
     Chama o endpoint PHP salvar_analise_auxiliar para popular tabelas auxiliares
@@ -3336,6 +3407,18 @@ def analisar_prontuario(texto: str, chat_url: str = None, chat_id: str = None, c
     def _newline():
         sys.stdout.write('\n')
         sys.stdout.flush()
+
+    def _inline_status(prefixo: str, msg: str):
+        texto = re.sub(r"\s+", " ", str(msg or "")).strip()
+        if not texto:
+            return
+
+        largura_terminal = shutil.get_terminal_size((140, 20)).columns
+        largura_util = max(30, largura_terminal - 6)
+        mensagem = f"{prefixo} {texto}"
+        if len(mensagem) > largura_util:
+            mensagem = mensagem[:max(0, largura_util - 3)].rstrip() + "..."
+        _inline(mensagem)
 
     def _inline_status(prefixo: str, msg: str):
         texto = re.sub(r"\s+", " ", str(msg or "")).strip()
