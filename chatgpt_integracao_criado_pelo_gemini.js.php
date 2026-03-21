@@ -4682,7 +4682,10 @@ header('Content-Type: application/javascript; charset=utf-8');
                     }
                 } else if (row.status === 'pendente' || row.status === 'processando') {
                     // Se há erro_msg de tentativa anterior, exibe o erro prévio junto ao aviso de pendente
-                    const priorError = extractAnaliseRetryReason(row.erro_msg || '');
+                    const _erroMsgRaw = String(row.erro_msg || '').trim();
+                    const priorError = typeof extractAnaliseRetryReason === 'function'
+                        ? extractAnaliseRetryReason(_erroMsgRaw)
+                        : _erroMsgRaw;
                     if (priorError) {
                         row.retryRequested = true;
                         row.previousError  = priorError;
@@ -4800,7 +4803,10 @@ header('Content-Type: application/javascript; charset=utf-8');
                     }
                 } else if (row.status === 'pendente' || row.status === 'processando') {
                     // Se há erro_msg de tentativa anterior, exibe o erro prévio junto ao aviso de pendente
-                    const priorError = extractAnaliseRetryReason(row.erro_msg || '');
+                    const _erroMsgRaw2 = String(row.erro_msg || '').trim();
+                    const priorError = typeof extractAnaliseRetryReason === 'function'
+                        ? extractAnaliseRetryReason(_erroMsgRaw2)
+                        : _erroMsgRaw2;
                     if (priorError) {
                         row.retryRequested = true;
                         row.previousError  = priorError;

@@ -1155,6 +1155,7 @@ def buscar_pendentes() -> dict:
         SELECT
             COUNT(*) AS total_tabela,
             SUM(la.id_atendimento IS NULL) AS total_analises_compiladas_paciente,
+            SUM(la.id_atendimento IS NULL AND la.status IN ('pendente', 'erro') AND (la.status = 'pendente' OR la.tentativas < {MAX_TENTATIVAS})) AS total_compiladas_pendentes,
             SUM(
                 la.id_atendimento IS NOT NULL
                 AND la.status = 'concluido'
@@ -1231,10 +1232,25 @@ def buscar_pendentes() -> dict:
         LIMIT 200
     """)
 
+    # Buscar sínteses compiladas de pacientes pendentes (id_atendimento IS NULL)
+    compiladas_pendentes = sql_exec(f"""
+        SELECT la.id, la.id_paciente
+        FROM {TABELA} la
+        WHERE
+            la.id_atendimento IS NULL
+            AND la.id_criador IS NULL
+            AND la.status IN ('pendente', 'erro')
+            AND (la.status = 'pendente' OR la.tentativas < {MAX_TENTATIVAS})
+        ORDER BY la.datetime_analise_criacao ASC
+        LIMIT {BATCH_SIZE}
+    """, reason="buscar_compiladas_pendentes")
+
     return {
         "pendentes":            data.get("data", []),
+        "compiladas_pendentes": compiladas_pendentes.get("data", []),
         "total_tabela":         int(row.get("total_tabela")         or 0),
         "total_analises_compiladas_paciente": int(row.get("total_analises_compiladas_paciente") or 0),
+        "total_compiladas_pendentes": int(row.get("total_compiladas_pendentes") or 0),
         "total_concluidos":     int(row.get("total_concluidos")     or 0),
         "total_pendentes":      int(row.get("total_pendentes")      or 0),
         "total_processando":    int(row.get("total_processando")    or 0),
@@ -1324,14 +1340,19 @@ def enfileirar_atendimentos_antigos(id_paciente: str) -> int:
 
 
 def contar_atendimentos_nao_concluidos_paciente(id_paciente: str) -> int:
-    """Conta atendimentos do paciente que ainda não chegaram ao status concluído."""
+    """Conta atendimentos do paciente que ainda não chegaram ao status concluído.
+    Exclui análises com erro esgotado (tentativas >= MAX_TENTATIVAS) que nunca serão
+    reprocessadas automaticamente — essas não devem bloquear a síntese compilada."""
     try:
         resp = sql_exec(f"""
             SELECT COUNT(*) AS total
             FROM {TABELA}
             WHERE id_paciente = '{esc(id_paciente)}'
               AND id_atendimento IS NOT NULL
-              AND status IN ('pendente', 'processando', 'erro')
+              AND (
+                  status IN ('pendente', 'processando')
+                  OR (status = 'erro' AND tentativas < {MAX_TENTATIVAS})
+              )
         """, reason="contar_atendimentos_nao_concluidos_paciente")
         data = resp.get("data") or []
         if not data:
@@ -4803,6 +4824,7 @@ def main():
             log.info(f"   📊 Prontuários na fila : {resultado['total_tabela']}")
             log.info(f"   🧬 Análises compiladas   : {resultado['total_analises_compiladas_paciente']}")
             log.info(f"   ✅ Concluídos/atualizados : {resultado['total_concluidos']}")
+            compiladas_pendentes = resultado.get("compiladas_pendentes", [])
             log.info(f"   🕐 Aguardando análise     : {resultado['total_pendentes']}")
             log.info(f"   🔄 Em processamento       : {resultado['total_processando']}")
             log.info(f"   🔁 Prontuários editados   : {resultado['total_desatualizados']}  (reanálise pendente)")
@@ -4810,10 +4832,22 @@ def main():
             log.info(f"   🚫 Esgotados (sem retentativa): {resultado['total_esgotados']}")
             for item in resultado.get("motivos_esgotados", []):
                 log.info(f"      ↳ {item['total']}x motivo: {item['motivo']}")
+            if compiladas_pendentes:
+                log.info(f"   🧬 Sínteses compiladas pendentes: {len(compiladas_pendentes)}")
 
             if pendentes:
                 log.info(f"   ▶  {len(pendentes)} prontuário(s) serão processados agora.")
                 processar_lote(pendentes)
+            elif compiladas_pendentes:
+                log.info(f"   🧬 Nenhum prontuário individual pendente. Processando {len(compiladas_pendentes)} síntese(s) compilada(s)...")
+                for comp in compiladas_pendentes:
+                    id_pac = comp.get("id_paciente")
+                    if not id_pac:
+                        continue
+                    try:
+                        atualizar_analise_compilada_paciente(str(id_pac))
+                    except Exception as e:
+                        log.warning(f"  ⚠️ Síntese compilada do paciente {id_pac} falhou: {e}")
             else:
                 log.info(f"   💤 Nenhum prontuário pendente. Próxima verificação em {POLL_INTERVAL}s.")
 
