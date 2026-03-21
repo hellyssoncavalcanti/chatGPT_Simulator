@@ -46,6 +46,10 @@ from markdownify import markdownify as md
 MAX_TABS = 5
 tab_semaphore = asyncio.Semaphore(MAX_TABS)
 
+SCREENSHOT_STREAM_INTERVAL_SEC = 2.0
+SCREENSHOT_STREAM_JPEG_QUALITY = 45
+SCREENSHOT_STREAM_MAX_BYTES = 300_000
+
 def emit_log(q, msg):
     if q: q.put(json.dumps({"type": "log", "content": f"[browser.py] {msg}"}) + "\n")
     file_log("browser.py", msg)
@@ -57,57 +61,79 @@ def emit_event(q, type_, content):
         payload = json.dumps({"type": type_, "content": content}, separators=(',', ':'))
         q.put(payload + "\n")
 
-def _guess_download_filename(url, headers):
-    disposition = (headers or {}).get('content-disposition', '') or ''
-    match = re.search(r"filename\\*=UTF-8''([^;]+)|filename=\"?([^\";]+)\"?", disposition, re.IGNORECASE)
-    if match:
-        raw_name = match.group(1) or match.group(2)
-        if raw_name:
-            return unquote(raw_name).strip()
-
+async def _get_window_state(page):
     try:
-        parsed = urlparse(url or '')
-        name = os.path.basename(parsed.path)
-        if name:
-            return name
+        session = await page.context.new_cdp_session(page)
+        info = await session.send("Browser.getWindowForTarget")
+        bounds = info.get("bounds", {}) or {}
+        state = bounds.get("windowState") or bounds.get("state") or "normal"
+        return session, info.get("windowId"), state
     except Exception:
-        pass
+        return None, None, None
 
-    return 'arquivo_chatgpt'
 
-async def handle_authenticated_download_task(browser, task):
-    q = task.get('stream_queue')
-    file_url = (task.get('url') or '').strip()
+async def _set_window_state(page, state: str) -> bool:
+    session, window_id, current_state = await _get_window_state(page)
+    if not session or not window_id:
+        return False
+    if current_state == state:
+        return True
+    try:
+        await session.send("Browser.setWindowBounds", {
+            "windowId": window_id,
+            "bounds": {"windowState": state},
+        })
+        return True
+    except Exception:
+        return False
 
-    if not file_url:
-        emit_event(q, 'error', 'URL do arquivo nao informada.')
-        if q: q.put(None)
+
+async def _preserve_minimized_if_needed(page):
+    _session, _window_id, state = await _get_window_state(page)
+    if state == "minimized":
+        await _set_window_state(page, "minimized")
+    return state
+
+
+async def _emit_browser_screenshot(page, q, label: str = "browser"):
+    if not q:
+        return
+    try:
+        raw = await page.screenshot(
+            type="jpeg",
+            quality=SCREENSHOT_STREAM_JPEG_QUALITY,
+            caret="hide",
+            animations="disabled",
+            scale="css",
+        )
+        if not raw:
+            return
+        if len(raw) > SCREENSHOT_STREAM_MAX_BYTES:
+            return
+        emit_event(q, "screenshot", {
+            "label": label,
+            "format": "jpeg",
+            "data_base64": base64.b64encode(raw).decode("ascii"),
+            "url": page.url,
+            "captured_at": int(time.time()),
+        })
+    except Exception:
         return
 
+
+async def _stream_browser_screenshots(page, q, stop_event: asyncio.Event, label: str = "browser"):
+    if not q:
+        return
     try:
-        response = await browser.request.get(file_url, fail_on_status_code=False, timeout=120000)
-        status = response.status
-        headers = await response.all_headers()
-        body = await response.body()
+        await _emit_browser_screenshot(page, q, label=label)
+        while not stop_event.is_set():
+            try:
+                await asyncio.wait_for(stop_event.wait(), timeout=SCREENSHOT_STREAM_INTERVAL_SEC)
+            except asyncio.TimeoutError:
+                await _emit_browser_screenshot(page, q, label=label)
+    except asyncio.CancelledError:
+        raise
 
-        if status >= 400:
-            emit_event(q, 'error', f'Falha ao baixar arquivo autenticado (HTTP {status}).')
-            if q: q.put(None)
-            return
-
-        filename = task.get('filename') or _guess_download_filename(file_url, headers)
-        emit_event(q, 'download', {
-            'status': status,
-            'filename': filename,
-            'content_type': headers.get('content-type') or 'application/octet-stream',
-            'content_disposition': headers.get('content-disposition') or '',
-            'body_base64': base64.b64encode(body).decode('ascii'),
-            'source_url': file_url,
-        })
-    except Exception as e:
-        emit_event(q, 'error', f'Erro ao baixar arquivo autenticado: {e}')
-    finally:
-        if q: q.put(None)
 
 async def smart_input(page, message, q=None, activityts=None):
     import re
@@ -636,6 +662,7 @@ async def execute_menu_option(page, option_text, url, new_name=None, q=None):
 async def handle_menu_task(context, task):
     q = task.get('stream_queue')
     page = await context.new_page()
+    await _preserve_minimized_if_needed(page)
     try:
         url = task.get('url')
         action = task.get('action')
@@ -679,11 +706,13 @@ async def handle_menu_task(context, task):
 async def handle_sync_task(context, task):
     q       = task.get('stream_queue')
     page    = await context.new_page()
+    await _preserve_minimized_if_needed(page)
     try:
         url    = task.get('url')
         chat_id = task.get('chat_id')
         emit_log(q, f"🔄 Sync iniciado para {url}")
         await page.goto(url, wait_until='domcontentloaded')
+        await _preserve_minimized_if_needed(page)
 
         # Aguarda React renderizar as mensagens
         try:
@@ -1027,6 +1056,8 @@ async def handle_search_task(context, task):
         q    = task.get('stream_queue')
         query = (task.get('query') or '').strip()
         page = None
+        screenshot_stop_event = asyncio.Event()
+        screenshot_task = None
         try:
             if not query:
                 emit_event(q, 'searchresult', {
@@ -1035,10 +1066,15 @@ async def handle_search_task(context, task):
                 return
 
             page = await context.new_page()
+            await _preserve_minimized_if_needed(page)
+            screenshot_task = asyncio.create_task(
+                _stream_browser_screenshots(page, q, screenshot_stop_event, label='search')
+            )
             emit_log(q, f"🔍 Pesquisando no Google: {query}")
 
             # ── 1. Abre o Google ──────────────────────────────────────
             await page.goto('https://www.google.com', wait_until='domcontentloaded')
+            await _preserve_minimized_if_needed(page)
             await asyncio.sleep(random.uniform(0.8, 1.5))
 
             # ── 2. Aceita cookies/consent se aparecer ─────────────────
@@ -1223,6 +1259,8 @@ async def handle_uptodate_search_task(context, task):
         q = task.get('stream_queue')
         query = (task.get('query') or '').strip()
         page = None
+        screenshot_stop_event = asyncio.Event()
+        screenshot_task = None
         try:
             if not query:
                 emit_event(q, 'searchresult', {
@@ -1231,9 +1269,14 @@ async def handle_uptodate_search_task(context, task):
                 return
 
             page = await context.new_page()
+            await _preserve_minimized_if_needed(page)
+            screenshot_task = asyncio.create_task(
+                _stream_browser_screenshots(page, q, screenshot_stop_event, label='uptodate_search')
+            )
             emit_log(q, f"🩺 Pesquisando no UpToDate: {query}")
 
             await page.goto('https://www.uptodate.com/contents/search', wait_until='domcontentloaded')
+            await _preserve_minimized_if_needed(page)
             await asyncio.sleep(random.uniform(1.0, 1.8))
 
             search_input = page.locator('#tbSearch, input.searchTerm, input[type="search"]').first
@@ -1358,312 +1401,13 @@ async def handle_uptodate_search_task(context, task):
                 'source': 'uptodate',
             })
         finally:
-            if page:
+            screenshot_stop_event.set()
+            if screenshot_task:
+                screenshot_task.cancel()
                 try:
-                    await page.close()
-                except Exception:
+                    await screenshot_task
+                except (asyncio.CancelledError, Exception):
                     pass
-            if q:
-                q.put(None)
-
-
-async def handle_uptodate_search_task(context, task):
-    """
-    Ação UPTODATE_SEARCH — abre a busca do UpToDate, pesquisa o termo e
-    retorna os resultados estruturados encontrados na listagem principal.
-    """
-    async with tab_semaphore:
-        q = task.get('stream_queue')
-        query = (task.get('query') or '').strip()
-        page = None
-        try:
-            if not query:
-                emit_event(q, 'searchresult', {
-                    'success': False, 'query': '', 'error': 'Query vazia'
-                })
-                return
-
-            page = await context.new_page()
-            emit_log(q, f"🩺 Pesquisando no UpToDate: {query}")
-
-            await page.goto('https://www.uptodate.com/contents/search', wait_until='domcontentloaded')
-            await asyncio.sleep(random.uniform(1.0, 1.8))
-
-            search_input = page.locator('#tbSearch, input.searchTerm, input[type="search"]').first
-            await search_input.wait_for(state='visible', timeout=15000)
-            await search_input.click()
-            await asyncio.sleep(random.uniform(0.2, 0.5))
-
-            try:
-                await page.locator('#clearSearch').click(timeout=1000)
-                await asyncio.sleep(0.2)
-            except Exception:
-                pass
-
-            emit_event(q, 'status', 'Digitando busca no UpToDate...')
-            await type_realistic(page, query, q)
-            await asyncio.sleep(random.uniform(0.3, 0.8))
-
-            submitted = False
-            submit_selectors = [
-                '.newsearch-submit',
-                'span.newsearch-submit',
-                '[aria-label="Submit search"]',
-            ]
-            for sel in submit_selectors:
-                try:
-                    btn = page.locator(sel).first
-                    if await btn.is_visible(timeout=1000):
-                        await btn.click()
-                        submitted = True
-                        break
-                except Exception:
-                    continue
-
-            if not submitted:
-                await page.keyboard.press('Enter')
-
-            emit_event(q, 'status', 'Aguardando resultados do UpToDate...')
-            try:
-                await page.wait_for_selector(
-                    '#searchresults, #search-results-container, .search-result-list-item',
-                    timeout=20000
-                )
-            except Exception:
-                await asyncio.sleep(4)
-
-            await asyncio.sleep(random.uniform(1.0, 2.0))
-
-            results = await page.evaluate("""() => {
-                const nodes = Array.from(document.querySelectorAll('#search-results-container .search-result-list-item'));
-                const items = [];
-                const seen = new Set();
-                let pos = 1;
-
-                const detectType = (li) => {
-                    const cls = li.className || '';
-                    if (cls.includes('ICG')) return 'pathway';
-                    if (cls.includes('LAB')) return 'lab';
-                    if (cls.includes('medical')) return 'medical';
-                    return 'topic';
-                };
-
-                for (const li of nodes) {
-                    if (pos > 12) break;
-                    const link = li.querySelector('a.searchResultLink[href]');
-                    if (!link) continue;
-
-                    const title = (link.innerText || '').trim();
-                    const href = link.getAttribute('href') || '';
-                    if (!title || !href) continue;
-
-                    const url = new URL(href, window.location.origin).href;
-                    if (seen.has(url)) continue;
-                    seen.add(url);
-
-                    const snippetEl = li.querySelector('.snippet');
-                    const snippet = snippetEl ? (snippetEl.innerText || '').trim().substring(0, 400) : '';
-                    const subhits = Array.from(li.querySelectorAll('.search-result-subhit-link'))
-                        .map(el => (el.innerText || '').trim())
-                        .filter(Boolean)
-                        .slice(0, 6);
-
-                    items.push({
-                        position: pos++,
-                        title,
-                        url,
-                        snippet,
-                        type: detectType(li),
-                        subhits,
-                    });
-                }
-
-                return items;
-            }""")
-
-            raw_html = ""
-            if not results:
-                emit_log(q, "⚠️ Seletores CSS não encontraram resultados no UpToDate — tentando fallback via raw HTML...")
-                try:
-                    raw_html = await page.content()
-                    results = _parse_uptodate_raw_html(raw_html, query)
-                    if results:
-                        emit_log(q, f"✅ Fallback raw HTML UpToDate: {len(results)} resultados extraídos")
-                except Exception as e_raw:
-                    emit_log(q, f"⚠️ Fallback raw HTML UpToDate falhou: {e_raw}")
-
-            emit_log(q, f"✅ {len(results)} resultado(s) UpToDate encontrados para: {query}")
-            emit_event(q, 'searchresult', {
-                'success': True,
-                'query': query,
-                'results': results,
-                'count': len(results),
-                'source': 'uptodate',
-                'raw_html': raw_html[:30000] if raw_html else '',
-            })
-
-        except Exception as e:
-            emit_log(q, f"❌ Erro na busca UpToDate: {e}")
-            emit_event(q, 'searchresult', {
-                'success': False,
-                'query': query,
-                'error': str(e),
-                'source': 'uptodate',
-            })
-        finally:
-            if page:
-                try:
-                    await page.close()
-                except Exception:
-                    pass
-            if q:
-                q.put(None)
-
-
-async def handle_uptodate_search_task(context, task):
-    """
-    Ação UPTODATE_SEARCH — abre a busca do UpToDate, pesquisa o termo e
-    retorna os resultados estruturados encontrados na listagem principal.
-    """
-    async with tab_semaphore:
-        q = task.get('stream_queue')
-        query = (task.get('query') or '').strip()
-        page = None
-        try:
-            if not query:
-                emit_event(q, 'searchresult', {
-                    'success': False, 'query': '', 'error': 'Query vazia'
-                })
-                return
-
-            page = await context.new_page()
-            emit_log(q, f"🩺 Pesquisando no UpToDate: {query}")
-
-            await page.goto('https://www.uptodate.com/contents/search', wait_until='domcontentloaded')
-            await asyncio.sleep(random.uniform(1.0, 1.8))
-
-            search_input = page.locator('#tbSearch, input.searchTerm, input[type="search"]').first
-            await search_input.wait_for(state='visible', timeout=15000)
-            await search_input.click()
-            await asyncio.sleep(random.uniform(0.2, 0.5))
-
-            try:
-                await page.locator('#clearSearch').click(timeout=1000)
-                await asyncio.sleep(0.2)
-            except Exception:
-                pass
-
-            emit_event(q, 'status', 'Digitando busca no UpToDate...')
-            await type_realistic(page, query, q)
-            await asyncio.sleep(random.uniform(0.3, 0.8))
-
-            submitted = False
-            submit_selectors = [
-                '.newsearch-submit',
-                'span.newsearch-submit',
-                '[aria-label="Submit search"]',
-            ]
-            for sel in submit_selectors:
-                try:
-                    btn = page.locator(sel).first
-                    if await btn.is_visible(timeout=1000):
-                        await btn.click()
-                        submitted = True
-                        break
-                except Exception:
-                    continue
-
-            if not submitted:
-                await page.keyboard.press('Enter')
-
-            emit_event(q, 'status', 'Aguardando resultados do UpToDate...')
-            try:
-                await page.wait_for_selector(
-                    '#searchresults, #search-results-container, .search-result-list-item',
-                    timeout=20000
-                )
-            except Exception:
-                await asyncio.sleep(4)
-
-            await asyncio.sleep(random.uniform(1.0, 2.0))
-
-            results = await page.evaluate("""() => {
-                const nodes = Array.from(document.querySelectorAll('#search-results-container .search-result-list-item'));
-                const items = [];
-                const seen = new Set();
-                let pos = 1;
-
-                const detectType = (li) => {
-                    const cls = li.className || '';
-                    if (cls.includes('ICG')) return 'pathway';
-                    if (cls.includes('LAB')) return 'lab';
-                    if (cls.includes('medical')) return 'medical';
-                    return 'topic';
-                };
-
-                for (const li of nodes) {
-                    if (pos > 12) break;
-                    const link = li.querySelector('a.searchResultLink[href]');
-                    if (!link) continue;
-
-                    const title = (link.innerText || '').trim();
-                    const href = link.getAttribute('href') || '';
-                    if (!title || !href) continue;
-
-                    const url = new URL(href, window.location.origin).href;
-                    if (seen.has(url)) continue;
-                    seen.add(url);
-
-                    const snippetEl = li.querySelector('.snippet');
-                    const snippet = snippetEl ? (snippetEl.innerText || '').trim().substring(0, 400) : '';
-                    const subhits = Array.from(li.querySelectorAll('.search-result-subhit-link'))
-                        .map(el => (el.innerText || '').trim())
-                        .filter(Boolean)
-                        .slice(0, 6);
-
-                    items.push({
-                        position: pos++,
-                        title,
-                        url,
-                        snippet,
-                        type: detectType(li),
-                        subhits,
-                    });
-                }
-
-                return items;
-            }""")
-
-            raw_html = ""
-            if not results:
-                emit_log(q, "⚠️ Seletores CSS não encontraram resultados no UpToDate — tentando fallback via raw HTML...")
-                try:
-                    raw_html = await page.content()
-                    results = _parse_uptodate_raw_html(raw_html, query)
-                    if results:
-                        emit_log(q, f"✅ Fallback raw HTML UpToDate: {len(results)} resultados extraídos")
-                except Exception as e_raw:
-                    emit_log(q, f"⚠️ Fallback raw HTML UpToDate falhou: {e_raw}")
-
-            emit_log(q, f"✅ {len(results)} resultado(s) UpToDate encontrados para: {query}")
-            emit_event(q, 'searchresult', {
-                'success': True,
-                'query': query,
-                'results': results,
-                'count': len(results),
-                'source': 'uptodate',
-                'raw_html': raw_html[:30000] if raw_html else '',
-            })
-
-        except Exception as e:
-            emit_log(q, f"❌ Erro na busca UpToDate: {e}")
-            emit_event(q, 'searchresult', {
-                'success': False,
-                'query': query,
-                'error': str(e),
-                'source': 'uptodate',
-            })
-        finally:
             if page:
                 try:
                     await page.close()
@@ -1679,12 +1423,17 @@ async def handle_chat_task(context, task):
         stop_event = asyncio.Event()
         activityts = [time.time()]
         page = None
+        screenshot_task = None
         try:
             page = await context.new_page()
+            await _preserve_minimized_if_needed(page)
             watchdog_task = asyncio.create_task(
                 watchdog_page(page, q, stop_event,
                               check_interval=15,
                               activity_ts=activityts)  # ✅ era activityts=, corrigido para activity_ts=
+            )
+            screenshot_task = asyncio.create_task(
+                _stream_browser_screenshots(page, q, stop_event, label='chat')
             )
             try:
                 await asyncio.wait_for(
@@ -1696,10 +1445,17 @@ async def handle_chat_task(context, task):
             finally:
                 stop_event.set()
                 watchdog_task.cancel()
+                if screenshot_task:
+                    screenshot_task.cancel()
                 try:
                     await watchdog_task
                 except (asyncio.CancelledError, Exception):
                     pass
+                if screenshot_task:
+                    try:
+                        await screenshot_task
+                    except (asyncio.CancelledError, Exception):
+                        pass
         except Exception as e:
             emit_log(q, f'ERRO Chat: {e}')
             emit_event(q, 'error', f'Falha no navegador: {str(e)}')
@@ -1723,9 +1479,11 @@ async def handle_chat_task_inner(task, page, q, stop_event: asyncio.Event, activ
     if url and url != 'None':
         emit_log(q, f'Abrindo chat existente: {url}')
         await page.goto(url, wait_until='domcontentloaded')
+        await _preserve_minimized_if_needed(page)
     else:
         emit_log(q, 'Iniciando nova aba de chat...')
         await page.goto('https://chatgpt.com', wait_until='domcontentloaded')
+        await _preserve_minimized_if_needed(page)
         await asyncio.sleep(2)
 
     if stop_event.is_set():
@@ -1745,6 +1503,7 @@ async def handle_chat_task_inner(task, page, q, stop_event: asyncio.Event, activ
                 emit_log(q, "Projeto 'ConexaoVida' encontrado. Criando novo chat no projeto...")
                 await project_loc.click()
                 await page.wait_for_selector('#prompt-textarea', timeout=10000)
+                await _preserve_minimized_if_needed(page)
                 await asyncio.sleep(1)
             else:
                 print("DICA: Projeto ConexaoVida não encontrado na barra lateral.")
@@ -1938,13 +1697,14 @@ async def browser_loop_async():
             b = await p.chromium.launch_persistent_context(
                 config.DIRS["profile"],
                 headless=False,
-                args=["--start-maximized", "--disable-blink-features=AutomationControlled", "--disable-infobars"],
+                args=["--start-minimized", "--disable-blink-features=AutomationControlled", "--disable-infobars"],
                 user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
                 viewport=None
             )
             try:
                 dp = await b.new_page()
                 await dp.goto("https://chatgpt.com")
+                await _set_window_state(dp, "minimized")
             except: pass
             return b
 
