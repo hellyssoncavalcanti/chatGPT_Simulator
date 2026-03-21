@@ -80,6 +80,7 @@ _ensure("numpy")
 # IMPORTS NORMAIS
 # ─────────────────────────────────────────────────────────────
 import time, json, logging, re, html as html_mod, requests, hashlib, shutil
+from collections import Counter
 from html.parser import HTMLParser
 from datetime import datetime
 
@@ -989,6 +990,34 @@ def _val_para_sql(val):
 
 
 
+def _normalizar_motivo_esgotado(erro_msg: str) -> str:
+    """Extrai um motivo legível/agrupável a partir do erro acumulado do registro."""
+    texto = re.sub(r"\s+", " ", str(erro_msg or "")).strip(" |")
+    if not texto:
+        return "Sem mensagem de erro registrada"
+
+    partes = [p.strip() for p in texto.split("|") if p.strip()]
+    partes_validas = [
+        p for p in partes
+        if not p.startswith("[AUTO-RESET")
+        and not p.startswith("[AUTO-RESET-STARTUP")
+    ]
+    motivo = (partes_validas[-1] if partes_validas else partes[-1] if partes else texto).strip()
+    motivo = re.sub(r"\s+", " ", motivo)
+    return motivo[:180] + ("..." if len(motivo) > 180 else "")
+
+
+def _agrupar_motivos_esgotados(rows: list[dict]) -> list[dict]:
+    contador = Counter()
+    for row in rows or []:
+        motivo = _normalizar_motivo_esgotado((row or {}).get("erro_msg"))
+        contador[motivo] += 1
+    return [
+        {"motivo": motivo, "total": total}
+        for motivo, total in contador.most_common(5)
+    ]
+
+
 def buscar_pendentes() -> dict:
     stats = sql_exec(f"""
         SELECT
@@ -1059,6 +1088,17 @@ def buscar_pendentes() -> dict:
         LIMIT {BATCH_SIZE}
     """)
 
+    esgotados_rows = sql_exec(f"""
+        SELECT la.erro_msg
+        FROM {TABELA} la
+        WHERE
+            la.id_atendimento IS NOT NULL
+            AND la.status = 'erro'
+            AND la.tentativas >= {MAX_TENTATIVAS}
+        ORDER BY la.id DESC
+        LIMIT 200
+    """)
+
     return {
         "pendentes":            data.get("data", []),
         "total_tabela":         int(row.get("total_tabela")         or 0),
@@ -1068,6 +1108,7 @@ def buscar_pendentes() -> dict:
         "total_processando":    int(row.get("total_processando")    or 0),
         "total_erros":          int(row.get("total_erros")          or 0),
         "total_esgotados":      int(row.get("total_esgotados")      or 0),
+        "motivos_esgotados":    _agrupar_motivos_esgotados(esgotados_rows.get("data", [])),
         "total_desatualizados": int(row.get("total_desatualizados") or 0),
     }
 
@@ -1269,6 +1310,45 @@ def resetar_travados():
     if afetados:
         log.warning(
             f"⚠️  {afetados} registro(s) travado(s) em 'processando' resetado(s) para 'pendente'."
+        )
+    return afetados
+
+
+def resetar_analises_interrompidas_no_startup():
+    """
+    Ao subir o analisador, limpa datetime_analise_iniciada de registros que
+    ficaram interrompidos sem conclusão válida na execução anterior.
+
+    Isso evita que o sistema trate como "análise já iniciada" algo que será
+    reprocessado do zero após uma parada/queda do processo Python.
+    """
+    resultado = sql_exec(
+        f"""
+        UPDATE {TABELA}
+        SET
+            status = CASE
+                        WHEN status = 'processando' THEN 'pendente'
+                        ELSE status
+                     END,
+            datetime_analise_iniciada = NULL,
+            erro_msg = CONCAT(
+                COALESCE(erro_msg, ''),
+                ' | [AUTO-RESET-STARTUP] datetime_analise_iniciada zerado em ',
+                NOW(),
+                ' após interrupção anterior sem conclusão válida'
+            )
+        WHERE
+            datetime_analise_iniciada IS NOT NULL
+            AND (
+                datetime_analise_concluida IS NULL
+                OR datetime_analise_concluida = '0000-00-00 00:00:00'
+            )
+        """
+    )
+    afetados = resultado.get('affected_rows', 0)
+    if afetados:
+        log.warning(
+            f"⚠️  {afetados} registro(s) com análise interrompida tiveram datetime_analise_iniciada resetado no startup."
         )
     return afetados
 
@@ -2425,6 +2505,38 @@ def _primeiro_node_representativo(nodes: list):
     return nodes[0] if nodes else None
 
 
+def _deduplicar_nodes_grafo(nodes: list) -> list:
+    dedup = {}
+    for node in nodes:
+        if not isinstance(node, dict):
+            continue
+        chave = (
+            str(node.get("tipo") or "").strip().lower(),
+            str(node.get("normalizado") or node.get("valor") or "").strip().lower(),
+        )
+        if not chave[1]:
+            continue
+        if chave not in dedup:
+            dedup[chave] = node
+            continue
+        existente = dedup[chave]
+        if not existente.get("id") and node.get("id"):
+            existente["id"] = node["id"]
+        if not existente.get("contexto") and node.get("contexto"):
+            existente["contexto"] = node["contexto"]
+        elif node.get("contexto") and node["contexto"] not in str(existente.get("contexto") or ""):
+            existente["contexto"] = f"{existente.get('contexto','')} | {node['contexto']}".strip(" |")
+    return list(dedup.values())
+
+
+def _primeiro_node_representativo(nodes: list):
+    for tipo_prioritario in ("diagnostico", "medicamento", "terapia", "sintoma", "gene", "risco"):
+        for node in nodes:
+            if (node.get("tipo") or "").lower() == tipo_prioritario:
+                return node
+    return nodes[0] if nodes else None
+
+
 def salvar_auxiliar(idatendimento: int, id_paciente: str, resultado: dict):
     """
     Chama o endpoint PHP salvar_analise_auxiliar para popular tabelas auxiliares
@@ -3295,6 +3407,18 @@ def analisar_prontuario(texto: str, chat_url: str = None, chat_id: str = None, c
     def _newline():
         sys.stdout.write('\n')
         sys.stdout.flush()
+
+    def _inline_status(prefixo: str, msg: str):
+        texto = re.sub(r"\s+", " ", str(msg or "")).strip()
+        if not texto:
+            return
+
+        largura_terminal = shutil.get_terminal_size((140, 20)).columns
+        largura_util = max(30, largura_terminal - 6)
+        mensagem = f"{prefixo} {texto}"
+        if len(mensagem) > largura_util:
+            mensagem = mensagem[:max(0, largura_util - 3)].rstrip() + "..."
+        _inline(mensagem)
 
     def _inline_status(prefixo: str, msg: str):
         texto = re.sub(r"\s+", " ", str(msg or "")).strip()
@@ -4620,6 +4744,8 @@ def main():
             log.info(f"   🔁 Prontuários editados   : {resultado['total_desatualizados']}  (reanálise pendente)")
             log.info(f"   ❌ Com erro (c/ retentativa): {resultado['total_erros']}")
             log.info(f"   🚫 Esgotados (sem retentativa): {resultado['total_esgotados']}")
+            for item in resultado.get("motivos_esgotados", []):
+                log.info(f"      ↳ {item['total']}x motivo: {item['motivo']}")
 
             if pendentes:
                 log.info(f"   ▶  {len(pendentes)} prontuário(s) serão processados agora.")
