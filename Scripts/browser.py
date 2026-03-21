@@ -1492,6 +1492,7 @@ async def handle_chat_task_inner(task, page, q, stop_event: asyncio.Event, activ
     start_time  = time.time()
     started     = False
     last_html   = ""
+    last_status_text = ""
     stuck_count = 0
     loop_count  = 0
     idle_ready_count = 0
@@ -1542,6 +1543,7 @@ async def handle_chat_task_inner(task, page, q, stop_event: asyncio.Event, activ
 
         if status_txt:
             emit_event(q, "status", status_txt)
+            last_status_text = status_txt
             started     = True
             stuck_count = 0
             idle_ready_count = 0
@@ -1556,12 +1558,41 @@ async def handle_chat_task_inner(task, page, q, stop_event: asyncio.Event, activ
 
         responses = await page.locator("div[data-message-author-role='assistant']").all()
         curr_html = ""
+        curr_text = ""
         if responses:
             curr_html = await responses[-1].inner_html()
             curr_html = clean_html(curr_html)
+            try:
+                curr_text = re.sub(r"\s+", " ", (await responses[-1].inner_text()) or "").strip()
+            except Exception:
+                curr_text = ""
 
         markdown_text = md(curr_html, heading_style="ATX").strip()
         markdown_text = markdown_text.replace("\\_", "_").replace("\\*", "*")
+
+        plain_markdown = re.sub(r"\s+", " ", markdown_text).strip()
+        visible_status_txt = curr_text
+        if visible_status_txt and plain_markdown:
+            if visible_status_txt.endswith(plain_markdown):
+                visible_status_txt = visible_status_txt[:-len(plain_markdown)].strip()
+            elif visible_status_txt == plain_markdown:
+                visible_status_txt = ""
+
+        # Só reaproveita o texto visível do balão como "status" enquanto ainda não
+        # há resposta markdown consolidada. Depois que o markdown começa a surgir,
+        # o texto do balão já representa a resposta final e não deve vazar no CMD
+        # como se fosse pensamento da LLM.
+        if (
+            not status_txt
+            and visible_status_txt
+            and not plain_markdown
+            and visible_status_txt != last_status_text
+        ):
+            emit_event(q, "status", visible_status_txt[:800])
+            last_status_text = visible_status_txt
+            started = True
+            stuck_count = 0
+            idle_ready_count = 0
 
         if markdown_text != last_html:
             if not started:
@@ -1569,6 +1600,7 @@ async def handle_chat_task_inner(task, page, q, stop_event: asyncio.Event, activ
                 started = True
             emit_event(q, "markdown", markdown_text)
             last_html   = markdown_text
+            last_status_text = ""
             stuck_count = 0
             idle_ready_count = 0
         else:

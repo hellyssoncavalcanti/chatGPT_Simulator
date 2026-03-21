@@ -240,13 +240,22 @@ function HasRequiredApiKeyOrIsSameOrigin(string $providedKey, string $expectedKe
 // -----------------------------------------------------
 // FUNÇÃO DE CONEXÃO AO BANCO (GLOBAL)
 // -----------------------------------------------------
+function apply_mysql_session_settings($con) {
+    if (!$con) return;
+    @$con->set_charset("utf8mb4");
+    @$con->query("SET time_zone = '-03:00'");
+}
+
 function get_mysql_connection_local() {
     global $mysqli, $config, $hostname_conexao, $database_conexao, $username_conexao, $password_conexao;
     
     // Força nova conexão se a global caiu
     if (isset($mysqli) && $mysqli instanceof mysqli) {
         try {
-            if (@$mysqli->ping()) return $mysqli;
+            if (@$mysqli->ping()) {
+                apply_mysql_session_settings($mysqli);
+                return $mysqli;
+            }
         } catch(Exception $e) {}
     }
 
@@ -270,7 +279,7 @@ function get_mysql_connection_local() {
     if (!$host) return null;
     $con = new mysqli($host, $user, $pass, $db, $port);
     if ($con->connect_error) return null;
-    $con->set_charset("utf8mb4");
+    apply_mysql_session_settings($con);
     return $con;
 }
 
@@ -2663,6 +2672,9 @@ if (isset($_GET['action']) && $_GET['action'] === 'proxy') {
                 $db = get_mysql_connection_local();
                 if (!$db || !$db->ping()) {
                     $db = new mysqli($hostname_conexao, $username_conexao, $password_conexao, $database_conexao);
+                    if ($db && !$db->connect_error) {
+                        apply_mysql_session_settings($db);
+                    }
                 }
             } catch (Exception $e) { $sqlResults[] = ["error" => "Falha BD: " . $e->getMessage()]; $db = null; }
 
