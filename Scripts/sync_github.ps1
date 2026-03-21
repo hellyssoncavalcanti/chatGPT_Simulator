@@ -356,20 +356,24 @@ function New-PullRequestsForPendingBranches {
     #>
     if (-not $script:Config.githubToken) { return }
 
+    $branchesComPr = @()
     try {
         $prsResponse = Invoke-GitHubApi -Uri "$($script:Config.apiBase)/pulls?state=open&base=$($script:Config.branch)&per_page=100"
-    } catch { return }
-
-    $prsArray = @($prsResponse)
-    if ($prsArray.Count -eq 1 -and $prsArray[0] -is [System.Array]) { $prsArray = @($prsArray[0]) }
-    $branchesComPr = @()
-    foreach ($p in $prsArray) {
-        if ($p -and $p.head -and $p.head.ref) { $branchesComPr += $p.head.ref }
+        $prsArray = @($prsResponse)
+        if ($prsArray.Count -eq 1 -and $prsArray[0] -is [System.Array]) { $prsArray = @($prsArray[0]) }
+        foreach ($p in $prsArray) {
+            if ($p -and $p.head -and $p.head.ref) { $branchesComPr += $p.head.ref }
+        }
+    } catch {
+        Write-Warn "Falha ao listar PRs abertos: $($_.Exception.Message). Continuando mesmo assim..."
     }
 
     try {
         $branchesResponse = Invoke-GitHubApi -Uri "$($script:Config.apiBase)/branches?per_page=100"
-    } catch { return }
+    } catch {
+        Write-Warn "Falha ao listar branches: $($_.Exception.Message)"
+        return
+    }
 
     $todasBranches = @($branchesResponse)
     if ($todasBranches.Count -eq 1 -and $todasBranches[0] -is [System.Array]) { $todasBranches = @($todasBranches[0]) }
@@ -398,14 +402,21 @@ function New-PullRequestsForPendingBranches {
         $bar = ('█' * $blocks) + ('░' * $spaces)
         Write-Host -NoNewline "`r[INFO] Processando branches [$bar] $pct%       " -ForegroundColor Cyan
         try {
-            $commitData = Invoke-GitHubApi -Uri $br.commit.url -ErrorAction SilentlyContinue
+            $commitData = Invoke-GitHubApi -Uri $br.commit.url
             $data = [datetime]::Parse($commitData.commit.committer.date)
             $listaComDatas += @{ name = $br.name; date = $data }
-        } catch {}
+        } catch {
+            Write-Log "[WARN] Falha ao obter data do commit da branch '$($br.name)': $($_.Exception.Message)"
+            # Fallback: inclui a branch com data atual para nao perder a candidata
+            $listaComDatas += @{ name = $br.name; date = (Get-Date) }
+        }
     }
     Write-Host ""
 
-    if ($listaComDatas.Count -eq 0) { return }
+    if ($listaComDatas.Count -eq 0) {
+        Write-Warn 'Nenhuma branch candidata pôde ser processada.'
+        return
+    }
 
     $listaOrdenada = $listaComDatas | Sort-Object date -Descending
     $maisRecente = $listaOrdenada[0]

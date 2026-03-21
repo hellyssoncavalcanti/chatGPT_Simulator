@@ -5884,16 +5884,20 @@ header('Content-Type: application/javascript; charset=utf-8');
         b.appendChild(wrap); return { tID, mID, hID };
     }
 
-    // ── Screenshot overlay (singleton) ──────────────────────────────────
-    (function _initScreenshotOverlay() {
+    // ── Screenshot overlay (singleton, adiado até o DOM estar pronto) ───
+    function _ensureScreenshotOverlay() {
         if (document.getElementById('ow-screenshot-overlay')) return;
+        const target = document.body || document.documentElement;
+        if (!target) return;
         const ov = document.createElement('div');
         ov.id = 'ow-screenshot-overlay';
         ov.innerHTML = `<button class="ow-overlay-close" title="Fechar">&times;</button><img src="" alt="screenshot"/>`;
         ov.querySelector('.ow-overlay-close').onclick = () => ov.classList.remove('active');
         ov.addEventListener('click', (e) => { if (e.target === ov) ov.classList.remove('active'); });
-        document.body.appendChild(ov);
-    })();
+        target.appendChild(ov);
+    }
+    if (document.body) { _ensureScreenshotOverlay(); }
+    else { document.addEventListener('DOMContentLoaded', _ensureScreenshotOverlay); }
 
     /**
      * Exibe/atualiza thumbnail de screenshot dentro da mensagem AI corrente.
@@ -5936,6 +5940,7 @@ header('Content-Type: application/javascript; charset=utf-8');
     }
 
     function _expandScreenshot(thumbEl) {
+        _ensureScreenshotOverlay();
         const ov = document.getElementById('ow-screenshot-overlay');
         if (!ov) return;
         const ovImg = ov.querySelector('img');
