@@ -3152,6 +3152,8 @@ header('Content-Type: application/javascript; charset=utf-8');
         #ow-analise-pendente .iap-badge.pendente{background:#d97706}
         #ow-analise-pendente .iap-badge.processando{background:#2563eb}
         #ow-analise-pendente .iap-item-text{font-size:12px;line-height:1.5;color:#7c5a10;margin-top:7px}
+        #ow-analise-pendente .iap-retry-note{margin-top:10px;padding:10px 11px;border-radius:10px;background:#fff8e1;border:1px dashed #f59e0b;color:#92400e;font-size:12px;line-height:1.45}
+        #ow-analise-pendente .iap-retry-note strong{color:#78350f}
         /* === ANÁLISE PRÉVIA DA LLM EXPOSTA NO CHAT — DESIGN SYSTEM = FIM === */
         
         @keyframes pulseRed { 0% { box-shadow: 0 0 0 0 rgba(211, 47, 47, 0.4); } 70% { box-shadow: 0 0 0 10px rgba(211, 47, 47, 0); } 100% { box-shadow: 0 0 0 0 rgba(211, 47, 47, 0); } }
@@ -4306,6 +4308,66 @@ header('Content-Type: application/javascript; charset=utf-8');
         }
     }
 
+    function extractAnaliseRetryReason(rawMsg) {
+        const text = String(rawMsg || '').trim();
+        if (!text) return '';
+        const parts = text.split('|').map(s => s.trim()).filter(Boolean);
+        const filtered = parts.filter(part => !/^\[AUTO-/i.test(part) && !/^\[MANUAL-/i.test(part));
+        return (filtered.pop() || parts.pop() || text).trim();
+    }
+
+    async function fetchAnaliseStatusRowById(analiseId) {
+        const res = await fetch("<?php echo $_SERVER['PHP_SELF']; ?>?action=execute_sql", {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json; charset=utf-8' },
+            body: JSON.stringify({
+                query: normalizeSQL(`
+                    SELECT id, status, tentativas, erro_msg, datetime_analise_criacao, datetime_analise_iniciada
+                    FROM chatgpt_atendimentos_analise
+                    WHERE id = ${Number(analiseId) || 0}
+                    LIMIT 1
+                `),
+                reason: 'Busca status atualizado da análise para requeue manual'
+            })
+        });
+        const data = await res.json();
+        return data?.success && data?.data?.length ? data.data[0] : null;
+    }
+
+    async function requestAnaliseRetry(row, scopeKey, scopeLabel = 'análise') {
+        const analiseId = Number(row?.id || 0);
+        if (!analiseId) return null;
+
+        const previousError = extractAnaliseRetryReason(row?.erro_msg || row?.erroMsg || '');
+        const res = await fetch("<?php echo $_SERVER['PHP_SELF']; ?>?action=api_exec", {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json; charset=utf-8' },
+            body: JSON.stringify({
+                sql: normalizeSQL(`
+                    UPDATE chatgpt_atendimentos_analise
+                    SET
+                        status = 'pendente',
+                        tentativas = 0,
+                        datetime_analise_iniciada = NULL,
+                        datetime_analise_criacao = NOW()
+                    WHERE id = ${analiseId}
+                    LIMIT 1
+                `)
+            })
+        });
+        const data = await res.json();
+        if (!(data?.success || data?.status === 'ok')) {
+            throw new Error(data?.error || data?.message || 'Falha ao solicitar reanálise');
+        }
+
+        const refreshed = await fetchAnaliseStatusRowById(analiseId);
+        const updatedRow = { ...(row || {}), ...(refreshed || {}), status: 'pendente', retryRequested: true, previousError };
+        updatedRow.queueInfo = await fetchAnaliseQueueEstimate(updatedRow);
+        setPendingAnaliseNotice(scopeKey, 'pendente', updatedRow);
+        notifyAnalisePreviaPendente('pendente', `${scopeLabel} (reprocessamento solicitado após erro anterior)`);
+        return updatedRow;
+    }
+
     function setPendingAnaliseNotice(scopeKey, status, row = {}) {
         const statusNorm = String(status || '').trim().toLowerCase();
         if (!['pendente', 'processando'].includes(statusNorm)) {
@@ -4372,6 +4434,15 @@ header('Content-Type: application/javascript; charset=utf-8');
                                 : queueInfo?.basis === 'in_progress'
                                     ? 'média do tempo já transcorrido nas análises em andamento'
                                 : '';
+                        const retryNote = cfg?.row?.retryRequested && cfg?.row?.previousError
+                            ? `
+                                <div class="iap-retry-note">
+                                    <strong>♻️ Nova tentativa solicitada pelo chat.</strong><br>
+                                    A análise anterior falhou com o motivo: <strong>${cfg.row.previousError}</strong>.<br>
+                                    O PHP recolocou esta análise em <strong>pendente</strong> para que o analisador tente novamente.
+                                </div>
+                            `
+                            : '';
                         const queueHtml = queueInfo
                             ? `
                                 <div class="iap-item-text" style="margin-top:10px;padding-top:10px;border-top:1px dashed #fcd34d;">
@@ -4388,6 +4459,7 @@ header('Content-Type: application/javascript; charset=utf-8');
                                     <span class="iap-badge ${cfg.status}">${statusLabel}</span>
                                 </div>
                                 <div class="iap-item-text">${statusText}</div>
+                                ${retryNote}
                                 ${queueHtml}
                             </div>
                         `;
@@ -4425,6 +4497,8 @@ header('Content-Type: application/javascript; charset=utf-8');
                                 datetime_analise_iniciada,
                                 datetime_atendimento_inicio,
                                 datetime_analise_concluida,
+                                tentativas,
+                                erro_msg,
                                 resumo_texto,
                                 gravidade_clinica,
                                 dados_json,
@@ -4471,8 +4545,15 @@ header('Content-Type: application/javascript; charset=utf-8');
             const row = data.data[0];
 
             if (row.status !== 'concluido') {
-                console.log(`%cℹ️  Análise existe mas status='${row.status}' — ignorando.`, 'color: #ff9800');
-                if (row.status === 'pendente' || row.status === 'processando') {
+                console.log(`%cℹ️  Análise existe mas status='${row.status}' — tratando conforme o estado.`, 'color: #ff9800');
+                if (row.status === 'erro') {
+                    const retriedRow = await requestAnaliseRetry(row, 'atendimento', 'atendimento atual');
+                    if (retriedRow) {
+                        console.info('♻️ Reanálise do atendimento solicitada após erro prévio.');
+                    } else {
+                        clearPendingAnaliseNotice('atendimento');
+                    }
+                } else if (row.status === 'pendente' || row.status === 'processando') {
                     row.queueInfo = await fetchAnaliseQueueEstimate(row);
                     setPendingAnaliseNotice('atendimento', row.status, row);
                     notifyAnalisePreviaPendente(row.status, 'atendimento');
@@ -4512,7 +4593,10 @@ header('Content-Type: application/javascript; charset=utf-8');
                             id,
                             status,
                             datetime_analise_criacao,
+                            datetime_analise_iniciada,
                             datetime_analise_concluida,
+                            tentativas,
+                            erro_msg,
                             resumo_texto,
                             gravidade_clinica,
                             dados_json,
@@ -4563,8 +4647,15 @@ header('Content-Type: application/javascript; charset=utf-8');
 
             const row = data.data[0];
             if (row.status !== 'concluido') {
-                console.log(`%cℹ️  Síntese compilada existe mas status='${row.status}' — ignorando.`, 'color: #ff9800');
-                if (row.status === 'pendente' || row.status === 'processando') {
+                console.log(`%cℹ️  Síntese compilada existe mas status='${row.status}' — tratando conforme o estado.`, 'color: #ff9800');
+                if (row.status === 'erro') {
+                    const retriedRow = await requestAnaliseRetry(row, 'paciente_compilado', 'síntese do paciente');
+                    if (retriedRow) {
+                        console.info('♻️ Reanálise da síntese do paciente solicitada após erro prévio.');
+                    } else {
+                        clearPendingAnaliseNotice('paciente_compilado');
+                    }
+                } else if (row.status === 'pendente' || row.status === 'processando') {
                     row.queueInfo = await fetchAnaliseQueueEstimate(row);
                     setPendingAnaliseNotice('paciente_compilado', row.status, row);
                     notifyAnalisePreviaPendente(row.status, 'síntese do paciente');

@@ -79,7 +79,7 @@ _ensure("numpy")
 # ─────────────────────────────────────────────────────────────
 # IMPORTS NORMAIS
 # ─────────────────────────────────────────────────────────────
-import time, json, logging, re, html as html_mod, requests, hashlib, shutil
+import time, json, logging, re, html as html_mod, requests, hashlib, shutil, os
 from collections import Counter
 from html.parser import HTMLParser
 from datetime import datetime
@@ -201,6 +201,110 @@ def _parse_json_llm(texto: str) -> dict:
     except json.JSONDecodeError:
         candidato_normalizado = _normalizar_json_llm(candidato)
         return json.loads(candidato_normalizado)
+
+
+def _json_parece_incompleto(texto: str) -> bool:
+    """Heurística para identificar respostas JSON possivelmente truncadas/incompletas."""
+    bruto = _strip_code_fences(texto or "").strip()
+    if not bruto or not bruto.startswith('{'):
+        return False
+
+    depth_obj = 0
+    depth_arr = 0
+    in_string = False
+    escape = False
+    for ch in bruto:
+        if in_string:
+            if escape:
+                escape = False
+            elif ch == '\\':
+                escape = True
+            elif ch == '"':
+                in_string = False
+            continue
+
+        if ch == '"':
+            in_string = True
+        elif ch == '{':
+            depth_obj += 1
+        elif ch == '}':
+            depth_obj -= 1
+        elif ch == '[':
+            depth_arr += 1
+        elif ch == ']':
+            depth_arr -= 1
+
+    return in_string or depth_obj > 0 or depth_arr > 0 or not bruto.rstrip().endswith('}')
+
+
+def _salvar_debug_json_falha(id_atendimento: int | None, etapa: str, markdown: str, erro: Exception | str):
+    """Salva artefatos para depurar falhas de parse JSON da resposta da LLM."""
+    os.makedirs('logs/json_debug', exist_ok=True)
+    ts = datetime.now().strftime('%d_%m_%Y-%H_%M_%S')
+    prefix = f"{id_atendimento or 'sem_id'}-{etapa}-{ts}"
+    path_md = os.path.join('logs', 'json_debug', f'{prefix}.md.txt')
+    path_meta = os.path.join('logs', 'json_debug', f'{prefix}.meta.json')
+
+    bruto = markdown or ''
+    candidato = _extrair_bloco_json(bruto)
+    normalizado = _normalizar_json_llm(candidato) if candidato else ''
+    meta = {
+        'id_atendimento': id_atendimento,
+        'etapa': etapa,
+        'erro': str(erro),
+        'json_parece_incompleto': _json_parece_incompleto(bruto),
+        'tem_bloco_json': bool(candidato),
+        'tamanho_markdown': len(bruto),
+        'tamanho_candidato_json': len(candidato),
+        'tamanho_json_normalizado': len(normalizado),
+        'markdown_preview': re.sub(r'\s+', ' ', _strip_code_fences(bruto))[:1200],
+        'json_preview': re.sub(r'\s+', ' ', candidato)[:1200],
+    }
+
+    with open(path_md, 'w', encoding='utf-8') as f:
+        f.write(bruto)
+    with open(path_meta, 'w', encoding='utf-8') as f:
+        json.dump(meta, f, ensure_ascii=False, indent=2)
+
+    return path_md, path_meta, meta
+
+
+def _reativar_esgotados_recuperaveis_no_startup():
+    """Reprocessa automaticamente erros esgotados com alta chance de recuperação."""
+    resultado = sql_exec(
+        f"""
+        UPDATE {TABELA}
+        SET
+            status = 'pendente',
+            tentativas = 0,
+            datetime_analise_iniciada = NULL,
+            erro_msg = CONCAT(
+                COALESCE(erro_msg, ''),
+                ' | [AUTO-REQUEUE-RECOVERABLE] ',
+                NOW(),
+                ' recolocado em pendente para nova tentativa de parse/stream'
+            )
+        WHERE
+            id_atendimento IS NOT NULL
+            AND status = 'erro'
+            AND tentativas >= {MAX_TENTATIVAS}
+            AND COALESCE(erro_msg, '') NOT LIKE '%[AUTO-REQUEUE-RECOVERABLE]%'
+            AND (
+                LOWER(COALESCE(erro_msg, '')) LIKE '%simulador não retornou conteúdo markdown%'
+                OR LOWER(COALESCE(erro_msg, '')) LIKE '%llm não retornou json válido%'
+                OR LOWER(COALESCE(erro_msg, '')) LIKE '%llm não retornou bloco json%'
+                OR LOWER(COALESCE(erro_msg, '')) LIKE '%expecting '', delimiter%'
+                OR LOWER(COALESCE(erro_msg, '')) LIKE '%expecting property name enclosed in double quotes%'
+                OR LOWER(COALESCE(erro_msg, '')) LIKE '%unterminated string%'
+                OR LOWER(COALESCE(erro_msg, '')) LIKE '%invalid control character%'
+                OR LOWER(COALESCE(erro_msg, '')) LIKE '%extra data%'
+            )
+        """
+    )
+    afetados = resultado.get('affected_rows', 0)
+    if afetados:
+        log.warning(f"♻️ {afetados} registro(s) esgotado(s) com erro recuperável foram recolocados em pendente no startup.")
+    return afetados
 
 
 def _decode_json_string_fragment(value: str) -> str:
@@ -3440,9 +3544,16 @@ def analisar_prontuario(texto: str, chat_url: str = None, chat_id: str = None, c
     try:
         resultado = _parse_json_llm(markdown)
     except Exception as parse_err:
+        path_md, path_meta, meta = _salvar_debug_json_falha(
+            idatendimento,
+            "analise_principal",
+            markdown,
+            parse_err,
+        )
         preview = re.sub(r"\s+", " ", _strip_code_fences(markdown))[:500]
         raise ValueError(
-            f"LLM não retornou JSON válido ({parse_err}). Prévia: {preview}"
+            f"LLM não retornou JSON válido ({parse_err}). "
+            f"incompleto={meta['json_parece_incompleto']} | debug: {path_md} | {path_meta} | Prévia: {preview}"
         ) from parse_err
 
     resultado["_chat_id"]       = new_chat_id
@@ -4398,9 +4509,16 @@ def enriquecer_com_evidencias(resultado: dict, resultados_web: list,
         try:
             enriquecido = _parse_json_llm(markdown)
         except Exception as parse_err:
+            path_md, path_meta, meta = _salvar_debug_json_falha(
+                resultado.get('_id_atendimento'),
+                "enriquecimento_evidencias",
+                markdown,
+                parse_err,
+            )
             preview = re.sub(r"\s+", " ", _strip_code_fences(markdown))[:500]
             log.warning(
-                f"  ⚠️ Enriquecimento: LLM não retornou JSON válido ({parse_err}). Prévia: {preview}"
+                f"  ⚠️ Enriquecimento: LLM não retornou JSON válido ({parse_err}). "
+                f"incompleto={meta['json_parece_incompleto']} | debug: {path_md} | {path_meta} | Prévia: {preview}"
             )
             return resultado
 
@@ -4645,6 +4763,7 @@ def main():
     garantir_migracoes()                         # corrige tipos de colunas em tabelas pré-existentes
     garantir_tabela_embeddings()                 # garante tabelas de embeddings + casos semelhantes
     resetar_analises_interrompidas_no_startup()  # limpa inícios de análise sem conclusão válida após quedas/interrupções
+    _reativar_esgotados_recuperaveis_no_startup() # recoloca erros recuperáveis em pendente para nova tentativa
 
     llm_estava_fora = False   # rastreia se houve queda para logar a reconexão
     ciclo = 0

@@ -135,6 +135,46 @@ async def _stream_browser_screenshots(page, q, stop_event: asyncio.Event, label:
         raise
 
 
+def _response_looks_incomplete_json(markdown_text: str) -> bool:
+    texto = (markdown_text or '').strip()
+    if not texto:
+        return False
+
+    if texto.startswith('```'):
+        texto = re.sub(r'^```(?:json)?\s*', '', texto, flags=re.IGNORECASE)
+        texto = re.sub(r'\s*```$', '', texto)
+    texto = texto.strip()
+    if not texto.startswith('{'):
+        return False
+
+    depth_obj = 0
+    depth_arr = 0
+    in_string = False
+    escape = False
+    for ch in texto:
+        if in_string:
+            if escape:
+                escape = False
+            elif ch == '\\':
+                escape = True
+            elif ch == '"':
+                in_string = False
+            continue
+
+        if ch == '"':
+            in_string = True
+        elif ch == '{':
+            depth_obj += 1
+        elif ch == '}':
+            depth_obj -= 1
+        elif ch == '[':
+            depth_arr += 1
+        elif ch == ']':
+            depth_arr -= 1
+
+    return in_string or depth_obj > 0 or depth_arr > 0 or not texto.rstrip().endswith('}')
+
+
 async def smart_input(page, message, q=None, activityts=None):
     import re
 
@@ -1674,7 +1714,14 @@ async def handle_chat_task_inner(task, page, q, stop_event: asyncio.Event, activ
         if not is_gen and not status_txt:
             idle_ready_count += 1
             if len(last_html) > 0:
-                if stuck_count > 20 and idle_ready_count > 8: break
+                if _response_looks_incomplete_json(last_html):
+                    if loop_count % 10 == 0:
+                        emit_event(q, "status", "Aguardando conclusão do JSON da resposta...")
+                    if stuck_count > 80 and idle_ready_count > 12:
+                        break
+                else:
+                    if stuck_count > 20 and idle_ready_count > 8:
+                        break
             else:
                 if time.time() - start_time > 60 and idle_ready_count > 8: break
         else:
