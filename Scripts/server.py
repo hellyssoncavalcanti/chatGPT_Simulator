@@ -369,6 +369,17 @@ def upload_avatar():
 def get_avatar(filename):
     return send_from_directory(config.DIRS["users"], filename)
 
+@app.route("/api/downloads/<filename>")
+def serve_download(filename):
+    """Proxy para arquivos baixados do ChatGPT (planilhas, imagens, etc.)."""
+    import re as _re
+    safe = _re.sub(r'[^\w.\-]', '_', filename)
+    downloads_dir = config.DIRS.get("downloads", os.path.join(config.BASE_DIR, "downloads"))
+    fpath = os.path.join(downloads_dir, safe)
+    if not os.path.isfile(fpath):
+        return jsonify({"error": "Arquivo não encontrado"}), 404
+    return send_from_directory(downloads_dir, safe, as_attachment=True, download_name=safe)
+
 # --- ROTAS GERAIS ---
 
 # Endpoint de saúde para o Analisador de Prontuários (e outros serviços)

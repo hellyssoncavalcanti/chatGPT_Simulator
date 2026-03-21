@@ -658,9 +658,110 @@ def clean_html(html_content):
     html = html_content.replace('<span class="result-streaming-cursor"></span>', '')
     html = re.sub(r'href="/cdn/assets/[^"]+"', 'href="#"', html)
     html = re.sub(r'src="/cdn/assets/[^"]+"', 'src=""', html)
+    # Preserva <a> de download antes de remover buttons
+    # ChatGPT às vezes embute download links dentro de divs/buttons
+    download_links = re.findall(
+        r'<a\s+[^>]*href="([^"]*(?:/backend-api/files/|files\.oaiusercontent\.com|sandbox:/)[^"]*)"[^>]*>([^<]*)</a>',
+        html, re.IGNORECASE
+    )
     html = re.sub(r'<button.*?</button>', '', html, flags=re.DOTALL)
     html = re.sub(r'<div class="flex gap-1.*?</div>', '', html, flags=re.DOTALL)
+    # Reinsere links de download que podem ter sido perdidos
+    for href, text in download_links:
+        display = text.strip() or href.split('/')[-1]
+        if display and href not in html:
+            html += f'\n<p>Arquivo: <a href="{href}" download>{display}</a></p>'
     return html
+
+
+async def _download_chatgpt_files(page, markdown_text, q=None):
+    """
+    Detecta links de download no markdown da resposta do ChatGPT,
+    baixa os arquivos via fetch no contexto do navegador e salva
+    localmente, retornando o markdown com URLs reescritas para o proxy.
+    """
+    downloads_dir = config.DIRS.get("downloads", os.path.join(config.BASE_DIR, "downloads"))
+    os.makedirs(downloads_dir, exist_ok=True)
+
+    # Padrões de URL de download do ChatGPT:
+    # 1) /backend-api/files/.../download
+    # 2) sandbox:/mnt/data/...
+    # 3) https://files.oaiusercontent.com/...
+    # 4) blob: URLs (não baixáveis via fetch)
+    # Markdown links: [filename](url)
+    link_pattern = re.compile(
+        r'\[([^\]]+)\]\(((?:https?://(?:files\.oaiusercontent\.com|cdn-uploads\.[^)]+)|/backend-api/files/[^)]+|sandbox:/[^)]+))\)'
+    )
+
+    matches = list(link_pattern.finditer(markdown_text))
+    if not matches:
+        return markdown_text
+
+    result = markdown_text
+    for m in matches:
+        display_name = m.group(1).strip()
+        raw_url = m.group(2).strip()
+
+        # Gera nome de arquivo seguro
+        safe_name = re.sub(r'[^\w.\-]', '_', display_name) or "file"
+        ts = int(time.time() * 1000)
+        local_name = f"{ts}_{safe_name}"
+        local_path = os.path.join(downloads_dir, local_name)
+
+        try:
+            if raw_url.startswith("sandbox:"):
+                # Sandbox URL: usar interação JS para obter o conteúdo
+                # O ChatGPT apresenta sandbox como link, mas o download real
+                # acontece via o botão "Download" que vira /backend-api/files/...
+                # Tentamos buscar via page.evaluate
+                emit_log(q, f"⬇️ Sandbox file detectado: {display_name} — tentando download...")
+                file_data = await page.evaluate("""async (url) => {
+                    try {
+                        // Tenta encontrar link de download real na página
+                        const anchors = Array.from(document.querySelectorAll('a[href*="/backend-api/files/"]'));
+                        for (const a of anchors) {
+                            if (a.textContent.includes(url.split('/').pop())) {
+                                const resp = await fetch(a.href);
+                                if (resp.ok) {
+                                    const buf = await resp.arrayBuffer();
+                                    return Array.from(new Uint8Array(buf));
+                                }
+                            }
+                        }
+                        return null;
+                    } catch(e) { return null; }
+                }""", raw_url)
+
+            elif raw_url.startswith("/backend-api/") or raw_url.startswith("https://"):
+                # URL absoluta ou relativa do backend-api — fetch direto
+                fetch_url = raw_url
+                if raw_url.startswith("/"):
+                    fetch_url = f"https://chatgpt.com{raw_url}"
+                emit_log(q, f"⬇️ Baixando arquivo: {display_name} de {fetch_url[:100]}...")
+                file_data = await page.evaluate("""async (url) => {
+                    try {
+                        const resp = await fetch(url);
+                        if (!resp.ok) return null;
+                        const buf = await resp.arrayBuffer();
+                        return Array.from(new Uint8Array(buf));
+                    } catch(e) { return null; }
+                }""", fetch_url)
+            else:
+                file_data = None
+
+            if file_data and len(file_data) > 0:
+                with open(local_path, "wb") as f:
+                    f.write(bytes(file_data))
+                proxy_url = f"/api/downloads/{local_name}"
+                result = result.replace(m.group(0), f"[{display_name}]({proxy_url})")
+                emit_log(q, f"✅ Arquivo salvo: {local_name} ({len(file_data)} bytes)")
+            else:
+                emit_log(q, f"⚠️ Não foi possível baixar: {display_name}")
+
+        except Exception as e:
+            emit_log(q, f"⚠️ Erro ao baixar {display_name}: {e}")
+
+    return result
 
 async def get_chat_title(page):
     try:
@@ -1703,6 +1804,28 @@ async def handle_chat_task_inner(task, page, q, stop_event: asyncio.Event, activ
     msg    = task.get('message')
     atts   = task.get('attachment_paths')
 
+    # Handler para capturar downloads automáticos do ChatGPT (code interpreter, etc.)
+    downloads_dir = config.DIRS.get("downloads", os.path.join(config.BASE_DIR, "downloads"))
+    os.makedirs(downloads_dir, exist_ok=True)
+    _auto_downloads = []
+
+    def _on_download(download):
+        async def _save():
+            try:
+                suggested = download.suggested_filename or "download"
+                safe = re.sub(r'[^\w.\-]', '_', suggested)
+                ts = int(time.time() * 1000)
+                local_name = f"{ts}_{safe}"
+                local_path = os.path.join(downloads_dir, local_name)
+                await download.save_as(local_path)
+                _auto_downloads.append({"name": suggested, "local": local_name, "path": local_path})
+                emit_log(q, f"⬇️ Auto-download capturado: {suggested} → {local_name}")
+            except Exception as e:
+                emit_log(q, f"⚠️ Erro no auto-download: {e}")
+        asyncio.ensure_future(_save())
+
+    page.on("download", _on_download)
+
     if url and url != 'None':
         emit_log(q, f'Abrindo chat existente: {url}')
         await page.goto(url, wait_until='domcontentloaded')
@@ -1907,6 +2030,31 @@ async def handle_chat_task_inner(task, page, q, stop_event: asyncio.Event, activ
         if time.time() - start_time > 600: break
         await asyncio.sleep(0.3)
 
+    # Após resposta completa: detectar e baixar arquivos gerados pelo ChatGPT
+    changed = False
+    if markdown_text:
+        try:
+            rewritten = await _download_chatgpt_files(page, markdown_text, q)
+            if rewritten != markdown_text:
+                markdown_text = rewritten
+                changed = True
+        except Exception as e:
+            emit_log(q, f"⚠️ Falha ao processar downloads: {e}")
+
+    # Aguarda auto-downloads pendentes (máx 3s)
+    if _auto_downloads or True:
+        await asyncio.sleep(1)
+    # Anexa auto-downloads que não tenham sido capturados pela detecção de links
+    for dl in _auto_downloads:
+        proxy_url = f"/api/downloads/{dl['local']}"
+        link_md = f"\n\n📎 Arquivo: [{dl['name']}]({proxy_url})"
+        if proxy_url not in markdown_text:
+            markdown_text += link_md
+            changed = True
+
+    if changed:
+        emit_event(q, "markdown", markdown_text)
+
     final_title = await get_chat_title(page)
     final_url   = page.url
     emit_event(q, "finish", {"chat_id": chat_id, "title": final_title, "url": final_url})  # ✅ era chat_id, corrigido para chat_id
@@ -1921,6 +2069,7 @@ async def browser_loop_async():
             b = await p.chromium.launch_persistent_context(
                 config.DIRS["profile"],
                 headless=False,
+                accept_downloads=True,
                 args=["--start-maximized", "--disable-blink-features=AutomationControlled", "--disable-infobars"],
                 user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
                 viewport=None

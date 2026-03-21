@@ -2406,6 +2406,99 @@ if (isset($_GET['action']) && $_GET['action'] === 'delete_simulator_chat') {
 }
 
 // -----------------------------------------------------
+// PROXY HANDLER: DOWNLOAD DE ARQUIVOS DO CHATGPT SIMULATOR
+// -----------------------------------------------------
+if (isset($_GET['action']) && $_GET['action'] === 'download_file') {
+    while (ob_get_level()) ob_end_clean();
+
+    $filename = basename($_GET['name'] ?? '');
+    if (empty($filename) || preg_match('/[^a-zA-Z0-9._\-]/', $filename)) {
+        http_response_code(400);
+        header('Content-Type: application/json');
+        echo json_encode(['error' => 'Nome de arquivo inválido']); exit;
+    }
+
+    // Resolve IP do ChatGPT Simulator (porta 3003)
+    global $ollama_manual_ip;
+    $sim_base = '';
+    if (!empty($ollama_manual_ip)) {
+        $sim_base = preg_replace('/:\d+$/', ':3003', rtrim($ollama_manual_ip, '/'));
+    } else {
+        $url_monitor = "http://conexaovida.org/no-ip-dynamic_ip.php?port=3003";
+        $ch = curl_init($url_monitor);
+        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+        curl_setopt($ch, CURLOPT_FOLLOWLOCATION, true);
+        curl_setopt($ch, CURLOPT_HEADER, true);
+        curl_setopt($ch, CURLOPT_TIMEOUT, 5);
+        $raw = curl_exec($ch);
+        $eff = curl_getinfo($ch, CURLINFO_EFFECTIVE_URL);
+        curl_close($ch);
+        $ip = null;
+        if (preg_match('/(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})/', $eff, $m)) $ip = $m[1];
+        elseif (preg_match('/(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})/', $raw ?? '', $m)) $ip = $m[1];
+        if ($ip && filter_var($ip, FILTER_VALIDATE_IP)) $sim_base = "http://{$ip}:3003";
+    }
+
+    if (empty($sim_base)) {
+        http_response_code(502);
+        header('Content-Type: application/json');
+        echo json_encode(['error' => 'ChatGPT Simulator não disponível']); exit;
+    }
+
+    $download_url = rtrim($sim_base, '/') . "/api/downloads/" . urlencode($filename);
+    $ch = curl_init($download_url);
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($ch, CURLOPT_FOLLOWLOCATION, true);
+    curl_setopt($ch, CURLOPT_TIMEOUT, 30);
+    curl_setopt($ch, CURLOPT_HEADER, true);
+    $response = curl_exec($ch);
+    $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    $header_size = curl_getinfo($ch, CURLINFO_HEADER_SIZE);
+    curl_close($ch);
+
+    if ($http_code !== 200 || $response === false) {
+        http_response_code($http_code ?: 502);
+        header('Content-Type: application/json');
+        echo json_encode(['error' => 'Arquivo não encontrado no servidor']); exit;
+    }
+
+    $headers_raw = substr($response, 0, $header_size);
+    $body = substr($response, $header_size);
+
+    // Detectar content-type do arquivo
+    $content_type = 'application/octet-stream';
+    if (preg_match('/Content-Type:\s*([^\r\n]+)/i', $headers_raw, $ct)) {
+        $content_type = trim($ct[1]);
+    }
+
+    // Extensão → mime fallback
+    $ext = strtolower(pathinfo($filename, PATHINFO_EXTENSION));
+    $mime_map = [
+        'xlsx' => 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        'xls'  => 'application/vnd.ms-excel',
+        'csv'  => 'text/csv',
+        'pdf'  => 'application/pdf',
+        'png'  => 'image/png',
+        'jpg'  => 'image/jpeg',
+        'jpeg' => 'image/jpeg',
+        'gif'  => 'image/gif',
+        'zip'  => 'application/zip',
+        'txt'  => 'text/plain',
+        'json' => 'application/json',
+    ];
+    if ($content_type === 'application/octet-stream' && isset($mime_map[$ext])) {
+        $content_type = $mime_map[$ext];
+    }
+
+    header("Content-Type: {$content_type}");
+    header("Content-Disposition: attachment; filename=\"{$filename}\"");
+    header("Content-Length: " . strlen($body));
+    header("Cache-Control: no-cache");
+    echo $body;
+    exit;
+}
+
+// -----------------------------------------------------
 // PROXY HANDLER (CHAT MODE)
 // -----------------------------------------------------
 if (isset($_GET['action']) && $_GET['action'] === 'proxy') {
@@ -3348,6 +3441,92 @@ header('Content-Type: application/javascript; charset=utf-8');
         .sb-view { display: none; animation: fadeIn 0.3s; }
         .sb-view.active { display: block; }
         @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+
+        /* ── Tabelas renderizadas pelo marked.js (planilhas, etc.) ── */
+        .msg-ai .ow-table-scroll {
+            overflow-x: auto;
+            -webkit-overflow-scrolling: touch;
+            margin: 8px 0;
+            max-width: 100%;
+        }
+        .msg-ai table {
+            border-collapse: collapse;
+            min-width: 100%;
+            font-size: 13px;
+            white-space: nowrap;
+        }
+        .msg-ai th, .msg-ai td {
+            border: 1px solid #d0d0d0;
+            padding: 6px 10px;
+            text-align: left;
+        }
+        .msg-ai th {
+            background: #1e3a5f;
+            color: #fff;
+            font-weight: 600;
+            position: sticky;
+            top: 0;
+        }
+        .msg-ai tr:nth-child(even) { background: #f5f7fa; }
+        .msg-ai tr:hover { background: #e8f0fe; }
+
+        /* ── Link de download de arquivo ── */
+        .msg-ai .ow-file-download {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            background: #f0f4ff;
+            border: 1px solid #c2d4f0;
+            border-radius: 8px;
+            padding: 8px 14px;
+            margin: 6px 0;
+            color: #1a5bb5;
+            text-decoration: none;
+            font-size: 13px;
+            font-weight: 500;
+            transition: background 0.15s;
+        }
+        .msg-ai .ow-file-download:hover { background: #dce6f8; }
+        .msg-ai .ow-file-download::before { content: '📎'; font-size: 16px; }
+
+        /* ── Mobile: portrait ── */
+        @media (max-width: 480px) {
+            #ow-window {
+                width: calc(100vw - 16px) !important;
+                height: 70vh !important;
+                right: -12px !important;
+                bottom: 70px !important;
+                border-radius: 10px;
+            }
+            #ow-toggle-btn { width: 50px; height: 50px; font-size: 20px; }
+            #ow-input { font-size: 16px; }
+        }
+
+        /* ── Mobile: landscape ── */
+        @media (max-height: 500px) and (orientation: landscape) {
+            #ow-widget { bottom: 8px; right: 8px; }
+            #ow-window {
+                width: 70vw !important;
+                height: calc(100vh - 16px) !important;
+                bottom: -8px !important;
+                right: 0 !important;
+                border-radius: 10px;
+            }
+            #ow-window.maximized {
+                width: 98vw !important;
+                height: calc(100vh - 8px) !important;
+                bottom: 4px !important;
+                right: 1vw !important;
+            }
+            #ow-header { padding: 8px 12px; }
+            #ow-messages { padding: 10px; gap: 8px; }
+            #ow-input-area { padding: 8px 10px; gap: 6px; }
+            #ow-input { height: 36px; padding: 8px; font-size: 14px; }
+            #ow-send { height: 36px; padding: 0 14px; font-size: 13px; }
+            #ow-mic { width: 36px; height: 36px; font-size: 16px; }
+            #ow-toggle-btn { width: 44px; height: 44px; font-size: 18px; }
+            .msg { font-size: 13px; padding: 8px 10px; }
+        }
     `;
     const stTag = document.createElement("style"); stTag.innerHTML = css; document.head.appendChild(stTag);
 
@@ -4077,13 +4256,36 @@ header('Content-Type: application/javascript; charset=utf-8');
         return text.replace(/\x00IC(\d+)\x00/g, (_, i) => ic[i]);
     }
 
+    /**
+     * Pós-processamento: tabelas em container scrollável + links de download estilizados.
+     */
+    const _phpSelf = "<?php echo $_SERVER['PHP_SELF']; ?>";
+    function _postProcessHtml(html) {
+        // 1) Envolve <table> em div scrollável horizontalmente
+        html = html.replace(/<table\b/g, '<div class="ow-table-scroll"><table')
+                   .replace(/<\/table>/g, '</table></div>');
+
+        // 2) Reescreve URLs /api/downloads/ para usar o proxy PHP
+        html = html.replace(
+            /href="\/api\/downloads\/([^"]+)"/gi,
+            (_, fname) => `href="${_phpSelf}?action=download_file&name=${encodeURIComponent(fname)}"`
+        );
+
+        // 3) Links de download de arquivos → botão estilizado
+        html = html.replace(
+            /<a\s+href="([^"]*action=download_file[^"]+)"[^>]*>([^<]+)<\/a>/gi,
+            '<a class="ow-file-download" href="$1" target="_blank" download>$2</a>'
+        );
+        return html;
+    }
+
     function formatMarkdown(text) {
         if (!text) return '';
 
         // ── Prioridade: marked.js (confiável, full CommonMark + GFM) ───────────
         if (typeof marked !== 'undefined') {
             try {
-                return marked.parse(text, { breaks: true, gfm: true });
+                return _postProcessHtml(marked.parse(text, { breaks: true, gfm: true }));
             } catch(e) {
                 console.warn('[formatMarkdown] marked.js erro, usando fallback:', e.message);
             }
@@ -7516,7 +7718,7 @@ header('Content-Type: application/javascript; charset=utf-8');
 
                     const mEl = document.getElementById(ui.mID);
                     if (mEl) {
-                        mEl.innerHTML = fullC.trim().startsWith(('<div>').slice(0, -1)) ? fullC : formatMarkdown(fullC);
+                        mEl.innerHTML = fullC.trim().startsWith(('<div>').slice(0, -1)) ? _postProcessHtml(fullC) : formatMarkdown(fullC);
                     }
                     scroll();
                 }
@@ -7553,7 +7755,7 @@ header('Content-Type: application/javascript; charset=utf-8');
             const mEl = document.getElementById(ui.mID);
             if (mEl) {
                 mEl.classList.remove('cursor-blink');
-                mEl.innerHTML = fullC.trim().startsWith(('<div>').slice(0, -1)) ? fullC : formatMarkdown(fullC);
+                mEl.innerHTML = fullC.trim().startsWith(('<div>').slice(0, -1)) ? _postProcessHtml(fullC) : formatMarkdown(fullC);
             }
             if (typeof injectSearchButtons === 'function') setTimeout(() => injectSearchButtons(), 0);
             if (fullT) document.getElementById(ui.tID).innerText = fullT;
