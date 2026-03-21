@@ -39,8 +39,17 @@ function Write-Section([string]$Title) {
     Write-Log "=== $Title ==="
 }
 
-function Write-Info([string]$Message, [ConsoleColor]$Color = [ConsoleColor]::Gray) {
-    Write-Host "[INFO] $Message" -ForegroundColor $Color
+function Write-Info {
+    param(
+        [string]$Message,
+        [ConsoleColor]$Color = [ConsoleColor]::Gray,
+        [switch]$NoNewline
+    )
+    if ($NoNewline) {
+        Write-Host "[INFO] $Message " -ForegroundColor $Color -NoNewline
+    } else {
+        Write-Host "[INFO] $Message" -ForegroundColor $Color
+    }
     Write-Log "[INFO] $Message"
 }
 
@@ -96,8 +105,7 @@ function Normalize-RelativePath([string]$PathValue) {
     if ([string]::IsNullOrWhiteSpace($PathValue)) {
         return ''
     }
-
-    return $PathValue.Replace('/', '\').TrimStart('.', '\').ToLowerInvariant()
+    return $PathValue.Trim('"').Replace('/', '\').Replace('\\', '\').TrimStart('.', '\').ToLowerInvariant()
 }
 
 function Initialize-Logging {
@@ -157,8 +165,9 @@ function Import-Settings {
     if (Test-IsPlaceholderValue $script:Config.githubToken) {
         $script:Config.githubToken = $null
     }
+    
     if (Test-IsPlaceholderValue $script:Config.ghUser) {
-        throw "Configuracao invalida em $settingsPath: substitua 'seu_usuario_ou_org' pelo usuario real do GitHub."
+        throw "Configuracao invalida em ${settingsPath}: substitua 'seu_usuario_ou_org' pelo usuario real do GitHub."
     }
 
     $script:Config.scriptDir = $scriptDir
@@ -199,14 +208,43 @@ function Acquire-Lock {
     if (-not (Test-Path $script:Config.tempDir)) {
         New-Item -ItemType Directory -Path $script:Config.tempDir -Force | Out-Null
     }
+
+    $myPid = $PID
+    $myParent = $null
+    try {
+        $myParent = (Get-CimInstance Win32_Process -Filter "ProcessId = $myPid").ParentProcessId
+    } catch { }
+
+    $killedOthers = $false
+
+    $syncCmds = Get-CimInstance Win32_Process | Where-Object { $_.Name -match 'cmd' -and $_.CommandLine -match 'sync_github\.bat' }
+    foreach ($c in $syncCmds) {
+        if ($myParent -and $c.ProcessId -eq $myParent) { continue }
+        try {
+            & taskkill.exe /F /T /PID $c.ProcessId 2>&1 | Out-Null
+            Write-Info "Substituindo janela CMD de sync anterior (PID $($c.ProcessId))"
+            $killedOthers = $true
+        } catch { }
+    }
+
+    $syncPs = Get-CimInstance Win32_Process | Where-Object { ($_.Name -match 'powershell' -or $_.Name -match 'pwsh') -and $_.CommandLine -match 'sync_github\.ps1' }
+    foreach ($p in $syncPs) {
+        if ($p.ProcessId -eq $myPid) { continue }
+        try {
+            & taskkill.exe /F /T /PID $p.ProcessId 2>&1 | Out-Null
+            Write-Info "Substituindo processo PowerShell de sync anterior (PID $($p.ProcessId))"
+            $killedOthers = $true
+        } catch { }
+    }
+
     if (Test-Path $script:Config.lockFile) {
-        $ageMinutes = ((Get-Date) - (Get-Item $script:Config.lockFile).LastWriteTime).TotalMinutes
-        if ($ageMinutes -lt 120) {
-            throw "Ja existe outra execucao do sync em andamento (lock: $($script:Config.lockFile))."
-        }
         Remove-Item $script:Config.lockFile -Force -ErrorAction SilentlyContinue
     }
-    Set-Content -Path $script:Config.lockFile -Value $PID -Encoding ascii
+    Set-Content -Path $script:Config.lockFile -Value $myPid -Encoding ascii
+    
+    if ($killedOthers) {
+        Write-Ok "Processos de sync conflitantes foram anulados. Assumindo exclusividade do ciclo."
+    }
 }
 
 function Release-Lock {
@@ -226,44 +264,43 @@ function Get-GitExe {
     throw 'Git nao encontrado. Instale o Git for Windows antes de usar a automacao.'
 }
 
-function Get-CommandExecutablePath {
-    param([string[]]$Names)
-
-    foreach ($name in $Names) {
-        $cmd = Get-Command $name -ErrorAction SilentlyContinue
-        if (-not $cmd) { continue }
-
-        $path = $cmd.Path
-        if ([string]::IsNullOrWhiteSpace($path)) {
-            $path = $cmd.Source
-        }
-
-        if (-not [string]::IsNullOrWhiteSpace($path) -and (Test-Path $path)) {
-            return $path
-        }
-    }
-
-    return $null
-}
-
 function Invoke-Git {
     param(
         [Parameter(Mandatory = $true)][string[]]$Args,
         [string]$WorkingDirectory = $script:Config.tempDir,
-        [switch]$AllowFailure
+        [switch]$AllowFailure,
+        [switch]$ShowProgress,
+        [string]$ProgressMessage = "Processando Git"
     )
 
     Push-Location $WorkingDirectory
     try {
         $previousErrorActionPreference = $ErrorActionPreference
         $ErrorActionPreference = 'Continue'
+        
+        if ($ShowProgress) {
+            Write-Host -NoNewline "[INFO] $ProgressMessage [░░░░░░░░░░░░░░░░░░░░] 0% " -ForegroundColor Cyan
+            Write-Log "[INFO] $ProgressMessage (Iniciando...)"
+        }
+
         try {
             $output = & $script:GitExe @Args 2>&1 | ForEach-Object {
-                if ($_ -is [System.Management.Automation.ErrorRecord]) {
-                    $_.ToString()
-                } else {
-                    "$_"
+                $line = $_.ToString()
+                if ($ShowProgress -and $line -match '(\d{1,3})%') {
+                    $pct = [int]$matches[1]
+                    $blocks = [math]::Floor($pct / 5)
+                    $spaces = 20 - $blocks
+                    
+                    $bar = ('█' * $blocks) + ('░' * $spaces)
+                    
+                    Write-Host -NoNewline "`r[INFO] $ProgressMessage [$bar] $pct%       " -ForegroundColor Cyan
                 }
+                $line
+            }
+            if ($ShowProgress) { 
+                Write-Host -NoNewline "`r[INFO] $ProgressMessage [████████████████████] 100%      " -ForegroundColor Cyan
+                Write-Host ""
+                Write-Log "[INFO] $ProgressMessage (Concluído)"
             }
             $exitCode = $LASTEXITCODE
         } finally {
@@ -345,8 +382,6 @@ function Merge-NewestPullRequest {
         return
     }
 
-    # Mantem a mesma estrategia do script que ja estava funcionando no Windows:
-    # usa o numero do PR como criterio de "mais recente" e processa o maior numero.
     $ordered = @($prsArray | Sort-Object -Property number -Descending)
     $newest = $ordered[0]
     $older = @()
@@ -356,6 +391,7 @@ function Merge-NewestPullRequest {
 
     $createdAtLog = if ($newest.created_at) { $newest.created_at } else { 'sem created_at' }
     Write-Info ("PR mais recente: #{0} - {1} ({2})" -f $newest.number, $newest.title, $createdAtLog)
+    
     if ($older.Count -gt 0) {
         Write-Info ("Fechando {0} PR(s) mais antigo(s)." -f $older.Count)
         foreach ($pr in $older) {
@@ -378,9 +414,33 @@ function Merge-NewestPullRequest {
     try {
         $mergeResult = Invoke-GitHubApi -Uri "$($script:Config.apiBase)/pulls/$($newest.number)/merge" -Method Put -Body @{ merge_method = 'merge' }
         $script:LastMergeInfo = $mergeResult
-        Write-Ok ("PR #{0} mergeado automaticamente." -f $newest.number)
+        Write-Ok ("PR #{0} mergeado automaticamente via API (método: merge)." -f $newest.number)
     } catch {
-        throw "Falha ao mergear PR #$($newest.number): $($_.Exception.Message)"
+        Write-Warn "API do GitHub recusou o merge (Erro de Conflito). Iniciando resolução automática..."
+        
+        try {
+            $resolveDir = Join-Path $script:Config.tempDir "resolve_$($newest.number)"
+            if (Test-Path $resolveDir) { Remove-Item -Path $resolveDir -Recurse -Force -ErrorAction SilentlyContinue }
+            
+            $repoUrl = Get-RepoUrlForClone
+            
+            Invoke-Git -Args @('clone', '--progress', '--branch', $script:Config.branch, $repoUrl, $resolveDir) -ShowProgress -ProgressMessage "Clonando temp para conflito" | Out-Null
+            
+            Invoke-Git -Args @('config', 'user.name', 'ChatGPT-AutoSync') -WorkingDirectory $resolveDir | Out-Null
+            Invoke-Git -Args @('config', 'user.email', 'autosync@conexaovida.org') -WorkingDirectory $resolveDir | Out-Null
+            
+            Invoke-Git -Args @('fetch', '--progress', 'origin', "pull/$($newest.number)/head:pr_branch") -ShowProgress -ProgressMessage "Baixando o codigo do PR #$($newest.number)" -WorkingDirectory $resolveDir | Out-Null
+            
+            Write-Info "Forcando a resolucao do conflito (priorizando sempre as alteracoes novas)..."
+            Invoke-Git -Args @('merge', 'pr_branch', '-X', 'theirs', '-m', "Auto-resolucao de conflitos do PR #$($newest.number)") -WorkingDirectory $resolveDir | Out-Null
+            
+            Invoke-Git -Args @('push', '--progress', 'origin', $script:Config.branch) -ShowProgress -ProgressMessage "Enviando alteracoes corrigidas" -WorkingDirectory $resolveDir | Out-Null
+            
+            Write-Ok ("Conflitos resolvidos sozinho! PR #{0} mergeado e encerrado com sucesso." -f $newest.number)
+        } catch {
+            Write-Fail "Nao foi possivel resolver o conflito automaticamente: $($_.Exception.Message)"
+            Write-Warn "O script continuara operando apenas com o que ja foi aprovado na branch principal."
+        }
     }
 }
 
@@ -394,7 +454,8 @@ function Fetch-RepositoryMirror {
 
     $mirrorPath = Join-Path $script:Config.tempDir ("repo_{0}" -f (Get-Date -Format 'yyyyMMdd_HHmmss'))
     $repoUrl = Get-RepoUrlForClone
-    Invoke-Git -Args @('clone', '--depth', '1', '--branch', $script:Config.branch, $repoUrl, $mirrorPath) | Out-Null
+    
+    Invoke-Git -Args @('clone', '--depth', '1', '--progress', '--branch', $script:Config.branch, $repoUrl, $mirrorPath) -ShowProgress -ProgressMessage "Baixando atualizacoes do repositório" | Out-Null
     $script:RepoMirror = $mirrorPath
     Write-Ok ("Espelho atualizado em $mirrorPath")
 }
@@ -403,7 +464,7 @@ function Test-IsProtectedPath([string]$RelativePath) {
     $pathLower = Normalize-RelativePath $RelativePath
     foreach ($item in $script:Config.protectedItems) {
         $protected = Normalize-RelativePath $item
-        if ($pathLower -eq $protected -or $pathLower.StartsWith("$protected\\")) {
+        if ($pathLower -eq $protected -or $pathLower.StartsWith("$protected\")) {
             return $true
         }
     }
@@ -427,8 +488,9 @@ function Sync-FilesFromMirror {
     $unchanged = 0
     $protectedCount = 0
 
-    foreach ($relPathGit in $gitFiles) {
-        $relativePath = $relPathGit.Replace('/', '\\')
+    foreach ($relPathGitRaw in $gitFiles) {
+        $relativePath = $relPathGitRaw.Trim('"').Replace('/', '\').Replace('\\', '\')
+        
         if (Test-IsProtectedPath -RelativePath $relativePath) {
             $protectedCount++
             $script:ProtectedFiles.Add($relativePath)
@@ -463,7 +525,7 @@ function Sync-FilesFromMirror {
         if ($needsCopy) {
             Copy-Item -Path $source -Destination $target -Force
             try {
-                $gitDate = Invoke-Git -Args @('log', '-1', '--format=%cI', '--', $relPathGit) -WorkingDirectory $script:RepoMirror
+                $gitDate = Invoke-Git -Args @('log', '-1', '--format=%cI', '--', $relPathGitRaw) -WorkingDirectory $script:RepoMirror
                 if ($gitDate) {
                     (Get-Item $target).LastWriteTime = [datetime]::Parse(($gitDate | Select-Object -First 1))
                 }
@@ -490,82 +552,105 @@ function Sync-FilesFromMirror {
     Write-Ok ("Resumo: $added novo(s), $updated atualizado(s), $unchanged inalterado(s), $protectedCount protegido(s)")
 }
 
-function Get-PythonCommandSpec {
-    $venvPython = Join-Path $script:Config.localDir '.venv\Scripts\python.exe'
-    if (Test-Path $venvPython) {
-        return @{
-            FilePath   = $venvPython
-            PrefixArgs = @()
-            Display    = $venvPython
+function Log-RunningProcessesStatus {
+    Write-Section 'MONITORAMENTO DE PROCESSOS'
+    $found = 0
+
+    $cmds = Get-CimInstance Win32_Process | Where-Object { $_.Name -match 'cmd' }
+    foreach ($c in $cmds) {
+        if ($c.CommandLine -match '0\. start\.bat' -or $c.CommandLine -match '1\. start_apenas_analisador_prontuarios\.bat') {
+            Write-Info "Alvo encontrado [Janela Inicial] (PID $($c.ProcessId)): $($c.CommandLine)"
+            $found++
         }
     }
 
-    $pyPath = Get-CommandExecutablePath -Names @('py', 'py.exe')
-    if ($pyPath) {
-        return @{
-            FilePath   = $pyPath
-            PrefixArgs = @('-3')
-            Display    = "$pyPath -3"
+    $mainName = [System.IO.Path]::GetFileName($script:Config.chatProcessPattern)
+    $analyzerName = [System.IO.Path]::GetFileName($script:Config.analyzerPattern)
+
+    $pys = Get-CimInstance Win32_Process | Where-Object { $_.Name -match 'python' -or $_.Name -match 'py' }
+    foreach ($p in $pys) {
+        if ($p.CommandLine -match [regex]::Escape($mainName) -or $p.CommandLine -match [regex]::Escape($analyzerName)) {
+            Write-Info "Alvo encontrado [Servidor Python] (PID $($p.ProcessId)): $($p.CommandLine)"
+            $found++
         }
     }
 
-    $pythonPath = Get-CommandExecutablePath -Names @('python', 'python.exe')
-    if ($pythonPath) {
-        return @{
-            FilePath   = $pythonPath
-            PrefixArgs = @()
-            Display    = $pythonPath
+    $browsers = Get-CimInstance Win32_Process | Where-Object { $_.Name -match 'chrome' -or $_.Name -match 'ms-playwright' -or $_.Name -match 'chromium' }
+    foreach ($b in $browsers) {
+        if ($b.ExecutablePath -match 'ms-playwright' -or $b.CommandLine -match 'playwright') {
+            Write-Info "Alvo encontrado [Navegador Oculto do Playwright] (PID $($b.ProcessId))"
+            $found++
         }
     }
 
-    throw 'Python nao encontrado para reiniciar os processos.'
+    if ($found -eq 0) {
+        Write-Info "O script esta a vigiar, mas nenhum processo do simulador foi encontrado rodando."
+    } else {
+        Write-Ok "Total de processos sendo vigiados (e que serao mortos se houver update): $found"
+    }
 }
 
 function Stop-ManagedProcesses {
-    Write-Section 'PARANDO PROCESSOS'
-
-    $patterns = @($script:Config.chatProcessPattern, $script:Config.analyzerPattern)
+    Write-Section 'PARANDO PROCESSOS E JANELAS'
     $killed = 0
-    foreach ($proc in @(Get-CimInstance Win32_Process | Where-Object { $_.CommandLine })) {
-        $commandLine = $proc.CommandLine
-        foreach ($pattern in $patterns) {
-            if ($commandLine -match [regex]::Escape($pattern)) {
-                try {
-                    Stop-Process -Id $proc.ProcessId -Force -ErrorAction Stop
-                    $killed++
-                    Write-Info ("Processo PID $($proc.ProcessId) encerrado: $commandLine")
-                } catch {
-                    Write-Warn ("Falha ao encerrar PID $($proc.ProcessId): $($_.Exception.Message)")
-                }
-                break
-            }
+
+    $cmds = Get-CimInstance Win32_Process | Where-Object { $_.Name -match 'cmd' }
+    foreach ($c in $cmds) {
+        if ($c.CommandLine -match '0\. start\.bat' -or $c.CommandLine -match '1\. start_apenas_analisador_prontuarios\.bat') {
+            try {
+                & taskkill.exe /F /T /PID $c.ProcessId 2>&1 | Out-Null
+                $killed++
+                Write-Info "Janela de inicializacao encerrada (PID $($c.ProcessId))"
+            } catch { }
         }
     }
 
-    Get-Process -Name 'ms-playwright' -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-    Write-Ok ("Total de processos encerrados: $killed")
+    $mainName = [System.IO.Path]::GetFileName($script:Config.chatProcessPattern)
+    $analyzerName = [System.IO.Path]::GetFileName($script:Config.analyzerPattern)
+
+    $pys = Get-CimInstance Win32_Process | Where-Object { $_.Name -match 'python' -or $_.Name -match 'py' }
+    foreach ($p in $pys) {
+        if ($p.CommandLine -match [regex]::Escape($mainName) -or $p.CommandLine -match [regex]::Escape($analyzerName)) {
+            try {
+                & taskkill.exe /F /T /PID $p.ProcessId 2>&1 | Out-Null
+                $killed++
+                Write-Info "Processo Python encerrado (PID $($p.ProcessId))"
+            } catch { }
+        }
+    }
+
+    $browsers = Get-CimInstance Win32_Process | Where-Object { $_.Name -match 'chrome' -or $_.Name -match 'ms-playwright' -or $_.Name -match 'chromium' }
+    foreach ($b in $browsers) {
+        if ($b.ExecutablePath -match 'ms-playwright' -or $b.CommandLine -match 'playwright') {
+            try {
+                & taskkill.exe /F /T /PID $b.ProcessId 2>&1 | Out-Null
+                $killed++
+                Write-Info "Navegador Playwright oculto encerrado (PID $($b.ProcessId))"
+            } catch { }
+        }
+    }
+
+    Write-Ok ("Total de processos e janelas encontrados e encerrados: $killed")
 }
 
 function Start-ManagedProcesses {
     Write-Section 'REINICIANDO PROCESSOS'
 
-    $pythonSpec = Get-PythonCommandSpec
-    $mainScript = Join-Path $script:Config.localDir 'Scripts\main.py'
-    $analyzerScript = Join-Path $script:Config.localDir 'Scripts\analisador_prontuarios.py'
+    $batMain = Join-Path $script:Config.localDir '0. start.bat'
+    $batAnalyzer = Join-Path $script:Config.localDir '1. start_apenas_analisador_prontuarios.bat'
 
-    if (-not (Test-Path $mainScript)) { throw "Arquivo nao encontrado: $mainScript" }
-    if (-not (Test-Path $analyzerScript)) { throw "Arquivo nao encontrado: $analyzerScript" }
-    if (-not (Test-Path $pythonSpec.FilePath)) { throw "Python nao encontrado em: $($pythonSpec.FilePath)" }
+    if (-not (Test-Path $batMain)) { throw "Arquivo .bat nao encontrado: $batMain" }
+    if (-not (Test-Path $batAnalyzer)) { throw "Arquivo .bat nao encontrado: $batAnalyzer" }
 
-    $mainArgs = @($pythonSpec.PrefixArgs + @($mainScript))
-    $analyzerArgs = @($pythonSpec.PrefixArgs + @($analyzerScript))
-
-    Write-Info ("Usando Python: $($pythonSpec.Display)")
-    Start-Process -FilePath $pythonSpec.FilePath -ArgumentList $mainArgs -WorkingDirectory $script:Config.localDir -WindowStyle Minimized | Out-Null
+    Write-Info "Iniciando $batMain..."
+    Start-Process -FilePath $batMain -WorkingDirectory $script:Config.localDir | Out-Null
+    
     Start-Sleep -Seconds 5
-    Start-Process -FilePath $pythonSpec.FilePath -ArgumentList $analyzerArgs -WorkingDirectory $script:Config.localDir -WindowStyle Minimized | Out-Null
+    
+    Write-Info "Iniciando $batAnalyzer..."
+    Start-Process -FilePath $batAnalyzer -WorkingDirectory $script:Config.localDir | Out-Null
 
-    Write-Ok 'ChatGPT Simulator e analisador de prontuarios reiniciados.'
+    Write-Ok 'ChatGPT Simulator e analisador de prontuarios reiniciados via arquivos .bat originais.'
 }
 
 function Register-AutoSyncTask {
@@ -635,6 +720,8 @@ function Run-SyncCycle {
         Write-Info "Repositorio local: $($script:Config.localDir)"
         Write-Info "Branch monitorada: $($script:Config.branch)"
 
+        Log-RunningProcessesStatus
+
         Merge-NewestPullRequest
         Fetch-RepositoryMirror
         Sync-FilesFromMirror
@@ -653,6 +740,14 @@ function Run-SyncCycle {
 }
 
 try {
+    # --- VOLTANDO AO PRETO PADRÃO SEGURO E INFALÍVEL ---
+    try {
+        [Console]::Title = "🔄 GitHub Auto-Sync [ChatGPT Simulator]"
+        [Console]::BackgroundColor = 'Black'
+        [Console]::ForegroundColor = 'Gray'
+        Clear-Host
+    } catch { }
+
     if ($script:InstallTask) {
         Import-Settings
         Assert-Configuration
@@ -684,13 +779,29 @@ try {
         }
 
         $intervalMinutes = [math]::Max(1, [int]$script:Config.syncIntervalMinutes)
-        Write-Info ("Modo agendado persistente: aguardando {0} minuto(s) para a proxima conferencia." -f $intervalMinutes)
-        Start-Sleep -Seconds ($intervalMinutes * 60)
+        $totalSeconds = $intervalMinutes * 60
+        Write-Log "[INFO] Aguardando $intervalMinutes minuto(s) para a proxima conferencia."
+        
+        for ($i = $totalSeconds; $i -gt 0; $i--) {
+            $m = [int][math]::Floor($i / 60)
+            $s = [int]($i % 60)
+            $timeFmt = "{0:D2}:{1:D2}" -f $m, $s
+            
+            Write-Host -NoNewline "`r[AGUARDANDO] Proxima verificacao no GitHub em: $timeFmt          " -ForegroundColor Yellow
+            Start-Sleep -Seconds 1
+        }
+        
+        Write-Host "`r[INICIANDO] Buscando atualizacoes agora...                                  " -ForegroundColor Green
+
     } while ($script:IsScheduled)
 } catch {
     if ($script:LogFile) {
         Write-Log $_.Exception.ToString()
     }
     Write-Fail $_.Exception.Message
+    
+    Write-Host "`nO script encontrou um erro e vai fechar em 30 segundos..." -ForegroundColor Red
+    Start-Sleep -Seconds 30
+    
     exit 1
 }
