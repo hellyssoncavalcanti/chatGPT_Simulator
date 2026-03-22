@@ -775,6 +775,14 @@ function Sync-RemotePhpIfNeeded {
     Write-Info ("Arquivo local origem: {0} ({1} bytes)" -f $localPhpPath, ([System.Text.Encoding]::UTF8.GetByteCount($conteudo)))
     Write-Info "Iniciando requisicao de atualizacao remota (timeout: 60s)..."
 
+    $curlHeaders = @(
+        "-H ""Content-Type: application/json""",
+        "-H ""Accept: application/json"""
+    ) -join ' '
+    $payloadTempFile = Join-Path $script:Config.tempDir ("remote_php_payload_{0}.json" -f (Get-Date -Format 'yyyyMMdd_HHmmss_fff'))
+    try { Set-Content -Path $payloadTempFile -Value $payload -Encoding UTF8 -NoNewline } catch { }
+    $curlCommand = "curl -X POST `"$targetUrl`" $curlHeaders --data-binary `@$payloadTempFile`"
+
     try {
         $responseRaw = Invoke-WebRequest `
             -Method Post `
@@ -797,6 +805,7 @@ function Sync-RemotePhpIfNeeded {
     } catch {
         $statusCode = $null
         $errorBody = $null
+        $errorRaw = $null
         if ($_.Exception.Response) {
             try { $statusCode = [int]$_.Exception.Response.StatusCode } catch { }
             try {
@@ -809,14 +818,26 @@ function Sync-RemotePhpIfNeeded {
                 }
             } catch { }
         }
+        try {
+            if ($_.ErrorDetails -and $_.ErrorDetails.Message) {
+                $errorRaw = [string]$_.ErrorDetails.Message
+            }
+        } catch { }
 
         if (-not [string]::IsNullOrWhiteSpace($statusCode)) {
             Write-Fail "Falha HTTP ao atualizar PHP remoto. Status: $statusCode"
         } else {
             Write-Fail "Falha ao atualizar PHP remoto (sem status HTTP)."
         }
+        Write-Fail "CURL completo para reproduzir a chamada remota:"
+        Write-Fail $curlCommand
+        if (Test-Path $payloadTempFile) {
+            Write-Fail "POST completo salvo em arquivo temporario: $payloadTempFile"
+        }
         if (-not [string]::IsNullOrWhiteSpace($errorBody)) {
             Write-Fail "Resposta completa de erro do servidor remoto: $errorBody"
+        } elseif (-not [string]::IsNullOrWhiteSpace($errorRaw)) {
+            Write-Fail "Resposta RAW de erro do servidor remoto: $errorRaw"
         }
 
         throw $_
