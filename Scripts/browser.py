@@ -48,6 +48,8 @@ tab_semaphore = asyncio.Semaphore(MAX_TABS)
 SCREENSHOT_STREAM_INTERVAL_SEC = 2.0
 SCREENSHOT_STREAM_JPEG_QUALITY = 45
 SCREENSHOT_STREAM_MAX_BYTES = 300_000
+_SCREENSHOT_INLINE_LAST_LEN = 0
+_SCREENSHOT_INLINE_LAST_MSG = ""
 
 def emit_log(q, msg):
     if q: q.put(json.dumps({"type": "log", "content": f"[browser.py] {msg}"}) + "\n")
@@ -114,6 +116,7 @@ async def _should_keep_context_minimized(context) -> bool:
 
 
 async def _emit_browser_screenshot(page, q, label: str = "browser"):
+    global _SCREENSHOT_INLINE_LAST_LEN, _SCREENSHOT_INLINE_LAST_MSG
     if not q:
         return
     try:
@@ -129,8 +132,13 @@ async def _emit_browser_screenshot(page, q, label: str = "browser"):
         if len(raw) > SCREENSHOT_STREAM_MAX_BYTES:
             return
         kb = len(raw) / 1024
-        print(f"📸 Screenshot stream [{label}]: {kb:.1f} KB — {page.url[:80]}", flush=True)
-        emit_log(q, f"📸 Screenshot stream [{label}]: {kb:.1f} KB — {page.url[:80]}")
+        msg = f"📸 Screenshot stream [{label}]: {kb:.1f} KB — {page.url[:80]}"
+        # Evita “flood” no CMD quando o conteúdo do stream não mudou:
+        # mantém uma única linha por ação e atualiza apenas quando houver mudança.
+        if msg != _SCREENSHOT_INLINE_LAST_MSG:
+            print(f"\r{msg.ljust(_SCREENSHOT_INLINE_LAST_LEN)}", end="", flush=True)
+            _SCREENSHOT_INLINE_LAST_LEN = len(msg)
+            _SCREENSHOT_INLINE_LAST_MSG = msg
         emit_event(q, "screenshot", {
             "label": label,
             "format": "jpeg",
@@ -143,6 +151,7 @@ async def _emit_browser_screenshot(page, q, label: str = "browser"):
 
 
 async def _stream_browser_screenshots(page, q, stop_event: asyncio.Event, label: str = "browser"):
+    global _SCREENSHOT_INLINE_LAST_LEN, _SCREENSHOT_INLINE_LAST_MSG
     if not q:
         return
     try:
@@ -154,6 +163,11 @@ async def _stream_browser_screenshots(page, q, stop_event: asyncio.Event, label:
                 await _emit_browser_screenshot(page, q, label=label)
     except asyncio.CancelledError:
         raise
+    finally:
+        if _SCREENSHOT_INLINE_LAST_LEN > 0:
+            print("", flush=True)
+            _SCREENSHOT_INLINE_LAST_LEN = 0
+            _SCREENSHOT_INLINE_LAST_MSG = ""
 
 
 def _composer_state_script():
@@ -1317,6 +1331,20 @@ async def handle_sync_task(context, task):
                 m['content'] = md(clean).strip()
             m['content'] = m['content'].replace('\u200b', '').replace('\xa0', ' ')
             m['content'] = m['content'].replace('\\_', '_').replace('\\*', '*')  # ✅ FIX — era omitido aqui
+
+        # Garante persistência de links de download também no fluxo de SYNC:
+        # quando o ChatGPT renderiza "cards" de arquivo sem URL visível no markdown,
+        # tentamos detectar/registrar os links na página e anexá-los na última resposta da IA.
+        try:
+            last_ai_idx = max((i for i, m in enumerate(msgs) if m.get('role') == 'assistant'), default=-1)
+            if last_ai_idx >= 0:
+                msgs[last_ai_idx]['content'] = await _detect_and_register_files(
+                    page,
+                    msgs[last_ai_idx].get('content') or '',
+                    q
+                )
+        except Exception as e_files:
+            emit_log(q, f"⚠️ Falha ao detectar links de download durante SYNC: {e_files}")
 
         title = await get_chat_title(page)
         emit_event(q, 'syncresult', {
