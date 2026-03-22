@@ -1214,6 +1214,27 @@ async def handle_sync_task(context, task):
     keep_minimized = await _should_keep_context_minimized(context)
     page    = await context.new_page()
     await _preserve_minimized_if_needed(page, keep_minimized=keep_minimized)
+    # Captura de downloads disparados durante SYNC (cards de arquivo sem URL explícita)
+    downloads_dir = config.DIRS.get("downloads", os.path.join(config.BASE_DIR, "downloads"))
+    os.makedirs(downloads_dir, exist_ok=True)
+    _sync_auto_downloads = []
+
+    def _on_sync_download(download):
+        async def _save():
+            try:
+                suggested = download.suggested_filename or "download"
+                ts = int(time.time() * 1000)
+                safe = re.sub(r"[^\w.\-]", "_", suggested)
+                local_name = f"sync_{ts}_{safe}"
+                local_path = os.path.join(downloads_dir, local_name)
+                await download.save_as(local_path)
+                _sync_auto_downloads.append({"name": suggested, "local": local_name, "path": local_path})
+                emit_log(q, f"⬇️ [SYNC] Auto-download capturado: {suggested}")
+            except Exception as e:
+                emit_log(q, f"⚠️ [SYNC] Erro no auto-download: {e}")
+        asyncio.ensure_future(_save())
+
+    page.on("download", _on_sync_download)
     try:
         url    = task.get('url')
         chat_id = task.get('chat_id')
@@ -1345,6 +1366,36 @@ async def handle_sync_task(context, task):
                 )
         except Exception as e_files:
             emit_log(q, f"⚠️ Falha ao detectar links de download durante SYNC: {e_files}")
+
+        # Fallback extra: alguns cards novos do ChatGPT não expõem URL no HTML/markdown.
+        # Nesses casos, tentamos clicar nos elementos de download para disparar o evento
+        # Playwright "download" e então registrar o arquivo local no stream.
+        try:
+            has_download_markers = any(
+                (m.get('role') == 'assistant') and (
+                    '/api/downloads/' in (m.get('content') or '') or '📎 Arquivo:' in (m.get('content') or '')
+                )
+                for m in msgs
+            )
+            if not has_download_markers:
+                clicked = await _click_chatgpt_download_elements(page, q)
+                if clicked:
+                    await asyncio.sleep(2)
+        except Exception as e_click_dl:
+            emit_log(q, f"⚠️ Falha ao clicar cards de download no SYNC: {e_click_dl}")
+
+        if _sync_auto_downloads:
+            await asyncio.sleep(1)
+            last_ai_idx = max((i for i, m in enumerate(msgs) if m.get('role') == 'assistant'), default=-1)
+            if last_ai_idx >= 0:
+                extra_links = []
+                for dl in _sync_auto_downloads:
+                    file_id = dl['local']
+                    register_file(file_id, f"local:{dl['path']}", dl['name'])
+                    extra_links.append(f"📎 Arquivo: [{dl['name']}](/api/downloads/{file_id})")
+                if extra_links:
+                    base = msgs[last_ai_idx].get('content') or ''
+                    msgs[last_ai_idx]['content'] = (base + "\n\n" + "\n".join(extra_links)).strip()
 
         title = await get_chat_title(page)
         emit_event(q, 'syncresult', {
