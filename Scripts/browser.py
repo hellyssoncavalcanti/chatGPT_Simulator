@@ -882,6 +882,39 @@ async def _click_chatgpt_download_elements(page, q=None):
                     }
                 });
             }
+
+            // Padrão 3: cards de arquivo recentes (UI nova), onde os botões são ícones
+            // sem texto e o nome do arquivo fica no cabeçalho.
+            const cardSelectors = [
+                'div.group.my-4.w-full.rounded-2xl',
+                'div.corner-superellipse\\/1\\.1',
+                'div[class*="corner-superellipse"]'
+            ];
+            const seenCards = new Set();
+            cardSelectors.forEach(sel => {
+                document.querySelectorAll(sel).forEach((card, cardIdx) => {
+                    if (seenCards.has(card)) return;
+                    seenCards.add(card);
+
+                    const headerText = (card.innerText || '').trim();
+                    const m = headerText.match(/[\\w\\-. ]+\\.(xlsx|xls|csv|pdf|docx|doc|pptx|ppt|zip|rar|json|xml|txt|png|jpg|jpeg|gif|svg)/i);
+                    if (!m) return;
+                    const filename = m[0].trim();
+
+                    const buttons = card.querySelectorAll('button');
+                    buttons.forEach((btn, btnIdx) => {
+                        const disabled = btn.disabled || btn.getAttribute('aria-disabled') === 'true';
+                        if (disabled) return;
+                        results.push({
+                            cardIndex: cardIdx,
+                            buttonIndex: btnIdx,
+                            text: filename,
+                            selector: 'file_card_btn',
+                            cardSelector: sel
+                        });
+                    });
+                });
+            });
             return results;
         }""")
 
@@ -894,6 +927,11 @@ async def _click_chatgpt_download_elements(page, q=None):
                 if el['selector'] == 'button_in_last':
                     last_msg = page.locator('[data-message-author-role="assistant"]').last
                     btn = last_msg.locator('button, [role="button"]').nth(el['index'])
+                    await btn.click(timeout=3000)
+                elif el['selector'] == 'file_card_btn':
+                    cards = page.locator(el.get('cardSelector') or 'div.group.my-4.w-full.rounded-2xl')
+                    card = cards.nth(el.get('cardIndex', 0))
+                    btn = card.locator('button').nth(el.get('buttonIndex', 0))
                     await btn.click(timeout=3000)
                 else:
                     link = page.locator('a').nth(el['index'])
