@@ -1357,14 +1357,16 @@ def _obter_datas_referencia_compilada(id_paciente: str):
     (exclui o próprio registro compilado).
     """
     try:
-        row = sql_get_one(f"""
+        resp = sql_exec(f"""
             SELECT
                 MIN(NULLIF(datetime_atendimento_inicio, '0000-00-00 00:00:00')) AS dt_inicio_mais_antiga,
                 MAX(NULLIF(datetime_ultima_atualizacao_atendimento, '0000-00-00 00:00:00')) AS dt_ultima_atualizacao_mais_nova
             FROM {TABELA}
             WHERE id_paciente = '{esc(id_paciente)}'
               AND COALESCE(id_criador, '') <> 'analise_compilada_paciente'
-        """) or {}
+        """, reason="_obter_datas_referencia_compilada")
+        data = resp.get("data") or []
+        row = data[0] if data else {}
         return row.get('dt_inicio_mais_antiga'), row.get('dt_ultima_atualizacao_mais_nova')
     except Exception as e:
         log.warning(f"  ⚠️ Erro ao obter datas de referência da síntese compilada do paciente {id_paciente}: {e}")
