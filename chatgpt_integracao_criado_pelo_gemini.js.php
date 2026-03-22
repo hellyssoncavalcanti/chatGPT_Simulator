@@ -2443,12 +2443,25 @@ if (isset($_GET['action']) && $_GET['action'] === 'download_file') {
         echo json_encode(['error' => 'ChatGPT Simulator não disponível']); exit;
     }
 
+    $apiKey = trim((string)($GLOBALS['CHATGPT_VIA_API_KEY'] ?? ''));
     $download_url = rtrim($sim_base, '/') . "/api/downloads/" . urlencode($filename);
+    // Reforço de autenticação para o Simulator:
+    // - Header Authorization (caminho principal)
+    // - api_key na query string (fallback compatível com check_auth)
+    if ($apiKey !== '') {
+        $download_url .= (strpos($download_url, '?') === false ? '?' : '&')
+            . 'api_key=' . rawurlencode($apiKey);
+    }
     $ch = curl_init($download_url);
     curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
     curl_setopt($ch, CURLOPT_FOLLOWLOCATION, true);
     curl_setopt($ch, CURLOPT_TIMEOUT, 90); // Timeout longo: browser.py faz proxy sob demanda via ChatGPT
     curl_setopt($ch, CURLOPT_HEADER, true);
+    if ($apiKey !== '') {
+        curl_setopt($ch, CURLOPT_HTTPHEADER, [
+            'Authorization: Bearer ' . $apiKey
+        ]);
+    }
     $response = curl_exec($ch);
     $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
     $header_size = curl_getinfo($ch, CURLINFO_HEADER_SIZE);
