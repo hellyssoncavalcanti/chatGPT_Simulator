@@ -3359,9 +3359,11 @@ header('Content-Type: application/javascript; charset=utf-8');
         .msg-user.ow-collapsed {
             max-height: 96px;
             overflow: hidden;
+            -webkit-mask-image: linear-gradient(to bottom, black 55%, transparent 100%);
+            mask-image: linear-gradient(to bottom, black 55%, transparent 100%);
         }
         /* AI messages: never collapse or fade */
-        .msg-ai { -webkit-mask-image: none !important; mask-image: none !important; max-height: none !important; }
+        .msg-ai { -webkit-mask-image: none !important; mask-image: none !important; max-height: none !important; overflow: visible !important; }
         .ow-user-expand-btn {
             align-self: flex-end;
             background: none;
@@ -5886,9 +5888,13 @@ header('Content-Type: application/javascript; charset=utf-8');
                         expanded = !expanded;
                         if (expanded) {
                             d.classList.remove('ow-collapsed');
+                            d.style.webkitMaskImage = 'none';
+                            d.style.maskImage = 'none';
                             expandBtn.innerHTML = `<svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor"><path d="M7 14l5-5 5 5z"/></svg><span>Ver menos</span>`;
                         } else {
                             d.classList.add('ow-collapsed');
+                            d.style.webkitMaskImage = '';
+                            d.style.maskImage = '';
                             expandBtn.innerHTML = `<svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor"><path d="M7 10l5 5 5-5z"/></svg><span>Ver mais</span>`;
                         }
                     };
