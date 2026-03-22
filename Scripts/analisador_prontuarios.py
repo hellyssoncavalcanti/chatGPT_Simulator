@@ -1384,7 +1384,7 @@ def contar_atendimentos_nao_concluidos_paciente(id_paciente: str) -> int:
             SELECT COUNT(*) AS total
             FROM {TABELA} la
             INNER JOIN clinica_atendimentos ca ON ca.id = la.id_atendimento
-            WHERE id_paciente = '{esc(id_paciente)}'
+            WHERE la.id_paciente = '{esc(id_paciente)}'
               AND COALESCE(la.id_criador, '') <> 'analise_compilada_paciente'
               AND la.status IN ('pendente', 'processando')
               AND ca.consulta_tipo_arquivo = 'texto'
