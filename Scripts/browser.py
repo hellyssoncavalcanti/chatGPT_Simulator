@@ -169,30 +169,44 @@ def _composer_state_script():
         ));
 
         // Detecção da nova funcionalidade do ChatGPT: "Colagens grandes agora viram anexos"
-        // Quando o ChatGPT converte texto colado em anexo, cria um card/chip na área do composer
-        // com "Exibir no campo de texto" como link. Detectamos isso verificando:
-        // 1. Links/botões com texto "Exibir no campo de texto" / "Show in text field"
-        // 2. Botões de remover o anexo criado automaticamente (ícone X no card)
-        // 3. Elementos com role de "apresentação" que contenham ícone de arquivo
+        // Quando o ChatGPT converte texto colado em anexo, cria um card/chip na área do composer.
+        // Detectamos via múltiplas estratégias:
         const pasteAsAttachmentNodes = [];
-        const allComposerBtns = composerRoot
-            ? Array.from(composerRoot.querySelectorAll('button, a, [role="button"]'))
-            : [];
-        for (const el of allComposerBtns) {
-            const txt = (el.innerText || el.textContent || '').trim().toLowerCase();
-            if (txt.includes('exibir no campo de texto') || txt.includes('show in text field')) {
-                pasteAsAttachmentNodes.push(el);
+        if (composerRoot) {
+            // Estratégia 1: texto "Exibir no campo de texto" / "Show in text field"
+            const allComposerEls = Array.from(composerRoot.querySelectorAll('button, a, [role="button"], span, div'));
+            for (const el of allComposerEls) {
+                const txt = (el.innerText || el.textContent || '').trim().toLowerCase();
+                if (txt.includes('exibir no campo de texto') || txt.includes('show in text field')
+                    || txt.includes('exibir no campo') || txt.includes('show in text')) {
+                    pasteAsAttachmentNodes.push(el);
+                }
             }
-        }
-        // Também procura cards de anexo automático: divs próximos ao textarea que contenham
-        // o botão "Exibir" e/ou tenham ícone de documento/arquivo (svg com path de arquivo)
-        if (composerRoot && pasteAsAttachmentNodes.length === 0) {
-            const candidates = composerRoot.querySelectorAll('[class*="group"], [class*="attach"], [class*="block"]');
-            for (const c of candidates) {
-                const inner = (c.innerText || '').toLowerCase();
-                if ((inner.includes('exibir no campo') || inner.includes('show in text'))
-                    && c.closest('form, [data-testid="composer"], main')) {
-                    pasteAsAttachmentNodes.push(c);
+            // Estratégia 2: cards de anexo com ícone de arquivo (svg + botão fechar)
+            if (pasteAsAttachmentNodes.length === 0) {
+                const candidates = composerRoot.querySelectorAll('[class*="group"], [class*="attach"], [class*="block"], [class*="chip"], [class*="file"], [class*="paste"]');
+                for (const c of candidates) {
+                    const inner = (c.innerText || '').toLowerCase();
+                    if ((inner.includes('exibir no campo') || inner.includes('show in text'))
+                        && c.closest('form, [data-testid="composer"], main')) {
+                        pasteAsAttachmentNodes.push(c);
+                    }
+                }
+            }
+            // Estratégia 3: qualquer novo elemento que apareceu no composer e contém SVG
+            //   (ícone de documento) + botão de fechar — típico de um card de anexo
+            if (pasteAsAttachmentNodes.length === 0) {
+                const composerDivs = composerRoot.querySelectorAll('div');
+                for (const d of composerDivs) {
+                    if (d.querySelector('svg') && d.querySelector('button[aria-label]')
+                        && d.offsetHeight > 20 && d.offsetHeight < 120
+                        && !d.querySelector('#prompt-textarea')) {
+                        const ariaLabel = (d.querySelector('button[aria-label]')?.getAttribute('aria-label') || '').toLowerCase();
+                        if (ariaLabel.includes('remov') || ariaLabel.includes('delet') || ariaLabel.includes('close')
+                            || ariaLabel.includes('exclu') || ariaLabel.includes('fechar')) {
+                            pasteAsAttachmentNodes.push(d);
+                        }
+                    }
                 }
             }
         }
@@ -414,8 +428,8 @@ async def smart_input(page, message, q=None, activityts=None):
 
         if inserted == 0:
             # Texto não apareceu no textarea — pode ser conversão em anexo.
-            # Aguarda até 3s com polling para detectar o anexo criado automaticamente.
-            for _retry in range(6):
+            # Aguarda até 5s com polling para detectar o anexo criado automaticamente.
+            for _retry in range(10):
                 if state.get('hasAttachments') or state.get('pasteAsAttachment'):
                     break
                 await asyncio.sleep(0.5)
@@ -423,9 +437,15 @@ async def smart_input(page, message, q=None, activityts=None):
                 inserted = int(state.get('textLength') or 0)
                 if inserted > 0:
                     break
+                # Fallback: se o sendBtn está habilitado mas não há texto,
+                # o ChatGPT aceitou o conteúdo como anexo (mesmo sem detectar card)
+                if state.get('sendEnabled') and not state.get('textReady'):
+                    emit_log(q, f"{label}: Send habilitado sem texto — provável anexo não detectado pelos seletores.")
+                    state['hasAttachments'] = True
+                    break
 
-            if inserted == 0 and (state.get('hasAttachments') or state.get('pasteAsAttachment')):
-                emit_log(q, f"{label}: ChatGPT converteu a cola em anexo ({state.get('attachmentCount')} item(ns)).")
+            if inserted == 0 and (state.get('hasAttachments') or state.get('pasteAsAttachment') or state.get('sendEnabled')):
+                emit_log(q, f"{label}: ChatGPT converteu a cola em anexo ({state.get('attachmentCount', '?')} item(ns)).")
                 inserted = total
 
         if activityts:
@@ -466,7 +486,7 @@ async def smart_input(page, message, q=None, activityts=None):
                             inserted_now = await _paste_clipboard(paste_chunk, label)
                             # Detecta se este chunk virou anexo (0 chars no textarea mas retornou total)
                             check_state = await _get_composer_state(page)
-                            if int(check_state.get('textLength') or 0) == 0 and (check_state.get('hasAttachments') or check_state.get('pasteAsAttachment')):
+                            if int(check_state.get('textLength') or 0) == 0 and (check_state.get('hasAttachments') or check_state.get('pasteAsAttachment') or check_state.get('sendEnabled')):
                                 paste_became_attachment = True
                                 # Contabiliza todos os chars restantes como "colados via anexo"
                                 remaining = sum(len(paste_chunks[i]) for i in range(chunk_index, len(paste_chunks)))
@@ -514,11 +534,14 @@ async def smart_input(page, message, q=None, activityts=None):
                         await asyncio.sleep(0.15)
                     expected_len = len(txt)
                     state_after_paste = await _get_composer_state(page)
-                    if total < expected_len * 0.9 and not state_after_paste.get('hasAttachments'):
+                    if total < expected_len * 0.9 and not state_after_paste.get('hasAttachments') and not state_after_paste.get('sendEnabled'):
                         emit_log(q, f'Aviso: colados {total} de ~{len(inner)} chars')
                     elif state_after_paste.get('hasAttachments') or paste_became_attachment:
                         emit_log(q,
-                                 f"Bloco aceito como anexo(s): {state_after_paste.get('attachmentCount')} item(ns).")
+                                 f"Bloco aceito como anexo(s): {state_after_paste.get('attachmentCount', '?')} item(ns).")
+                    elif total < expected_len * 0.9 and state_after_paste.get('sendEnabled'):
+                        emit_log(q,
+                                 f"Bloco aceito (send habilitado, provavel anexo): {total} de ~{len(inner)} chars")
                     await asyncio.sleep(0.3)
             else:
                 if segment.strip():
@@ -2010,6 +2033,12 @@ async def handle_chat_task_inner(task, page, q, stop_event: asyncio.Event, activ
 
     emit_event(q, "status", "Aguardando resposta...")
 
+    # Inicia streaming de screenshots em background durante a resposta
+    screenshot_stop = asyncio.Event()
+    screenshot_task = asyncio.create_task(
+        _stream_browser_screenshots(page, q, screenshot_stop, label="chat")
+    )
+
     start_time  = time.time()
     started     = False
     last_html   = ""
@@ -2138,6 +2167,14 @@ async def handle_chat_task_inner(task, page, q, stop_event: asyncio.Event, activ
 
         if time.time() - start_time > 600: break
         await asyncio.sleep(0.3)
+
+    # Para o streaming de screenshots
+    screenshot_stop.set()
+    screenshot_task.cancel()
+    try:
+        await screenshot_task
+    except (asyncio.CancelledError, Exception):
+        pass
 
     # Após resposta completa: registrar URLs de arquivos para proxy sob demanda
     changed = False

@@ -186,6 +186,8 @@ function Import-Settings {
         $script:Config.headers.Authorization = "Bearer $($script:Config.githubToken)"
     }
     $script:Config.protectedItems = @(
+        'sync_github.bat',
+        'Scripts\sync_github.ps1',
         'Scripts\sync_github_settings.ps1',
         'Scripts\sync_github.settings.ps1',
         'chrome_profile'
