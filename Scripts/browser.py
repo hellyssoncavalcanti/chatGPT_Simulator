@@ -887,7 +887,6 @@ async def _click_chatgpt_download_elements(page, q=None):
             // sem texto e o nome do arquivo fica no cabeçalho.
             const cardSelectors = [
                 'div.group.my-4.w-full.rounded-2xl',
-                'div.corner-superellipse\\/1\\.1',
                 'div[class*="corner-superellipse"]'
             ];
             const seenCards = new Set();
