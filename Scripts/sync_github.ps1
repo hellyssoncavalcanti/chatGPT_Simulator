@@ -722,7 +722,28 @@ function Sync-FilesFromMirror {
     }
 
     if ($added -gt 0 -or $updated -gt 0) {
-        $script:RestartRequested = $true
+        # Captura o caminho relativo exato do nosso arquivo PHP
+        $localPhpRelative = Normalize-RelativePath $script:Config.remotePhpLocalFile
+        $requiresRestart = $false
+        
+        # Junta todos os arquivos novos e atualizados numa única lista
+        $changedFiles = @($script:AddedFiles) + @($script:UpdatedFiles)
+        
+        # Inspeciona cada arquivo modificado
+        foreach ($file in $changedFiles) {
+            # Se encontrar QUALQUER arquivo que não seja o PHP, o reinício é obrigatório
+            if ((Normalize-RelativePath $file) -ne $localPhpRelative) {
+                $requiresRestart = $true
+                break
+            }
+        }
+
+        # Decide o que fazer
+        if ($requiresRestart) {
+            $script:RestartRequested = $true
+        } else {
+            Write-Info "Atualizacao exclusiva do PHP detectada. O reinicio dos processos locais (BATs) sera ignorado." -Color Yellow
+        }
     }
 
     Write-Ok ("Resumo: $added novo(s), $updated atualizado(s), $unchanged inalterado(s), $protectedCount protegido(s)")
