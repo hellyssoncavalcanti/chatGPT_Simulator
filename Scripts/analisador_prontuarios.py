@@ -770,6 +770,9 @@ def garantir_migracoes():
       • seguimento_retorno_estimado  VARCHAR(100) → LONGTEXT
         Motivo: o campo recebe o objeto JSON completo de seguimento, que pode
         facilmente ultrapassar os 100 caracteres do tipo original.
+      • hash_prontuario (comentário)
+        Motivo: remover referência antiga ao descritor analise_compilada_paciente,
+        que agora é salvo em id_criador nas análises compiladas.
     """
     migracoes = [
         (
@@ -778,6 +781,14 @@ def garantir_migracoes():
             ALTER TABLE {TABELA}
             MODIFY COLUMN seguimento_retorno_estimado LONGTEXT NULL
             COMMENT 'JSON completo do objeto seguimento_retorno_estimado retornado pelo LLM.'
+            """
+        ),
+        (
+            "hash_prontuario COMMENT atualizado",
+            f"""
+            ALTER TABLE {TABELA}
+            MODIFY COLUMN hash_prontuario CHAR(64) NULL
+            COMMENT 'Hash SHA-256 do conteudo bruto do prontuario analisado.'
             """
         ),
     ]
