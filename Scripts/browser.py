@@ -48,6 +48,7 @@ tab_semaphore = asyncio.Semaphore(MAX_TABS)
 SCREENSHOT_STREAM_INTERVAL_SEC = 2.0
 SCREENSHOT_STREAM_JPEG_QUALITY = 45
 SCREENSHOT_STREAM_MAX_BYTES = 300_000
+_SCREENSHOT_INLINE_LAST_LEN = 0
 
 def emit_log(q, msg):
     if q: q.put(json.dumps({"type": "log", "content": f"[browser.py] {msg}"}) + "\n")
@@ -114,6 +115,7 @@ async def _should_keep_context_minimized(context) -> bool:
 
 
 async def _emit_browser_screenshot(page, q, label: str = "browser"):
+    global _SCREENSHOT_INLINE_LAST_LEN
     if not q:
         return
     try:
@@ -129,8 +131,9 @@ async def _emit_browser_screenshot(page, q, label: str = "browser"):
         if len(raw) > SCREENSHOT_STREAM_MAX_BYTES:
             return
         kb = len(raw) / 1024
-        print(f"📸 Screenshot stream [{label}]: {kb:.1f} KB — {page.url[:80]}", flush=True)
-        emit_log(q, f"📸 Screenshot stream [{label}]: {kb:.1f} KB — {page.url[:80]}")
+        msg = f"📸 Screenshot stream [{label}]: {kb:.1f} KB — {page.url[:80]}"
+        print(f"\r{msg.ljust(_SCREENSHOT_INLINE_LAST_LEN)}", end="", flush=True)
+        _SCREENSHOT_INLINE_LAST_LEN = len(msg)
         emit_event(q, "screenshot", {
             "label": label,
             "format": "jpeg",
@@ -143,6 +146,7 @@ async def _emit_browser_screenshot(page, q, label: str = "browser"):
 
 
 async def _stream_browser_screenshots(page, q, stop_event: asyncio.Event, label: str = "browser"):
+    global _SCREENSHOT_INLINE_LAST_LEN
     if not q:
         return
     try:
@@ -154,6 +158,10 @@ async def _stream_browser_screenshots(page, q, stop_event: asyncio.Event, label:
                 await _emit_browser_screenshot(page, q, label=label)
     except asyncio.CancelledError:
         raise
+    finally:
+        if _SCREENSHOT_INLINE_LAST_LEN > 0:
+            print("", flush=True)
+            _SCREENSHOT_INLINE_LAST_LEN = 0
 
 
 def _composer_state_script():
