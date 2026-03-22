@@ -29,10 +29,22 @@ _file_registry = {}
 _file_registry_lock = threading.Lock()
 
 
-def register_file(file_id: str, url: str, name: str):
-    """Registra um arquivo do ChatGPT para proxy futuro."""
+def register_file(
+    file_id: str,
+    url: str,
+    name: str,
+    *,
+    payload_b64: str | None = None,
+    content_type: str | None = None
+):
+    """Registra um arquivo para proxy futuro (URL remota ou payload em memória)."""
     with _file_registry_lock:
-        _file_registry[file_id] = {"url": url, "name": name}
+        _file_registry[file_id] = {
+            "url": url,
+            "name": name,
+            "payload_b64": payload_b64,
+            "content_type": content_type
+        }
 
 
 def get_file_info(file_id: str) -> dict | None:
