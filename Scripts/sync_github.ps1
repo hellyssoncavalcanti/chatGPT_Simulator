@@ -777,10 +777,10 @@ function Sync-RemotePhpIfNeeded {
         throw "Arquivo PHP alterado nao encontrado localmente para sync remoto: $localPhpPath"
     }
 
-    # Lemos o conteúdo do ficheiro
-    $conteudo = Get-Content -Path $localPhpPath -Raw -Encoding UTF8
-    
-    # Montamos o JSON como texto
+    # 1. Leitura PURA usando o núcleo do .NET (Ignora todos os metadados do PowerShell)
+    $conteudo = [System.IO.File]::ReadAllText($localPhpPath, [System.Text.Encoding]::UTF8)
+
+    # 2. Construção do pacote APENAS com o que o PHP precisa
     $payloadString = @{
         api_key  = $script:Config.remotePhpApiKey
         filepath = $script:Config.remotePhpTargetPath
