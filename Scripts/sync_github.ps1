@@ -225,7 +225,9 @@ function Acquire-Lock {
     foreach ($c in $syncCmds) {
         if ($myParent -and $c.ProcessId -eq $myParent) { continue }
         try {
-            & taskkill.exe /F /T /PID $c.ProcessId 2>&1 | Out-Null
+            # REMOVIDO O PARÂMETRO /T (Tree Kill)
+            # Assim mata APENAS o CMD do sync, sem tocar nos servidores BAT associados!
+            & taskkill.exe /F /PID $c.ProcessId 2>&1 | Out-Null
             Write-Info "Substituindo janela CMD de sync anterior (PID $($c.ProcessId))"
             $killedOthers = $true
         } catch { }
@@ -235,7 +237,9 @@ function Acquire-Lock {
     foreach ($p in $syncPs) {
         if ($p.ProcessId -eq $myPid) { continue }
         try {
-            & taskkill.exe /F /T /PID $p.ProcessId 2>&1 | Out-Null
+            # REMOVIDO O PARÂMETRO /T (Tree Kill)
+            # Assim mata APENAS o PowerShell do sync, preservando os processos filhos!
+            & taskkill.exe /F /PID $p.ProcessId 2>&1 | Out-Null
             Write-Info "Substituindo processo PowerShell de sync anterior (PID $($p.ProcessId))"
             $killedOthers = $true
         } catch { }
@@ -250,7 +254,6 @@ function Acquire-Lock {
         Write-Ok "Processos de sync conflitantes foram anulados. Assumindo exclusividade do ciclo."
     }
 }
-
 function Release-Lock {
     if (Test-Path $script:Config.lockFile) {
         Remove-Item $script:Config.lockFile -Force -ErrorAction SilentlyContinue
