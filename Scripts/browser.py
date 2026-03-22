@@ -882,6 +882,39 @@ async def _click_chatgpt_download_elements(page, q=None):
                     }
                 });
             }
+
+            // Padrão 3: cards de arquivo recentes (UI nova), onde os botões são ícones
+            // sem texto e o nome do arquivo fica no cabeçalho.
+            const cardSelectors = [
+                'div.group.my-4.w-full.rounded-2xl',
+                'div.corner-superellipse\\/1\\.1',
+                'div[class*="corner-superellipse"]'
+            ];
+            const seenCards = new Set();
+            cardSelectors.forEach(sel => {
+                document.querySelectorAll(sel).forEach((card, cardIdx) => {
+                    if (seenCards.has(card)) return;
+                    seenCards.add(card);
+
+                    const headerText = (card.innerText || '').trim();
+                    const m = headerText.match(/[\\w\\-. ]+\\.(xlsx|xls|csv|pdf|docx|doc|pptx|ppt|zip|rar|json|xml|txt|png|jpg|jpeg|gif|svg)/i);
+                    if (!m) return;
+                    const filename = m[0].trim();
+
+                    const buttons = card.querySelectorAll('button');
+                    buttons.forEach((btn, btnIdx) => {
+                        const disabled = btn.disabled || btn.getAttribute('aria-disabled') === 'true';
+                        if (disabled) return;
+                        results.push({
+                            cardIndex: cardIdx,
+                            buttonIndex: btnIdx,
+                            text: filename,
+                            selector: 'file_card_btn',
+                            cardSelector: sel
+                        });
+                    });
+                });
+            });
             return results;
         }""")
 
@@ -894,6 +927,11 @@ async def _click_chatgpt_download_elements(page, q=None):
                 if el['selector'] == 'button_in_last':
                     last_msg = page.locator('[data-message-author-role="assistant"]').last
                     btn = last_msg.locator('button, [role="button"]').nth(el['index'])
+                    await btn.click(timeout=3000)
+                elif el['selector'] == 'file_card_btn':
+                    cards = page.locator(el.get('cardSelector') or 'div.group.my-4.w-full.rounded-2xl')
+                    card = cards.nth(el.get('cardIndex', 0))
+                    btn = card.locator('button').nth(el.get('buttonIndex', 0))
                     await btn.click(timeout=3000)
                 else:
                     link = page.locator('a').nth(el['index'])
@@ -2140,12 +2178,16 @@ async def handle_chat_task_inner(task, page, q, stop_event: asyncio.Event, activ
                 const details = lastAsst.querySelectorAll('details');
                 if (details.length > 0) return details[details.length - 1].innerText.trim();
             }
-            const targets = Array.from(document.querySelectorAll('div, span'));
+            const targets = Array.from(document.querySelectorAll('div, span, button'));
             const bad = ["Plus","Team","Enterprise","Upgrade","GPT-4","admin","ChatGPT","Send message"];
             const el = targets.find(t => {
                 const txt = t.innerText;
                 if (!txt) return false;
                 const lower = txt.toLowerCase();
+                // "Thought for 1m 8s" é metadado pós-resposta (não indica geração ativa).
+                if (/^thought for\s+\d+/i.test(txt.trim()) || /^pensou por\s+\d+/i.test(txt.trim())) {
+                    return false;
+                }
                 const isStatus = lower.includes('pesquisando') || lower.includes('searching') ||
                                  lower.includes('buscando')    || lower.includes('browsing')  ||
                                  lower.includes('procurando')  || lower.includes('checking')  ||
@@ -2165,9 +2207,13 @@ async def handle_chat_task_inner(task, page, q, stop_event: asyncio.Event, activ
             const sendBtn = document.querySelector('button[data-testid="send-button"]');
             const ta = document.querySelector('#prompt-textarea');
             const stopVisible = !!(stopBtn && stopBtn.offsetParent !== null);
+            // sendDisabled isoladamente não indica geração:
+            // quando o composer está vazio, o botão "Enviar" costuma ficar desabilitado
+            // mesmo sem resposta em andamento.
             const sendDisabled = !!(sendBtn && (sendBtn.disabled || sendBtn.getAttribute('aria-disabled') === 'true'));
+            const textareaHasText = !!(ta && ((ta.innerText || '').trim().length > 0));
             const textareaBusy = !!(ta && ta.getAttribute('aria-busy') === 'true');
-            return { stopVisible, sendDisabled, textareaBusy };
+            return { stopVisible, sendDisabled, textareaHasText, textareaBusy };
         }""")
 
         if status_txt:
@@ -2179,7 +2225,11 @@ async def handle_chat_task_inner(task, page, q, stop_event: asyncio.Event, activ
         elif not started and loop_count % 10 == 0:
             emit_event(q, "status", "Aguardando resposta...")
 
-        is_gen = bool(gen_state.get('stopVisible') or gen_state.get('sendDisabled') or gen_state.get('textareaBusy'))
+        is_gen = bool(
+            gen_state.get('stopVisible')
+            or gen_state.get('textareaBusy')
+            or (gen_state.get('sendDisabled') and gen_state.get('textareaHasText'))
+        )
         if is_gen:
             started     = True
             stuck_count = 0
