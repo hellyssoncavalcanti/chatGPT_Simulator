@@ -2443,12 +2443,25 @@ if (isset($_GET['action']) && $_GET['action'] === 'download_file') {
         echo json_encode(['error' => 'ChatGPT Simulator não disponível']); exit;
     }
 
+    $apiKey = trim((string)($GLOBALS['CHATGPT_VIA_API_KEY'] ?? ''));
     $download_url = rtrim($sim_base, '/') . "/api/downloads/" . urlencode($filename);
+    // Reforço de autenticação para o Simulator:
+    // - Header Authorization (caminho principal)
+    // - api_key na query string (fallback compatível com check_auth)
+    if ($apiKey !== '') {
+        $download_url .= (strpos($download_url, '?') === false ? '?' : '&')
+            . 'api_key=' . rawurlencode($apiKey);
+    }
     $ch = curl_init($download_url);
     curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
     curl_setopt($ch, CURLOPT_FOLLOWLOCATION, true);
     curl_setopt($ch, CURLOPT_TIMEOUT, 90); // Timeout longo: browser.py faz proxy sob demanda via ChatGPT
     curl_setopt($ch, CURLOPT_HEADER, true);
+    if ($apiKey !== '') {
+        curl_setopt($ch, CURLOPT_HTTPHEADER, [
+            'Authorization: Bearer ' . $apiKey
+        ]);
+    }
     $response = curl_exec($ch);
     $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
     $header_size = curl_getinfo($ch, CURLINFO_HEADER_SIZE);
@@ -3210,10 +3223,10 @@ header('Content-Type: application/javascript; charset=utf-8');
 
     const css = `
         div.qtip { z-index: 2147483647 !important; }
-        #ow-widget { position: fixed; bottom: 20px; right: 20px; z-index: 99999; font-family: -apple-system, sans-serif; }
+        #ow-widget { position: fixed; bottom: 2.5vh; right: 1.2vw; z-index: 99999; font-family: -apple-system, sans-serif; }
         #ow-toggle-btn { width: 60px; height: 60px; background: #212121; border-radius: 50%; color: #fff; border:none; cursor:pointer; font-size:24px; box-shadow:0 4px 15px rgba(0,0,0,0.3); transition: transform 0.2s; }
         #ow-toggle-btn:hover { transform: scale(1.05); }
-        #ow-window { position: absolute; bottom: 80px; right: 0; width: 420px; height: 650px; background: #fff; border-radius: 12px; box-shadow: 0 5px 30px rgba(0,0,0,0.15); display: none; flex-direction: column; border: 1px solid #ddd; overflow: hidden; transition: width 0.3s, height 0.3s; z-index: 100000; }
+        #ow-window { position: absolute; bottom: clamp(72px, 9vh, 120px); right: 0; width: 420px; height: min(650px, 80vh); max-height: 80vh; background: #fff; border-radius: 12px; box-shadow: 0 5px 30px rgba(0,0,0,0.15); display: none; flex-direction: column; border: 1px solid #ddd; overflow: hidden; transition: width 0.3s, height 0.3s; z-index: 100000; }
         #ow-window.maximized { width: 90vw !important; height: 90vh !important; bottom: 5vh !important; right: 5vw !important; }
         #ow-backdrop { position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; background: rgba(0,0,0,0.5); z-index: 99998; display: none; backdrop-filter: blur(2px); }
         #ow-backdrop.active { display: block; }
