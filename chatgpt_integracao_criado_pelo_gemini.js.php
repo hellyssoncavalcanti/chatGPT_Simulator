@@ -3248,8 +3248,18 @@ header('Content-Type: application/javascript; charset=utf-8');
         #ow-input { flex: 1; padding: 12px; border: 1px solid #ddd; border-radius: 8px; resize: none; height: 45px; font-size: 14px; outline: none; }
         #ow-send { background: #212121; color: #fff; border: none; padding: 0 20px; border-radius: 8px; cursor: pointer; height: 45px; font-weight: 600; }
         #ow-send.stop-mode { background: #d32f2f; }
-        
-        #ow-mic { width: 45px; height: 45px; background: #f0f0f0; border: 1px solid #ccc; border-radius: 8px; cursor: pointer; font-size: 20px; display: flex; align-items: center; justify-content: center; transition: all 0.2s; }
+
+        #ow-attach-btn { width: 45px; height: 45px; background: #f0f0f0; border: 1px solid #ccc; border-radius: 8px; cursor: pointer; font-size: 18px; display: flex; align-items: center; justify-content: center; transition: all 0.2s; flex-shrink: 0; }
+        #ow-attach-btn:hover { background: #e0e0e0; border-color: #999; }
+        #ow-attach-preview { display: none; flex-wrap: wrap; gap: 6px; padding: 8px 15px 0; }
+        #ow-attach-preview.has-items { display: flex; }
+        .ow-att-chip { display: inline-flex; align-items: center; gap: 4px; background: #e8f0fe; border: 1px solid #c2d7f7; border-radius: 16px; padding: 3px 8px 3px 6px; font-size: 12px; color: #1a56db; max-width: 180px; }
+        .ow-att-chip img { width: 24px; height: 24px; border-radius: 4px; object-fit: cover; flex-shrink: 0; }
+        .ow-att-chip .ow-att-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .ow-att-chip .ow-att-remove { cursor: pointer; font-size: 14px; color: #666; margin-left: 2px; line-height: 1; flex-shrink: 0; }
+        .ow-att-chip .ow-att-remove:hover { color: #d32f2f; }
+
+        #ow-mic { width: 45px; height: 45px; background: #f0f0f0; border: 1px solid #ccc; border-radius: 8px; cursor: pointer; font-size: 20px; display: flex; align-items: center; justify-content: center; transition: all 0.2s; flex-shrink: 0; }
         #ow-mic.recording { background: #ffebee; border-color: #ef5350; color: #d32f2f; animation: pulseRed 1.5s infinite; }
         
         /* === ANÁLISE PRÉVIA DA LLM EXPOSTA NO CHAT — DESIGN SYSTEM = INICIO === */
@@ -3616,6 +3626,7 @@ header('Content-Type: application/javascript; charset=utf-8');
             #ow-input-area { padding: 8px 10px; gap: 6px; }
             #ow-input { height: 36px; padding: 8px; font-size: 14px; }
             #ow-send { height: 36px; padding: 0 14px; font-size: 13px; }
+            #ow-attach-btn { width: 36px; height: 36px; }
             #ow-mic { width: 36px; height: 36px; font-size: 16px; }
             #ow-toggle-btn { width: 44px; height: 44px; font-size: 18px; }
             .msg { font-size: 13px; padding: 8px 10px; }
@@ -3720,7 +3731,10 @@ header('Content-Type: application/javascript; charset=utf-8');
             </div>
             <div id="ow-body" style="flex:1; display:flex; flex-direction:column; position:relative; overflow:hidden;">
                 <div id="ow-messages"></div>
+                <div id="ow-attach-preview"></div>
                 <div id="ow-input-area">
+                    <button id="ow-attach-btn" title="Anexar arquivo"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/></svg></button>
+                    <input type="file" id="ow-file-input" multiple accept="image/*,.pdf,.doc,.docx,.xls,.xlsx,.csv,.txt,.json,.xml" style="display:none">
                     <button id="ow-mic" title="Ditado Clínico (Clique para falar)">🎤</button>
                     <textarea id="ow-input" placeholder="Pergunte algo..."></textarea>
                     <button id="ow-send">Enviar</button>
@@ -7787,7 +7801,7 @@ header('Content-Type: application/javascript; charset=utf-8');
         localStorage.removeItem(RECOVERY_KEY);
     }
 
-    async function sendWithRecovery(userTxt, ctx, retryCount = 0, partialContent = "") {
+    async function sendWithRecovery(userTxt, ctx, retryCount = 0, partialContent = "", attachments = []) {
         // ── Fonte de verdade: SEMPRE a primeira ação ────────────────────────────
         Session.setQuestion(userTxt);
 
@@ -7816,9 +7830,10 @@ header('Content-Type: application/javascript; charset=utf-8');
             : '';
 
         if (isSimulator && Session.chatId && isChatGPTUrl) {
-            promptFinal = userTxt;
+            promptFinal = userTxt || (attachments.length ? 'Analise o(s) arquivo(s) anexado(s).' : '');
         } else {
-            promptFinal = `[INICIO_TEXTO_COLADO]\n\nResponda em Português do Brasil.${speedHint}${languageInstruction}${sqlInstruction}${pageCtxStr && pageCtxStr.trim() !== '' ? `\n\n[DADOS DO PACIENTE E DO PROFISSIONAL QUE O ATENDEU]\n${pageCtxStr}` : ''}${ctx && ctx.trim() !== '' ? `\n\n[DADOS DE CONTEXTO]\n${ctx}` : ''}\n\n[FIM_TEXTO_COLADO]\n\n${USER_SEP}\n${userTxt}`;
+            const userPart = userTxt || (attachments.length ? 'Analise o(s) arquivo(s) anexado(s).' : '');
+            promptFinal = `[INICIO_TEXTO_COLADO]\n\nResponda em Português do Brasil.${speedHint}${languageInstruction}${sqlInstruction}${pageCtxStr && pageCtxStr.trim() !== '' ? `\n\n[DADOS DO PACIENTE E DO PROFISSIONAL QUE O ATENDEU]\n${pageCtxStr}` : ''}${ctx && ctx.trim() !== '' ? `\n\n[DADOS DE CONTEXTO]\n${ctx}` : ''}\n\n[FIM_TEXTO_COLADO]\n\n${USER_SEP}\n${userPart}`;
         }
 
         state.messages.push({ role: 'user', content: promptFinal });
@@ -7835,11 +7850,12 @@ header('Content-Type: application/javascript; charset=utf-8');
         }
         try {
             await apiCallStream('/v1/chat/completions', 'POST', {
-                model:    effectiveModel,          // ← usa a variável resolvida, não o .value direto
+                model:    effectiveModel,
                 messages: state.messages,
                 stream:   useStream,
                 chat_id:  Session.chatId  || null,
-                url:      Session.chatUrl || null
+                url:      Session.chatUrl || null,
+                attachments: attachments.length > 0 ? attachments : undefined
             }, (chunk) => {
                 // ── Metadados no root (formato legado) ────────────────────
                 if (chunk.chat_id || chunk.url) {
@@ -7958,6 +7974,94 @@ header('Content-Type: application/javascript; charset=utf-8');
 
     let firstSendDone = false; // Flag para verificar recovery apenas 1 vez
 
+    // ── Gerenciamento de anexos (Ctrl+V e clipe) ─────────────────────────
+    const _pendingAttachments = []; // { name, type, dataUrl }
+
+    function _fileToDataUrl(file) {
+        return new Promise((resolve, reject) => {
+            const r = new FileReader();
+            r.onload = () => resolve(r.result);
+            r.onerror = reject;
+            r.readAsDataURL(file);
+        });
+    }
+
+    async function _addAttachment(file) {
+        if (_pendingAttachments.length >= 10) return;
+        const dataUrl = await _fileToDataUrl(file);
+        _pendingAttachments.push({ name: file.name, type: file.type, dataUrl });
+        _renderAttachmentPreview();
+    }
+
+    function _removeAttachment(index) {
+        _pendingAttachments.splice(index, 1);
+        _renderAttachmentPreview();
+    }
+
+    function _clearAttachments() {
+        _pendingAttachments.length = 0;
+        _renderAttachmentPreview();
+    }
+
+    function _renderAttachmentPreview() {
+        const preview = document.getElementById('ow-attach-preview');
+        if (!preview) return;
+        preview.innerHTML = '';
+        if (_pendingAttachments.length === 0) {
+            preview.classList.remove('has-items');
+            return;
+        }
+        preview.classList.add('has-items');
+        _pendingAttachments.forEach((att, i) => {
+            const chip = document.createElement('div');
+            chip.className = 'ow-att-chip';
+            const isImg = att.type && att.type.startsWith('image/');
+            chip.innerHTML =
+                (isImg ? `<img src="${att.dataUrl}" alt="">` : '') +
+                `<span class="ow-att-name">${att.name}</span>` +
+                `<span class="ow-att-remove" title="Remover">&times;</span>`;
+            chip.querySelector('.ow-att-remove').onclick = () => _removeAttachment(i);
+            preview.appendChild(chip);
+        });
+    }
+
+    function _collectAttachmentsPayload() {
+        if (_pendingAttachments.length === 0) return [];
+        return _pendingAttachments.map(a => ({ name: a.name, data: a.dataUrl }));
+    }
+
+    // Ctrl+V no textarea: intercepta imagens/arquivos colados
+    document.addEventListener('DOMContentLoaded', () => {
+        const inp = document.getElementById('ow-input');
+        if (!inp) return;
+        inp.addEventListener('paste', async (e) => {
+            const items = e.clipboardData?.items;
+            if (!items) return;
+            for (const item of items) {
+                if (item.kind === 'file') {
+                    e.preventDefault();
+                    const file = item.getAsFile();
+                    if (file) await _addAttachment(file);
+                }
+            }
+        });
+    });
+
+    // Botão de clipe + input de arquivo
+    document.addEventListener('DOMContentLoaded', () => {
+        const attachBtn = document.getElementById('ow-attach-btn');
+        const fileInput = document.getElementById('ow-file-input');
+        if (attachBtn && fileInput) {
+            attachBtn.onclick = () => fileInput.click();
+            fileInput.onchange = async () => {
+                for (const file of fileInput.files) {
+                    await _addAttachment(file);
+                }
+                fileInput.value = '';
+            };
+        }
+    });
+
     async function send() {
         // Remove card de análise prévia ao iniciar conversa
         const cardAnalise = document.getElementById('ow-analise-previa');
@@ -7971,9 +8075,9 @@ header('Content-Type: application/javascript; charset=utf-8');
             return; 
         }
 
-        const userTxt = inp.value.trim(); 
-        if(!userTxt) return;
-        
+        const userTxt = inp.value.trim();
+        if(!userTxt && _pendingAttachments.length === 0) return;
+
         // Verifica recovery apenas no primeiro envio
         if (!firstSendDone) {
             firstSendDone = true;
@@ -7996,8 +8100,10 @@ header('Content-Type: application/javascript; charset=utf-8');
         }
         
         currentAbortController = new AbortController();
-        inp.value = ''; 
-        addSimpleMsg('user', userTxt); 
+        const attachmentsPayload = _collectAttachmentsPayload();
+        _clearAttachments();
+        inp.value = '';
+        addSimpleMsg('user', userTxt || (attachmentsPayload.length ? `[${attachmentsPayload.length} anexo(s)]` : ''));
         scroll(true);
         btn.innerText = 'Parar'; 
         btn.classList.add('stop-mode');
@@ -8058,7 +8164,7 @@ header('Content-Type: application/javascript; charset=utf-8');
             console.log(`%c${PREFIX} 🧠 Análise clínica injetada no ctx`, 'color: #4caf50; font-weight: bold');
         }
 
-        await sendWithRecovery(userTxt, ctx, 0, "");
+        await sendWithRecovery(userTxt, ctx, 0, "", attachmentsPayload);
     }
 
     window.retryFromRecovery = function() {
