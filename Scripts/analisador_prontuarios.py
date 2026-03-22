@@ -1345,6 +1345,30 @@ def enfileirar_atendimentos_antigos(id_paciente: str) -> int:
     return enfileirados
 
 
+
+
+def _obter_datas_referencia_compilada(id_paciente: str):
+    """
+    Para a síntese compilada do paciente, retorna:
+      - a data/hora de início de atendimento mais antiga já analisada;
+      - a data/hora de última atualização mais recente já analisada.
+
+    Ambas as referências são calculadas a partir das análises unitárias
+    (exclui o próprio registro compilado).
+    """
+    try:
+        row = sql_get_one(f"""
+            SELECT
+                MIN(NULLIF(datetime_atendimento_inicio, '0000-00-00 00:00:00')) AS dt_inicio_mais_antiga,
+                MAX(NULLIF(datetime_ultima_atualizacao_atendimento, '0000-00-00 00:00:00')) AS dt_ultima_atualizacao_mais_nova
+            FROM {TABELA}
+            WHERE id_paciente = '{esc(id_paciente)}'
+              AND COALESCE(id_criador, '') <> 'analise_compilada_paciente'
+        """) or {}
+        return row.get('dt_inicio_mais_antiga'), row.get('dt_ultima_atualizacao_mais_nova')
+    except Exception as e:
+        log.warning(f"  ⚠️ Erro ao obter datas de referência da síntese compilada do paciente {id_paciente}: {e}")
+        return None, None
 def contar_atendimentos_nao_concluidos_paciente(id_paciente: str) -> int:
     """Conta atendimentos do paciente que ainda não chegaram ao status concluído.
     Exclui análises com erro esgotado (tentativas >= MAX_TENTATIVAS) que nunca serão
@@ -1377,6 +1401,10 @@ def garantir_registro_compilado_paciente_pendente(id_paciente: str) -> int:
     os atendimentos unitários do paciente já estiverem concluídos, para que a
     síntese do paciente possa entrar na fila com id_atendimento NULL.
     """
+    dt_inicio_mais_antiga, dt_ultima_atualizacao_mais_nova = _obter_datas_referencia_compilada(id_paciente)
+    dt_inicio_sql = esc_str(str(dt_inicio_mais_antiga)) if dt_inicio_mais_antiga else "NULL"
+    dt_ultima_sql = esc_str(str(dt_ultima_atualizacao_mais_nova)) if dt_ultima_atualizacao_mais_nova else "NULL"
+
     existente = sql_exec(f"""
         SELECT id
         FROM {TABELA}
@@ -1391,8 +1419,8 @@ def garantir_registro_compilado_paciente_pendente(id_paciente: str) -> int:
         sql_exec(f"""
             UPDATE {TABELA} SET
                 id_atendimento = '',
-                datetime_atendimento_inicio = NULL,
-                datetime_ultima_atualizacao_atendimento = NULL,
+                datetime_atendimento_inicio = {dt_inicio_sql},
+                datetime_ultima_atualizacao_atendimento = {dt_ultima_sql},
                 id_criador = 'analise_compilada_paciente',
                 status = 'pendente',
                 erro_msg = NULL,
@@ -1410,8 +1438,8 @@ def garantir_registro_compilado_paciente_pendente(id_paciente: str) -> int:
              datetime_ultima_atualizacao_atendimento, status, tentativas, erro_msg,
              modelo_llm, prompt_version, chat_id, chat_url)
         VALUES
-            ('', {esc_str(id_paciente)}, 'analise_compilada_paciente', NULL,
-             NULL, 'pendente', 0, NULL,
+            ('', {esc_str(id_paciente)}, 'analise_compilada_paciente', {dt_inicio_sql},
+             {dt_ultima_sql}, 'pendente', 0, NULL,
              {esc_str(LLM_MODEL)}, {esc_str(PROMPT_VERSION)}, '', '')
     """, reason="criar_registro_compilado_pendente")
 
@@ -1888,10 +1916,11 @@ def montar_texto_compilado_paciente(id_paciente: str):
 def salvar_resultado_compilado_paciente(id_paciente: str, resultado: dict):
     id_registro = garantir_registro_compilado_paciente_pendente(id_paciente)
 
+    dt_inicio_mais_antiga, dt_ultima_atualizacao_mais_nova = _obter_datas_referencia_compilada(id_paciente)
     sets = [
         f"id_atendimento = {esc_str(_listar_ids_atendimentos_compilados(id_paciente))}",
-        "datetime_atendimento_inicio = NULL",
-        "datetime_ultima_atualizacao_atendimento = NULL",
+        f"datetime_atendimento_inicio = {esc_str(str(dt_inicio_mais_antiga)) if dt_inicio_mais_antiga else 'NULL'}",
+        f"datetime_ultima_atualizacao_atendimento = {esc_str(str(dt_ultima_atualizacao_mais_nova)) if dt_ultima_atualizacao_mais_nova else 'NULL'}",
         "id_criador = 'analise_compilada_paciente'",
         f"id_paciente = '{esc(id_paciente)}'",
     ] + _montar_sets_resultado(resultado)
@@ -2058,10 +2087,11 @@ def montar_texto_compilado_paciente(id_paciente: str):
 def salvar_resultado_compilado_paciente(id_paciente: str, resultado: dict):
     id_registro = garantir_registro_compilado_paciente_pendente(id_paciente)
 
+    dt_inicio_mais_antiga, dt_ultima_atualizacao_mais_nova = _obter_datas_referencia_compilada(id_paciente)
     sets = [
         f"id_atendimento = {esc_str(_listar_ids_atendimentos_compilados(id_paciente))}",
-        "datetime_atendimento_inicio = NULL",
-        "datetime_ultima_atualizacao_atendimento = NULL",
+        f"datetime_atendimento_inicio = {esc_str(str(dt_inicio_mais_antiga)) if dt_inicio_mais_antiga else 'NULL'}",
+        f"datetime_ultima_atualizacao_atendimento = {esc_str(str(dt_ultima_atualizacao_mais_nova)) if dt_ultima_atualizacao_mais_nova else 'NULL'}",
         "id_criador = 'analise_compilada_paciente'",
         f"id_paciente = '{esc(id_paciente)}'",
     ] + _montar_sets_resultado(resultado)
@@ -2222,10 +2252,11 @@ def montar_texto_compilado_paciente(id_paciente: str):
 def salvar_resultado_compilado_paciente(id_paciente: str, resultado: dict):
     id_registro = garantir_registro_compilado_paciente_pendente(id_paciente)
 
+    dt_inicio_mais_antiga, dt_ultima_atualizacao_mais_nova = _obter_datas_referencia_compilada(id_paciente)
     sets = [
         f"id_atendimento = {esc_str(_listar_ids_atendimentos_compilados(id_paciente))}",
-        "datetime_atendimento_inicio = NULL",
-        "datetime_ultima_atualizacao_atendimento = NULL",
+        f"datetime_atendimento_inicio = {esc_str(str(dt_inicio_mais_antiga)) if dt_inicio_mais_antiga else 'NULL'}",
+        f"datetime_ultima_atualizacao_atendimento = {esc_str(str(dt_ultima_atualizacao_mais_nova)) if dt_ultima_atualizacao_mais_nova else 'NULL'}",
         "id_criador = 'analise_compilada_paciente'",
         f"id_paciente = '{esc(id_paciente)}'",
     ] + _montar_sets_resultado(resultado)
@@ -2386,10 +2417,11 @@ def montar_texto_compilado_paciente(id_paciente: str):
 def salvar_resultado_compilado_paciente(id_paciente: str, resultado: dict):
     id_registro = garantir_registro_compilado_paciente_pendente(id_paciente)
 
+    dt_inicio_mais_antiga, dt_ultima_atualizacao_mais_nova = _obter_datas_referencia_compilada(id_paciente)
     sets = [
         f"id_atendimento = {esc_str(_listar_ids_atendimentos_compilados(id_paciente))}",
-        "datetime_atendimento_inicio = NULL",
-        "datetime_ultima_atualizacao_atendimento = NULL",
+        f"datetime_atendimento_inicio = {esc_str(str(dt_inicio_mais_antiga)) if dt_inicio_mais_antiga else 'NULL'}",
+        f"datetime_ultima_atualizacao_atendimento = {esc_str(str(dt_ultima_atualizacao_mais_nova)) if dt_ultima_atualizacao_mais_nova else 'NULL'}",
         "id_criador = 'analise_compilada_paciente'",
         f"id_paciente = '{esc(id_paciente)}'",
     ] + _montar_sets_resultado(resultado)
