@@ -419,99 +419,92 @@ function New-PullRequestsForPendingBranches {
     }
 
     $listaOrdenada = $listaComDatas | Sort-Object date -Descending
-    $maisRecente = $listaOrdenada[0]
-    $nomeBranch = $maisRecente.name
 
-    if ([string]::IsNullOrWhiteSpace($nomeBranch)) { return }
+    Write-Info "Criando PRs para $($listaOrdenada.Count) branch(es) pendente(s)..."
 
-    Write-Info "Branch mais recente sem PR: '$nomeBranch' ($($maisRecente.date))." -Color Cyan
+    foreach ($item in $listaOrdenada) {
+        $nomeBranch = $item.name
+        if ([string]::IsNullOrWhiteSpace($nomeBranch)) { continue }
 
-    # Buscar commits da branch em relacao ao base para montar titulo e corpo do PR
-    $prTitle = "Merge automatico: $nomeBranch"
-    $prBodyLines = @("PR gerado automaticamente pelo sync para a branch ``$nomeBranch``.", "")
+        Write-Info "Processando branch '$nomeBranch' ($($item.date))..." -Color Cyan
 
-    try {
-        $compare = Invoke-GitHubApi -Uri "$($script:Config.apiBase)/compare/$($script:Config.branch)...$($nomeBranch)"
-        $commits = @($compare.commits)
+        # Buscar commits da branch em relacao ao base para montar titulo e corpo do PR
+        $prTitle = "Merge automatico: $nomeBranch"
+        $prBodyLines = @("PR gerado automaticamente pelo sync para a branch ``$nomeBranch``.", "")
 
-        if ($commits.Count -gt 0) {
-            # Titulo: usar a mensagem do primeiro commit (primeira linha)
-            $firstMsg = ($commits[0].commit.message -split "`n")[0].Trim()
-            if ($commits.Count -eq 1) {
-                $prTitle = $firstMsg
-            } else {
-                # Multiplos commits: titulo resumido
-                $prTitle = $firstMsg
-                if ($prTitle.Length -gt 65) {
-                    $prTitle = $prTitle.Substring(0, 62) + '...'
-                }
-                $prTitle = "$prTitle (+$($commits.Count - 1))"
-            }
+        try {
+            $compare = Invoke-GitHubApi -Uri "$($script:Config.apiBase)/compare/$($script:Config.branch)...$($nomeBranch)"
+            $commits = @($compare.commits)
 
-            $prBodyLines += "## Commits"
-            $prBodyLines += ""
-            foreach ($c in $commits) {
-                $msg = ($c.commit.message -split "`n")[0].Trim()
-                $sha = $c.sha.Substring(0, 7)
-                $prBodyLines += "- ``$sha`` $msg"
-            }
-            $prBodyLines += ""
-
-            # Listar arquivos alterados
-            $files = @($compare.files)
-            if ($files.Count -gt 0) {
-                $prBodyLines += "## Arquivos alterados ($($files.Count))"
-                $prBodyLines += ""
-                foreach ($f in $files) {
-                    $statusIcon = switch ($f.status) {
-                        'added'    { '🆕' }
-                        'removed'  { '🗑️' }
-                        'modified' { '✏️' }
-                        'renamed'  { '📝' }
-                        default    { '📄' }
+            if ($commits.Count -gt 0) {
+                # Titulo: usar a mensagem do primeiro commit (primeira linha)
+                $firstMsg = ($commits[0].commit.message -split "`n")[0].Trim()
+                if ($commits.Count -eq 1) {
+                    $prTitle = $firstMsg
+                } else {
+                    # Multiplos commits: titulo resumido
+                    $prTitle = $firstMsg
+                    if ($prTitle.Length -gt 65) {
+                        $prTitle = $prTitle.Substring(0, 62) + '...'
                     }
-                    $prBodyLines += "- $statusIcon ``$($f.filename)`` (+$($f.additions) -$($f.deletions))"
+                    $prTitle = "$prTitle (+$($commits.Count - 1))"
                 }
+
+                $prBodyLines += "## Commits"
+                $prBodyLines += ""
+                foreach ($c in $commits) {
+                    $msg = ($c.commit.message -split "`n")[0].Trim()
+                    $sha = $c.sha.Substring(0, 7)
+                    $prBodyLines += "- ``$sha`` $msg"
+                }
+                $prBodyLines += ""
+
+                # Listar arquivos alterados
+                $files = @($compare.files)
+                if ($files.Count -gt 0) {
+                    $prBodyLines += "## Arquivos alterados ($($files.Count))"
+                    $prBodyLines += ""
+                    foreach ($f in $files) {
+                        $statusIcon = switch ($f.status) {
+                            'added'    { '🆕' }
+                            'removed'  { '🗑️' }
+                            'modified' { '✏️' }
+                            'renamed'  { '📝' }
+                            default    { '📄' }
+                        }
+                        $prBodyLines += "- $statusIcon ``$($f.filename)`` (+$($f.additions) -$($f.deletions))"
+                    }
+                }
+            } elseif ($commits.Count -eq 0) {
+                Write-Info "Branch '$nomeBranch' sem commits novos em relacao ao base. Pulando." -Color DarkGray
+                continue
+            }
+        } catch {
+            Write-Warn "Nao foi possivel obter commits da branch '$nomeBranch': $($_.Exception.Message)"
+        }
+
+        $prBody = $prBodyLines -join "`n"
+
+        try {
+            $newPr = Invoke-GitHubApi -Uri "$($script:Config.apiBase)/pulls" -Method Post -Body @{
+                title = $prTitle
+                head  = $nomeBranch
+                base  = $script:Config.branch
+                body  = $prBody
+            }
+            Write-Ok "PR #$($newPr.number) criado para '$nomeBranch': $prTitle"
+        } catch {
+            $errMsg = $_.Exception.Message
+            if ($errMsg -match 'No commits between' -or $errMsg -match 'already exists' -or $errMsg -match 'A pull request already exists') {
+                Write-Info "Branch '$nomeBranch' sem modificacoes reais ou PR ja existe." -Color DarkGray
+            } else {
+                Write-Warn "Falha ao criar PR para '$nomeBranch': $errMsg"
             }
         }
-    } catch {
-        Write-Warn "Nao foi possivel obter commits da branch: $($_.Exception.Message)"
     }
-
-    $prBody = $prBodyLines -join "`n"
-
-    try {
-        $newPr = Invoke-GitHubApi -Uri "$($script:Config.apiBase)/pulls" -Method Post -Body @{
-            title = $prTitle
-            head  = $nomeBranch
-            base  = $script:Config.branch
-            body  = $prBody
-        }
-        Write-Ok "PR #$($newPr.number) criado: $prTitle"
-    } catch {
-        $errMsg = $_.Exception.Message
-        if ($errMsg -match 'No commits between' -or $errMsg -match 'already exists' -or $errMsg -match 'A pull request already exists') {
-            Write-Info "Branch '$nomeBranch' sem modificacoes reais ou PR ja existe." -Color DarkGray
-        } else {
-            Write-Warn "Falha ao criar PR para '$nomeBranch': $errMsg"
-        }
-    }
-
-    # Faxina: deletar branches mais antigas que nao sao a mais recente
-    $outras = $listaOrdenada | Select-Object -Skip 1
-    $lixoRemovido = 0
-    foreach ($velha in $outras) {
-        if ($velha.name -match '^(claude|codex|chatgpt)/') {
-            try {
-                Invoke-GitHubApi -Uri "$($script:Config.apiBase)/git/refs/heads/$($velha.name)" -Method Delete -ErrorAction SilentlyContinue | Out-Null
-                $lixoRemovido++
-            } catch {}
-        }
-    }
-    if ($lixoRemovido -gt 0) { Write-Ok "Faxina: $lixoRemovido branch(es) antiga(s) deletada(s)." }
 }
 
-function Merge-NewestPullRequest {
+function Merge-AllPullRequests {
     Write-Section 'PULL REQUESTS'
 
     if (-not $script:Config.githubToken) {
@@ -520,11 +513,11 @@ function Merge-NewestPullRequest {
         return
     }
 
-    # Criar PRs automaticamente para branches pendentes (claude/, codex/, chatgpt/)
+    # Criar PRs automaticamente para TODAS as branches pendentes (claude/, codex/, chatgpt/)
     New-PullRequestsForPendingBranches
 
     try {
-        $prsResponse = Invoke-GitHubApi -Uri "$($script:Config.apiBase)/pulls?state=open&base=$($script:Config.branch)&per_page=100&sort=created&direction=desc"
+        $prsResponse = Invoke-GitHubApi -Uri "$($script:Config.apiBase)/pulls?state=open&base=$($script:Config.branch)&per_page=100&sort=created&direction=asc"
     } catch {
         $statusCode = $null
         try { $statusCode = [int]$_.Exception.Response.StatusCode.value__ } catch {}
@@ -548,66 +541,79 @@ function Merge-NewestPullRequest {
         return
     }
 
-    $ordered = @($prsArray | Sort-Object -Property number -Descending)
-    $newest = $ordered[0]
-    $older = @()
-    if ($ordered.Count -gt 1) {
-        $older = @($ordered[1..($ordered.Count - 1)])
-    }
+    # Ordena do mais antigo ao mais novo para merge sequencial
+    $ordered = @($prsArray | Sort-Object -Property number)
+    Write-Info ("Encontrado(s) {0} PR(s) aberto(s). Mergeando TODOS sequencialmente..." -f $ordered.Count)
 
-    $createdAtLog = if ($newest.created_at) { $newest.created_at } else { 'sem created_at' }
-    Write-Info ("PR mais recente: #{0} - {1} ({2})" -f $newest.number, $newest.title, $createdAtLog)
-    
-    if ($older.Count -gt 0) {
-        Write-Info ("Fechando {0} PR(s) mais antigo(s)." -f $older.Count)
-        foreach ($pr in $older) {
+    $mergedCount = 0
+    $failedCount = 0
+
+    foreach ($pr in $ordered) {
+        $createdAtLog = if ($pr.created_at) { $pr.created_at } else { 'sem created_at' }
+        Write-Info ("Processando PR #{0} - {1} ({2})" -f $pr.number, $pr.title, $createdAtLog)
+
+        # Verificar se já está mergeado
+        try {
+            $details = Invoke-GitHubApi -Uri "$($script:Config.apiBase)/pulls/$($pr.number)"
+            if ($details.merged -eq $true) {
+                Write-Info ("PR #{0} ja estava mergeado." -f $pr.number)
+                continue
+            }
+        } catch {
+            Write-Warn ("Falha ao obter detalhes do PR #{0}: {1}" -f $pr.number, $_.Exception.Message)
+            $failedCount++
+            continue
+        }
+
+        # Tentar merge via API
+        try {
+            $mergeResult = Invoke-GitHubApi -Uri "$($script:Config.apiBase)/pulls/$($pr.number)/merge" -Method Put -Body @{ merge_method = 'merge' }
+            $script:LastMergeInfo = $mergeResult
+            Write-Ok ("PR #{0} mergeado automaticamente via API." -f $pr.number)
+            $mergedCount++
+        } catch {
+            Write-Warn "API recusou merge do PR #$($pr.number). Tentando resolucao automatica de conflitos..."
+
             try {
-                Invoke-GitHubApi -Uri "$($script:Config.apiBase)/issues/$($pr.number)/comments" -Method Post -Body @{ body = "Fechado automaticamente porque o PR mais recente (#$($newest.number)) sera processado pelo sync automatico." } | Out-Null
-                Invoke-GitHubApi -Uri "$($script:Config.apiBase)/pulls/$($pr.number)" -Method Patch -Body @{ state = 'closed' } | Out-Null
-                Write-Info ("PR #{0} fechado." -f $pr.number)
+                $resolveDir = Join-Path $script:Config.tempDir "resolve_$($pr.number)"
+                if (Test-Path $resolveDir) { Remove-Item -Path $resolveDir -Recurse -Force -ErrorAction SilentlyContinue }
+
+                $repoUrl = Get-RepoUrlForClone
+
+                Invoke-Git -Args @('clone', '--progress', '--branch', $script:Config.branch, $repoUrl, $resolveDir) -ShowProgress -ProgressMessage "Clonando temp para conflito PR #$($pr.number)" | Out-Null
+
+                Invoke-Git -Args @('config', 'user.name', 'ChatGPT-AutoSync') -WorkingDirectory $resolveDir | Out-Null
+                Invoke-Git -Args @('config', 'user.email', 'autosync@conexaovida.org') -WorkingDirectory $resolveDir | Out-Null
+
+                Invoke-Git -Args @('fetch', '--progress', 'origin', "pull/$($pr.number)/head:pr_branch") -ShowProgress -ProgressMessage "Baixando PR #$($pr.number)" -WorkingDirectory $resolveDir | Out-Null
+
+                Write-Info "Resolvendo conflitos (priorizando alteracoes do PR)..."
+                Invoke-Git -Args @('merge', 'pr_branch', '-X', 'theirs', '-m', "Auto-resolucao de conflitos do PR #$($pr.number)") -WorkingDirectory $resolveDir | Out-Null
+
+                Invoke-Git -Args @('push', '--progress', 'origin', $script:Config.branch) -ShowProgress -ProgressMessage "Enviando resolucao do PR #$($pr.number)" -WorkingDirectory $resolveDir | Out-Null
+
+                Write-Ok ("PR #{0} mergeado com resolucao automatica de conflitos." -f $pr.number)
+                $mergedCount++
+
+                # Limpar diretorio temporario
+                Remove-Item -Path $resolveDir -Recurse -Force -ErrorAction SilentlyContinue
             } catch {
-                Write-Warn ("Falha ao fechar PR #{0}: {1}" -f $pr.number, $_.Exception.Message)
+                Write-Fail ("Nao foi possivel resolver conflito do PR #{0}: {1}" -f $pr.number, $_.Exception.Message)
+                $failedCount++
             }
         }
-    }
 
-    $details = Invoke-GitHubApi -Uri "$($script:Config.apiBase)/pulls/$($newest.number)"
-    if ($details.merged -eq $true) {
-        Write-Info ("PR #{0} ja estava mergeado." -f $newest.number)
-        return
-    }
-
-    try {
-        $mergeResult = Invoke-GitHubApi -Uri "$($script:Config.apiBase)/pulls/$($newest.number)/merge" -Method Put -Body @{ merge_method = 'merge' }
-        $script:LastMergeInfo = $mergeResult
-        Write-Ok ("PR #{0} mergeado automaticamente via API (método: merge)." -f $newest.number)
-    } catch {
-        Write-Warn "API do GitHub recusou o merge (Erro de Conflito). Iniciando resolução automática..."
-        
+        # Deletar branch remota do PR apos merge (faxina)
         try {
-            $resolveDir = Join-Path $script:Config.tempDir "resolve_$($newest.number)"
-            if (Test-Path $resolveDir) { Remove-Item -Path $resolveDir -Recurse -Force -ErrorAction SilentlyContinue }
-            
-            $repoUrl = Get-RepoUrlForClone
-            
-            Invoke-Git -Args @('clone', '--progress', '--branch', $script:Config.branch, $repoUrl, $resolveDir) -ShowProgress -ProgressMessage "Clonando temp para conflito" | Out-Null
-            
-            Invoke-Git -Args @('config', 'user.name', 'ChatGPT-AutoSync') -WorkingDirectory $resolveDir | Out-Null
-            Invoke-Git -Args @('config', 'user.email', 'autosync@conexaovida.org') -WorkingDirectory $resolveDir | Out-Null
-            
-            Invoke-Git -Args @('fetch', '--progress', 'origin', "pull/$($newest.number)/head:pr_branch") -ShowProgress -ProgressMessage "Baixando o codigo do PR #$($newest.number)" -WorkingDirectory $resolveDir | Out-Null
-            
-            Write-Info "Forcando a resolucao do conflito (priorizando sempre as alteracoes novas)..."
-            Invoke-Git -Args @('merge', 'pr_branch', '-X', 'theirs', '-m', "Auto-resolucao de conflitos do PR #$($newest.number)") -WorkingDirectory $resolveDir | Out-Null
-            
-            Invoke-Git -Args @('push', '--progress', 'origin', $script:Config.branch) -ShowProgress -ProgressMessage "Enviando alteracoes corrigidas" -WorkingDirectory $resolveDir | Out-Null
-            
-            Write-Ok ("Conflitos resolvidos sozinho! PR #{0} mergeado e encerrado com sucesso." -f $newest.number)
-        } catch {
-            Write-Fail "Nao foi possivel resolver o conflito automaticamente: $($_.Exception.Message)"
-            Write-Warn "O script continuara operando apenas com o que ja foi aprovado na branch principal."
-        }
+            $branchName = $pr.head.ref
+            if ($branchName -and $branchName -match '^(claude|codex|chatgpt)/') {
+                Invoke-GitHubApi -Uri "$($script:Config.apiBase)/git/refs/heads/$branchName" -Method Delete | Out-Null
+                Write-Info "Branch '$branchName' deletada apos merge."
+            }
+        } catch { }
     }
+
+    Write-Ok ("Resumo PRs: $mergedCount mergeado(s), $failedCount com falha, $($ordered.Count) total.")
 }
 
 function Fetch-RepositoryMirror {
@@ -888,7 +894,7 @@ function Run-SyncCycle {
 
         Log-RunningProcessesStatus
 
-        Merge-NewestPullRequest
+        Merge-AllPullRequests
         Fetch-RepositoryMirror
         Sync-FilesFromMirror
 
