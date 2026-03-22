@@ -448,16 +448,16 @@ def garantir_tabela():
             CREATE TABLE IF NOT EXISTS {TABELA} (
                 id                                      INT UNSIGNED AUTO_INCREMENT PRIMARY KEY
                                                         COMMENT 'Chave primaria interna da tabela de analises.',
-                id_atendimento                          INT(10) NULL
-                                                        COMMENT 'FK para clinica_atendimentos.id. NULL = sintese compilada do paciente.',
+                id_atendimento                          LONGTEXT NULL
+                                                        COMMENT 'ID do atendimento (unitário) ou lista textual de IDs dos atendimentos consolidados (síntese compilada do paciente).',
                 datetime_atendimento_inicio             DATETIME NULL
                                                         COMMENT 'Data/hora de inicio do atendimento clinico. NULL = sintese compilada do paciente.',
                 datetime_ultima_atualizacao_atendimento DATETIME NULL
                                                         COMMENT 'COALESCE(datetime_atualizacao, datetime_consulta_fim) no momento da analise.',
                 id_paciente                             VARCHAR(800) NOT NULL
                                                         COMMENT 'FK para membros.id do paciente.',
-                id_criador                              VARCHAR(10) NULL
-                                                        COMMENT 'FK para membros.id do profissional criador. NULL = sintese compilada do paciente.',
+                id_criador                              LONGTEXT NULL
+                                                        COMMENT 'FK para membros.id do profissional criador (unitário) ou descritor analise_compilada_paciente nas sínteses compiladas.',
                 datetime_analise_criacao                DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
                                                         COMMENT 'Data/hora de insercao do registro.',
                 datetime_analise_iniciada               DATETIME NULL
@@ -527,7 +527,7 @@ def garantir_tabela():
                 prompt_version                          VARCHAR(30) NULL
                                                         COMMENT 'Versao do prompt clinico utilizado. Facilita auditoria e reprocessamento por versao.',
                 hash_prontuario                         CHAR(64) NULL
-                                                        COMMENT 'Hash SHA-256 do conteudo bruto do prontuario. Para sinteses compiladas do paciente, usar o marcador literal analise_compilada_paciente.',
+                                                        COMMENT 'Hash SHA-256 do conteudo bruto do prontuario analisado.',
                 -- cdss / scoring
                 score_risco                             TINYINT NULL
                                                         COMMENT 'Score numerico de risco clinico estimado pela analise: 1=baixo, 2=moderado, 3=alto.',
@@ -538,8 +538,7 @@ def garantir_tabela():
                 INDEX  idx_atendimento (id_atendimento),
                 INDEX  idx_paciente    (id_paciente),
                 INDEX  idx_status      (status),
-                INDEX  idx_hash        (hash_prontuario),
-                UNIQUE KEY uq_atendimento (id_atendimento)
+                INDEX  idx_hash        (hash_prontuario)
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
         """)
         log.info(f"✅ Tabela {TABELA} verificada/criada.")
@@ -618,7 +617,7 @@ def garantir_colunas_v16():
     colunas_v16 = [
         ("modelo_llm",        "VARCHAR(100) NULL", "Modelo LLM utilizado para gerar esta analise."),
         ("prompt_version",    "VARCHAR(30) NULL",  "Versao do prompt clinico utilizado."),
-        ("hash_prontuario",   "CHAR(64) NULL",     "Hash SHA-256 do conteudo bruto do prontuario. Para sinteses compiladas do paciente, usar o marcador literal analise_compilada_paciente."),
+        ("hash_prontuario",   "CHAR(64) NULL",     "Hash SHA-256 do conteudo bruto do prontuario analisado."),
         ("score_risco",       "TINYINT NULL",      "Score numerico de risco clinico: 1=baixo, 2=moderado, 3=alto."),
         ("alertas_clinicos",  "LONGTEXT NULL",     "JSON array de alertas clinicos identificados automaticamente."),
         ("casos_semelhantes", "LONGTEXT NULL",     "JSON array com IDs de atendimentos clinicamente semelhantes."),
@@ -647,9 +646,9 @@ def garantir_schema_analise_compilada_paciente():
     longitudinal do paciente usando apenas id_paciente como localizador.
     """
     ajustes = [
-        f"ALTER TABLE {TABELA} MODIFY COLUMN id_atendimento INT(10) NULL COMMENT 'FK para clinica_atendimentos.id. NULL = sintese compilada do paciente.'",
+        f"ALTER TABLE {TABELA} MODIFY COLUMN id_atendimento LONGTEXT NULL COMMENT 'ID do atendimento (unitário) ou lista textual de IDs dos atendimentos consolidados (síntese compilada do paciente).'",
         f"ALTER TABLE {TABELA} MODIFY COLUMN datetime_atendimento_inicio DATETIME NULL COMMENT 'Data/hora de inicio do atendimento clinico. NULL = sintese compilada do paciente.'",
-        f"ALTER TABLE {TABELA} MODIFY COLUMN id_criador VARCHAR(10) NULL COMMENT 'FK para membros.id do profissional criador. NULL = sintese compilada do paciente.'",
+        f"ALTER TABLE {TABELA} MODIFY COLUMN id_criador LONGTEXT NULL COMMENT 'FK para membros.id do profissional criador (unitário) ou descritor analise_compilada_paciente nas sínteses compiladas.'",
         f"ALTER TABLE {TABELA} ADD INDEX idx_paciente (id_paciente)",
     ]
     for sql in ajustes:
@@ -671,9 +670,9 @@ def garantir_schema_analise_compilada_paciente():
     longitudinal do paciente usando apenas id_paciente como localizador.
     """
     ajustes = [
-        f"ALTER TABLE {TABELA} MODIFY COLUMN id_atendimento INT(10) NULL COMMENT 'FK para clinica_atendimentos.id. NULL = sintese compilada do paciente.'",
+        f"ALTER TABLE {TABELA} MODIFY COLUMN id_atendimento LONGTEXT NULL COMMENT 'ID do atendimento (unitário) ou lista textual de IDs dos atendimentos consolidados (síntese compilada do paciente).'",
         f"ALTER TABLE {TABELA} MODIFY COLUMN datetime_atendimento_inicio DATETIME NULL COMMENT 'Data/hora de inicio do atendimento clinico. NULL = sintese compilada do paciente.'",
-        f"ALTER TABLE {TABELA} MODIFY COLUMN id_criador VARCHAR(10) NULL COMMENT 'FK para membros.id do profissional criador. NULL = sintese compilada do paciente.'",
+        f"ALTER TABLE {TABELA} MODIFY COLUMN id_criador LONGTEXT NULL COMMENT 'FK para membros.id do profissional criador (unitário) ou descritor analise_compilada_paciente nas sínteses compiladas.'",
         f"ALTER TABLE {TABELA} ADD INDEX idx_paciente (id_paciente)",
     ]
     for sql in ajustes:
@@ -695,9 +694,9 @@ def garantir_schema_analise_compilada_paciente():
     longitudinal do paciente usando apenas id_paciente como localizador.
     """
     ajustes = [
-        f"ALTER TABLE {TABELA} MODIFY COLUMN id_atendimento INT(10) NULL COMMENT 'FK para clinica_atendimentos.id. NULL = sintese compilada do paciente.'",
+        f"ALTER TABLE {TABELA} MODIFY COLUMN id_atendimento LONGTEXT NULL COMMENT 'ID do atendimento (unitário) ou lista textual de IDs dos atendimentos consolidados (síntese compilada do paciente).'",
         f"ALTER TABLE {TABELA} MODIFY COLUMN datetime_atendimento_inicio DATETIME NULL COMMENT 'Data/hora de inicio do atendimento clinico. NULL = sintese compilada do paciente.'",
-        f"ALTER TABLE {TABELA} MODIFY COLUMN id_criador VARCHAR(10) NULL COMMENT 'FK para membros.id do profissional criador. NULL = sintese compilada do paciente.'",
+        f"ALTER TABLE {TABELA} MODIFY COLUMN id_criador LONGTEXT NULL COMMENT 'FK para membros.id do profissional criador (unitário) ou descritor analise_compilada_paciente nas sínteses compiladas.'",
         f"ALTER TABLE {TABELA} ADD INDEX idx_paciente (id_paciente)",
     ]
     for sql in ajustes:
@@ -719,9 +718,9 @@ def garantir_schema_analise_compilada_paciente():
     longitudinal do paciente usando apenas id_paciente como localizador.
     """
     ajustes = [
-        f"ALTER TABLE {TABELA} MODIFY COLUMN id_atendimento INT(10) NULL COMMENT 'FK para clinica_atendimentos.id. NULL = sintese compilada do paciente.'",
+        f"ALTER TABLE {TABELA} MODIFY COLUMN id_atendimento LONGTEXT NULL COMMENT 'ID do atendimento (unitário) ou lista textual de IDs dos atendimentos consolidados (síntese compilada do paciente).'",
         f"ALTER TABLE {TABELA} MODIFY COLUMN datetime_atendimento_inicio DATETIME NULL COMMENT 'Data/hora de inicio do atendimento clinico. NULL = sintese compilada do paciente.'",
-        f"ALTER TABLE {TABELA} MODIFY COLUMN id_criador VARCHAR(10) NULL COMMENT 'FK para membros.id do profissional criador. NULL = sintese compilada do paciente.'",
+        f"ALTER TABLE {TABELA} MODIFY COLUMN id_criador LONGTEXT NULL COMMENT 'FK para membros.id do profissional criador (unitário) ou descritor analise_compilada_paciente nas sínteses compiladas.'",
         f"ALTER TABLE {TABELA} ADD INDEX idx_paciente (id_paciente)",
     ]
     for sql in ajustes:
@@ -743,9 +742,9 @@ def garantir_schema_analise_compilada_paciente():
     longitudinal do paciente usando apenas id_paciente como localizador.
     """
     ajustes = [
-        f"ALTER TABLE {TABELA} MODIFY COLUMN id_atendimento INT(10) NULL COMMENT 'FK para clinica_atendimentos.id. NULL = sintese compilada do paciente.'",
+        f"ALTER TABLE {TABELA} MODIFY COLUMN id_atendimento LONGTEXT NULL COMMENT 'ID do atendimento (unitário) ou lista textual de IDs dos atendimentos consolidados (síntese compilada do paciente).'",
         f"ALTER TABLE {TABELA} MODIFY COLUMN datetime_atendimento_inicio DATETIME NULL COMMENT 'Data/hora de inicio do atendimento clinico. NULL = sintese compilada do paciente.'",
-        f"ALTER TABLE {TABELA} MODIFY COLUMN id_criador VARCHAR(10) NULL COMMENT 'FK para membros.id do profissional criador. NULL = sintese compilada do paciente.'",
+        f"ALTER TABLE {TABELA} MODIFY COLUMN id_criador LONGTEXT NULL COMMENT 'FK para membros.id do profissional criador (unitário) ou descritor analise_compilada_paciente nas sínteses compiladas.'",
         f"ALTER TABLE {TABELA} ADD INDEX idx_paciente (id_paciente)",
     ]
     for sql in ajustes:
@@ -771,6 +770,9 @@ def garantir_migracoes():
       • seguimento_retorno_estimado  VARCHAR(100) → LONGTEXT
         Motivo: o campo recebe o objeto JSON completo de seguimento, que pode
         facilmente ultrapassar os 100 caracteres do tipo original.
+      • hash_prontuario (comentário)
+        Motivo: remover referência antiga ao descritor analise_compilada_paciente,
+        que agora é salvo em id_criador nas análises compiladas.
     """
     migracoes = [
         (
@@ -779,6 +781,14 @@ def garantir_migracoes():
             ALTER TABLE {TABELA}
             MODIFY COLUMN seguimento_retorno_estimado LONGTEXT NULL
             COMMENT 'JSON completo do objeto seguimento_retorno_estimado retornado pelo LLM.'
+            """
+        ),
+        (
+            "hash_prontuario COMMENT atualizado",
+            f"""
+            ALTER TABLE {TABELA}
+            MODIFY COLUMN hash_prontuario CHAR(64) NULL
+            COMMENT 'Hash SHA-256 do conteudo bruto do prontuario analisado.'
             """
         ),
     ]
@@ -829,7 +839,6 @@ def garantir_tabela_embeddings():
                 embedding_vector    LONGTEXT      NOT NULL COMMENT 'JSON array com o vetor de embedding',
                 hash_prontuario     CHAR(64)      NULL     COMMENT 'SHA-256 do texto do prontuario',
                 datetime_criacao    DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                UNIQUE KEY uq_atendimento (id_atendimento),
                 INDEX idx_paciente (id_paciente),
                 INDEX idx_hash     (hash_prontuario)
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
@@ -1154,10 +1163,10 @@ def buscar_pendentes() -> dict:
     stats = sql_exec(f"""
         SELECT
             COUNT(*) AS total_tabela,
-            SUM(la.id_atendimento IS NULL) AS total_analises_compiladas_paciente,
-            SUM(la.id_atendimento IS NULL AND la.status IN ('pendente', 'erro') AND (la.status = 'pendente' OR la.tentativas < {MAX_TENTATIVAS})) AS total_compiladas_pendentes,
+            SUM(COALESCE(la.id_criador, '') = 'analise_compilada_paciente') AS total_analises_compiladas_paciente,
+            SUM(COALESCE(la.id_criador, '') = 'analise_compilada_paciente' AND la.status IN ('pendente', 'erro') AND (la.status = 'pendente' OR la.tentativas < {MAX_TENTATIVAS})) AS total_compiladas_pendentes,
             SUM(
-                la.id_atendimento IS NOT NULL
+                COALESCE(la.id_criador, '') <> 'analise_compilada_paciente'
                 AND la.status = 'concluido'
                 AND NOT IFNULL(
                     COALESCE(
@@ -1167,12 +1176,12 @@ def buscar_pendentes() -> dict:
                     0
                 )
             ) AS total_concluidos,
-            SUM(la.id_atendimento IS NOT NULL AND la.status = 'pendente') AS total_pendentes,
-            SUM(la.id_atendimento IS NOT NULL AND la.status = 'processando') AS total_processando,
-            SUM(la.id_atendimento IS NOT NULL AND la.status = 'erro' AND la.tentativas < {MAX_TENTATIVAS}) AS total_erros,
-            SUM(la.id_atendimento IS NOT NULL AND la.status = 'erro' AND la.tentativas >= {MAX_TENTATIVAS}) AS total_esgotados,
+            SUM(COALESCE(la.id_criador, '') <> 'analise_compilada_paciente' AND la.status = 'pendente') AS total_pendentes,
+            SUM(COALESCE(la.id_criador, '') <> 'analise_compilada_paciente' AND la.status = 'processando') AS total_processando,
+            SUM(COALESCE(la.id_criador, '') <> 'analise_compilada_paciente' AND la.status = 'erro' AND la.tentativas < {MAX_TENTATIVAS}) AS total_erros,
+            SUM(COALESCE(la.id_criador, '') <> 'analise_compilada_paciente' AND la.status = 'erro' AND la.tentativas >= {MAX_TENTATIVAS}) AS total_esgotados,
             SUM(
-                la.id_atendimento IS NOT NULL
+                COALESCE(la.id_criador, '') <> 'analise_compilada_paciente'
                 AND la.status = 'concluido'
                 AND IFNULL(
                     COALESCE(
@@ -1225,20 +1234,19 @@ def buscar_pendentes() -> dict:
         SELECT la.erro_msg
         FROM {TABELA} la
         WHERE
-            la.id_atendimento IS NOT NULL
+            COALESCE(la.id_criador, '') <> 'analise_compilada_paciente'
             AND la.status = 'erro'
             AND la.tentativas >= {MAX_TENTATIVAS}
         ORDER BY la.id DESC
         LIMIT 200
     """)
 
-    # Buscar sínteses compiladas de pacientes pendentes (id_atendimento IS NULL)
+    # Buscar sínteses compiladas de pacientes pendentes (id_criador = analise_compilada_paciente)
     compiladas_pendentes = sql_exec(f"""
         SELECT la.id, la.id_paciente
         FROM {TABELA} la
         WHERE
-            la.id_atendimento IS NULL
-            AND la.id_criador IS NULL
+            la.id_criador = 'analise_compilada_paciente'
             AND la.status IN ('pendente', 'erro')
             AND (la.status = 'pendente' OR la.tentativas < {MAX_TENTATIVAS})
         ORDER BY la.datetime_analise_criacao ASC
@@ -1319,8 +1327,6 @@ def enfileirar_atendimentos_antigos(id_paciente: str) -> int:
                 (id_atendimento, id_paciente, id_criador, datetime_atendimento_inicio, status)
             VALUES
                 {", ".join(valores_sql)}
-            ON DUPLICATE KEY UPDATE
-                id_atendimento = id_atendimento
         """)
     except Exception as e:
         log.warning(f"  ⚠️ Erro ao salvar atendimentos antigos do paciente {id_paciente}: {e}")
@@ -1339,6 +1345,30 @@ def enfileirar_atendimentos_antigos(id_paciente: str) -> int:
     return enfileirados
 
 
+
+
+def _obter_datas_referencia_compilada(id_paciente: str):
+    """
+    Para a síntese compilada do paciente, retorna:
+      - a data/hora de início de atendimento mais antiga já analisada;
+      - a data/hora de última atualização mais recente já analisada.
+
+    Ambas as referências são calculadas a partir das análises unitárias
+    (exclui o próprio registro compilado).
+    """
+    try:
+        row = sql_get_one(f"""
+            SELECT
+                MIN(NULLIF(datetime_atendimento_inicio, '0000-00-00 00:00:00')) AS dt_inicio_mais_antiga,
+                MAX(NULLIF(datetime_ultima_atualizacao_atendimento, '0000-00-00 00:00:00')) AS dt_ultima_atualizacao_mais_nova
+            FROM {TABELA}
+            WHERE id_paciente = '{esc(id_paciente)}'
+              AND COALESCE(id_criador, '') <> 'analise_compilada_paciente'
+        """) or {}
+        return row.get('dt_inicio_mais_antiga'), row.get('dt_ultima_atualizacao_mais_nova')
+    except Exception as e:
+        log.warning(f"  ⚠️ Erro ao obter datas de referência da síntese compilada do paciente {id_paciente}: {e}")
+        return None, None
 def contar_atendimentos_nao_concluidos_paciente(id_paciente: str) -> int:
     """Conta atendimentos do paciente que ainda não chegaram ao status concluído.
     Exclui análises com erro esgotado (tentativas >= MAX_TENTATIVAS) que nunca serão
@@ -1348,7 +1378,7 @@ def contar_atendimentos_nao_concluidos_paciente(id_paciente: str) -> int:
             SELECT COUNT(*) AS total
             FROM {TABELA}
             WHERE id_paciente = '{esc(id_paciente)}'
-              AND id_atendimento IS NOT NULL
+              AND COALESCE(id_criador, '') <> 'analise_compilada_paciente'
               AND (
                   status IN ('pendente', 'processando')
                   OR (status = 'erro' AND tentativas < {MAX_TENTATIVAS})
@@ -1371,12 +1401,15 @@ def garantir_registro_compilado_paciente_pendente(id_paciente: str) -> int:
     os atendimentos unitários do paciente já estiverem concluídos, para que a
     síntese do paciente possa entrar na fila com id_atendimento NULL.
     """
+    dt_inicio_mais_antiga, dt_ultima_atualizacao_mais_nova = _obter_datas_referencia_compilada(id_paciente)
+    dt_inicio_sql = esc_str(str(dt_inicio_mais_antiga)) if dt_inicio_mais_antiga else "NULL"
+    dt_ultima_sql = esc_str(str(dt_ultima_atualizacao_mais_nova)) if dt_ultima_atualizacao_mais_nova else "NULL"
+
     existente = sql_exec(f"""
         SELECT id
         FROM {TABELA}
         WHERE id_paciente = '{esc(id_paciente)}'
-          AND id_atendimento IS NULL
-          AND id_criador IS NULL
+          AND id_criador = 'analise_compilada_paciente'
         ORDER BY id DESC
         LIMIT 1
     """, reason="buscar_registro_compilado_pendente").get("data", [])
@@ -1385,15 +1418,14 @@ def garantir_registro_compilado_paciente_pendente(id_paciente: str) -> int:
         id_registro = int(existente[0]["id"])
         sql_exec(f"""
             UPDATE {TABELA} SET
-                id_atendimento = NULL,
-                datetime_atendimento_inicio = NULL,
-                datetime_ultima_atualizacao_atendimento = NULL,
-                id_criador = NULL,
+                id_atendimento = '',
+                datetime_atendimento_inicio = {dt_inicio_sql},
+                datetime_ultima_atualizacao_atendimento = {dt_ultima_sql},
+                id_criador = 'analise_compilada_paciente',
                 status = 'pendente',
                 erro_msg = NULL,
                 chat_id = '',
                 chat_url = '',
-                hash_prontuario = 'analise_compilada_paciente',
                 modelo_llm = {esc_str(LLM_MODEL)},
                 prompt_version = {esc_str(PROMPT_VERSION)}
             WHERE id = {id_registro}
@@ -1404,19 +1436,18 @@ def garantir_registro_compilado_paciente_pendente(id_paciente: str) -> int:
         INSERT INTO {TABELA}
             (id_atendimento, id_paciente, id_criador, datetime_atendimento_inicio,
              datetime_ultima_atualizacao_atendimento, status, tentativas, erro_msg,
-             modelo_llm, prompt_version, chat_id, chat_url, hash_prontuario)
+             modelo_llm, prompt_version, chat_id, chat_url)
         VALUES
-            (NULL, {esc_str(id_paciente)}, NULL, NULL,
-             NULL, 'pendente', 0, NULL,
-             {esc_str(LLM_MODEL)}, {esc_str(PROMPT_VERSION)}, '', '', 'analise_compilada_paciente')
+            ('', {esc_str(id_paciente)}, 'analise_compilada_paciente', {dt_inicio_sql},
+             {dt_ultima_sql}, 'pendente', 0, NULL,
+             {esc_str(LLM_MODEL)}, {esc_str(PROMPT_VERSION)}, '', '')
     """, reason="criar_registro_compilado_pendente")
 
     criado = sql_exec(f"""
         SELECT id
         FROM {TABELA}
         WHERE id_paciente = '{esc(id_paciente)}'
-          AND id_atendimento IS NULL
-          AND id_criador IS NULL
+          AND id_criador = 'analise_compilada_paciente'
         ORDER BY id DESC
         LIMIT 1
     """, reason="buscar_registro_compilado_pendente_criado").get("data", [])
@@ -1617,7 +1648,7 @@ def montar_texto_compilado_paciente(id_paciente: str):
         FROM {TABELA}
         WHERE id_paciente = '{esc(id_paciente)}'
           AND status = 'concluido'
-          AND id_atendimento IS NOT NULL
+          AND COALESCE(id_criador, '') <> 'analise_compilada_paciente'
         ORDER BY datetime_atendimento_inicio ASC, id_atendimento ASC
         LIMIT 50
     """, reason="carregar_analises_paciente_compilado").get("data", [])
@@ -1684,15 +1715,32 @@ def montar_texto_compilado_paciente(id_paciente: str):
     return texto, rows[-1]
 
 
+def _listar_ids_atendimentos_compilados(id_paciente: str) -> str:
+    rows = sql_exec(f"""
+        SELECT id_atendimento
+        FROM {TABELA}
+        WHERE id_paciente = '{esc(id_paciente)}'
+          AND status = 'concluido'
+          AND COALESCE(id_criador, '') <> 'analise_compilada_paciente'
+        ORDER BY datetime_atendimento_inicio DESC, id DESC
+        LIMIT 100
+    """, reason="listar_ids_atendimentos_compilados").get("data", [])
+    ids = []
+    for row in rows:
+        val = str(row.get("id_atendimento") or "").strip()
+        if val:
+            ids.append(val)
+    return ",".join(ids)
+
+
 def salvar_resultado_compilado_paciente(id_paciente: str, resultado: dict):
     id_registro = garantir_registro_compilado_paciente_pendente(id_paciente)
 
     sets = _montar_sets_resultado(resultado) + [
-        "id_atendimento = NULL",
+        f"id_atendimento = {esc_str(_listar_ids_atendimentos_compilados(id_paciente))}",
         "datetime_atendimento_inicio = NULL",
         "datetime_ultima_atualizacao_atendimento = NULL",
-        "id_criador = NULL",
-        "hash_prontuario = 'analise_compilada_paciente'",
+        "id_criador = 'analise_compilada_paciente'",
         f"id_paciente = '{esc(id_paciente)}'",
     ]
 
@@ -1815,7 +1863,7 @@ def montar_texto_compilado_paciente(id_paciente: str):
         FROM {TABELA}
         WHERE id_paciente = '{esc(id_paciente)}'
           AND status = 'concluido'
-          AND id_atendimento IS NOT NULL
+          AND COALESCE(id_criador, '') <> 'analise_compilada_paciente'
         ORDER BY datetime_atendimento_inicio DESC, id_atendimento DESC
         LIMIT 25
     """, reason="carregar_analises_paciente_compilado").get("data", [])
@@ -1868,12 +1916,12 @@ def montar_texto_compilado_paciente(id_paciente: str):
 def salvar_resultado_compilado_paciente(id_paciente: str, resultado: dict):
     id_registro = garantir_registro_compilado_paciente_pendente(id_paciente)
 
+    dt_inicio_mais_antiga, dt_ultima_atualizacao_mais_nova = _obter_datas_referencia_compilada(id_paciente)
     sets = [
-        "id_atendimento = NULL",
-        "datetime_atendimento_inicio = NULL",
-        "datetime_ultima_atualizacao_atendimento = NULL",
-        "id_criador = NULL",
-        "hash_prontuario = 'analise_compilada_paciente'",
+        f"id_atendimento = {esc_str(_listar_ids_atendimentos_compilados(id_paciente))}",
+        f"datetime_atendimento_inicio = {esc_str(str(dt_inicio_mais_antiga)) if dt_inicio_mais_antiga else 'NULL'}",
+        f"datetime_ultima_atualizacao_atendimento = {esc_str(str(dt_ultima_atualizacao_mais_nova)) if dt_ultima_atualizacao_mais_nova else 'NULL'}",
+        "id_criador = 'analise_compilada_paciente'",
         f"id_paciente = '{esc(id_paciente)}'",
     ] + _montar_sets_resultado(resultado)
 
@@ -1986,7 +2034,7 @@ def montar_texto_compilado_paciente(id_paciente: str):
         FROM {TABELA}
         WHERE id_paciente = '{esc(id_paciente)}'
           AND status = 'concluido'
-          AND id_atendimento IS NOT NULL
+          AND COALESCE(id_criador, '') <> 'analise_compilada_paciente'
         ORDER BY datetime_atendimento_inicio DESC, id_atendimento DESC
         LIMIT 25
     """, reason="carregar_analises_paciente_compilado").get("data", [])
@@ -2039,12 +2087,12 @@ def montar_texto_compilado_paciente(id_paciente: str):
 def salvar_resultado_compilado_paciente(id_paciente: str, resultado: dict):
     id_registro = garantir_registro_compilado_paciente_pendente(id_paciente)
 
+    dt_inicio_mais_antiga, dt_ultima_atualizacao_mais_nova = _obter_datas_referencia_compilada(id_paciente)
     sets = [
-        "id_atendimento = NULL",
-        "datetime_atendimento_inicio = NULL",
-        "datetime_ultima_atualizacao_atendimento = NULL",
-        "id_criador = NULL",
-        "hash_prontuario = 'analise_compilada_paciente'",
+        f"id_atendimento = {esc_str(_listar_ids_atendimentos_compilados(id_paciente))}",
+        f"datetime_atendimento_inicio = {esc_str(str(dt_inicio_mais_antiga)) if dt_inicio_mais_antiga else 'NULL'}",
+        f"datetime_ultima_atualizacao_atendimento = {esc_str(str(dt_ultima_atualizacao_mais_nova)) if dt_ultima_atualizacao_mais_nova else 'NULL'}",
+        "id_criador = 'analise_compilada_paciente'",
         f"id_paciente = '{esc(id_paciente)}'",
     ] + _montar_sets_resultado(resultado)
 
@@ -2151,7 +2199,7 @@ def montar_texto_compilado_paciente(id_paciente: str):
         FROM {TABELA}
         WHERE id_paciente = '{esc(id_paciente)}'
           AND status = 'concluido'
-          AND id_atendimento IS NOT NULL
+          AND COALESCE(id_criador, '') <> 'analise_compilada_paciente'
         ORDER BY datetime_atendimento_inicio DESC, id_atendimento DESC
         LIMIT 25
     """, reason="carregar_analises_paciente_compilado").get("data", [])
@@ -2204,12 +2252,12 @@ def montar_texto_compilado_paciente(id_paciente: str):
 def salvar_resultado_compilado_paciente(id_paciente: str, resultado: dict):
     id_registro = garantir_registro_compilado_paciente_pendente(id_paciente)
 
+    dt_inicio_mais_antiga, dt_ultima_atualizacao_mais_nova = _obter_datas_referencia_compilada(id_paciente)
     sets = [
-        "id_atendimento = NULL",
-        "datetime_atendimento_inicio = NULL",
-        "datetime_ultima_atualizacao_atendimento = NULL",
-        "id_criador = NULL",
-        "hash_prontuario = 'analise_compilada_paciente'",
+        f"id_atendimento = {esc_str(_listar_ids_atendimentos_compilados(id_paciente))}",
+        f"datetime_atendimento_inicio = {esc_str(str(dt_inicio_mais_antiga)) if dt_inicio_mais_antiga else 'NULL'}",
+        f"datetime_ultima_atualizacao_atendimento = {esc_str(str(dt_ultima_atualizacao_mais_nova)) if dt_ultima_atualizacao_mais_nova else 'NULL'}",
+        "id_criador = 'analise_compilada_paciente'",
         f"id_paciente = '{esc(id_paciente)}'",
     ] + _montar_sets_resultado(resultado)
 
@@ -2316,7 +2364,7 @@ def montar_texto_compilado_paciente(id_paciente: str):
         FROM {TABELA}
         WHERE id_paciente = '{esc(id_paciente)}'
           AND status = 'concluido'
-          AND id_atendimento IS NOT NULL
+          AND COALESCE(id_criador, '') <> 'analise_compilada_paciente'
         ORDER BY datetime_atendimento_inicio DESC, id_atendimento DESC
         LIMIT 25
     """, reason="carregar_analises_paciente_compilado").get("data", [])
@@ -2369,12 +2417,12 @@ def montar_texto_compilado_paciente(id_paciente: str):
 def salvar_resultado_compilado_paciente(id_paciente: str, resultado: dict):
     id_registro = garantir_registro_compilado_paciente_pendente(id_paciente)
 
+    dt_inicio_mais_antiga, dt_ultima_atualizacao_mais_nova = _obter_datas_referencia_compilada(id_paciente)
     sets = [
-        "id_atendimento = NULL",
-        "datetime_atendimento_inicio = NULL",
-        "datetime_ultima_atualizacao_atendimento = NULL",
-        "id_criador = NULL",
-        "hash_prontuario = 'analise_compilada_paciente'",
+        f"id_atendimento = {esc_str(_listar_ids_atendimentos_compilados(id_paciente))}",
+        f"datetime_atendimento_inicio = {esc_str(str(dt_inicio_mais_antiga)) if dt_inicio_mais_antiga else 'NULL'}",
+        f"datetime_ultima_atualizacao_atendimento = {esc_str(str(dt_ultima_atualizacao_mais_nova)) if dt_ultima_atualizacao_mais_nova else 'NULL'}",
+        "id_criador = 'analise_compilada_paciente'",
         f"id_paciente = '{esc(id_paciente)}'",
     ] + _montar_sets_resultado(resultado)
 
