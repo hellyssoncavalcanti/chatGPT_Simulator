@@ -48,6 +48,8 @@ tab_semaphore = asyncio.Semaphore(MAX_TABS)
 SCREENSHOT_STREAM_INTERVAL_SEC = 2.0
 SCREENSHOT_STREAM_JPEG_QUALITY = 45
 SCREENSHOT_STREAM_MAX_BYTES = 300_000
+_SCREENSHOT_INLINE_LAST_LEN = 0
+_SCREENSHOT_INLINE_LAST_MSG = ""
 
 def emit_log(q, msg):
     if q: q.put(json.dumps({"type": "log", "content": f"[browser.py] {msg}"}) + "\n")
@@ -114,6 +116,7 @@ async def _should_keep_context_minimized(context) -> bool:
 
 
 async def _emit_browser_screenshot(page, q, label: str = "browser"):
+    global _SCREENSHOT_INLINE_LAST_LEN, _SCREENSHOT_INLINE_LAST_MSG
     if not q:
         return
     try:
@@ -129,8 +132,13 @@ async def _emit_browser_screenshot(page, q, label: str = "browser"):
         if len(raw) > SCREENSHOT_STREAM_MAX_BYTES:
             return
         kb = len(raw) / 1024
-        print(f"📸 Screenshot stream [{label}]: {kb:.1f} KB — {page.url[:80]}", flush=True)
-        emit_log(q, f"📸 Screenshot stream [{label}]: {kb:.1f} KB — {page.url[:80]}")
+        msg = f"📸 Screenshot stream [{label}]: {kb:.1f} KB — {page.url[:80]}"
+        # Evita “flood” no CMD quando o conteúdo do stream não mudou:
+        # mantém uma única linha por ação e atualiza apenas quando houver mudança.
+        if msg != _SCREENSHOT_INLINE_LAST_MSG:
+            print(f"\r{msg.ljust(_SCREENSHOT_INLINE_LAST_LEN)}", end="", flush=True)
+            _SCREENSHOT_INLINE_LAST_LEN = len(msg)
+            _SCREENSHOT_INLINE_LAST_MSG = msg
         emit_event(q, "screenshot", {
             "label": label,
             "format": "jpeg",
@@ -143,6 +151,7 @@ async def _emit_browser_screenshot(page, q, label: str = "browser"):
 
 
 async def _stream_browser_screenshots(page, q, stop_event: asyncio.Event, label: str = "browser"):
+    global _SCREENSHOT_INLINE_LAST_LEN, _SCREENSHOT_INLINE_LAST_MSG
     if not q:
         return
     try:
@@ -154,6 +163,11 @@ async def _stream_browser_screenshots(page, q, stop_event: asyncio.Event, label:
                 await _emit_browser_screenshot(page, q, label=label)
     except asyncio.CancelledError:
         raise
+    finally:
+        if _SCREENSHOT_INLINE_LAST_LEN > 0:
+            print("", flush=True)
+            _SCREENSHOT_INLINE_LAST_LEN = 0
+            _SCREENSHOT_INLINE_LAST_MSG = ""
 
 
 def _composer_state_script():
@@ -639,26 +653,28 @@ async def wait_for_chat_ready(page, url: str, q=None, timeout: int = 30) -> bool
         const ta = document.querySelector('#prompt-textarea');
         if (!ta || ta.disabled) return { ready: false, signal: 'textarea_disabled' };
 
-        // Sinal 2: send-button existe e não está disabled/aria-disabled
+        // Sinal 2: se houver "Stop generating", ainda está processando
+        const stopBtn = document.querySelector(
+            'button[aria-label="Stop generating"], button[data-testid="stop-button"]'
+        );
+        if (stopBtn) {
+            return { ready: false, signal: 'generating' };
+        }
+
+        // Sinal 3: send-button existe e não está disabled/aria-disabled
         const btn = document.querySelector('button[data-testid="send-button"]');
         if (btn) {
             const ariaDisabled = btn.getAttribute('aria-disabled');
             if (!btn.disabled && ariaDisabled !== 'true') {
                 return { ready: true, signal: 'send_button_enabled' };
             }
-            return { ready: false, signal: 'send_button_disabled' };
+            // No ChatGPT o botão costuma ficar desabilitado quando o input está vazio.
+            // Isso NÃO significa que a página não está pronta.
+            return { ready: true, signal: 'send_button_disabled_but_idle' };
         }
 
-        // Sinal 3: fallback — send-button não existe no DOM mas também não há
-        // botão "Stop generating" → chat está ocioso e pronto para input
-        const stopBtn = document.querySelector(
-            'button[aria-label="Stop generating"], button[data-testid="stop-button"]'
-        );
-        if (!stopBtn) {
-            return { ready: true, signal: 'no_stop_button_fallback' };
-        }
-
-        return { ready: false, signal: 'generating' };
+        // Sinal 4: fallback — sem send-button e sem "Stop", mas textarea habilitado
+        return { ready: true, signal: 'no_send_button_fallback' };
     }"""
 
     attempt = 0
@@ -725,7 +741,7 @@ def _resolve_chatgpt_download_url(raw_url: str) -> str:
     return raw_url
 
 
-async def _detect_and_register_files(page, markdown_text, q=None):
+async def _detect_and_register_files(page, markdown_text, q=None, allow_click_fallback=True):
     """
     Detecta links de download no markdown da resposta do ChatGPT e
     registra as URLs originais em shared.file_registry para proxy
@@ -787,7 +803,7 @@ async def _detect_and_register_files(page, markdown_text, q=None):
             emit_log(q, f"⚠️ Erro ao detectar links na página: {e}")
 
         # Fallback 2: clica em elementos de download do code interpreter para capturar via auto-download
-        if not page_links:
+        if not page_links and allow_click_fallback:
             try:
                 clicked = await _click_chatgpt_download_elements(page, q)
                 if clicked:
@@ -868,6 +884,38 @@ async def _click_chatgpt_download_elements(page, q=None):
                     }
                 });
             }
+
+            // Padrão 3: cards de arquivo recentes (UI nova), onde os botões são ícones
+            // sem texto e o nome do arquivo fica no cabeçalho.
+            const cardSelectors = [
+                'div.group.my-4.w-full.rounded-2xl',
+                'div[class*="corner-superellipse"]'
+            ];
+            const seenCards = new Set();
+            cardSelectors.forEach(sel => {
+                document.querySelectorAll(sel).forEach((card, cardIdx) => {
+                    if (seenCards.has(card)) return;
+                    seenCards.add(card);
+
+                    const headerText = (card.innerText || '').trim();
+                    const m = headerText.match(/[\\w\\-. ]+\\.(xlsx|xls|csv|pdf|docx|doc|pptx|ppt|zip|rar|json|xml|txt|png|jpg|jpeg|gif|svg)/i);
+                    if (!m) return;
+                    const filename = m[0].trim();
+
+                    const buttons = card.querySelectorAll('button');
+                    buttons.forEach((btn, btnIdx) => {
+                        const disabled = btn.disabled || btn.getAttribute('aria-disabled') === 'true';
+                        if (disabled) return;
+                        results.push({
+                            cardIndex: cardIdx,
+                            buttonIndex: btnIdx,
+                            text: filename,
+                            selector: 'file_card_btn',
+                            cardSelector: sel
+                        });
+                    });
+                });
+            });
             return results;
         }""")
 
@@ -880,6 +928,11 @@ async def _click_chatgpt_download_elements(page, q=None):
                 if el['selector'] == 'button_in_last':
                     last_msg = page.locator('[data-message-author-role="assistant"]').last
                     btn = last_msg.locator('button, [role="button"]').nth(el['index'])
+                    await btn.click(timeout=3000)
+                elif el['selector'] == 'file_card_btn':
+                    cards = page.locator(el.get('cardSelector') or 'div.group.my-4.w-full.rounded-2xl')
+                    card = cards.nth(el.get('cardIndex', 0))
+                    btn = card.locator('button').nth(el.get('buttonIndex', 0))
                     await btn.click(timeout=3000)
                 else:
                     link = page.locator('a').nth(el['index'])
@@ -1200,6 +1253,46 @@ async def handle_sync_task(context, task):
     keep_minimized = await _should_keep_context_minimized(context)
     page    = await context.new_page()
     await _preserve_minimized_if_needed(page, keep_minimized=keep_minimized)
+    # Captura de downloads disparados durante SYNC (cards de arquivo sem URL explícita)
+    # Sem persistir em disco: preferimos payload em memória (ou URL fallback).
+    _sync_auto_downloads = []
+
+    def _on_sync_download(download):
+        async def _save():
+            try:
+                suggested = download.suggested_filename or "download"
+                dl_url = getattr(download, "url", None)
+                if callable(dl_url):
+                    dl_url = dl_url()
+
+                payload_b64 = None
+                try:
+                    tmp_path = await download.path()
+                    if tmp_path and os.path.isfile(tmp_path):
+                        with open(tmp_path, "rb") as f:
+                            payload_b64 = base64.b64encode(f.read()).decode("ascii")
+                except Exception:
+                    payload_b64 = None
+
+                if not payload_b64 and not dl_url:
+                    emit_log(q, f"⚠️ [SYNC] Download sem payload/URL disponível: {suggested}")
+                    return
+
+                safe = re.sub(r"[^\w.\-]", "_", suggested)
+                file_id = f"sync_{int(time.time() * 1000)}_{safe}"
+                _sync_auto_downloads.append({
+                    "name": suggested,
+                    "file_id": file_id,
+                    "url": dl_url or "",
+                    "payload_b64": payload_b64,
+                    "content_type": "application/octet-stream"
+                })
+                emit_log(q, f"⬇️ [SYNC] Auto-download capturado: {suggested}")
+            except Exception as e:
+                emit_log(q, f"⚠️ [SYNC] Erro no auto-download: {e}")
+        asyncio.ensure_future(_save())
+
+    page.on("download", _on_sync_download)
     try:
         url    = task.get('url')
         chat_id = task.get('chat_id')
@@ -1317,6 +1410,56 @@ async def handle_sync_task(context, task):
                 m['content'] = md(clean).strip()
             m['content'] = m['content'].replace('\u200b', '').replace('\xa0', ' ')
             m['content'] = m['content'].replace('\\_', '_').replace('\\*', '*')  # ✅ FIX — era omitido aqui
+
+        # Garante persistência de links de download também no fluxo de SYNC:
+        # quando o ChatGPT renderiza "cards" de arquivo sem URL visível no markdown,
+        # tentamos detectar/registrar os links na página e anexá-los na última resposta da IA.
+        try:
+            last_ai_idx = max((i for i, m in enumerate(msgs) if m.get('role') == 'assistant'), default=-1)
+            if last_ai_idx >= 0:
+                msgs[last_ai_idx]['content'] = await _detect_and_register_files(
+                    page,
+                    msgs[last_ai_idx].get('content') or '',
+                    q,
+                    allow_click_fallback=False
+                )
+        except Exception as e_files:
+            emit_log(q, f"⚠️ Falha ao detectar links de download durante SYNC: {e_files}")
+
+        # Fallback extra: alguns cards novos do ChatGPT não expõem URL no HTML/markdown.
+        # Nesses casos, tentamos clicar nos elementos de download para disparar o evento
+        # Playwright "download" e então registrar o arquivo no stream.
+        try:
+            has_download_markers = any(
+                (m.get('role') == 'assistant') and (
+                    '/api/downloads/' in (m.get('content') or '') or '📎 Arquivo:' in (m.get('content') or '')
+                )
+                for m in msgs
+            )
+            if not has_download_markers and not _sync_auto_downloads:
+                clicked = await _click_chatgpt_download_elements(page, q)
+                if clicked:
+                    await asyncio.sleep(2)
+        except Exception as e_click_dl:
+            emit_log(q, f"⚠️ Falha ao clicar cards de download no SYNC: {e_click_dl}")
+
+        if _sync_auto_downloads:
+            await asyncio.sleep(1)
+            last_ai_idx = max((i for i, m in enumerate(msgs) if m.get('role') == 'assistant'), default=-1)
+            if last_ai_idx >= 0:
+                extra_links = []
+                for dl in _sync_auto_downloads:
+                    register_file(
+                        dl["file_id"],
+                        dl["url"],
+                        dl["name"],
+                        payload_b64=dl.get("payload_b64"),
+                        content_type=dl.get("content_type")
+                    )
+                    extra_links.append(f"📎 Arquivo: [{dl['name']}](/api/downloads/{dl['file_id']})")
+                if extra_links:
+                    base = msgs[last_ai_idx].get('content') or ''
+                    msgs[last_ai_idx]['content'] = (base + "\n\n" + "\n".join(extra_links)).strip()
 
         title = await get_chat_title(page)
         emit_event(q, 'syncresult', {
@@ -1937,21 +2080,40 @@ async def handle_chat_task_inner(task, page, q, stop_event: asyncio.Event, activ
     atts   = task.get('attachment_paths')
 
     # Handler para capturar downloads automáticos do ChatGPT (code interpreter, etc.)
-    downloads_dir = config.DIRS.get("downloads", os.path.join(config.BASE_DIR, "downloads"))
-    os.makedirs(downloads_dir, exist_ok=True)
+    # Sem salvar em disco: payload em memória (ou URL fallback).
     _auto_downloads = []
 
     def _on_download(download):
         async def _save():
             try:
                 suggested = download.suggested_filename or "download"
-                safe = re.sub(r'[^\w.\-]', '_', suggested)
-                ts = int(time.time() * 1000)
-                local_name = f"{ts}_{safe}"
-                local_path = os.path.join(downloads_dir, local_name)
-                await download.save_as(local_path)
-                _auto_downloads.append({"name": suggested, "local": local_name, "path": local_path})
-                emit_log(q, f"⬇️ Auto-download capturado: {suggested} → {local_name}")
+                dl_url = getattr(download, "url", None)
+                if callable(dl_url):
+                    dl_url = dl_url()
+
+                payload_b64 = None
+                try:
+                    tmp_path = await download.path()
+                    if tmp_path and os.path.isfile(tmp_path):
+                        with open(tmp_path, "rb") as f:
+                            payload_b64 = base64.b64encode(f.read()).decode("ascii")
+                except Exception:
+                    payload_b64 = None
+
+                if not payload_b64 and not dl_url:
+                    emit_log(q, f"⚠️ Auto-download sem payload/URL disponível: {suggested}")
+                    return
+
+                safe = re.sub(r"[^\w.\-]", "_", suggested)
+                file_id = f"{int(time.time() * 1000)}_{safe}"
+                _auto_downloads.append({
+                    "name": suggested,
+                    "file_id": file_id,
+                    "url": dl_url or "",
+                    "payload_b64": payload_b64,
+                    "content_type": "application/octet-stream"
+                })
+                emit_log(q, f"⬇️ Auto-download capturado: {suggested}")
             except Exception as e:
                 emit_log(q, f"⚠️ Erro no auto-download: {e}")
         asyncio.ensure_future(_save())
@@ -2061,12 +2223,16 @@ async def handle_chat_task_inner(task, page, q, stop_event: asyncio.Event, activ
                 const details = lastAsst.querySelectorAll('details');
                 if (details.length > 0) return details[details.length - 1].innerText.trim();
             }
-            const targets = Array.from(document.querySelectorAll('div, span'));
+            const targets = Array.from(document.querySelectorAll('div, span, button'));
             const bad = ["Plus","Team","Enterprise","Upgrade","GPT-4","admin","ChatGPT","Send message"];
             const el = targets.find(t => {
                 const txt = t.innerText;
                 if (!txt) return false;
                 const lower = txt.toLowerCase();
+                // "Thought for 1m 8s" é metadado pós-resposta (não indica geração ativa).
+                if (/^thought for\s+\d+/i.test(txt.trim()) || /^pensou por\s+\d+/i.test(txt.trim())) {
+                    return false;
+                }
                 const isStatus = lower.includes('pesquisando') || lower.includes('searching') ||
                                  lower.includes('buscando')    || lower.includes('browsing')  ||
                                  lower.includes('procurando')  || lower.includes('checking')  ||
@@ -2086,9 +2252,13 @@ async def handle_chat_task_inner(task, page, q, stop_event: asyncio.Event, activ
             const sendBtn = document.querySelector('button[data-testid="send-button"]');
             const ta = document.querySelector('#prompt-textarea');
             const stopVisible = !!(stopBtn && stopBtn.offsetParent !== null);
+            // sendDisabled isoladamente não indica geração:
+            // quando o composer está vazio, o botão "Enviar" costuma ficar desabilitado
+            // mesmo sem resposta em andamento.
             const sendDisabled = !!(sendBtn && (sendBtn.disabled || sendBtn.getAttribute('aria-disabled') === 'true'));
+            const textareaHasText = !!(ta && ((ta.innerText || '').trim().length > 0));
             const textareaBusy = !!(ta && ta.getAttribute('aria-busy') === 'true');
-            return { stopVisible, sendDisabled, textareaBusy };
+            return { stopVisible, sendDisabled, textareaHasText, textareaBusy };
         }""")
 
         if status_txt:
@@ -2100,7 +2270,11 @@ async def handle_chat_task_inner(task, page, q, stop_event: asyncio.Event, activ
         elif not started and loop_count % 10 == 0:
             emit_event(q, "status", "Aguardando resposta...")
 
-        is_gen = bool(gen_state.get('stopVisible') or gen_state.get('sendDisabled') or gen_state.get('textareaBusy'))
+        is_gen = bool(
+            gen_state.get('stopVisible')
+            or gen_state.get('textareaBusy')
+            or (gen_state.get('sendDisabled') and gen_state.get('textareaHasText'))
+        )
         if is_gen:
             started     = True
             stuck_count = 0
@@ -2191,14 +2365,18 @@ async def handle_chat_task_inner(task, page, q, stop_event: asyncio.Event, activ
     if _auto_downloads:
         await asyncio.sleep(1)  # aguarda downloads pendentes
     for dl in _auto_downloads:
-        file_id = dl['local']
-        # Auto-downloads já foram salvos em disco pelo handler; registra o path local
-        register_file(file_id, f"local:{dl['path']}", dl['name'])
-        link_md = f"\n\n📎 Arquivo: [{dl['name']}](/api/downloads/{file_id})"
-        if file_id not in markdown_text:
+        register_file(
+            dl["file_id"],
+            dl["url"],
+            dl["name"],
+            payload_b64=dl.get("payload_b64"),
+            content_type=dl.get("content_type")
+        )
+        link_md = f"\n\n📎 Arquivo: [{dl['name']}](/api/downloads/{dl['file_id']})"
+        if dl["file_id"] not in markdown_text:
             markdown_text += link_md
             changed = True
-        emit_log(q, f"📎 Auto-download registrado: {dl['name']} → {file_id}")
+        emit_log(q, f"📎 Auto-download registrado: {dl['name']} → {dl['file_id']}")
 
     if changed:
         emit_event(q, "markdown", markdown_text)
