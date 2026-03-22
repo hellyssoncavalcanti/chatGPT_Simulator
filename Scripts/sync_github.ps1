@@ -781,7 +781,7 @@ function Sync-RemotePhpIfNeeded {
     ) -join ' '
     $payloadTempFile = Join-Path $script:Config.tempDir ("remote_php_payload_{0}.json" -f (Get-Date -Format 'yyyyMMdd_HHmmss_fff'))
     try { Set-Content -Path $payloadTempFile -Value $payload -Encoding UTF8 -NoNewline } catch { }
-    $curlCommand = "curl -X POST `"$targetUrl`" $curlHeaders --data-binary `@$payloadTempFile`"
+    $curlCommand = ('curl -X POST "{0}" {1} --data-binary "@{2}"' -f $targetUrl, $curlHeaders, $payloadTempFile)
 
     try {
         $responseRaw = Invoke-WebRequest `
