@@ -753,8 +753,11 @@ function Sync-RemotePhpIfNeeded {
         throw "Arquivo PHP alterado nao encontrado localmente para sync remoto: $localPhpPath"
     }
 
+    # Lemos o conteúdo do ficheiro
     $conteudo = Get-Content -Path $localPhpPath -Raw -Encoding UTF8
-    $payload = @{
+    
+    # Montamos o JSON como texto
+    $payloadString = @{
         api_key  = $script:Config.remotePhpApiKey
         filepath = $script:Config.remotePhpTargetPath
         conteudo = $conteudo
@@ -776,19 +779,25 @@ function Sync-RemotePhpIfNeeded {
     Write-Info "Iniciando requisicao de atualizacao remota (timeout: 60s)..."
 
     $curlHeaders = @(
-        "-H ""Content-Type: application/json""",
+        "-H ""Content-Type: application/json; charset=utf-8""",
         "-H ""Accept: application/json"""
     ) -join ' '
     $payloadTempFile = Join-Path $script:Config.tempDir ("remote_php_payload_{0}.json" -f (Get-Date -Format 'yyyyMMdd_HHmmss_fff'))
-    try { Set-Content -Path $payloadTempFile -Value $payload -Encoding UTF8 -NoNewline } catch { }
+    try { Set-Content -Path $payloadTempFile -Value $payloadString -Encoding UTF8 -NoNewline } catch { }
     $curlCommand = ('curl -X POST "{0}" {1} --data-binary "@{2}"' -f $targetUrl, $curlHeaders, $payloadTempFile)
 
-    try {
+    # --- A MÁGICA ACONTECE AQUI ---
+    # Convertemos a string JSON diretamente em bytes UTF-8 estritos
+    # Isto impede o PowerShell de corromper os acentos durante o envio!
+    $payloadBytes = [System.Text.Encoding]::UTF8.GetBytes($payloadString)
+
+try {
         $responseRaw = Invoke-WebRequest `
             -Method Post `
             -Uri $script:Config.remotePhpSaveUrl `
-            -ContentType 'application/json' `
-            -Body $payload `
+            -ContentType 'application/json; charset=utf-8' `
+            -Body $payloadBytes `
+            -UseBasicParsing `
             -TimeoutSec 60
 
         $statusCode = [int]$responseRaw.StatusCode
@@ -843,6 +852,8 @@ function Sync-RemotePhpIfNeeded {
         throw $_
     }
 }
+
+
 
 function Log-RunningProcessesStatus {
     Write-Section 'MONITORAMENTO DE PROCESSOS'
