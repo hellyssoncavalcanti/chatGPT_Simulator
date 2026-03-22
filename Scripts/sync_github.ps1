@@ -145,6 +145,10 @@ function Import-Settings {
         syncIntervalMinutes = 10
         chatProcessPattern  = 'Scripts\\main.py'
         analyzerPattern     = 'Scripts\\analisador_prontuarios.py'
+        remotePhpSaveUrl    = if ($env:CHATGPT_SIMULATOR_REMOTE_PHP_SAVE_URL) { $env:CHATGPT_SIMULATOR_REMOTE_PHP_SAVE_URL } else { 'https://conexaovida.org/editar_php.php?action=save_file_remote' }
+        remotePhpApiKey     = if ($env:CHATGPT_SIMULATOR_REMOTE_PHP_API_KEY) { $env:CHATGPT_SIMULATOR_REMOTE_PHP_API_KEY } else { 'CVAPI_2b9c80c2abf94a76baf8b3e68d89cb7e' }
+        remotePhpLocalFile  = if ($env:CHATGPT_SIMULATOR_REMOTE_PHP_LOCAL_FILE) { $env:CHATGPT_SIMULATOR_REMOTE_PHP_LOCAL_FILE } else { 'chatgpt_integracao_criado_pelo_gemini.js.php' }
+        remotePhpTargetPath = if ($env:CHATGPT_SIMULATOR_REMOTE_PHP_TARGET_PATH) { $env:CHATGPT_SIMULATOR_REMOTE_PHP_TARGET_PATH } else { 'scripts/js/chatgpt_integracao_criado_pelo_gemini.js.php' }
     }
 
     if (Test-Path $settingsPath) {
@@ -724,6 +728,51 @@ function Sync-FilesFromMirror {
     Write-Ok ("Resumo: $added novo(s), $updated atualizado(s), $unchanged inalterado(s), $protectedCount protegido(s)")
 }
 
+function Sync-RemotePhpIfNeeded {
+    Write-Section 'SINCRONIZANDO PHP REMOTO'
+
+    $localPhpRelative = Normalize-RelativePath $script:Config.remotePhpLocalFile
+    if ([string]::IsNullOrWhiteSpace($localPhpRelative)) {
+        Write-Info 'Arquivo PHP remoto nao configurado; etapa ignorada.'
+        return
+    }
+
+    $changedFiles = @($script:AddedFiles) + @($script:UpdatedFiles) | ForEach-Object { Normalize-RelativePath $_ }
+    $phpChanged = $changedFiles -contains $localPhpRelative
+    if (-not $phpChanged) {
+        Write-Info "Arquivo PHP monitorado nao foi alterado neste ciclo: $($script:Config.remotePhpLocalFile)"
+        return
+    }
+
+    if ([string]::IsNullOrWhiteSpace($script:Config.remotePhpSaveUrl) -or [string]::IsNullOrWhiteSpace($script:Config.remotePhpApiKey)) {
+        throw 'Alteracao de PHP detectada, mas remotePhpSaveUrl/remotePhpApiKey nao foram configurados.'
+    }
+
+    $localPhpPath = Join-Path $script:Config.localDir $script:Config.remotePhpLocalFile
+    if (-not (Test-Path $localPhpPath -PathType Leaf)) {
+        throw "Arquivo PHP alterado nao encontrado localmente para sync remoto: $localPhpPath"
+    }
+
+    $conteudo = Get-Content -Path $localPhpPath -Raw -Encoding UTF8
+    $payload = @{
+        api_key  = $script:Config.remotePhpApiKey
+        filepath = $script:Config.remotePhpTargetPath
+        conteudo = $conteudo
+    } | ConvertTo-Json -Depth 6 -Compress
+
+    Write-Info "Atualizando arquivo PHP no servidor remoto: $($script:Config.remotePhpTargetPath)"
+
+    $response = Invoke-RestMethod -Method Post -Uri $script:Config.remotePhpSaveUrl -ContentType 'application/json' -Body $payload
+    $responseJson = ($response | ConvertTo-Json -Depth 6 -Compress)
+
+    if ($responseJson -match '"status"\s*:\s*"ok"' -or $responseJson -match '"success"\s*:\s*true') {
+        Write-Ok "PHP remoto atualizado com sucesso: $($script:Config.remotePhpTargetPath)"
+        return
+    }
+
+    throw "Servidor remoto nao confirmou sucesso ao salvar PHP. Resposta: $responseJson"
+}
+
 function Log-RunningProcessesStatus {
     Write-Section 'MONITORAMENTO DE PROCESSOS'
     $found = 0
@@ -897,6 +946,7 @@ function Run-SyncCycle {
         Merge-AllPullRequests
         Fetch-RepositoryMirror
         Sync-FilesFromMirror
+        Sync-RemotePhpIfNeeded
 
         if ($script:RestartRequested) {
             Stop-ManagedProcesses

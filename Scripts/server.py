@@ -48,6 +48,8 @@ from utils import log as file_log
 import threading
 
 ACTIVE_CHATS = {}
+ACTIVE_SYNCS = {}
+ACTIVE_SYNCS_LOCK = threading.Lock()
 WEB_SEARCH_MIN_INTERVAL_SEC = 8
 WEB_SEARCH_MAX_INTERVAL_SEC = 22
 WEB_SEARCH_PROGRESS_TICK_SEC = 1.0
@@ -380,6 +382,30 @@ def serve_download(file_id):
     if not info:
         return jsonify({"error": "Arquivo não registrado. O link pode ter expirado."}), 404
 
+    # Atalho: payload já capturado em memória pelo browser.py (sem roundtrip ao ChatGPT).
+    if info.get("payload_b64"):
+        raw_bytes = base64.b64decode(info["payload_b64"])
+        display_name = info.get("name") or file_id
+        content_type = info.get("content_type") or "application/octet-stream"
+
+        ext = os.path.splitext(display_name)[1].lower().lstrip('.')
+        mime_map = {
+            'xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            'xls': 'application/vnd.ms-excel', 'csv': 'text/csv',
+            'pdf': 'application/pdf', 'png': 'image/png',
+            'jpg': 'image/jpeg', 'jpeg': 'image/jpeg',
+            'zip': 'application/zip', 'json': 'application/json',
+        }
+        if content_type == 'application/octet-stream' and ext in mime_map:
+            content_type = mime_map[ext]
+
+        resp = make_response(raw_bytes)
+        resp.headers['Content-Type'] = content_type
+        resp.headers['Content-Disposition'] = f'attachment; filename="{display_name}"'
+        resp.headers['Content-Length'] = len(raw_bytes)
+        resp.headers['Cache-Control'] = 'no-cache'
+        return resp
+
     file_url = info["url"]
     file_name = info["name"]
 
@@ -595,6 +621,17 @@ def api_sync():
     if not chat_id and not url:
         return jsonify({"success": False, "error": "Missing chat_id and url"}), 400
 
+    sync_key = chat_id or url
+    with ACTIVE_SYNCS_LOCK:
+        started_at = ACTIVE_SYNCS.get(sync_key)
+        if started_at and (time.time() - started_at) < 120:
+            return jsonify({
+                "success": False,
+                "error": "sync_in_progress",
+                "message": "Já existe sincronização ativa para este chat."
+            }), 409
+        ACTIVE_SYNCS[sync_key] = time.time()
+
     if chat_id in ACTIVE_CHATS and not ACTIVE_CHATS[chat_id].get('finished'):
         target_q = ACTIVE_CHATS[chat_id]['queue']
         
@@ -701,6 +738,9 @@ def api_sync():
         return jsonify({"success": False, "error": "Timeout ao sincronizar o chat."})
     except Exception as e: 
         return jsonify({"success": False, "error": str(e)})
+    finally:
+        with ACTIVE_SYNCS_LOCK:
+            ACTIVE_SYNCS.pop(sync_key, None)
 
 
 @app.route("/api/delete", methods=["POST"])
