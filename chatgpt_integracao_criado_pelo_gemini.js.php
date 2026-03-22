@@ -3091,6 +3091,7 @@ header('Content-Type: application/javascript; charset=utf-8');
     
     const PREFIX = 'chatgpt_integracao_';
     const KEY_MODEL = PREFIX + 'selected_model';
+    const KEY_MODEL_MANUAL = PREFIX + 'selected_model_manual';
     const KEY_STREAM = PREFIX + 'stream_enabled';
     const KEY_CONTEXT = PREFIX + 'context_prefs'; 
     const KEY_HIST_PREFIX = PREFIX + 'hist_';
@@ -6432,16 +6433,25 @@ header('Content-Type: application/javascript; charset=utf-8');
                 sel.innerHTML = '';
                 
                 let savedModel = localStorage.getItem(KEY_MODEL);
-                
-                // Trata a seleção padrão: se o simulador caiu, muda para o primeiro do Ollama (se houver)
-                if (savedModel === 'ChatGPT Simulator' && !isSimulatorOnline && ollamaModels.length > 0) {
-                    savedModel = ollamaModels[0].name;
+                const manualModelSelection = localStorage.getItem(KEY_MODEL_MANUAL) === '1';
+
+                // Regra solicitada:
+                // - Se o simulador estiver online, ele vira padrão automaticamente
+                //   (exceto quando houver seleção manual prévia do usuário para outro modelo).
+                if (isSimulatorOnline) {
+                    if (!manualModelSelection || !savedModel || savedModel === 'ChatGPT Simulator (Offline)') {
+                        savedModel = 'ChatGPT Simulator';
+                        localStorage.setItem(KEY_MODEL_MANUAL, '0');
+                    }
+                } else {
+                    // Simulador caiu: evita deixar selecionado um valor inválido/offline.
+                    if (!savedModel || savedModel === 'ChatGPT Simulator' || savedModel === 'ChatGPT Simulator (Offline)') {
+                        savedModel = (ollamaModels.length > 0 ? ollamaModels[0].name : '');
+                        localStorage.setItem(KEY_MODEL_MANUAL, '0');
+                    }
                 }
-                if (!savedModel) {
-                    savedModel = isSimulatorOnline ? 'ChatGPT Simulator' : (ollamaModels.length > 0 ? ollamaModels[0].name : '');
-                }
-                
-                localStorage.setItem(KEY_MODEL, savedModel);
+
+                localStorage.setItem(KEY_MODEL, savedModel || '');
 
                 finalModels.forEach(m => {
                     const opt = document.createElement('option'); 
@@ -6460,6 +6470,7 @@ header('Content-Type: application/javascript; charset=utf-8');
                 if(!sel.options[sel.selectedIndex].disabled) {
                     const previousMode = state.chatMode || getCurrentChatMode();
                     localStorage.setItem(KEY_MODEL, sel.value);
+                    localStorage.setItem(KEY_MODEL_MANUAL, '1'); // usuário escolheu manualmente
                     const nextMode = getCurrentChatMode();
                     updateInputPlaceholderForModel();
                     if (previousMode !== nextMode) {
