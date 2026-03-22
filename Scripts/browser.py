@@ -2178,12 +2178,16 @@ async def handle_chat_task_inner(task, page, q, stop_event: asyncio.Event, activ
                 const details = lastAsst.querySelectorAll('details');
                 if (details.length > 0) return details[details.length - 1].innerText.trim();
             }
-            const targets = Array.from(document.querySelectorAll('div, span'));
+            const targets = Array.from(document.querySelectorAll('div, span, button'));
             const bad = ["Plus","Team","Enterprise","Upgrade","GPT-4","admin","ChatGPT","Send message"];
             const el = targets.find(t => {
                 const txt = t.innerText;
                 if (!txt) return false;
                 const lower = txt.toLowerCase();
+                // "Thought for 1m 8s" é metadado pós-resposta (não indica geração ativa).
+                if (/^thought for\s+\d+/i.test(txt.trim()) || /^pensou por\s+\d+/i.test(txt.trim())) {
+                    return false;
+                }
                 const isStatus = lower.includes('pesquisando') || lower.includes('searching') ||
                                  lower.includes('buscando')    || lower.includes('browsing')  ||
                                  lower.includes('procurando')  || lower.includes('checking')  ||
