@@ -760,17 +760,67 @@ function Sync-RemotePhpIfNeeded {
         conteudo = $conteudo
     } | ConvertTo-Json -Depth 6 -Compress
 
+    $targetUrl = $script:Config.remotePhpSaveUrl
+    try {
+        $uriObj = [System.Uri]$targetUrl
+        if ([string]::IsNullOrWhiteSpace($uriObj.Query)) {
+            $targetUrl = "$($uriObj.AbsoluteUri)?filepath=$([System.Uri]::EscapeDataString($script:Config.remotePhpTargetPath))"
+        } else {
+            $targetUrl = "$($uriObj.AbsoluteUri)&filepath=$([System.Uri]::EscapeDataString($script:Config.remotePhpTargetPath))"
+        }
+    } catch { }
+
     Write-Info "Atualizando arquivo PHP no servidor remoto: $($script:Config.remotePhpTargetPath)"
+    Write-Info "URL completa do endpoint remoto: $targetUrl"
+    Write-Info ("Arquivo local origem: {0} ({1} bytes)" -f $localPhpPath, ([System.Text.Encoding]::UTF8.GetByteCount($conteudo)))
+    Write-Info "Iniciando requisicao de atualizacao remota (timeout: 60s)..."
 
-    $response = Invoke-RestMethod -Method Post -Uri $script:Config.remotePhpSaveUrl -ContentType 'application/json' -Body $payload
-    $responseJson = ($response | ConvertTo-Json -Depth 6 -Compress)
+    try {
+        $responseRaw = Invoke-WebRequest `
+            -Method Post `
+            -Uri $script:Config.remotePhpSaveUrl `
+            -ContentType 'application/json' `
+            -Body $payload `
+            -TimeoutSec 60
 
-    if ($responseJson -match '"status"\s*:\s*"ok"' -or $responseJson -match '"success"\s*:\s*true') {
-        Write-Ok "PHP remoto atualizado com sucesso: $($script:Config.remotePhpTargetPath)"
-        return
+        $statusCode = [int]$responseRaw.StatusCode
+        $responseBody = ($responseRaw.Content | Out-String).Trim()
+        Write-Info "Resposta HTTP remota: $statusCode"
+        Write-Info "Resposta completa do servidor remoto: $responseBody"
+
+        if ($statusCode -ge 200 -and $statusCode -lt 300 -and ($responseBody -match '"status"\s*:\s*"ok"' -or $responseBody -match '"success"\s*:\s*true')) {
+            Write-Ok "PHP remoto atualizado com sucesso: $($script:Config.remotePhpTargetPath)"
+            return
+        }
+
+        throw "Servidor remoto nao confirmou sucesso ao salvar PHP. HTTP=$statusCode; body=$responseBody"
+    } catch {
+        $statusCode = $null
+        $errorBody = $null
+        if ($_.Exception.Response) {
+            try { $statusCode = [int]$_.Exception.Response.StatusCode } catch { }
+            try {
+                $stream = $_.Exception.Response.GetResponseStream()
+                if ($stream) {
+                    $reader = New-Object System.IO.StreamReader($stream)
+                    $errorBody = $reader.ReadToEnd()
+                    $reader.Dispose()
+                    $stream.Dispose()
+                }
+            } catch { }
+        }
+
+        if (-not [string]::IsNullOrWhiteSpace($statusCode)) {
+            Write-Fail "Falha HTTP ao atualizar PHP remoto. Status: $statusCode"
+        } else {
+            Write-Fail "Falha ao atualizar PHP remoto (sem status HTTP)."
+        }
+        if (-not [string]::IsNullOrWhiteSpace($errorBody)) {
+            Write-Fail "Resposta completa de erro do servidor remoto: $errorBody"
+        }
+
+        throw $_
     }
-
-    throw "Servidor remoto nao confirmou sucesso ao salvar PHP. Resposta: $responseJson"
 }
 
 function Log-RunningProcessesStatus {
