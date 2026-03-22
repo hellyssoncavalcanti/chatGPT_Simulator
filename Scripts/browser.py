@@ -1326,6 +1326,20 @@ async def handle_sync_task(context, task):
             m['content'] = m['content'].replace('\u200b', '').replace('\xa0', ' ')
             m['content'] = m['content'].replace('\\_', '_').replace('\\*', '*')  # ✅ FIX — era omitido aqui
 
+        # Garante persistência de links de download também no fluxo de SYNC:
+        # quando o ChatGPT renderiza "cards" de arquivo sem URL visível no markdown,
+        # tentamos detectar/registrar os links na página e anexá-los na última resposta da IA.
+        try:
+            last_ai_idx = max((i for i, m in enumerate(msgs) if m.get('role') == 'assistant'), default=-1)
+            if last_ai_idx >= 0:
+                msgs[last_ai_idx]['content'] = await _detect_and_register_files(
+                    page,
+                    msgs[last_ai_idx].get('content') or '',
+                    q
+                )
+        except Exception as e_files:
+            emit_log(q, f"⚠️ Falha ao detectar links de download durante SYNC: {e_files}")
+
         title = await get_chat_title(page)
         emit_event(q, 'syncresult', {
             'success': True, 'messages': msgs, 'title': title, 'chat_id': chat_id
