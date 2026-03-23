@@ -17,6 +17,24 @@
 # =============================================================================
 import queue
 import threading
+import sys
+
+# ─────────────────────────────────────────────────────────────
+# CAPTURA CONFIGURAÇÃO DE DEBUG (que é estabelecida no arquivo "config.py").
+# ─────────────────────────────────────────────────────────────
+# Verifica se config já foi importado; se não, importa.
+# Quando já estiver em sys.modules, ainda precisamos vinculá-lo no escopo local.
+if 'config' in sys.modules and sys.modules.get('config') is not None:
+    config = sys.modules['config']
+else:
+    import config
+
+# Tenta importar DEBUG_LOG do módulo config já carregado
+try:
+    DEBUG_LOG = config.DEBUG_LOG
+except AttributeError:
+    DEBUG_LOG = False  # fallback se a variável não existir no config
+    print("⚠️ DEBUG_LOG não encontrado no config.py. Usando False como padrão.")
 
 # Fila principal de comunicação entre o Flask e o Browser
 browser_queue = queue.Queue()

@@ -23,8 +23,23 @@ import os
 import json
 import hashlib
 import uuid
+import sys
 import config
 from datetime import datetime, timedelta
+
+# ─────────────────────────────────────────────────────────────
+# CAPTURA CONFIGURAÇÃO DE DEBUG (que é estabelecida no arquivo "config.py").
+# ─────────────────────────────────────────────────────────────
+# Verifica se config já foi importado; se não, importa
+if 'config' not in sys.modules:
+    import config
+
+# Tenta importar DEBUG_LOG do módulo config já carregado
+try:
+    DEBUG_LOG = config.DEBUG_LOG
+except AttributeError:
+    DEBUG_LOG = False  # fallback se a variável não existir no config
+    print("⚠️ DEBUG_LOG não encontrado no config.py. Usando False como padrão.")
 
 # Sessões ativas: {token: user_id}
 SESSIONS = {}
