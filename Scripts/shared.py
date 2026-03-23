@@ -22,8 +22,11 @@ import sys
 # ─────────────────────────────────────────────────────────────
 # CAPTURA CONFIGURAÇÃO DE DEBUG (que é estabelecida no arquivo "config.py").
 # ─────────────────────────────────────────────────────────────
-# Verifica se config já foi importado; se não, importa
-if 'config' not in sys.modules:
+# Verifica se config já foi importado; se não, importa.
+# Quando já estiver em sys.modules, ainda precisamos vinculá-lo no escopo local.
+if 'config' in sys.modules and sys.modules.get('config') is not None:
+    config = sys.modules['config']
+else:
     import config
 
 # Tenta importar DEBUG_LOG do módulo config já carregado
