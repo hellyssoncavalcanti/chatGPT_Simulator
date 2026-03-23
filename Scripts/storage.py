@@ -21,12 +21,27 @@
 # =============================================================================
 import json
 import os
+import sys
 from datetime import datetime
 import config
 from utils import log
 import threading
 import hashlib
 from urllib.parse import parse_qs, urlparse
+
+# ─────────────────────────────────────────────────────────────
+# CAPTURA CONFIGURAÇÃO DE DEBUG (que é estabelecida no arquivo "config.py").
+# ─────────────────────────────────────────────────────────────
+# Verifica se config já foi importado; se não, importa
+if 'config' not in sys.modules:
+    import config
+
+# Tenta importar DEBUG_LOG do módulo config já carregado
+try:
+    DEBUG_LOG = config.DEBUG_LOG
+except AttributeError:
+    DEBUG_LOG = False  # fallback se a variável não existir no config
+    log("storage.py", "⚠️ DEBUG_LOG não encontrado no config.py. Usando False como padrão.")
 
 _lock = threading.Lock()
 
