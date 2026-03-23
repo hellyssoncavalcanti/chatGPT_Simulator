@@ -98,7 +98,7 @@ try:
     DEBUG_LOG = config.DEBUG_LOG
 except AttributeError:
     DEBUG_LOG = False  # fallback se a variável não existir no config
-    log.warning("⚠️ DEBUG_LOG não encontrado no config.py. Usando False como padrão.")
+    logging.warning("⚠️ DEBUG_LOG não encontrado no config.py. Usando False como padrão.")
 
 
 
@@ -1845,13 +1845,8 @@ def _listar_ids_atendimentos_compilados(id_paciente: str) -> str:
 def salvar_resultado_compilado_paciente(id_paciente: str, resultado: dict):
     id_registro = garantir_registro_compilado_paciente_pendente(id_paciente)
 
-    id_registro = garantir_registro_compilado_paciente_pendente(id_paciente)
-
-    ids_str = _listar_ids_atendimentos_compilados(id_paciente)
-    id_atendimento_sql = f"'{esc(ids_str)}'" if ids_str else "NULL"
-
     sets = _montar_sets_resultado(resultado) + [
-        f"id_atendimento = {id_atendimento_sql}",
+        "id_atendimento = NULL",  # síntese compilada não deve colidir com uq_atendimento de análises unitárias
         "datetime_atendimento_inicio = NULL",
         "datetime_ultima_atualizacao_atendimento = NULL",
         "id_criador = 'analise_compilada_paciente'",
@@ -2068,7 +2063,7 @@ def salvar_resultado_compilado_paciente(id_paciente: str, resultado: dict):
 
     dt_inicio_mais_antiga, dt_ultima_atualizacao_mais_nova = _obter_datas_referencia_compilada(id_paciente)
     sets = [
-        f"id_atendimento = {esc_str(_listar_ids_atendimentos_compilados(id_paciente))}",
+        "id_atendimento = NULL",  # síntese compilada não deve colidir com uq_atendimento de análises unitárias
         f"datetime_atendimento_inicio = {esc_str(str(dt_inicio_mais_antiga)) if dt_inicio_mais_antiga else 'NULL'}",
         f"datetime_ultima_atualizacao_atendimento = {esc_str(str(dt_ultima_atualizacao_mais_nova)) if dt_ultima_atualizacao_mais_nova else 'NULL'}",
         "id_criador = 'analise_compilada_paciente'",
@@ -2274,7 +2269,7 @@ def salvar_resultado_compilado_paciente(id_paciente: str, resultado: dict):
 
     dt_inicio_mais_antiga, dt_ultima_atualizacao_mais_nova = _obter_datas_referencia_compilada(id_paciente)
     sets = [
-        f"id_atendimento = {esc_str(_listar_ids_atendimentos_compilados(id_paciente))}",
+        "id_atendimento = NULL",  # síntese compilada não deve colidir com uq_atendimento de análises unitárias
         f"datetime_atendimento_inicio = {esc_str(str(dt_inicio_mais_antiga)) if dt_inicio_mais_antiga else 'NULL'}",
         f"datetime_ultima_atualizacao_atendimento = {esc_str(str(dt_ultima_atualizacao_mais_nova)) if dt_ultima_atualizacao_mais_nova else 'NULL'}",
         "id_criador = 'analise_compilada_paciente'",
@@ -2458,7 +2453,7 @@ def salvar_resultado_compilado_paciente(id_paciente: str, resultado: dict):
 
     dt_inicio_mais_antiga, dt_ultima_atualizacao_mais_nova = _obter_datas_referencia_compilada(id_paciente)
     sets = [
-        f"id_atendimento = {esc_str(_listar_ids_atendimentos_compilados(id_paciente))}",
+        "id_atendimento = NULL",  # síntese compilada não deve colidir com uq_atendimento de análises unitárias
         f"datetime_atendimento_inicio = {esc_str(str(dt_inicio_mais_antiga)) if dt_inicio_mais_antiga else 'NULL'}",
         f"datetime_ultima_atualizacao_atendimento = {esc_str(str(dt_ultima_atualizacao_mais_nova)) if dt_ultima_atualizacao_mais_nova else 'NULL'}",
         "id_criador = 'analise_compilada_paciente'",
@@ -2623,7 +2618,7 @@ def salvar_resultado_compilado_paciente(id_paciente: str, resultado: dict):
 
     dt_inicio_mais_antiga, dt_ultima_atualizacao_mais_nova = _obter_datas_referencia_compilada(id_paciente)
     sets = [
-        f"id_atendimento = {esc_str(_listar_ids_atendimentos_compilados(id_paciente))}",
+        "id_atendimento = NULL",  # síntese compilada não deve colidir com uq_atendimento de análises unitárias
         f"datetime_atendimento_inicio = {esc_str(str(dt_inicio_mais_antiga)) if dt_inicio_mais_antiga else 'NULL'}",
         f"datetime_ultima_atualizacao_atendimento = {esc_str(str(dt_ultima_atualizacao_mais_nova)) if dt_ultima_atualizacao_mais_nova else 'NULL'}",
         "id_criador = 'analise_compilada_paciente'",
