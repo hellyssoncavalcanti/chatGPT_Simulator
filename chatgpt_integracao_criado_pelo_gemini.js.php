@@ -6241,8 +6241,8 @@ header('Content-Type: application/javascript; charset=utf-8');
         return lines.join('\n').trim();
     }
 
-    async function handleDirectToolModeMessage(userTxt) {
-        const parsed = parseDirectToolRequest(userTxt);
+    async function handleDirectToolModeMessage(userTxt, parsedRequest = null) {
+        const parsed = parsedRequest || parseDirectToolRequest(userTxt);
         if (!parsed.ok) {
             appendAssistantMarkdown(formatDirectToolError(userTxt));
             return false;
@@ -8175,14 +8175,31 @@ header('Content-Type: application/javascript; charset=utf-8');
             }
         }
         
-        currentAbortController = new AbortController();
         const attachmentsPayload = _collectAttachmentsPayload();
+        const parsedDirectRequest = userTxt ? parseDirectToolRequest(userTxt) : { ok: false };
+        const shouldAutoRunDirectTool = !!parsedDirectRequest?.ok;
+
+        currentAbortController = new AbortController();
         _clearAttachments();
         inp.value = '';
         addSimpleMsg('user', userTxt || (attachmentsPayload.length ? `[${attachmentsPayload.length} anexo(s)]` : ''));
         scroll(true);
         btn.innerText = 'Parar'; 
         btn.classList.add('stop-mode');
+
+        if (shouldAutoRunDirectTool) {
+            if (attachmentsPayload.length > 0) {
+                appendAssistantMarkdown(
+                    'ℹ️ **Payload `sql_queries/search_queries` detectado.** ' +
+                    'Os anexos pendentes foram ignorados nesta execução para evitar que o simulador trate o pedido como análise de arquivo.'
+                );
+            }
+
+            state.messages.push({ role: 'user', content: userTxt });
+            saveLocal();
+            await handleDirectToolModeMessage(userTxt, parsedDirectRequest);
+            return;
+        }
 
         if (isDirectToolMode()) {
             state.messages.push({ role: 'user', content: userTxt });

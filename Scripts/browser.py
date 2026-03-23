@@ -749,6 +749,51 @@ def clean_html(html_content):
     return html
 
 
+async def _read_last_assistant_snapshot(page):
+    """
+    Lê o último balão do assistant diretamente do DOM, sem usar Locator.inner_html().
+
+    Motivo:
+    - Locator.inner_html() aguarda a existência do elemento e pode estourar timeout
+      quando o ChatGPT ainda não materializou o balão do assistant no DOM.
+    - Durante respostas longas, streaming, tools/browsing ou mudanças de layout,
+      o balão pode ser recriado e alguns locators ficam instáveis.
+
+    Retorna sempre um dict com `html` e `text`; se não houver mensagem ainda,
+    retorna strings vazias.
+    """
+    try:
+        snapshot = await page.evaluate("""() => {
+            const nodes = Array.from(document.querySelectorAll('[data-message-author-role="assistant"]'));
+            if (!nodes.length) {
+                return { html: '', text: '' };
+            }
+
+            const preferred =
+                [...nodes].reverse().find((node) => {
+                    if (!node) return false;
+                    const txt = (node.innerText || '').trim();
+                    const html = (node.innerHTML || '').trim();
+                    return !!txt || !!html;
+                }) || nodes[nodes.length - 1];
+
+            return {
+                html: preferred?.innerHTML || '',
+                text: (preferred?.innerText || '').trim(),
+            };
+        }""")
+    except Exception:
+        return {"html": "", "text": ""}
+
+    if not isinstance(snapshot, dict):
+        return {"html": "", "text": ""}
+
+    return {
+        "html": snapshot.get("html") or "",
+        "text": snapshot.get("text") or "",
+    }
+
+
 def _resolve_chatgpt_download_url(raw_url: str) -> str:
     """Normaliza URL de download do ChatGPT para forma absoluta."""
     if raw_url.startswith("/"):
@@ -2319,16 +2364,9 @@ async def handle_chat_task_inner(task, page, q, stop_event: asyncio.Event, activ
             stuck_count = 0
             idle_ready_count = 0
 
-        responses = await page.locator("div[data-message-author-role='assistant']").all()
-        curr_html = ""
-        curr_text = ""
-        if responses:
-            curr_html = await responses[-1].inner_html()
-            curr_html = clean_html(curr_html)
-            try:
-                curr_text = re.sub(r"\s+", " ", (await responses[-1].inner_text()) or "").strip()
-            except Exception:
-                curr_text = ""
+        assistant_snapshot = await _read_last_assistant_snapshot(page)
+        curr_html = clean_html(assistant_snapshot.get("html", ""))
+        curr_text = re.sub(r"\s+", " ", assistant_snapshot.get("text", "")).strip()
 
         markdown_text = md(curr_html, heading_style="ATX").strip()
         markdown_text = markdown_text.replace("\\_", "_").replace("\\*", "*")
