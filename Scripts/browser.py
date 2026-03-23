@@ -35,11 +35,26 @@ import time
 import re
 import os
 import queue
+import sys
 from playwright.async_api import async_playwright
 import config
 from shared import browser_queue, register_file
 from utils import log as file_log
 from markdownify import markdownify as md
+
+# ─────────────────────────────────────────────────────────────
+# CAPTURA CONFIGURAÇÃO DE DEBUG (que é estabelecida no arquivo "config.py").
+# ─────────────────────────────────────────────────────────────
+# Verifica se config já foi importado; se não, importa
+if 'config' not in sys.modules:
+    import config
+
+# Tenta importar DEBUG_LOG do módulo config já carregado
+try:
+    DEBUG_LOG = config.DEBUG_LOG
+except AttributeError:
+    DEBUG_LOG = False  # fallback se a variável não existir no config
+    print("⚠️ DEBUG_LOG não encontrado no config.py. Usando False como padrão.")
 
 # Semáforo para limitar número de abas simultâneas (evita travar o PC)
 MAX_TABS = 5
