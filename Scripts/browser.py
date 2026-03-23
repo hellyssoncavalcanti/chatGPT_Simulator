@@ -35,11 +35,26 @@ import time
 import re
 import os
 import queue
+import sys
 from playwright.async_api import async_playwright
 import config
 from shared import browser_queue, register_file
 from utils import log as file_log
 from markdownify import markdownify as md
+
+# ─────────────────────────────────────────────────────────────
+# CAPTURA CONFIGURAÇÃO DE DEBUG (que é estabelecida no arquivo "config.py").
+# ─────────────────────────────────────────────────────────────
+# Verifica se config já foi importado; se não, importa
+if 'config' not in sys.modules:
+    import config
+
+# Tenta importar DEBUG_LOG do módulo config já carregado
+try:
+    DEBUG_LOG = config.DEBUG_LOG
+except AttributeError:
+    DEBUG_LOG = False  # fallback se a variável não existir no config
+    print("⚠️ DEBUG_LOG não encontrado no config.py. Usando False como padrão.")
 
 # Semáforo para limitar número de abas simultâneas (evita travar o PC)
 MAX_TABS = 5
@@ -885,8 +900,9 @@ async def _click_chatgpt_download_elements(page, q=None):
                 });
             }
 
-            // Padrão 3: cards de arquivo recentes (UI nova), onde os botões são ícones
-            // sem texto e o nome do arquivo fica no cabeçalho.
+            // Padrão 3: cards de arquivo recentes (UI nova), onde os botões podem ser ícones.
+            // IMPORTANTE: filtrar SOMENTE botões com forte indicação de download para
+            // não clicar em abas (ex.: Resumo/Atendimentos) e gerar erro de overlay.
             const cardSelectors = [
                 'div.group.my-4.w-full.rounded-2xl',
                 'div[class*="corner-superellipse"]'
@@ -902,10 +918,27 @@ async def _click_chatgpt_download_elements(page, q=None):
                     if (!m) return;
                     const filename = m[0].trim();
 
-                    const buttons = card.querySelectorAll('button');
+                    const buttons = card.querySelectorAll('button, [role="button"]');
                     buttons.forEach((btn, btnIdx) => {
                         const disabled = btn.disabled || btn.getAttribute('aria-disabled') === 'true';
                         if (disabled) return;
+                        const textLower = (btn.textContent || '').trim().toLowerCase();
+                        const classLower = String(btn.className || '').toLowerCase();
+                        const isTabLike = /resumo|atendimentos|overview|table|tabela|chart|gráfico/.test(textLower)
+                            || classLower.includes('border-t-2');
+                        if (isTabLike) return;
+
+                        const looksIconButton = classLower.includes('rounded-full')
+                            || !!btn.querySelector('svg');
+                        const label = (
+                            (btn.getAttribute('aria-label') || '') + ' ' +
+                            (btn.getAttribute('title') || '') + ' ' +
+                            (btn.getAttribute('data-testid') || '') + ' ' +
+                            (btn.textContent || '')
+                        ).toLowerCase();
+                        const explicitDownload = /(download|baixar|file-download|icon-download|transferir|save-file|file-save)/.test(label);
+                        const likelyHeaderIcon = looksIconButton && btnIdx < 3;
+                        if (!(explicitDownload || likelyHeaderIcon)) return;
                         results.push({
                             cardIndex: cardIdx,
                             buttonIndex: btnIdx,
@@ -928,20 +961,21 @@ async def _click_chatgpt_download_elements(page, q=None):
                 if el['selector'] == 'button_in_last':
                     last_msg = page.locator('[data-message-author-role="assistant"]').last
                     btn = last_msg.locator('button, [role="button"]').nth(el['index'])
-                    await btn.click(timeout=3000)
+                    await btn.click(timeout=2000, force=True)
                 elif el['selector'] == 'file_card_btn':
                     cards = page.locator(el.get('cardSelector') or 'div.group.my-4.w-full.rounded-2xl')
                     card = cards.nth(el.get('cardIndex', 0))
-                    btn = card.locator('button').nth(el.get('buttonIndex', 0))
-                    await btn.click(timeout=3000)
+                    btn = card.locator('button, [role="button"]').nth(el.get('buttonIndex', 0))
+                    await btn.click(timeout=2000, force=True)
                 else:
                     link = page.locator('a').nth(el['index'])
-                    await link.click(timeout=3000)
+                    await link.click(timeout=2000, force=True)
                 emit_log(q, f"📎 Clicou elemento de download: {el['text']}")
                 clicked = True
                 await asyncio.sleep(1)
             except Exception as e:
-                emit_log(q, f"⚠️ Falha ao clicar download '{el['text']}': {e}")
+                detalhe = str(e).splitlines()[0][:220]
+                emit_log(q, f"ℹ️ Clique de download ignorado '{el['text']}': {detalhe}")
 
         return clicked
     except Exception as e:
@@ -1256,6 +1290,7 @@ async def handle_sync_task(context, task):
     # Captura de downloads disparados durante SYNC (cards de arquivo sem URL explícita)
     # Sem persistir em disco: preferimos payload em memória (ou URL fallback).
     _sync_auto_downloads = []
+    _sync_download_tasks = []
 
     def _on_sync_download(download):
         async def _save():
@@ -1290,7 +1325,7 @@ async def handle_sync_task(context, task):
                 emit_log(q, f"⬇️ [SYNC] Auto-download capturado: {suggested}")
             except Exception as e:
                 emit_log(q, f"⚠️ [SYNC] Erro no auto-download: {e}")
-        asyncio.ensure_future(_save())
+        _sync_download_tasks.append(asyncio.create_task(_save()))
 
     page.on("download", _on_sync_download)
     try:
@@ -1443,8 +1478,11 @@ async def handle_sync_task(context, task):
         except Exception as e_click_dl:
             emit_log(q, f"⚠️ Falha ao clicar cards de download no SYNC: {e_click_dl}")
 
-        if _sync_auto_downloads:
+        if _sync_download_tasks:
+            await asyncio.gather(*_sync_download_tasks, return_exceptions=True)
+        elif _sync_auto_downloads:
             await asyncio.sleep(1)
+        if _sync_auto_downloads:
             last_ai_idx = max((i for i, m in enumerate(msgs) if m.get('role') == 'assistant'), default=-1)
             if last_ai_idx >= 0:
                 extra_links = []
@@ -2082,6 +2120,7 @@ async def handle_chat_task_inner(task, page, q, stop_event: asyncio.Event, activ
     # Handler para capturar downloads automáticos do ChatGPT (code interpreter, etc.)
     # Sem salvar em disco: payload em memória (ou URL fallback).
     _auto_downloads = []
+    _download_tasks = []
 
     def _on_download(download):
         async def _save():
@@ -2116,7 +2155,7 @@ async def handle_chat_task_inner(task, page, q, stop_event: asyncio.Event, activ
                 emit_log(q, f"⬇️ Auto-download capturado: {suggested}")
             except Exception as e:
                 emit_log(q, f"⚠️ Erro no auto-download: {e}")
-        asyncio.ensure_future(_save())
+        _download_tasks.append(asyncio.create_task(_save()))
 
     page.on("download", _on_download)
 
@@ -2361,9 +2400,11 @@ async def handle_chat_task_inner(task, page, q, stop_event: asyncio.Event, activ
         except Exception as e:
             emit_log(q, f"⚠️ Falha ao registrar arquivos: {e}")
 
-    # Auto-downloads capturados pelo Playwright: registra para proxy
-    if _auto_downloads:
-        await asyncio.sleep(1)  # aguarda downloads pendentes
+    # Auto-downloads capturados pelo Playwright: aguarda tarefas pendentes e registra para proxy
+    if _download_tasks:
+        await asyncio.gather(*_download_tasks, return_exceptions=True)
+    elif _auto_downloads:
+        await asyncio.sleep(1)  # compatibilidade: pequena espera quando já houver itens
     for dl in _auto_downloads:
         register_file(
             dl["file_id"],

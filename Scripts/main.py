@@ -36,6 +36,20 @@ CORE_DEPENDENCIES = [
 REPAIR_FLAG = "--repair-venv"
 SKIP_BOOTSTRAP_FLAG = "--skip-bootstrap"
 
+# ─────────────────────────────────────────────────────────────
+# CAPTURA CONFIGURAÇÃO DE DEBUG (que é estabelecida no arquivo "config.py").
+# ─────────────────────────────────────────────────────────────
+# Verifica se config já foi importado; se não, importa
+if 'config' not in sys.modules:
+    import config
+
+# Tenta importar DEBUG_LOG do módulo config já carregado
+try:
+    DEBUG_LOG = config.DEBUG_LOG
+except AttributeError:
+    DEBUG_LOG = False  # fallback se a variável não existir no config
+    print("⚠️ DEBUG_LOG não encontrado no config.py. Usando False como padrão.")
+
 
 def _same_path(path_a: str, path_b: str) -> bool:
     return os.path.normcase(os.path.abspath(path_a)) == os.path.normcase(os.path.abspath(path_b))

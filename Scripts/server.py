@@ -38,6 +38,7 @@ import shutil
 import time
 import copy
 import logging
+import sys
 from flask import Flask, request, jsonify, Response, send_from_directory, stream_with_context, make_response
 from flask_cors import CORS
 import config
@@ -46,6 +47,20 @@ import storage
 import auth
 from utils import log as file_log
 import threading
+
+# ─────────────────────────────────────────────────────────────
+# CAPTURA CONFIGURAÇÃO DE DEBUG (que é estabelecida no arquivo "config.py").
+# ─────────────────────────────────────────────────────────────
+# Verifica se config já foi importado; se não, importa
+if 'config' not in sys.modules:
+    import config
+
+# Tenta importar DEBUG_LOG do módulo config já carregado
+try:
+    DEBUG_LOG = config.DEBUG_LOG
+except AttributeError:
+    DEBUG_LOG = False  # fallback se a variável não existir no config
+    logging.warning("⚠️ DEBUG_LOG não encontrado no config.py. Usando False como padrão.")
 
 ACTIVE_CHATS = {}
 ACTIVE_SYNCS = {}
