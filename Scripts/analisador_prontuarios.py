@@ -3694,12 +3694,19 @@ def aguardar_llm_startup():
             raise
 
 
-def analisar_prontuario(texto: str, chat_url: str = None, chat_id: str = None, contexto: str = "") -> dict:
+def analisar_prontuario(
+    texto: str,
+    chat_url: str = None,
+    chat_id: str = None,
+    contexto: str = "",
+    id_atendimento: int | None = None,
+) -> dict:
     """
     chat_url / chat_id: se fornecidos, o browser.py retoma a conversa existente
     em vez de abrir um novo chat — evita proliferação de chats no ChatGPT.
     contexto: bloco de texto com dados do paciente, profissional e hospital
     (inserido antes do prontuário para dar contexto ao LLM).
+    id_atendimento: parâmetro opcional para compatibilidade com chamadas legadas.
     """
     # Monta bloco de contexto se disponível
     bloco_contexto = ""
