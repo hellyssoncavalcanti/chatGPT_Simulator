@@ -922,13 +922,23 @@ async def _click_chatgpt_download_elements(page, q=None):
                     buttons.forEach((btn, btnIdx) => {
                         const disabled = btn.disabled || btn.getAttribute('aria-disabled') === 'true';
                         if (disabled) return;
+                        const textLower = (btn.textContent || '').trim().toLowerCase();
+                        const classLower = String(btn.className || '').toLowerCase();
+                        const isTabLike = /resumo|atendimentos|overview|table|tabela|chart|gráfico/.test(textLower)
+                            || classLower.includes('border-t-2');
+                        if (isTabLike) return;
+
+                        const looksIconButton = classLower.includes('rounded-full')
+                            || !!btn.querySelector('svg');
                         const label = (
                             (btn.getAttribute('aria-label') || '') + ' ' +
                             (btn.getAttribute('title') || '') + ' ' +
                             (btn.getAttribute('data-testid') || '') + ' ' +
                             (btn.textContent || '')
                         ).toLowerCase();
-                        if (!/(download|baixar|file-download|icon-download|transferir)/.test(label)) return;
+                        const explicitDownload = /(download|baixar|file-download|icon-download|transferir|save-file|file-save)/.test(label);
+                        const likelyHeaderIcon = looksIconButton && btnIdx < 3;
+                        if (!(explicitDownload || likelyHeaderIcon)) return;
                         results.push({
                             cardIndex: cardIdx,
                             buttonIndex: btnIdx,
