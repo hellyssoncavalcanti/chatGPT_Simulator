@@ -3259,8 +3259,11 @@ header('Content-Type: application/javascript; charset=utf-8');
             flex-direction: column;
             gap: 15px;
             scroll-behavior: smooth;
+            -webkit-overflow-scrolling: touch;
+            overscroll-behavior: contain;
             /* padding-bottom removido — não é mais necessário */
         }
+        #ow-messages > * { flex-shrink: 0; }
 
         #ow-input-area {
             flex-shrink: 0;          /* ← ocupa espaço real no flex, não sobrepõe */
@@ -3292,7 +3295,7 @@ header('Content-Type: application/javascript; charset=utf-8');
         #ow-mic.recording { background: #ffebee; border-color: #ef5350; color: #d32f2f; animation: pulseRed 1.5s infinite; }
         
         /* === ANÁLISE PRÉVIA DA LLM EXPOSTA NO CHAT — DESIGN SYSTEM = INICIO === */
-        #ow-analise-previa{font-family:Inter,system-ui,-apple-system,Segoe UI,Roboto,sans-serif;border:1px solid #e2e8f0;border-radius:14px;background:#fff;box-shadow:0 8px 24px rgba(0,0,0,0.08);margin:10px 0;overflow:visible;width:100%;box-sizing:border-box}
+        #ow-analise-previa{font-family:Inter,system-ui,-apple-system,Segoe UI,Roboto,sans-serif;border:1px solid #e2e8f0;border-radius:14px;background:#fff;box-shadow:0 8px 24px rgba(0,0,0,0.08);margin:10px 0;overflow:visible;width:100%;max-width:100%;box-sizing:border-box;flex-shrink:0;align-self:stretch}
         #ow-analise-previa .ia-header{display:flex;align-items:flex-start;justify-content:space-between;padding:14px 16px;border-bottom:1px solid #e2e8f0;background:#f8fafc;gap:8px;flex-wrap:wrap}
         #ow-analise-previa .ia-title{font-weight:700;font-size:16px;color:#0f172a}
         #ow-analise-previa .ia-actions{display:flex;gap:6px;flex-wrap:wrap}
@@ -3335,19 +3338,19 @@ header('Content-Type: application/javascript; charset=utf-8');
         #ow-analise-previa .ia-prio{font-size:11px;font-weight:700;padding:2px 9px;border-radius:999px;color:#fff}
         #iap-toast{position:fixed;bottom:20px;right:20px;background:#0f172a;color:#fff;padding:8px 12px;border-radius:8px;font-size:13px;opacity:0;transform:translateY(10px);transition:0.2s;z-index:9999}
         #iap-toast.show{opacity:1;transform:translateY(0)}
-        #ow-analise-pendente{font-family:Inter,system-ui,-apple-system,Segoe UI,Roboto,sans-serif;border:1px solid #fde68a;border-radius:14px;background:linear-gradient(135deg,#fffdf5 0%,#fff7db 100%);box-shadow:0 8px 24px rgba(180,83,9,.08);margin:10px 0;overflow:hidden;width:100%;box-sizing:border-box}
+        #ow-analise-pendente{font-family:Inter,system-ui,-apple-system,Segoe UI,Roboto,sans-serif;border:1px solid #fde68a;border-radius:14px;background:linear-gradient(135deg,#fffdf5 0%,#fff7db 100%);box-shadow:0 8px 24px rgba(180,83,9,.08);margin:10px 0;overflow:visible;width:100%;max-width:100%;box-sizing:border-box;flex-shrink:0;align-self:stretch}
         #ow-analise-pendente .iap-header{display:flex;align-items:flex-start;justify-content:space-between;padding:14px 16px;border-bottom:1px solid #fde68a;background:rgba(255,251,235,.9);gap:8px;flex-wrap:wrap}
         #ow-analise-pendente .iap-title{font-weight:700;font-size:15px;color:#92400e}
         #ow-analise-pendente .iap-subtitle{font-size:12px;color:#b45309;margin-top:3px}
-        #ow-analise-pendente .iap-list{padding:14px 16px;display:flex;flex-direction:column;gap:10px}
-        #ow-analise-pendente .iap-item{border:1px solid #fcd34d;border-radius:10px;background:#fff;padding:12px 13px}
+        #ow-analise-pendente .iap-list{padding:14px 16px;display:flex;flex-direction:column;gap:10px;min-width:0}
+        #ow-analise-pendente .iap-item{border:1px solid #fcd34d;border-radius:10px;background:#fff;padding:12px 13px;min-width:0}
         #ow-analise-pendente .iap-item-head{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap}
         #ow-analise-pendente .iap-item-title{font-size:13px;font-weight:700;color:#78350f}
         #ow-analise-pendente .iap-badge{font-size:11px;font-weight:800;padding:4px 10px;border-radius:999px;color:#fff}
         #ow-analise-pendente .iap-badge.pendente{background:#d97706}
         #ow-analise-pendente .iap-badge.processando{background:#2563eb}
         #ow-analise-pendente .iap-badge.erro{background:#dc2626}
-        #ow-analise-pendente .iap-item-text{font-size:12px;line-height:1.5;color:#7c5a10;margin-top:7px}
+        #ow-analise-pendente .iap-item-text{font-size:12px;line-height:1.5;color:#7c5a10;margin-top:7px;overflow-wrap:anywhere;word-break:break-word}
         /* === ANÁLISE PRÉVIA DA LLM EXPOSTA NO CHAT — DESIGN SYSTEM = FIM === */
         
         @keyframes pulseRed { 0% { box-shadow: 0 0 0 0 rgba(211, 47, 47, 0.4); } 70% { box-shadow: 0 0 0 10px rgba(211, 47, 47, 0); } 100% { box-shadow: 0 0 0 0 rgba(211, 47, 47, 0); } }
@@ -6241,8 +6244,8 @@ header('Content-Type: application/javascript; charset=utf-8');
         return lines.join('\n').trim();
     }
 
-    async function handleDirectToolModeMessage(userTxt) {
-        const parsed = parseDirectToolRequest(userTxt);
+    async function handleDirectToolModeMessage(userTxt, parsedRequest = null) {
+        const parsed = parsedRequest || parseDirectToolRequest(userTxt);
         if (!parsed.ok) {
             appendAssistantMarkdown(formatDirectToolError(userTxt));
             return false;
@@ -8175,14 +8178,31 @@ header('Content-Type: application/javascript; charset=utf-8');
             }
         }
         
-        currentAbortController = new AbortController();
         const attachmentsPayload = _collectAttachmentsPayload();
+        const parsedDirectRequest = userTxt ? parseDirectToolRequest(userTxt) : { ok: false };
+        const shouldAutoRunDirectTool = !!parsedDirectRequest?.ok;
+
+        currentAbortController = new AbortController();
         _clearAttachments();
         inp.value = '';
         addSimpleMsg('user', userTxt || (attachmentsPayload.length ? `[${attachmentsPayload.length} anexo(s)]` : ''));
         scroll(true);
         btn.innerText = 'Parar'; 
         btn.classList.add('stop-mode');
+
+        if (shouldAutoRunDirectTool) {
+            if (attachmentsPayload.length > 0) {
+                appendAssistantMarkdown(
+                    'ℹ️ **Payload `sql_queries/search_queries` detectado.** ' +
+                    'Os anexos pendentes foram ignorados nesta execução para evitar que o simulador trate o pedido como análise de arquivo.'
+                );
+            }
+
+            state.messages.push({ role: 'user', content: userTxt });
+            saveLocal();
+            await handleDirectToolModeMessage(userTxt, parsedDirectRequest);
+            return;
+        }
 
         if (isDirectToolMode()) {
             state.messages.push({ role: 'user', content: userTxt });
