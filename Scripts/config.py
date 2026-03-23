@@ -31,6 +31,10 @@ PORT = 3002
 API_KEY = "CVAPI_2b9c80c2abf94a76baf8b3e68d89cb7e"
 BASE_DIR = r"C:\chatgpt_simulator"
 
+# Debug: exibe todas as queries SQL no console (útil para auditoria)
+DEBUG_LOG = False   # Altere para True para ativar o debug
+
+
 DIRS = {
     "certs": os.path.join(BASE_DIR, "certs"),
     "frontend": os.path.join(BASE_DIR, "frontend"),
