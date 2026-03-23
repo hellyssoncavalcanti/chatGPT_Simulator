@@ -2170,6 +2170,21 @@ if (function_exists('get_mysql_connection_local')) {
     } catch (Exception $_e) { /* silencioso — usa padrão */ }
 }
 
+// Regra complementar: formato de data para exibição ao usuário final.
+// IMPORTANTE: não altera formato interno de SQL.
+$date_format_rule = <<<EOT
+
+[FORMATAÇÃO DE DATAS PARA RESPOSTA FINAL AO USUÁRIO]
+• Em toda resposta textual final ao usuário, exibir datas no formato dd/mm/yy.
+• Esta regra vale somente para a resposta final exibida ao usuário.
+• NÃO aplicar esta formatação dentro de SQL/queries; manter datas em SQL no padrão técnico já utilizado pelo sistema.
+• Se uma data vier em outro formato na fonte, converta apenas na resposta final.
+EOT;
+
+if (stripos($active_system_prompt, 'formatação de datas para resposta final ao usuário') === false) {
+    $active_system_prompt .= "\n" . $date_format_rule;
+}
+
 /* * Encapsulamento final do Contexto e Prompt do Sistema
  * Assim, a LLM saberá onde inicia e termina o seu bloco de instruções raiz.
  */
