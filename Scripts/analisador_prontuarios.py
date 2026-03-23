@@ -82,6 +82,7 @@ _ensure("numpy")
 # IMPORTS NORMAIS
 # ─────────────────────────────────────────────────────────────
 import time, json, logging, re, html as html_mod, requests, hashlib, shutil, os
+import inspect
 from collections import Counter
 from html.parser import HTMLParser
 from datetime import datetime
@@ -316,6 +317,8 @@ def _reativar_esgotados_recuperaveis_no_startup():
                 OR LOWER(COALESCE(erro_msg, '')) LIKE '%unterminated string%'
                 OR LOWER(COALESCE(erro_msg, '')) LIKE '%invalid control character%'
                 OR LOWER(COALESCE(erro_msg, '')) LIKE '%extra data%'
+                OR LOWER(COALESCE(erro_msg, '')) LIKE '%unexpected keyword argument ''id_atendimento''%'
+                OR LOWER(COALESCE(erro_msg, '')) LIKE '%name ''idatendimento'' is not defined%'
             )
         """,
         reason="reativar_esgotados_recuperaveis"
@@ -391,17 +394,23 @@ def _extrair_queries_pesquisa_fallback(markdown: str) -> list:
 # ─────────────────────────────────────────────────────────────
 _WRITE_CMDS = {'CREATE', 'ALTER', 'INSERT', 'UPDATE', 'DELETE', 'DROP', 'TRUNCATE', 'REPLACE'}
 
-def sql_exec(query: str, reason: str = "analisador_prontuarios") -> dict:
+def sql_exec(query: str, reason: str | None = None) -> dict:
     """Roteia automaticamente:
     - SELECT/SHOW/DESCRIBE -> execute_sql (api_key no header+payload, sem rate limiting)
     - CREATE/ALTER/INSERT/UPDATE/DELETE -> api_exec
     """
 
+    # Evita reason genérica: se não vier explícita, infere da função chamadora.
+    if not (reason and str(reason).strip()):
+        caller = "desconhecido"
+        try:
+            caller = inspect.stack()[1].function
+        except Exception:
+            pass
+        reason = f"auto:{caller}"
+
     # Padroniza o reason com prefixo do módulo
-    if reason and reason.strip():
-        reason = f"[analisador_prontuarios.py] {reason}"
-    else:
-        reason = "[analisador_prontuarios.py]"
+    reason = f"[analisador_prontuarios.py] {reason}"
 
     # Debug: loga a query antes de enviar
     if DEBUG_LOG:
@@ -707,7 +716,7 @@ def garantir_schema_analise_compilada_paciente():
     ]
     for sql in ajustes:
         try:
-            sql_exec(sql)
+            sql_exec(sql, reason="garantir_schema_analise_compilada_paciente")
         except RuntimeError as e:
             msg = str(e).lower()
             if 'duplicate key name' in msg or 'already exists' in msg:
@@ -731,7 +740,7 @@ def garantir_schema_analise_compilada_paciente():
     ]
     for sql in ajustes:
         try:
-            sql_exec(sql)
+            sql_exec(sql, reason="garantir_schema_analise_compilada_paciente")
         except RuntimeError as e:
             msg = str(e).lower()
             if 'duplicate key name' in msg or 'already exists' in msg:
@@ -755,7 +764,7 @@ def garantir_schema_analise_compilada_paciente():
     ]
     for sql in ajustes:
         try:
-            sql_exec(sql)
+            sql_exec(sql, reason="garantir_schema_analise_compilada_paciente")
         except RuntimeError as e:
             msg = str(e).lower()
             if 'duplicate key name' in msg or 'already exists' in msg:
@@ -779,7 +788,7 @@ def garantir_schema_analise_compilada_paciente():
     ]
     for sql in ajustes:
         try:
-            sql_exec(sql)
+            sql_exec(sql, reason="garantir_schema_analise_compilada_paciente")
         except RuntimeError as e:
             msg = str(e).lower()
             if 'duplicate key name' in msg or 'already exists' in msg:
@@ -925,7 +934,7 @@ def salvar_embedding(id_atendimento: int, id_paciente: str, vetor: list, hash_pr
             embedding_dim    = VALUES(embedding_dim),
             hash_prontuario  = VALUES(hash_prontuario),
             datetime_criacao = NOW()
-    """)
+    """, reason="salvar_embedding")
 
 
 def buscar_casos_semelhantes(id_atendimento: int, vetor_origem: list) -> list:
@@ -997,7 +1006,7 @@ def salvar_casos_semelhantes(id_atendimento: int, id_paciente: str, casos: list)
                     embedding_model = VALUES(embedding_model),
                     score_similaridade = VALUES(score_similaridade),
                     datetime_calculo = VALUES(datetime_calculo)
-            """)
+            """, reason="salvar_casos_semelhantes_upsert")
         except Exception as e:
             log.warning(f"  ⚠️ Erro ao salvar caso semelhante (dest={id_dest}): {e}")
 
@@ -1008,7 +1017,7 @@ def salvar_casos_semelhantes(id_atendimento: int, id_paciente: str, casos: list)
             UPDATE {TABELA} SET
                 casos_semelhantes = _utf8mb4'{esc(casos_json)}'
             WHERE id_atendimento = {int(id_atendimento)}
-        """)
+        """, reason="salvar_casos_semelhantes_json")
     except Exception as e:
         log.warning(f"  ⚠️ Erro ao atualizar casos_semelhantes na análise: {e}")
 
@@ -1064,7 +1073,7 @@ def _get_colunas_tabela(force=False):
             FROM INFORMATION_SCHEMA.COLUMNS
             WHERE TABLE_SCHEMA = DATABASE()
               AND TABLE_NAME   = '{TABELA}'
-        """)
+        """, reason="carregar_colunas_tabela")
         _COLUNAS_TABELA = {r["COLUMN_NAME"] for r in (resp.get("data") or [])}
         log.debug(f"[schema] {len(_COLUNAS_TABELA)} colunas carregadas para {TABELA}.")
     except Exception as e:
@@ -1539,7 +1548,7 @@ def garantir_registro_compilado_paciente_pendente(id_paciente: str) -> int:
                 modelo_llm = {esc_str(LLM_MODEL)},
                 prompt_version = {esc_str(PROMPT_VERSION)}
             WHERE id = {id_registro}
-        """)
+        """, reason="atualizar_registro_compilado_pendente")
         return id_registro
 
     sql_exec(f"""
@@ -1576,7 +1585,7 @@ def marcar_processando(row: dict):
             datetime_analise_iniciada               = NOW(),
             datetime_ultima_atualizacao_atendimento = {f"'{dtp}'" if dtp else 'NULL'}
         WHERE id_atendimento = {idat}
-    """)
+    """, reason="marcar_processando_unitario")
 
 
 
@@ -1698,7 +1707,7 @@ def salvar_resultado(id_atendimento: int, resultado: dict):
         + f"\nWHERE id_atendimento = {int(id_atendimento)}"
     )
     log.debug(f"[salvar_resultado] {len(sets)} campos → id_atendimento={id_atendimento}")
-    sql_exec(sql)
+    sql_exec(sql, reason="salvar_resultado_unitario")
 
 
 def _stringify_compact(value) -> str:
@@ -2714,7 +2723,7 @@ def salvar_erro(id_atendimento: int, msg: str):
             status   = 'erro',
             erro_msg = _utf8mb4'{esc(str(msg)[:1000])}'
         WHERE id_atendimento = {id_atendimento}
-    """)
+    """, reason="salvar_erro_unitario")
 
 
 def limpar_tabelas_complementares(id_atendimento: int):
@@ -2732,7 +2741,8 @@ def limpar_tabelas_complementares(id_atendimento: int):
     for tabela in tabelas:
         try:
             resp = sql_exec(
-                f"DELETE FROM {tabela} WHERE id_atendimento = {int(id_atendimento)}"
+                f"DELETE FROM {tabela} WHERE id_atendimento = {int(id_atendimento)}",
+                reason=f"limpar_tabela_complementar_{tabela}"
             )
             afetados = resp.get("affected_rows", 0)
             if afetados:
