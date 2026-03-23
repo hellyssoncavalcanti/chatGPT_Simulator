@@ -5273,6 +5273,32 @@ header('Content-Type: application/javascript; charset=utf-8');
         // ------------------------------------------------------------------
         const isChatGPTUrl = state.currentChatUrl && state.currentChatUrl.includes("chatgpt.com");
         if (state.currentChatId && isChatGPTUrl) {
+            let simulatorOnline = false;
+            try {
+                const pingRes = await fetch("<?php echo $_SERVER['PHP_SELF']; ?>?action=ping_simulator", {
+                    method: 'GET',
+                    cache: 'no-store'
+                });
+                const pingData = await pingRes.json();
+                simulatorOnline = !!pingData?.online;
+            } catch (pingErr) {
+                console.warn(`${FILE_PREFIX} ⚠️ [SYNC] Ping do simulator falhou:`, pingErr);
+            }
+
+            if (!simulatorOnline) {
+                console.warn(`%c☁️ ${FILE_PREFIX} [SYNC] Simulator off-line — sincronização com nuvem ignorada.`, "color: #ff9800; font-weight: bold;");
+                const box = document.getElementById('ow-messages');
+                if (box) {
+                    const old = document.getElementById('ow-sync-offline-indicator');
+                    if (old) old.remove();
+                    const offlineMsg = document.createElement('div');
+                    offlineMsg.id = 'ow-sync-offline-indicator';
+                    offlineMsg.innerHTML = '<div style="text-align:center; font-size:11px; color:#ff9800; margin-top: 10px;">⚠️ Não foi possível atualizar o histórico com a nuvem porque o ChatGPT Simulator está off-line.</div>';
+                    box.appendChild(offlineMsg);
+                    scroll(true);
+                }
+                return;
+            }
             
             console.log(`%c☁️ ${FILE_PREFIX} [SYNC] Sincronizando histórico com a nuvem... (ID: ${state.currentChatId})`, "color: #2196f3; font-weight: bold;");
 
@@ -7866,7 +7892,11 @@ header('Content-Type: application/javascript; charset=utf-8');
         saveLocal();
 
         const ui = addAiMarkup();
-        let fullC = partialContent, fullT = '', openedT = false;
+        const tWrapEl = document.getElementById(ui.tID)?.parentElement;
+        const tElInit = document.getElementById(ui.tID);
+        if (tWrapEl) tWrapEl.style.display = 'block';
+        if (tElInit) tElInit.innerText = 'Enviando pedido...';
+        let fullC = partialContent, fullT = '', openedT = true;
 
         if (partialContent) {
             document.getElementById(ui.mID).innerHTML = formatMarkdown(partialContent) +
@@ -7979,7 +8009,11 @@ header('Content-Type: application/javascript; charset=utf-8');
                 mEl.innerHTML = fullC.trim().startsWith(('<div>').slice(0, -1)) ? _postProcessHtml(fullC) : formatMarkdown(fullC);
             }
             if (typeof injectSearchButtons === 'function') setTimeout(() => injectSearchButtons(), 0);
-            if (fullT) document.getElementById(ui.tID).innerText = fullT;
+            if (fullT) {
+                document.getElementById(ui.tID).innerText = fullT;
+            } else if (tWrapEl) {
+                tWrapEl.style.display = 'none';
+            }
             
             //só salva se houver conteúdo real:
             if (fullC.trim() || fullT.trim()) {
@@ -7993,6 +8027,7 @@ header('Content-Type: application/javascript; charset=utf-8');
             if (error.name !== 'AbortError') {
                 document.getElementById(ui.mID).innerText = 'Erro ao se comunicar: ' + error.message;
             }
+            if (tWrapEl) tWrapEl.style.display = 'none';
             btn.innerText = 'Enviar';
             btn.classList.remove('stop-mode');
         }
