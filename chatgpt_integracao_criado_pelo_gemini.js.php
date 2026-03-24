@@ -4025,6 +4025,8 @@ header('Content-Type: application/javascript; charset=utf-8');
         btnExec.onclick = async () => {
             btnExec.disabled = true;
             btnExec.innerHTML = `<span style="font-size:12px;color:#ff9800;font-weight:bold">⏳ Executando...</span>`;
+            _setOwProcessing(true);
+            try {
 
             // UI de resultado
             let resultUI = el.nextElementSibling;
@@ -4175,6 +4177,13 @@ header('Content-Type: application/javascript; charset=utf-8');
             btnExec.disabled = false;
             btnExec.innerHTML = `<span style="font-size:12px;color:#0d652d;font-weight:bold">✅ Concluído</span>`;
             setTimeout(() => { btnExec.innerHTML = execHTML; }, 3000);
+            } catch (err) {
+                console.error(`${FILE_PREFIX} ❌ Erro na execução manual de SQL:`, err);
+                btnExec.disabled = false;
+                btnExec.innerHTML = execHTML;
+            } finally {
+                _setOwProcessing(false);
+            }
         };
 
         actionBar.appendChild(btnCopy);
@@ -4194,9 +4203,8 @@ header('Content-Type: application/javascript; charset=utf-8');
             const sqlQueries = extractSQLFromResponse(sourceText);
             if (!sqlQueries || sqlQueries.length === 0) return;
 
-            const signature = JSON.stringify(
-                sqlQueries.map((q) => String((q && q.query) || q || '').trim())
-            );
+            const sourceText = el.closest('.msg-ai')?.innerText || el.textContent || '';
+            if (!sourceText || !/sql_queries/i.test(sourceText)) return;
 
             // Se já injetou para o mesmo payload nesta bolha, não duplica.
             if (bubble.dataset.sqlUiSignature === signature && bubble.querySelector('.ow-sql-actions-bar')) {
@@ -4213,16 +4221,13 @@ header('Content-Type: application/javascript; charset=utf-8');
                 }
             });
 
-            // Prioriza bloco com JSON SQL visível.
-            let target =
-                bubble.querySelector('pre code')?.parentElement
-                || bubble.querySelector('pre')
-                || Array.from(bubble.querySelectorAll('p, div, span'))
-                    .find((el) => /sql_queries/i.test(el.textContent || ''))
-                || bubble;
+            // Evita processar containers gigantes (wrappers de página)
+            if (sourceText.length > 5000) return;
 
-            _attachSQLButtons(target, sqlQueries);
-            bubble.dataset.sqlUiSignature = signature;
+            const sqlQueries = extractSQLFromResponse(sourceText);
+            if (sqlQueries && sqlQueries.length > 0) {
+                _attachSQLButtons(target, sqlQueries);
+            }
         });
     }
 
@@ -6317,6 +6322,7 @@ header('Content-Type: application/javascript; charset=utf-8');
 
     async function init() {
         console.groupCollapsed(`%c🔧 ${FILE_PREFIX} [SYSTEM] Inicialização ChatJS`, "color: #e67e22; font-weight: bold;");
+        _initOwProcessingObserver();
         const streamPref = localStorage.getItem(KEY_STREAM);
         document.getElementById('ow-stream-check').checked = streamPref === 'false' ? false : true;
 
@@ -7399,8 +7405,7 @@ header('Content-Type: application/javascript; charset=utf-8');
             return false;
         }
 
-        const _sendBtn = document.getElementById('ow-send');
-        if (_sendBtn) { _sendBtn.disabled = true; _sendBtn.classList.add('stop-mode'); }
+        _setOwProcessing(true);
 
         console.groupCollapsed(`%c${FILE_PREFIX} 🔍 Pesquisa web detectada na resposta`, "color: #4caf50; font-weight: bold; background: #e8f5e9; padding: 4px 8px; border-radius: 4px;");
         console.log(`Queries: ${searchQueries.length}`);
@@ -7480,9 +7485,9 @@ header('Content-Type: application/javascript; charset=utf-8');
                 const mEl = document.getElementById(ui.mID);
                 if (mEl) mEl.innerText = 'Erro ao pesquisar na web: ' + e.message;
             }
+        } finally {
+            _setOwProcessing(false);
         }
-
-        if (_sendBtn) { _sendBtn.disabled = false; _sendBtn.classList.remove('stop-mode'); }
         return true;
     }
 
@@ -7527,8 +7532,7 @@ header('Content-Type: application/javascript; charset=utf-8');
         btnExec.onclick = async () => {
             btnExec.disabled = true;
             btnExec.innerHTML = `<span style="font-size:12px;color:#ff9800;font-weight:bold">⏳ Pesquisando...</span>`;
-            const _owSend = document.getElementById('ow-send');
-            if (_owSend) { _owSend.disabled = true; _owSend.classList.add('stop-mode'); }
+            _setOwProcessing(true);
 
             try {
                 const searchData = await executeWebSearch(searchQueries);
@@ -7566,12 +7570,13 @@ header('Content-Type: application/javascript; charset=utf-8');
 
             } catch(e) {
                 console.error('Erro pesquisa manual:', e);
+            } finally {
+                _setOwProcessing(false);
             }
 
             btnExec.disabled = false;
             btnExec.innerHTML = `<span style="font-size:12px;color:#2e7d32;font-weight:bold">✅ Concluído</span>`;
             setTimeout(() => { btnExec.innerHTML = execHTML; }, 3000);
-            if (_owSend) { _owSend.disabled = false; _owSend.classList.remove('stop-mode'); }
         };
 
         actionBar.appendChild(btnExec);
@@ -7731,13 +7736,15 @@ header('Content-Type: application/javascript; charset=utf-8');
             return false;
         }
 
-        console.groupCollapsed(`%c${FILE_PREFIX} 🐬 SQL detectado na resposta`, "color: #00bcd4; font-weight: bold; background: #e0f7fa; padding: 4px 8px; border-radius: 4px;");
-        console.log(`Queries encontradas: ${sqlQueries.length}`);
-        sqlQueries.forEach((q, i) => {
-            console.log(`[${i + 1}] ${q.reason || 'Sem descrição'}`);
-            console.log(`    SQL: ${q.query.substring(0, 80)}...`);
-        });
-        console.groupEnd();
+        _setOwProcessing(true);
+        try {
+            console.groupCollapsed(`%c${FILE_PREFIX} 🐬 SQL detectado na resposta`, "color: #00bcd4; font-weight: bold; background: #e0f7fa; padding: 4px 8px; border-radius: 4px;");
+            console.log(`Queries encontradas: ${sqlQueries.length}`);
+            sqlQueries.forEach((q, i) => {
+                console.log(`[${i + 1}] ${q.reason || 'Sem descrição'}`);
+                console.log(`    SQL: ${q.query.substring(0, 80)}...`);
+            });
+            console.groupEnd();
 
         // Renderiza UI de execução
         if (ui && ui.mID && document.getElementById(ui.mID)) {
@@ -7822,7 +7829,11 @@ header('Content-Type: application/javascript; charset=utf-8');
             }
         }
 
-        return formatSQLResultsForLLM(sqlResults, originalQuestion, originalContext);
+            const sqlResultContext = formatSQLResultsForLLM(sqlResults, originalQuestion, originalContext);
+            return sqlResultContext;
+        } finally {
+            _setOwProcessing(false);
+        }
     }
 
 
@@ -7907,6 +7918,52 @@ header('Content-Type: application/javascript; charset=utf-8');
     
     function clearRecoveryState() {
         localStorage.removeItem(RECOVERY_KEY);
+    }
+
+    let _owProcessingDepth = 0;
+    function _hasActiveBlinkCursor() {
+        return !!document.querySelector('#ow-messages .cursor-blink');
+    }
+
+    function _refreshOwSendButtonState() {
+        const btn = document.getElementById('ow-send');
+        if (!btn) return;
+
+        const hasInternalProcessing = _owProcessingDepth > 0;
+        const hasUiStreaming = _hasActiveBlinkCursor();
+        const isProcessing = hasInternalProcessing || hasUiStreaming;
+
+        if (isProcessing) {
+            btn.innerText = 'Parar';
+            btn.classList.add('stop-mode');
+            // Se há processamento interno (SQL/search em background), bloqueia envio.
+            // Se for apenas streaming da LLM (cursor-blink), mantém clicável para Abort.
+            btn.disabled = hasInternalProcessing;
+            return;
+        }
+
+        btn.innerText = 'Enviar';
+        btn.classList.remove('stop-mode');
+        btn.disabled = false;
+    }
+
+    function _initOwProcessingObserver() {
+        const root = document.getElementById('ow-messages');
+        if (!root || root.__owProcessingObserverAttached) return;
+
+        const obs = new MutationObserver(() => _refreshOwSendButtonState());
+        obs.observe(root, { childList: true, subtree: true, attributes: true, attributeFilter: ['class'] });
+        root.__owProcessingObserverAttached = true;
+        _refreshOwSendButtonState();
+    }
+
+    function _setOwProcessing(active) {
+        if (active) {
+            _owProcessingDepth += 1;
+        } else {
+            _owProcessingDepth = Math.max(0, _owProcessingDepth - 1);
+        }
+        _refreshOwSendButtonState();
     }
 
     async function sendWithRecovery(userTxt, ctx, retryCount = 0, partialContent = "", attachments = []) {
