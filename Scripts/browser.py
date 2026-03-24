@@ -2449,7 +2449,12 @@ async def handle_chat_task_inner(task, page, q, stop_event: asyncio.Event, activ
             if len(last_html) > 0:
                 if stuck_count > 20 and idle_ready_count > 8: break
             else:
-                if time.time() - start_time > 60 and idle_ready_count > 8: break
+                # Evita encerrar cedo demais quando o ChatGPT demora para começar
+                # a emitir markdown visível (ex.: requests longas, tools, busy UI).
+                # Já existe timeout global de 600s no loop.
+                if time.time() - start_time > 300 and idle_ready_count > 20:
+                    emit_log(q, "⏳ Sem markdown visível por 300s; encerrando leitura desta tarefa.")
+                    break
         else:
             idle_ready_count = 0
 
