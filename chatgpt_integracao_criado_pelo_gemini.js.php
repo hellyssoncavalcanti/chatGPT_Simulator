@@ -4184,46 +4184,45 @@ header('Content-Type: application/javascript; charset=utf-8');
 
     function injectSQLButtons() {
         const container = document.getElementById('ow-messages') || document.body;
+        const assistantBubbles = container.querySelectorAll('.msg-ai');
 
-        // [FIX BUG 1] Adiciona 'code' — JSON em fenced blocks fica em <pre><code>
-        const elements = container.querySelectorAll('pre, code, p, div, span');
-
-        elements.forEach(el => {
-            // [FIX BUG 2] Guarda pela presença FÍSICA da barra, não por classe
-            // (classe sobrevive a innerHTML replacement, barra não)
-            if (el.querySelector('.ow-sql-actions-bar')) return;
-
-            const sourceText = el.closest('.msg-ai')?.innerText || el.textContent || '';
+        assistantBubbles.forEach((bubble) => {
+            const sourceText = bubble.innerText || bubble.textContent || '';
             if (!sourceText || !/sql_queries/i.test(sourceText)) return;
-
-            // [FIX BUG 1] Para <code> dentro de <pre>: opera no <pre>
-            // (só <pre> tem o contexto CSS necessário para position:absolute)
-            let target = el;
-            if (el.tagName === 'CODE' && el.parentElement?.tagName === 'PRE') {
-                target = el.parentElement;
-                if (target.querySelector('.ow-sql-actions-bar')) return;
-            }
-
-            // Deepest-element check (evita injetar na div wrapper)
-            let isDeepest = true;
-            for (const child of el.children) {
-                if (child.classList?.contains('ow-sql-actions-bar')) continue;
-                if (child.tagName === 'BR') continue; // <br> não conta
-                if (/sql_queries/i.test(child.textContent || '')) {
-                    isDeepest = false;
-                    break;
-                }
-            }
-            if (!isDeepest) return;
-
-            // Evita processar containers gigantes (wrappers de página),
-            // mas mantém tolerância para queries longas reais.
             if (sourceText.length > 120000) return;
 
             const sqlQueries = extractSQLFromResponse(sourceText);
-            if (sqlQueries && sqlQueries.length > 0) {
-                _attachSQLButtons(target, sqlQueries);
+            if (!sqlQueries || sqlQueries.length === 0) return;
+
+            const signature = JSON.stringify(
+                sqlQueries.map((q) => String((q && q.query) || q || '').trim())
+            );
+
+            // Se já injetou para o mesmo payload nesta bolha, não duplica.
+            if (bubble.dataset.sqlUiSignature === signature && bubble.querySelector('.ow-sql-actions-bar')) {
+                return;
             }
+
+            // Remove barras antigas desta bolha para evitar acúmulo.
+            bubble.querySelectorAll('.ow-sql-actions-bar').forEach((bar) => {
+                const host = bar.parentElement;
+                if (host && host.children.length === 1 && host.classList.contains('ow-sql-wrapper')) {
+                    host.remove();
+                } else {
+                    bar.remove();
+                }
+            });
+
+            // Prioriza bloco com JSON SQL visível.
+            let target =
+                bubble.querySelector('pre code')?.parentElement
+                || bubble.querySelector('pre')
+                || Array.from(bubble.querySelectorAll('p, div, span'))
+                    .find((el) => /sql_queries/i.test(el.textContent || ''))
+                || bubble;
+
+            _attachSQLButtons(target, sqlQueries);
+            bubble.dataset.sqlUiSignature = signature;
         });
     }
 
