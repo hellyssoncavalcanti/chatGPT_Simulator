@@ -363,12 +363,14 @@ class WhatsAppWebClient:
             self._page = self._browser.new_page()
             self._page.goto(WHATSAPP_WEB_URL, wait_until="domcontentloaded")
             self._wait_ready()
+            self._log_chat_list_snapshot("startup")
             log.info("WhatsApp Web pronto.")
 
     def _wait_ready(self, timeout_ms: int = 180000) -> None:
         assert self._page is not None
         try:
             self._page.wait_for_selector('div[aria-label="Chat list"], #pane-side', timeout=timeout_ms)
+            log.info("WhatsApp Web autenticado: lista de chats visível no browser.")
         except PlaywrightTimeoutError:
             log.error(
                 "WhatsApp Web não autenticado. Abra a janela e faça login via QR Code em %s",
@@ -376,22 +378,111 @@ class WhatsAppWebClient:
             )
             raise
 
+    def _log_chat_list_snapshot(self, reason: str, limit: int = 12) -> None:
+        assert self._page is not None
+        try:
+            chats = self._page.evaluate(
+                """(maxItems) => {
+                    const root = document.querySelector('#pane-side');
+                    if (!root) return [];
+                    const names = [];
+                    const nodes = root.querySelectorAll('span[dir="auto"]');
+                    for (const n of nodes) {
+                        const t = (n.textContent || '').trim();
+                        if (!t) continue;
+                        if (names.includes(t)) continue;
+                        names.push(t);
+                        if (names.length >= maxItems) break;
+                    }
+                    return names;
+                }""",
+                limit,
+            )
+            if chats:
+                log.info("Lista de chats visíveis (%s): %s", reason, " | ".join(chats))
+            else:
+                log.warning("Não foi possível capturar a lista de chats visíveis (%s).", reason)
+        except Exception:
+            log.exception("Falha ao capturar lista de chats visíveis (%s).", reason)
+
+    def _find_existing_chat_in_sidebar(self, phone: str) -> bool:
+        assert self._page is not None
+        phone_digits = re.sub(r"\D", "", phone or "")
+        if not phone_digits:
+            return False
+        try:
+            found = self._page.evaluate(
+                """(needle) => {
+                    const root = document.querySelector('#pane-side');
+                    if (!root) return false;
+                    const texts = root.querySelectorAll('span[dir="auto"], div[title]');
+                    for (const el of texts) {
+                        const txt = ((el.getAttribute && el.getAttribute('title')) || el.textContent || '').trim();
+                        if (!txt) continue;
+                        const digits = txt.replace(/\\D/g, '');
+                        if (!digits) continue;
+                        if (digits.endsWith(needle.slice(-8)) || digits.endsWith(needle.slice(-9)) || digits === needle) {
+                            return true;
+                        }
+                    }
+                    return false;
+                }""",
+                phone_digits,
+            )
+            return bool(found)
+        except Exception:
+            log.exception("Falha ao buscar chat existente na barra lateral para telefone=%s", phone)
+            return False
+
     def _open_chat(self, phone: str) -> None:
         assert self._page is not None
+        existing = self._find_existing_chat_in_sidebar(phone)
+        if existing:
+            log.info("Abrindo chat com histórico identificado na lista lateral para %s", phone)
+        else:
+            log.info("Abrindo novo chat (sem histórico identificado na lista lateral) para %s", phone)
+        self._log_chat_list_snapshot(f"antes_open_chat:{phone}", limit=8)
+
         url = f"https://web.whatsapp.com/send?phone={phone}&text={quote('')}&app_absent=0"
+        log.info("Navegando para URL de chat: %s", url)
         self._page.goto(url, wait_until="domcontentloaded")
         self._page.wait_for_timeout(1200)
         self._page.wait_for_selector("footer div[contenteditable='true']", timeout=30000)
+        inbound_count = self._page.locator("div.message-in").count()
+        outbound_count = self._page.locator("div.message-out").count()
+        log.info(
+            "Chat aberto para %s | mensagens_recebidas=%s | mensagens_enviadas=%s",
+            phone,
+            inbound_count,
+            outbound_count,
+        )
 
     def send_message(self, phone: str, text: str) -> None:
         with self._lock:
             self.start()
+            log.info("Iniciando fluxo de envio WhatsApp para %s", phone)
             self._open_chat(phone)
             box = self._page.locator("footer div[contenteditable='true']").first
+            before_out = self._page.locator("div.message-out").count()
             box.click()
             box.fill(text)
             box.press("Enter")
-            self._page.wait_for_timeout(500)
+            self._page.wait_for_timeout(1200)
+            after_out = self._page.locator("div.message-out").count()
+            if after_out > before_out:
+                log.info(
+                    "Envio confirmado no browser para %s | out_antes=%s out_depois=%s",
+                    phone,
+                    before_out,
+                    after_out,
+                )
+            else:
+                log.warning(
+                    "Sem confirmação visual de envio no browser para %s | out_antes=%s out_depois=%s",
+                    phone,
+                    before_out,
+                    after_out,
+                )
 
     def read_last_inbound(self, phone: str) -> Optional[Dict[str, str]]:
         with self._lock:
