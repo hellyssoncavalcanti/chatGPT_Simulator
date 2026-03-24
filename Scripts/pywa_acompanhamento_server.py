@@ -332,8 +332,14 @@ wa_web = WhatsAppWebClient()
 
 def send_pending_followups_once() -> Dict[str, Any]:
     rows = run_sql(FETCH_SQL)
+    total_rows = len(rows)
+    total_followup_items = 0
     sent = 0
     skipped = 0
+    skipped_missing_phone = 0
+    skipped_empty_followup = 0
+    skipped_already_sent = 0
+    errors = 0
 
     for row in rows:
         id_atendimento = row.get("id_atendimento")
@@ -344,16 +350,21 @@ def send_pending_followups_once() -> Dict[str, Any]:
 
         if not phone:
             skipped += 1
+            skipped_missing_phone += 1
             continue
 
         itens = extract_followup_items(row.get("mensagens_acompanhamento"))
         if not itens:
             skipped += 1
+            skipped_empty_followup += 1
             continue
+        total_followup_items += len(itens)
 
         for key, pergunta in itens:
             dedupe_key = f"{id_atendimento}:{key}:{hashlib.sha1(pergunta.encode('utf-8')).hexdigest()}"
             if state.is_sent(dedupe_key):
+                skipped += 1
+                skipped_already_sent += 1
                 continue
 
             try:
@@ -388,9 +399,32 @@ def send_pending_followups_once() -> Dict[str, Any]:
                 )
                 sent += 1
             except Exception:
+                errors += 1
                 log.exception("Falha no envio para %s (atendimento=%s)", phone, id_atendimento)
 
-    return {"total": len(rows), "sent": sent, "skipped": skipped}
+    return {
+        "total": total_rows,
+        "total_followup_items": total_followup_items,
+        "sent": sent,
+        "skipped": skipped,
+        "skipped_missing_phone": skipped_missing_phone,
+        "skipped_empty_followup": skipped_empty_followup,
+        "skipped_already_sent": skipped_already_sent,
+        "errors": errors,
+    }
+
+
+def _build_skip_reason_summary(stats: Dict[str, Any]) -> str:
+    reasons: List[str] = []
+    if stats.get("skipped_missing_phone", 0):
+        reasons.append(f"sem telefone válido={stats['skipped_missing_phone']}")
+    if stats.get("skipped_empty_followup", 0):
+        reasons.append(f"sem mensagem de acompanhamento={stats['skipped_empty_followup']}")
+    if stats.get("skipped_already_sent", 0):
+        reasons.append(f"já enviado anteriormente={stats['skipped_already_sent']}")
+    if stats.get("errors", 0):
+        reasons.append(f"falha ao enviar={stats['errors']}")
+    return "; ".join(reasons) if reasons else "nenhum motivo classificado"
 
 
 def process_incoming_replies_once() -> Dict[str, int]:
@@ -455,7 +489,22 @@ def scheduler_loop() -> None:
     while True:
         try:
             stats = send_pending_followups_once()
-            log.info("Envio acompanhamento | total=%s enviados=%s ignorados=%s", stats["total"], stats["sent"], stats["skipped"])
+            motivos = _build_skip_reason_summary(stats)
+            log.info(
+                "Envio acompanhamento | total=%s itens=%s enviados=%s ignorados=%s "
+                "(sem_telefone=%s, sem_mensagem=%s, ja_enviado=%s, erros=%s, motivos=%s)",
+                stats["total"],
+                stats["total_followup_items"],
+                stats["sent"],
+                stats["skipped"],
+                stats["skipped_missing_phone"],
+                stats["skipped_empty_followup"],
+                stats["skipped_already_sent"],
+                stats["errors"],
+                motivos,
+            )
+            if stats["sent"] == 0 and stats["total"] > 0:
+                log.warning("Nenhum envio novo nesta varredura. Motivos: %s", motivos)
         except Exception:
             log.exception("Falha no ciclo de envio")
         time.sleep(POLL_INTERVAL_SEC)
