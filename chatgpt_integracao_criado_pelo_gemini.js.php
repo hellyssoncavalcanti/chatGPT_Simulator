@@ -6704,6 +6704,23 @@ header('Content-Type: application/javascript; charset=utf-8');
                                 if (typeof state !== 'undefined') state.currentChatId = jsonObj.content;
                                 console.log(`%c📌 CHAT_ID GUARDADO: ${data.chat_id}`, "color: #e91e63; font-weight: bold;");
                             }
+
+                            // 👉 Captura contexto antecipado (chat_id/url) antes do finish
+                            if (jsonObj.type === 'chat_meta' && jsonObj.content) {
+                                const meta = jsonObj.content || {};
+                                if (meta.chat_id) {
+                                    data.chat_id = meta.chat_id;
+                                    if (typeof state !== 'undefined') state.currentChatId = meta.chat_id;
+                                }
+                                if (meta.url) {
+                                    data.url = meta.url;
+                                    if (typeof state !== 'undefined') state.currentChatUrl = meta.url;
+                                }
+                                if (typeof Session !== 'undefined') {
+                                    Session.setChat(meta.chat_id || data.chat_id, meta.url || data.url, null);
+                                }
+                                console.log(`%c🔗 CHAT_META antecipado: ID [${data.chat_id || 'N/A'}] | URL [${data.url || 'N/A'}]`, "color: #00acc1; font-weight: bold;");
+                            }
                     
                             // 👉 Captura o evento "finish" que traz URL e Título
                             if (jsonObj.type === 'finish' && jsonObj.content && jsonObj.content.chat_id) {

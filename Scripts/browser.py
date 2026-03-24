@@ -2329,6 +2329,7 @@ async def handle_chat_task_inner(task, page, q, stop_event: asyncio.Event, activ
     stuck_count = 0
     loop_count  = 0
     idle_ready_count = 0
+    early_meta_emitted = False
 
     while True:
         if stop_event.is_set():
@@ -2336,6 +2337,22 @@ async def handle_chat_task_inner(task, page, q, stop_event: asyncio.Event, activ
             break
 
         loop_count += 1
+
+        # Emite chat_id/url assim que a URL do chat ficar disponível
+        # (antes mesmo do finish), para o cliente remoto salvar contexto cedo.
+        if not early_meta_emitted:
+            try:
+                current_url = page.url or ""
+                m_chat = re.search(r'/c/([^/?#]+)', current_url)
+                if current_url.startswith('https://chatgpt.com') and m_chat:
+                    early_chat_id = m_chat.group(1)
+                    emit_event(q, "chat_meta", {
+                        "chat_id": early_chat_id,
+                        "url": current_url,
+                    })
+                    early_meta_emitted = True
+            except Exception:
+                pass
 
         status_txt = await page.evaluate("""() => {
             const asstMsgs = document.querySelectorAll('div[data-message-author-role="assistant"]');
