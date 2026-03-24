@@ -143,6 +143,20 @@ python Scripts/pywa_acompanhamento_server.py
 - `PYWA_SIMULATOR_API_KEY`
 - `PYWA_POLL_INTERVAL_SEC` (default: `120`)
 - `PYWA_FETCH_SQL` (permite customizar a query de captação das mensagens de acompanhamento)
+- `PYWA_APP_SECRET` (**recomendado**) para validação de assinatura do webhook
+
+### Guia rápido de configuração do WhatsApp Cloud API (com links)
+
+1. Criar app no Meta for Developers:  
+   https://developers.facebook.com/apps/
+2. Ativar e configurar WhatsApp Cloud API:  
+   https://developers.facebook.com/docs/whatsapp/cloud-api/get-started
+3. Configurar Webhooks (callback URL + verify token):  
+   https://developers.facebook.com/docs/graph-api/webhooks/getting-started
+4. Documentação oficial do PyWa:  
+   https://pywa.readthedocs.io/
+5. Para rodar localmente recebendo webhook, expor HTTPS com túnel (ex.: ngrok):  
+   https://ngrok.com/docs/getting-started/
 
 ---
 

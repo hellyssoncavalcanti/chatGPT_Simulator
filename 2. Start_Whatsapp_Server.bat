@@ -35,7 +35,15 @@ if %errorLevel% neq 0 (
     echo [ERRO] Falha ao iniciar o servidor PyWa.
     echo [ERRO] Verifique variaveis: PYWA_PHONE_ID e PYWA_TOKEN.
     echo [ERRO] PYWA_VERIFY_TOKEN e opcional ^(se ausente, um token local padrao sera usado^).
+    echo [ERRO] Recomendado configurar tambem PYWA_APP_SECRET para validar assinatura do webhook.
     echo [ERRO] Tambem confirme conectividade com PHP_URL e SIMULATOR_URL.
+    echo.
+    echo [AJUDA] Guia de configuracao:
+    echo [AJUDA] 1^) Meta Apps: https://developers.facebook.com/apps/
+    echo [AJUDA] 2^) Cloud API: https://developers.facebook.com/docs/whatsapp/cloud-api/get-started
+    echo [AJUDA] 3^) Webhooks: https://developers.facebook.com/docs/graph-api/webhooks/getting-started
+    echo [AJUDA] 4^) Docs PyWa: https://pywa.readthedocs.io/
+    echo [AJUDA] 5^) Túnel HTTPS local ^(ngrok^): https://ngrok.com/docs/getting-started/
 )
 
 pause

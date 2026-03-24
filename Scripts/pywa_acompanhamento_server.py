@@ -47,6 +47,7 @@ SIMULATOR_API_KEY = os.getenv("PYWA_SIMULATOR_API_KEY", "CVAPI_2b9c80c2abf94a76b
 WA_PHONE_ID = os.getenv("PYWA_PHONE_ID", "")
 WA_TOKEN = os.getenv("PYWA_TOKEN", "")
 WA_VERIFY_TOKEN = os.getenv("PYWA_VERIFY_TOKEN", "").strip() or "pywa_local_verify_token"
+WA_APP_SECRET = os.getenv("PYWA_APP_SECRET", "").strip()
 
 HOST = os.getenv("PYWA_HOST", "0.0.0.0")
 PORT = int(os.getenv("PYWA_PORT", "3011"))
@@ -282,6 +283,8 @@ wa = WhatsApp(
     token=WA_TOKEN,
     server=flask_app,
     verify_token=WA_VERIFY_TOKEN,
+    app_secret=WA_APP_SECRET or None,
+    validate_updates=bool(WA_APP_SECRET),
 )
 
 
@@ -466,6 +469,24 @@ if __name__ == "__main__":
 
     if not WA_PHONE_ID or not WA_TOKEN:
         log.error("Configure PYWA_PHONE_ID e PYWA_TOKEN antes de iniciar o servidor.")
+        log.error(
+            "Guia rápido de configuração:\n"
+            "1) Crie app/credenciais no Meta for Developers:\n"
+            "   https://developers.facebook.com/apps/\n"
+            "2) Configure WhatsApp Cloud API:\n"
+            "   https://developers.facebook.com/docs/whatsapp/cloud-api/get-started\n"
+            "3) Pegue Phone Number ID e Access Token e defina:\n"
+            "   - PYWA_PHONE_ID\n"
+            "   - PYWA_TOKEN\n"
+            "4) Configure o webhook e verify token (PYWA_VERIFY_TOKEN):\n"
+            "   https://developers.facebook.com/docs/graph-api/webhooks/getting-started\n"
+            "5) (Recomendado) Configure app secret para validar assinatura:\n"
+            "   - PYWA_APP_SECRET\n"
+            "   Docs PyWa: https://pywa.readthedocs.io/\n"
+            "6) Se usar este servidor localmente, exponha a porta com túnel HTTPS (ex.: ngrok):\n"
+            "   https://ngrok.com/docs/getting-started/\n"
+            "7) Aponte o callback do webhook para: https://SEU_DOMINIO/webhooks"
+        )
         sys.exit(1)
 
     t = threading.Thread(target=scheduler_loop, daemon=True)
