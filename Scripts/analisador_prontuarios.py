@@ -158,6 +158,14 @@ log = logging.getLogger("analisador")
 log.info(f"📄 Log: {_log_file}")
 
 
+def _headers_llm() -> dict:
+    return {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {API_KEY}",
+        "X-Request-Source": "analisador_prontuarios.py",
+    }
+
+
 def _strip_code_fences(texto: str) -> str:
     """Remove cercas Markdown ```...``` mantendo apenas o conteúdo interno."""
     texto = (texto or "").strip()
@@ -194,6 +202,55 @@ def _normalizar_json_llm(raw_json: str) -> str:
         .replace("‘", "'")
         .replace("`", '"')
     )
+
+    # Escapa aspas internas não-escapadas dentro de valores string.
+    # Exemplo comum de LLM: "titulo": "Expressive language delay ("late talking") in..."
+    # JSON válido exigiria: \"late talking\".
+    chars = []
+    in_string = False
+    escape = False
+    n = len(texto)
+    i = 0
+    while i < n:
+        ch = texto[i]
+        if not in_string:
+            chars.append(ch)
+            if ch == '"':
+                in_string = True
+            i += 1
+            continue
+
+        if escape:
+            chars.append(ch)
+            escape = False
+            i += 1
+            continue
+
+        if ch == '\\':
+            chars.append(ch)
+            escape = True
+            i += 1
+            continue
+
+        if ch == '"':
+            # Se após aspas houver delimitador de fim de string JSON, encerra string.
+            # Caso contrário, trata como aspas internas e escapa.
+            j = i + 1
+            while j < n and texto[j] in ' \t\r\n':
+                j += 1
+            next_ch = texto[j] if j < n else ''
+            if next_ch in [',', '}', ']', ':', '']:
+                chars.append('"')
+                in_string = False
+            else:
+                chars.append('\\"')
+            i += 1
+            continue
+
+        chars.append(ch)
+        i += 1
+
+    texto = ''.join(chars)
 
     # Ex.: "query": "..."   "reason": "..."
     texto = re.sub(r'("(?:(?:\\.|[^"\\])*)")(\s*)"([A-Za-z0-9_\-]+)"\s*:', r'\1,\2"\3":', texto)
@@ -254,6 +311,24 @@ def _json_parece_incompleto(texto: str) -> bool:
             depth_arr -= 1
 
     return in_string or depth_obj > 0 or depth_arr > 0 or not bruto.rstrip().endswith('}')
+
+
+def _extrair_markdown_visivel_llm(texto: str) -> str:
+    """
+    Remove blocos/markers de raciocínio interno para identificar apenas a
+    resposta visível já entregue pela LLM ao usuário.
+    """
+    bruto = texto or ""
+    if not bruto.strip():
+        return ""
+
+    # Caso o bloco <think> ainda esteja aberto, consideramos que a resposta
+    # visível ainda não começou.
+    if "<think>" in bruto and "</think>" not in bruto:
+        return ""
+
+    sem_think = re.sub(r"<think>[\s\S]*?</think>", "", bruto, flags=re.IGNORECASE)
+    return sem_think.strip()
 
 
 def _salvar_debug_json_falha(id_atendimento: int | None, etapa: str, markdown: str, erro: Exception | str):
@@ -3744,10 +3819,7 @@ def analisar_prontuario(
     resp = requests.post(
         LLM_URL,
         json=payload,
-        headers={
-            "Content-Type":  "application/json",
-            "Authorization": f"Bearer {API_KEY}",
-        },
+        headers=_headers_llm(),
         stream=True,
         timeout=300,
     )
@@ -3817,10 +3889,11 @@ def analisar_prontuario(
 
         elif t == "markdown":
                    markdown = obj.get("content", "")
-                   if "<think>" in markdown and "</think>" not in markdown:
-                       _inline_status('⏳', f"Pensando... ({len(markdown)} chars)")
+                   markdown_visivel = _extrair_markdown_visivel_llm(markdown)
+                   if markdown_visivel:
+                       _inline_status('📝', f"Recebendo: {len(markdown_visivel)} chars...")
                    else:
-                       _inline_status('📝', f"Recebendo: {len(markdown)} chars...")
+                       _inline_status('⏳', "Pensando...")
                    inline_active = True
 
         elif t == "finish":
@@ -4408,10 +4481,7 @@ def gerar_dados_auxiliares_llm(resultado: dict, chat_url: str = None, chat_id: s
         resp = requests.post(
             LLM_URL,
             json=payload,
-            headers={
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {API_KEY}",
-            },
+            headers=_headers_llm(),
             stream=True,
             timeout=300,
         )
@@ -4519,10 +4589,7 @@ def gerar_queries_pesquisa_llm(resultado: dict, chat_url: str = None, chat_id: s
         resp = requests.post(
             LLM_URL,
             json=payload,
-            headers={
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {API_KEY}",
-            },
+            headers=_headers_llm(),
             stream=True,
             timeout=300,
         )
@@ -4718,10 +4785,7 @@ def enriquecer_com_evidencias(resultado: dict, resultados_web: list,
         resp = requests.post(
             LLM_URL,
             json=payload,
-            headers={
-                "Content-Type":  "application/json",
-                "Authorization": f"Bearer {API_KEY}",
-            },
+            headers=_headers_llm(),
             stream=True,
             timeout=300,
         )
@@ -4784,10 +4848,11 @@ def enriquecer_com_evidencias(resultado: dict, resultados_web: list,
                 log.info(f"  📎 chat_id: {new_chat_id}")
             elif t == "markdown":
                        markdown = obj.get("content", "")
-                       if "<think>" in markdown and "</think>" not in markdown:
-                           _inline_status('⏳', f"Pensando... ({len(markdown)} chars)")
+                       markdown_visivel = _extrair_markdown_visivel_llm(markdown)
+                       if markdown_visivel:
+                           _inline_status('📝', f"Recebendo: {len(markdown_visivel)} chars...")
                        else:
-                           _inline_status('📝', f"Recebendo: {len(markdown)} chars...")
+                           _inline_status('⏳', "Pensando...")
                        inline_active = True
             elif t == "finish":
                 if inline_active:

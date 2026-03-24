@@ -2197,29 +2197,38 @@ if(isset($active_system_prompt) && !empty($active_system_prompt))
 // HELPER: EXTRAIR JSON
 // -----------------------------------------------------
 function extract_json_from_text($text) {
-    $text = trim($text);
+    $text = sanitize_json_string(trim($text));
     $json = json_decode($text, true);
     if (json_last_error() === JSON_ERROR_NONE && isset($json['sql_queries'])) return $json;
-    if (preg_match('/```(?:\w+)?\s*(\{.*?"sql_queries".*?\})\s*```/s', $text, $matches)) {
-        $candidate = sanitize_json_string($matches[1]);
-        $j = json_decode($candidate, true);
-        if ($j && isset($j['sql_queries'])) return $j;
+
+    if (preg_match_all('/```(?:\w+)?\s*([\s\S]*?)```/s', $text, $matches)) {
+        foreach($matches[1] as $block) {
+            $candidate = sanitize_json_string($block);
+            $j = json_decode($candidate, true);
+            if ($j && isset($j['sql_queries'])) return $j;
+        }
     }
+
     if (preg_match_all('/\{(?:[^{}]|(?R))*\}/s', $text, $matches)) {
         foreach($matches[0] as $candidate) {
-            if (strpos($candidate, '"sql_queries"') !== false) {
-                $candidateClean = sanitize_json_string($candidate);
-                $j = json_decode($candidateClean, true);
-                if ($j && isset($j['sql_queries'])) return $j;
-            }
+            if (stripos($candidate, 'sql_queries') === false) continue;
+            $candidateClean = sanitize_json_string($candidate);
+            $j = json_decode($candidateClean, true);
+            if ($j && isset($j['sql_queries'])) return $j;
         }
     }
     return null;
 }
 
 function sanitize_json_string($str) {
+    $str = str_replace(
+        ["\xE2\x80\x98", "\xE2\x80\x99", "\xE2\x80\x9C", "\xE2\x80\x9D", "\xC2\xA0", "\\_", "\\*"],
+        ["'", "'", '"', '"', ' ', '_', '*'],
+        $str
+    );
     $str = preg_replace('/\n\s*\/\/[^\n]*/', '', $str);
     $str = preg_replace('!/\*.*?\*/!s', '', $str);
+    $str = preg_replace('/,\s*([}\]])/', '$1', $str);
     return $str; 
 }
 
@@ -3259,8 +3268,11 @@ header('Content-Type: application/javascript; charset=utf-8');
             flex-direction: column;
             gap: 15px;
             scroll-behavior: smooth;
+            -webkit-overflow-scrolling: touch;
+            overscroll-behavior: contain;
             /* padding-bottom removido — não é mais necessário */
         }
+        #ow-messages > * { flex-shrink: 0; }
 
         #ow-input-area {
             flex-shrink: 0;          /* ← ocupa espaço real no flex, não sobrepõe */
@@ -3292,7 +3304,7 @@ header('Content-Type: application/javascript; charset=utf-8');
         #ow-mic.recording { background: #ffebee; border-color: #ef5350; color: #d32f2f; animation: pulseRed 1.5s infinite; }
         
         /* === ANÁLISE PRÉVIA DA LLM EXPOSTA NO CHAT — DESIGN SYSTEM = INICIO === */
-        #ow-analise-previa{font-family:Inter,system-ui,-apple-system,Segoe UI,Roboto,sans-serif;border:1px solid #e2e8f0;border-radius:14px;background:#fff;box-shadow:0 8px 24px rgba(0,0,0,0.08);margin:10px 0;overflow:visible;width:100%;box-sizing:border-box}
+        #ow-analise-previa{font-family:Inter,system-ui,-apple-system,Segoe UI,Roboto,sans-serif;border:1px solid #e2e8f0;border-radius:14px;background:#fff;box-shadow:0 8px 24px rgba(0,0,0,0.08);margin:10px 0;overflow:visible;width:100%;max-width:100%;box-sizing:border-box;flex-shrink:0;align-self:stretch}
         #ow-analise-previa .ia-header{display:flex;align-items:flex-start;justify-content:space-between;padding:14px 16px;border-bottom:1px solid #e2e8f0;background:#f8fafc;gap:8px;flex-wrap:wrap}
         #ow-analise-previa .ia-title{font-weight:700;font-size:16px;color:#0f172a}
         #ow-analise-previa .ia-actions{display:flex;gap:6px;flex-wrap:wrap}
@@ -3335,19 +3347,19 @@ header('Content-Type: application/javascript; charset=utf-8');
         #ow-analise-previa .ia-prio{font-size:11px;font-weight:700;padding:2px 9px;border-radius:999px;color:#fff}
         #iap-toast{position:fixed;bottom:20px;right:20px;background:#0f172a;color:#fff;padding:8px 12px;border-radius:8px;font-size:13px;opacity:0;transform:translateY(10px);transition:0.2s;z-index:9999}
         #iap-toast.show{opacity:1;transform:translateY(0)}
-        #ow-analise-pendente{font-family:Inter,system-ui,-apple-system,Segoe UI,Roboto,sans-serif;border:1px solid #fde68a;border-radius:14px;background:linear-gradient(135deg,#fffdf5 0%,#fff7db 100%);box-shadow:0 8px 24px rgba(180,83,9,.08);margin:10px 0;overflow:hidden;width:100%;box-sizing:border-box}
+        #ow-analise-pendente{font-family:Inter,system-ui,-apple-system,Segoe UI,Roboto,sans-serif;border:1px solid #fde68a;border-radius:14px;background:linear-gradient(135deg,#fffdf5 0%,#fff7db 100%);box-shadow:0 8px 24px rgba(180,83,9,.08);margin:10px 0;overflow:visible;width:100%;max-width:100%;box-sizing:border-box;flex-shrink:0;align-self:stretch}
         #ow-analise-pendente .iap-header{display:flex;align-items:flex-start;justify-content:space-between;padding:14px 16px;border-bottom:1px solid #fde68a;background:rgba(255,251,235,.9);gap:8px;flex-wrap:wrap}
         #ow-analise-pendente .iap-title{font-weight:700;font-size:15px;color:#92400e}
         #ow-analise-pendente .iap-subtitle{font-size:12px;color:#b45309;margin-top:3px}
-        #ow-analise-pendente .iap-list{padding:14px 16px;display:flex;flex-direction:column;gap:10px}
-        #ow-analise-pendente .iap-item{border:1px solid #fcd34d;border-radius:10px;background:#fff;padding:12px 13px}
+        #ow-analise-pendente .iap-list{padding:14px 16px;display:flex;flex-direction:column;gap:10px;min-width:0}
+        #ow-analise-pendente .iap-item{border:1px solid #fcd34d;border-radius:10px;background:#fff;padding:12px 13px;min-width:0}
         #ow-analise-pendente .iap-item-head{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap}
         #ow-analise-pendente .iap-item-title{font-size:13px;font-weight:700;color:#78350f}
         #ow-analise-pendente .iap-badge{font-size:11px;font-weight:800;padding:4px 10px;border-radius:999px;color:#fff}
         #ow-analise-pendente .iap-badge.pendente{background:#d97706}
         #ow-analise-pendente .iap-badge.processando{background:#2563eb}
         #ow-analise-pendente .iap-badge.erro{background:#dc2626}
-        #ow-analise-pendente .iap-item-text{font-size:12px;line-height:1.5;color:#7c5a10;margin-top:7px}
+        #ow-analise-pendente .iap-item-text{font-size:12px;line-height:1.5;color:#7c5a10;margin-top:7px;overflow-wrap:anywhere;word-break:break-word}
         /* === ANÁLISE PRÉVIA DA LLM EXPOSTA NO CHAT — DESIGN SYSTEM = FIM === */
         
         @keyframes pulseRed { 0% { box-shadow: 0 0 0 0 rgba(211, 47, 47, 0.4); } 70% { box-shadow: 0 0 0 10px rgba(211, 47, 47, 0); } 100% { box-shadow: 0 0 0 0 rgba(211, 47, 47, 0); } }
@@ -4172,44 +4184,45 @@ header('Content-Type: application/javascript; charset=utf-8');
 
     function injectSQLButtons() {
         const container = document.getElementById('ow-messages') || document.body;
+        const assistantBubbles = container.querySelectorAll('.msg-ai');
 
-        // [FIX BUG 1] Adiciona 'code' — JSON em fenced blocks fica em <pre><code>
-        const elements = container.querySelectorAll('pre, code, p, div, span');
+        assistantBubbles.forEach((bubble) => {
+            const sourceText = bubble.innerText || bubble.textContent || '';
+            if (!sourceText || !/sql_queries/i.test(sourceText)) return;
+            if (sourceText.length > 120000) return;
 
-        elements.forEach(el => {
-            // [FIX BUG 2] Guarda pela presença FÍSICA da barra, não por classe
-            // (classe sobrevive a innerHTML replacement, barra não)
-            if (el.querySelector('.ow-sql-actions-bar')) return;
+            const sqlQueries = extractSQLFromResponse(sourceText);
+            if (!sqlQueries || sqlQueries.length === 0) return;
 
-            if (!el.textContent || !el.textContent.includes('"sql_queries"')) return;
+            const signature = JSON.stringify(
+                sqlQueries.map((q) => String((q && q.query) || q || '').trim())
+            );
 
-            // [FIX BUG 1] Para <code> dentro de <pre>: opera no <pre>
-            // (só <pre> tem o contexto CSS necessário para position:absolute)
-            let target = el;
-            if (el.tagName === 'CODE' && el.parentElement?.tagName === 'PRE') {
-                target = el.parentElement;
-                if (target.querySelector('.ow-sql-actions-bar')) return;
+            // Se já injetou para o mesmo payload nesta bolha, não duplica.
+            if (bubble.dataset.sqlUiSignature === signature && bubble.querySelector('.ow-sql-actions-bar')) {
+                return;
             }
 
-            // Deepest-element check (evita injetar na div wrapper)
-            let isDeepest = true;
-            for (const child of el.children) {
-                if (child.classList?.contains('ow-sql-actions-bar')) continue;
-                if (child.tagName === 'BR') continue; // <br> não conta
-                if (child.textContent?.includes('"sql_queries"')) {
-                    isDeepest = false;
-                    break;
+            // Remove barras antigas desta bolha para evitar acúmulo.
+            bubble.querySelectorAll('.ow-sql-actions-bar').forEach((bar) => {
+                const host = bar.parentElement;
+                if (host && host.children.length === 1 && host.classList.contains('ow-sql-wrapper')) {
+                    host.remove();
+                } else {
+                    bar.remove();
                 }
-            }
-            if (!isDeepest) return;
+            });
 
-            // Evita processar containers gigantes (wrappers de página)
-            if (el.textContent.length > 5000) return;
+            // Prioriza bloco com JSON SQL visível.
+            let target =
+                bubble.querySelector('pre code')?.parentElement
+                || bubble.querySelector('pre')
+                || Array.from(bubble.querySelectorAll('p, div, span'))
+                    .find((el) => /sql_queries/i.test(el.textContent || ''))
+                || bubble;
 
-            const sqlQueries = extractSQLFromResponse(el.textContent);
-            if (sqlQueries && sqlQueries.length > 0) {
-                _attachSQLButtons(target, sqlQueries);
-            }
+            _attachSQLButtons(target, sqlQueries);
+            bubble.dataset.sqlUiSignature = signature;
         });
     }
 
@@ -6241,8 +6254,8 @@ header('Content-Type: application/javascript; charset=utf-8');
         return lines.join('\n').trim();
     }
 
-    async function handleDirectToolModeMessage(userTxt) {
-        const parsed = parseDirectToolRequest(userTxt);
+    async function handleDirectToolModeMessage(userTxt, parsedRequest = null) {
+        const parsed = parsedRequest || parseDirectToolRequest(userTxt);
         if (!parsed.ok) {
             appendAssistantMarkdown(formatDirectToolError(userTxt));
             return false;
@@ -6637,10 +6650,6 @@ header('Content-Type: application/javascript; charset=utf-8');
                 const { done, value } = await reader.read();
                 if (done) break;
                 const chunk = decoder.decode(value, { stream: true });
-                // -----------------------------------------------------
-                // 👉 ADICIONA ESTE LOG AQUI PARA VER O TEXTO BRUTO QUE CHEGA
-                // -----------------------------------------------------
-                console.log(`%c🔎 CHUNK BRUTO RECEBIDO:`, "color: #ff9800; font-weight: bold;", chunk);
                 buffer += chunk;
                 const lines = buffer.split('\n');
                 buffer = lines.pop();
@@ -6657,6 +6666,16 @@ header('Content-Type: application/javascript; charset=utf-8');
                                 console.dir(json.js_log.data);
                                 console.groupEnd();
                                 continue;
+                            }
+
+                            if (json.type === 'screenshot') {
+                                const capturedAt = json.content?.captured_at
+                                    ? new Date(json.content.captured_at * 1000).toLocaleString('pt-BR')
+                                    : new Date().toLocaleString('pt-BR');
+                                console.log(
+                                    `%c${FILE_PREFIX} 📸 Screenshot recebido em ${capturedAt}`,
+                                    "color: #03a9f4; font-weight: bold;"
+                                );
                             }
 
                             const txt = json.choices?.[0]?.delta?.content || "";
@@ -6684,6 +6703,23 @@ header('Content-Type: application/javascript; charset=utf-8');
                                 data.chat_id = jsonObj.content;
                                 if (typeof state !== 'undefined') state.currentChatId = jsonObj.content;
                                 console.log(`%c📌 CHAT_ID GUARDADO: ${data.chat_id}`, "color: #e91e63; font-weight: bold;");
+                            }
+
+                            // 👉 Captura contexto antecipado (chat_id/url) antes do finish
+                            if (jsonObj.type === 'chat_meta' && jsonObj.content) {
+                                const meta = jsonObj.content || {};
+                                if (meta.chat_id) {
+                                    data.chat_id = meta.chat_id;
+                                    if (typeof state !== 'undefined') state.currentChatId = meta.chat_id;
+                                }
+                                if (meta.url) {
+                                    data.url = meta.url;
+                                    if (typeof state !== 'undefined') state.currentChatUrl = meta.url;
+                                }
+                                if (typeof Session !== 'undefined') {
+                                    Session.setChat(meta.chat_id || data.chat_id, meta.url || data.url, null);
+                                }
+                                console.log(`%c🔗 CHAT_META antecipado: ID [${data.chat_id || 'N/A'}] | URL [${data.url || 'N/A'}]`, "color: #00acc1; font-weight: bold;");
                             }
                     
                             // 👉 Captura o evento "finish" que traz URL e Título
@@ -6955,7 +6991,7 @@ header('Content-Type: application/javascript; charset=utf-8');
             return null;
         }
 
-        if (!text.includes('"sql_queries"')) {
+        if (!/sql_queries/i.test(text)) {
             return null;
         }
         
@@ -6964,17 +7000,22 @@ header('Content-Type: application/javascript; charset=utf-8');
                 .replace(/[\u2018\u2019]/g, "'")  
                 .replace(/[\u201C\u201D]/g, '"')  
                 .replace(/[\u00A0]/g, " ") // Corrige espaços invisíveis que quebram o Parse
+                .replace(/\\_/g, '_')
+                .replace(/\\\*/g, '*')
+                .replace(/,(\s*[}\]])/g, '$1')
                 .trim();
         }
         
         try {
             // 1. Tenta primeiro encontrar um bloco Markdown (Padrão seguro)
-            const markdownMatch = text.match(/```(?:json)?\s*(\{[\s\S]*?"sql_queries"[\s\S]*?\})\s*```/);
-            if (markdownMatch) {
-                const json = JSON.parse(sanitizeJSON(markdownMatch[1]));
-                if (json.sql_queries && Array.isArray(json.sql_queries) && json.sql_queries.length > 0) {
-                    console.log(`${FILE_PREFIX} 🐬 SQL extraído (Markdown)`);
-                    return json.sql_queries;
+            const markdownBlocks = [...text.matchAll(/```(?:json)?\s*([\s\S]*?)```/gi)];
+            if (markdownBlocks.length) {
+                for (const match of markdownBlocks) {
+                    const json = JSON.parse(sanitizeJSON(match[1]));
+                    if (json.sql_queries && Array.isArray(json.sql_queries) && json.sql_queries.length > 0) {
+                        console.log(`${FILE_PREFIX} 🐬 SQL extraído (Markdown)`);
+                        return json.sql_queries;
+                    }
                 }
             }
             
@@ -6986,7 +7027,7 @@ header('Content-Type: application/javascript; charset=utf-8');
                 
                 if (closeIndex > 0) {
                     let jsonStr = candidate.substring(0, closeIndex + 1);
-                    if (jsonStr.includes('"sql_queries"')) {
+                    if (/sql_queries/i.test(jsonStr)) {
                         try {
                             const json = JSON.parse(sanitizeJSON(jsonStr));
                             if (json.sql_queries && Array.isArray(json.sql_queries)) {
@@ -8175,14 +8216,31 @@ header('Content-Type: application/javascript; charset=utf-8');
             }
         }
         
-        currentAbortController = new AbortController();
         const attachmentsPayload = _collectAttachmentsPayload();
+        const parsedDirectRequest = userTxt ? parseDirectToolRequest(userTxt) : { ok: false };
+        const shouldAutoRunDirectTool = !!parsedDirectRequest?.ok;
+
+        currentAbortController = new AbortController();
         _clearAttachments();
         inp.value = '';
         addSimpleMsg('user', userTxt || (attachmentsPayload.length ? `[${attachmentsPayload.length} anexo(s)]` : ''));
         scroll(true);
         btn.innerText = 'Parar'; 
         btn.classList.add('stop-mode');
+
+        if (shouldAutoRunDirectTool) {
+            if (attachmentsPayload.length > 0) {
+                appendAssistantMarkdown(
+                    'ℹ️ **Payload `sql_queries/search_queries` detectado.** ' +
+                    'Os anexos pendentes foram ignorados nesta execução para evitar que o simulador trate o pedido como análise de arquivo.'
+                );
+            }
+
+            state.messages.push({ role: 'user', content: userTxt });
+            saveLocal();
+            await handleDirectToolModeMessage(userTxt, parsedDirectRequest);
+            return;
+        }
 
         if (isDirectToolMode()) {
             state.messages.push({ role: 'user', content: userTxt });

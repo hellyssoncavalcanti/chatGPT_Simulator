@@ -1252,12 +1252,25 @@ def chat_completions():
     nome_membro = data.get("nome_membro_solicitante") or None
     id_membro   = data.get("id_membro_solicitante")   or None
     _quem = f', por "{nome_membro}" (id_membro: "{id_membro}")' if (nome_membro or id_membro) else ""
+    source_hint = (
+        data.get("request_source")
+        or request.headers.get("X-Request-Source")
+        or request.headers.get("X-Client-Source")
+        or ""
+    )
+    source_hint_norm = str(source_hint).strip().lower()
+    is_analyzer = (
+        'analisador_prontuarios' in source_hint_norm
+        or 'analisador-prontuarios' in source_hint_norm
+        or source_hint_norm == 'analyzer'
+    )
+    _origem = " [origem: analisador_prontuarios.py]" if is_analyzer else (f" [origem: {source_hint}]" if source_hint else "")
 
     if chat_id:
-        print(f"\n[📡 SERVIDOR] Requisição remota recebida{_quem}! Continuando Chat ID: {chat_id}")
+        print(f"\n[📡 SERVIDOR] Requisição remota recebida{_quem}{_origem}! Continuando Chat ID: {chat_id}")
     else:
         chat_id = str(uuid.uuid4())
-        print(f"\n[📡 SERVIDOR] Novo pedido remoto{_quem}. Gerando Chat ID: {chat_id}")
+        print(f"\n[📡 SERVIDOR] Novo pedido remoto{_quem}{_origem}. Gerando Chat ID: {chat_id}")
 
     # Tenta pegar a mensagem única (string)
     message = data.get("message", "")
@@ -1342,6 +1355,8 @@ def chat_completions():
     if stream:
         def generate():
             yield json.dumps({"type": "chat_id", "content": chat_id}) + "\n"
+            if url and url != "None":
+                yield json.dumps({"type": "chat_meta", "content": {"chat_id": chat_id, "url": url}}) + "\n"
 
             try:
                 while True:
@@ -1366,6 +1381,22 @@ def chat_completions():
                             ACTIVE_CHATS[chat_id]['status'] = msg_obj['content']
                         elif t == 'markdown':
                             ACTIVE_CHATS[chat_id]['markdown'] = msg_obj['content']
+                        elif t == 'chat_meta':
+                            fin = msg_obj.get('content', {}) or {}
+                            early_url = fin.get('url') or ''
+                            early_chat_id = fin.get('chat_id') or chat_id
+                            if early_url:
+                                try:
+                                    snapshot = storage.load_chats().get(early_chat_id, {})
+                                    storage.save_chat(
+                                        early_chat_id,
+                                        snapshot.get('title') or 'Novo Chat',
+                                        early_url,
+                                        [],
+                                        origin_url=origin_url or snapshot.get('origin_url', '')
+                                    )
+                                except Exception as e:
+                                    log(f"[WARN] Falha ao persistir chat_meta antecipado: {e}")
                         elif t == 'finish':
                             ACTIVE_CHATS[chat_id]['finished']    = True
                             ACTIVE_CHATS[chat_id]['finished_at'] = time.time()
