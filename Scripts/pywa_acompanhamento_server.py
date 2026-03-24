@@ -979,7 +979,14 @@ class WhatsAppWebClient:
             box = self._page.locator("p._aupe, footer div[contenteditable='true']").first
             before_out = self._page.locator("div.message-out").count()
             box.click()
-            self._page.keyboard.type(text, delay=5)
+            # Type text line by line, using Shift+Enter for newlines
+            # to avoid triggering message send on each line break.
+            lines = text.split("\n")
+            for i, line in enumerate(lines):
+                if line:
+                    self._page.keyboard.type(line, delay=5)
+                if i < len(lines) - 1:
+                    self._page.keyboard.press("Shift+Enter")
             send_icon = self._page.locator('span[data-icon="wds-ic-send-filled"]').first
             if send_icon.count() > 0:
                 send_icon.click(timeout=10000)
