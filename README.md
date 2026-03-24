@@ -109,6 +109,43 @@ Dentro do `main.py`, a inicialização acontece assim:
 
 ---
 
+## Servidor PyWa de acompanhamento (WhatsApp)
+
+Foi adicionado o script `Scripts/pywa_acompanhamento_server.py`, responsável por:
+
+1. Buscar no banco os registros com `mensagens_acompanhamento`;
+2. Enviar as mensagens ao WhatsApp do paciente via **PyWa**;
+3. Receber a resposta do paciente e encaminhar automaticamente para a **URL específica do chat daquele paciente** (`url_chatgpt`) no endpoint local do Simulator (`/v1/chat/completions`);
+4. Responder o paciente com a saída retornada pelo ChatGPT Simulator.
+
+### Como executar
+
+```bash
+pip install -U "pywa[flask]" requests
+
+export PYWA_PHONE_ID="SEU_PHONE_NUMBER_ID"
+export PYWA_TOKEN="SEU_ACCESS_TOKEN"
+export PYWA_VERIFY_TOKEN="SEU_VERIFY_TOKEN"
+
+python Scripts/pywa_acompanhamento_server.py
+```
+
+### Endpoints auxiliares
+
+- `GET /health` — status básico do serviço
+- `POST /send-now` — força um ciclo imediato de envio de mensagens pendentes
+
+### Variáveis de ambiente principais
+
+- `PYWA_PHP_URL` (default: URL PHP da integração)
+- `PYWA_PHP_API_KEY`
+- `PYWA_SIMULATOR_URL` (default: `http://127.0.0.1:3003/v1/chat/completions`)
+- `PYWA_SIMULATOR_API_KEY`
+- `PYWA_POLL_INTERVAL_SEC` (default: `120`)
+- `PYWA_FETCH_SQL` (permite customizar a query de captação das mensagens de acompanhamento)
+
+---
+
 ## Autenticação e segurança
 
 O sistema possui camadas simples, porém explícitas, de segurança:
