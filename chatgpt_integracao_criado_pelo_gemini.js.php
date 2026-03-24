@@ -2197,29 +2197,38 @@ if(isset($active_system_prompt) && !empty($active_system_prompt))
 // HELPER: EXTRAIR JSON
 // -----------------------------------------------------
 function extract_json_from_text($text) {
-    $text = trim($text);
+    $text = sanitize_json_string(trim($text));
     $json = json_decode($text, true);
     if (json_last_error() === JSON_ERROR_NONE && isset($json['sql_queries'])) return $json;
-    if (preg_match('/```(?:\w+)?\s*(\{.*?"sql_queries".*?\})\s*```/s', $text, $matches)) {
-        $candidate = sanitize_json_string($matches[1]);
-        $j = json_decode($candidate, true);
-        if ($j && isset($j['sql_queries'])) return $j;
+
+    if (preg_match_all('/```(?:\w+)?\s*([\s\S]*?)```/s', $text, $matches)) {
+        foreach($matches[1] as $block) {
+            $candidate = sanitize_json_string($block);
+            $j = json_decode($candidate, true);
+            if ($j && isset($j['sql_queries'])) return $j;
+        }
     }
+
     if (preg_match_all('/\{(?:[^{}]|(?R))*\}/s', $text, $matches)) {
         foreach($matches[0] as $candidate) {
-            if (strpos($candidate, '"sql_queries"') !== false) {
-                $candidateClean = sanitize_json_string($candidate);
-                $j = json_decode($candidateClean, true);
-                if ($j && isset($j['sql_queries'])) return $j;
-            }
+            if (stripos($candidate, 'sql_queries') === false) continue;
+            $candidateClean = sanitize_json_string($candidate);
+            $j = json_decode($candidateClean, true);
+            if ($j && isset($j['sql_queries'])) return $j;
         }
     }
     return null;
 }
 
 function sanitize_json_string($str) {
+    $str = str_replace(
+        ["\xE2\x80\x98", "\xE2\x80\x99", "\xE2\x80\x9C", "\xE2\x80\x9D", "\xC2\xA0", "\\_", "\\*"],
+        ["'", "'", '"', '"', ' ', '_', '*'],
+        $str
+    );
     $str = preg_replace('/\n\s*\/\/[^\n]*/', '', $str);
     $str = preg_replace('!/\*.*?\*/!s', '', $str);
+    $str = preg_replace('/,\s*([}\]])/', '$1', $str);
     return $str; 
 }
 
@@ -4184,7 +4193,8 @@ header('Content-Type: application/javascript; charset=utf-8');
             // (classe sobrevive a innerHTML replacement, barra não)
             if (el.querySelector('.ow-sql-actions-bar')) return;
 
-            if (!el.textContent || !el.textContent.includes('"sql_queries"')) return;
+            const sourceText = el.closest('.msg-ai')?.innerText || el.textContent || '';
+            if (!sourceText || !/sql_queries/i.test(sourceText)) return;
 
             // [FIX BUG 1] Para <code> dentro de <pre>: opera no <pre>
             // (só <pre> tem o contexto CSS necessário para position:absolute)
@@ -4207,9 +4217,9 @@ header('Content-Type: application/javascript; charset=utf-8');
             if (!isDeepest) return;
 
             // Evita processar containers gigantes (wrappers de página)
-            if (el.textContent.length > 5000) return;
+            if (sourceText.length > 5000) return;
 
-            const sqlQueries = extractSQLFromResponse(el.textContent);
+            const sqlQueries = extractSQLFromResponse(sourceText);
             if (sqlQueries && sqlQueries.length > 0) {
                 _attachSQLButtons(target, sqlQueries);
             }
@@ -6958,7 +6968,7 @@ header('Content-Type: application/javascript; charset=utf-8');
             return null;
         }
 
-        if (!text.includes('"sql_queries"')) {
+        if (!/sql_queries/i.test(text)) {
             return null;
         }
         
@@ -6967,17 +6977,22 @@ header('Content-Type: application/javascript; charset=utf-8');
                 .replace(/[\u2018\u2019]/g, "'")  
                 .replace(/[\u201C\u201D]/g, '"')  
                 .replace(/[\u00A0]/g, " ") // Corrige espaços invisíveis que quebram o Parse
+                .replace(/\\_/g, '_')
+                .replace(/\\\*/g, '*')
+                .replace(/,(\s*[}\]])/g, '$1')
                 .trim();
         }
         
         try {
             // 1. Tenta primeiro encontrar um bloco Markdown (Padrão seguro)
-            const markdownMatch = text.match(/```(?:json)?\s*(\{[\s\S]*?"sql_queries"[\s\S]*?\})\s*```/);
-            if (markdownMatch) {
-                const json = JSON.parse(sanitizeJSON(markdownMatch[1]));
-                if (json.sql_queries && Array.isArray(json.sql_queries) && json.sql_queries.length > 0) {
-                    console.log(`${FILE_PREFIX} 🐬 SQL extraído (Markdown)`);
-                    return json.sql_queries;
+            const markdownBlocks = [...text.matchAll(/```(?:json)?\s*([\s\S]*?)```/gi)];
+            if (markdownBlocks.length) {
+                for (const match of markdownBlocks) {
+                    const json = JSON.parse(sanitizeJSON(match[1]));
+                    if (json.sql_queries && Array.isArray(json.sql_queries) && json.sql_queries.length > 0) {
+                        console.log(`${FILE_PREFIX} 🐬 SQL extraído (Markdown)`);
+                        return json.sql_queries;
+                    }
                 }
             }
             
@@ -6989,7 +7004,7 @@ header('Content-Type: application/javascript; charset=utf-8');
                 
                 if (closeIndex > 0) {
                     let jsonStr = candidate.substring(0, closeIndex + 1);
-                    if (jsonStr.includes('"sql_queries"')) {
+                    if (/sql_queries/i.test(jsonStr)) {
                         try {
                             const json = JSON.parse(sanitizeJSON(jsonStr));
                             if (json.sql_queries && Array.isArray(json.sql_queries)) {
