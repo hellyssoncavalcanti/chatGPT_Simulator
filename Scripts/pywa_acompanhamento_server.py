@@ -65,11 +65,13 @@ WHATSAPP_PROFILE_DIR.mkdir(parents=True, exist_ok=True)
 
 DEFAULT_FETCH_SQL = """
 SELECT
+  caa.id AS id_analise,
   caa.id_atendimento,
   caa.id_paciente,
   COALESCE(m.telefone1,m.telefone2,m.telefone1pais,m.telefone2pais) AS telefone,
   m.nome AS nome_paciente,
   caa.mensagens_acompanhamento,
+  caa.chat_url,
   cc.url_chatgpt
 FROM chatgpt_atendimentos_analise caa
 JOIN membros m ON m.id = caa.id_paciente
@@ -182,6 +184,130 @@ def run_sql(query: str) -> List[Dict[str, Any]]:
     if not res.get("success"):
         raise RuntimeError(f"execute_sql falhou: {res}")
     return res.get("data") or []
+
+
+def insert_whatsapp_chat(
+    phone: str,
+    id_paciente: Any,
+    id_atendimento: Any,
+    id_analise: Any,
+    chat_url: str,
+    first_message: str,
+) -> Optional[int]:
+    """Insert a chatgpt_chats record for a WhatsApp follow-up conversation.
+
+    Called when the first follow-up message is sent to a patient.
+    Returns the inserted row id, or None on failure.
+    """
+    safe_phone = (phone or "").replace("'", "")
+    safe_chat_url = (chat_url or "").replace("'", "''")
+    safe_msg = first_message.replace("'", "''")
+
+    initial_mensagens = json.dumps(
+        [
+            {
+                "role": "system",
+                "content": first_message,
+                "timestamp": utc_now_iso(),
+                "source": "whatsapp",
+            }
+        ],
+        ensure_ascii=False,
+    )
+    safe_mensagens = initial_mensagens.replace("'", "''")
+
+    # id_chatgpt and url_chatgpt may be empty at insert time (populated
+    # later when the ChatGPT Simulator returns a conversation URL).
+    query = (
+        "INSERT INTO chatgpt_chats "
+        "(id_criador, id_paciente, id_atendimento, id_chatgpt_atendimentos_analise, "
+        " url_atual, titulo, id_chatgpt, url_chatgpt, chat_mode, link_whatsapp, mensagens) "
+        "VALUES ("
+        f"NULL, "
+        f"{int(id_paciente) if id_paciente else 'NULL'}, "
+        f"{int(id_atendimento) if id_atendimento else 'NULL'}, "
+        f"{int(id_analise) if id_analise else 'NULL'}, "
+        f"'whatsapp://acompanhamento', "
+        f"'Acompanhamento WhatsApp', "
+        f"'', "
+        f"'{safe_chat_url}', "
+        f"'whatsapp', "
+        f"'{safe_phone}', "
+        f"'{safe_mensagens}'"
+        ")"
+    )
+    try:
+        run_sql(query)
+        # Retrieve the inserted id
+        rows = run_sql(
+            f"SELECT id FROM chatgpt_chats "
+            f"WHERE link_whatsapp = '{safe_phone}' AND chat_mode = 'whatsapp' "
+            f"ORDER BY id DESC LIMIT 1"
+        )
+        chat_id = int(rows[0]["id"]) if rows else None
+        log.info(
+            "chatgpt_chats inserido (WhatsApp) | id=%s phone=%s id_paciente=%s id_atendimento=%s",
+            chat_id, phone, id_paciente, id_atendimento,
+        )
+        return chat_id
+    except Exception:
+        log.exception("Falha ao inserir chatgpt_chats (WhatsApp) para phone=%s", phone)
+        return None
+
+
+def append_whatsapp_message(
+    phone: str,
+    role: str,
+    content: str,
+    source: str = "whatsapp",
+) -> None:
+    """Append a message to the mensagens JSON array of the WhatsApp chat record."""
+    safe_phone = (phone or "").replace("'", "")
+    new_msg = json.dumps(
+        {"role": role, "content": content, "timestamp": utc_now_iso(), "source": source},
+        ensure_ascii=False,
+    ).replace("'", "''")
+
+    # Use JSON_ARRAY_APPEND if mensagens already exists, otherwise set a new array
+    query = (
+        "UPDATE chatgpt_chats SET mensagens = "
+        f"CASE WHEN mensagens IS NULL OR mensagens = '' "
+        f"  THEN CONCAT('[', '{new_msg}', ']') "
+        f"  ELSE JSON_ARRAY_APPEND(mensagens, '$', CAST('{new_msg}' AS JSON)) "
+        f"END "
+        f"WHERE link_whatsapp = '{safe_phone}' AND chat_mode = 'whatsapp' "
+        f"ORDER BY id DESC LIMIT 1"
+    )
+    try:
+        run_sql(query)
+    except Exception:
+        log.exception("Falha ao atualizar mensagens do chat WhatsApp para phone=%s", phone)
+
+
+def lookup_whatsapp_chat(phone: str) -> Optional[Dict[str, Any]]:
+    """Find the most recent chatgpt_chats record for a WhatsApp phone.
+
+    Returns dict with keys: id, id_paciente, id_atendimento,
+    id_chatgpt_atendimentos_analise, url_chatgpt, link_whatsapp.
+    """
+    if not phone:
+        return None
+    safe_phone = (phone or "").replace("'", "")
+    suffix = safe_phone[-9:] if len(safe_phone) >= 9 else safe_phone
+    query = (
+        "SELECT id, id_paciente, id_atendimento, id_chatgpt_atendimentos_analise, "
+        "       url_chatgpt, link_whatsapp "
+        "FROM chatgpt_chats "
+        f"WHERE chat_mode = 'whatsapp' AND link_whatsapp LIKE '%{suffix}' "
+        "ORDER BY id DESC LIMIT 1"
+    )
+    try:
+        rows = run_sql(query)
+        if rows:
+            return rows[0]
+    except Exception:
+        log.exception("Falha ao buscar chatgpt_chats WhatsApp para phone=%s", phone)
+    return None
 
 
 def send_to_chatgpt(url_chatgpt: str, text: str, id_paciente: Any, id_atendimento: Any) -> Dict[str, Any]:
@@ -939,7 +1065,9 @@ def send_pending_followups_once() -> Dict[str, Any]:
     for row in rows:
         id_atendimento = row.get("id_atendimento")
         id_paciente = row.get("id_paciente")
+        id_analise = row.get("id_analise")
         nome_paciente = row.get("nome_paciente")
+        chat_url = (row.get("chat_url") or "").strip()
         url_chatgpt = (row.get("url_chatgpt") or "").strip()
         original_phone = normalize_phone(row.get("telefone"))
         phone, phone_source = resolve_phone_with_member_fallback(row.get("telefone"), id_paciente)
@@ -1028,6 +1156,18 @@ def send_pending_followups_once() -> Dict[str, Any]:
                         "url_chatgpt": url_chatgpt,
                     },
                 )
+
+                # Persist in chatgpt_chats with chat_mode='whatsapp' for later lookup
+                full_msg = f"{pergunta}\n\nPode me responder por aqui?"
+                insert_whatsapp_chat(
+                    phone=phone,
+                    id_paciente=id_paciente,
+                    id_atendimento=id_atendimento,
+                    id_analise=id_analise,
+                    chat_url=chat_url or url_chatgpt,
+                    first_message=full_msg,
+                )
+
                 sent += 1
             except Exception:
                 errors += 1
@@ -1075,19 +1215,39 @@ def _resolve_chat_to_atendimento(
 ) -> Optional[Dict[str, Any]]:
     """Given a chat title (and optional phone), find the matching atendimento.
 
-    Tries: phone from title → phone from hint → DB lookup by name.
+    Tries (in order):
+      1. chatgpt_chats.link_whatsapp (fastest — direct phone lookup)
+      2. chatgpt_atendimentos_analise via membros phone columns
+      3. chatgpt_atendimentos_analise via patient name fallback
+
     Returns dict with id_analise, id_atendimento, id_paciente, chat_url,
     nome_paciente, telefone.
     """
     # Try phone extracted from title first
     phone = _phone_from_title(title)
+
+    # 1) Fast path: lookup by link_whatsapp in chatgpt_chats
+    for candidate_phone in [phone, normalize_phone(phone_hint) if phone_hint else None]:
+        if not candidate_phone:
+            continue
+        wa_chat = lookup_whatsapp_chat(candidate_phone)
+        if wa_chat and (wa_chat.get("url_chatgpt") or "").strip():
+            return {
+                "id_analise": wa_chat.get("id_chatgpt_atendimentos_analise"),
+                "id_atendimento": wa_chat.get("id_atendimento"),
+                "id_paciente": wa_chat.get("id_paciente"),
+                "chat_url": (wa_chat.get("url_chatgpt") or "").strip(),
+                "nome_paciente": None,
+                "telefone": candidate_phone,
+            }
+
+    # 2) Lookup via chatgpt_atendimentos_analise + membros phone columns
     if phone:
         result = lookup_atendimento_by_phone(phone)
         if result:
             result.setdefault("telefone", phone)
             return result
 
-    # Try phone hint (extracted from open chat header)
     if phone_hint:
         norm = normalize_phone(phone_hint)
         if norm:
@@ -1096,7 +1256,7 @@ def _resolve_chat_to_atendimento(
                 result.setdefault("telefone", norm)
                 return result
 
-    # Fallback: try matching by name
+    # 3) Fallback: try matching by name
     result = lookup_atendimento_by_name(title)
     return result
 
@@ -1199,7 +1359,12 @@ def process_incoming_replies_once() -> Dict[str, int]:
             )
             answer = (res.get("html") or "").strip() or "Recebido. A equipe entrará em contato se necessário."
 
-            # 7) Reply to the patient
+            # 7) Log patient message and simulator response in chatgpt_chats.mensagens
+            if phone:
+                append_whatsapp_message(phone, role="user", content=last["text"], source="whatsapp")
+                append_whatsapp_message(phone, role="assistant", content=answer, source="chatgpt_simulator")
+
+            # 8) Reply to the patient
             dest_phone = TEST_DESTINATION_PHONE if TEST_DESTINATION_PHONE else phone
             if dest_phone:
                 wa_web.send_message(dest_phone, answer)
