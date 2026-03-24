@@ -140,6 +140,13 @@ class StateStore:
         with self.lock:
             return dict(self.state["phone_context"])
 
+    def get_phone_context_field(self, phone: str, field: str) -> Any:
+        with self.lock:
+            ctx = self.state["phone_context"].get(phone)
+            if ctx and isinstance(ctx, dict):
+                return ctx.get(field)
+            return None
+
     def mark_forwarded(self, dedupe_key: str, payload: Dict[str, Any]) -> None:
         with self.lock:
             self.state["forwarded_messages"][dedupe_key] = payload
@@ -471,6 +478,79 @@ def build_forward_prompt(ctx: Dict[str, Any], patient_text: str) -> str:
     )
 
 
+def lookup_atendimento_by_phone(phone_digits: str) -> Optional[Dict[str, Any]]:
+    """Find the most recent chatgpt_atendimentos_analise record for a phone.
+
+    Returns dict with keys: id_analise, id_atendimento, id_paciente,
+    chat_url, nome_paciente — or None if not found.
+    """
+    if not phone_digits:
+        return None
+    # Match against the last 8-9 digits to handle country-code variations
+    suffix = phone_digits[-9:] if len(phone_digits) >= 9 else phone_digits
+    query = (
+        "SELECT caa.id AS id_analise, caa.id_atendimento, caa.id_paciente, "
+        "       caa.chat_url, m.nome AS nome_paciente "
+        "FROM chatgpt_atendimentos_analise caa "
+        "JOIN membros m ON m.id = caa.id_paciente "
+        "WHERE caa.chat_url IS NOT NULL AND caa.chat_url <> '' "
+        "  AND caa.status = 'concluido' "
+        f"  AND (REPLACE(REPLACE(REPLACE(REPLACE(COALESCE(m.telefone1,''),' ',''),'-',''),'(',''),')','') LIKE '%{suffix}' "
+        f"    OR REPLACE(REPLACE(REPLACE(REPLACE(COALESCE(m.telefone2,''),' ',''),'-',''),'(',''),')','') LIKE '%{suffix}' "
+        f"    OR REPLACE(REPLACE(REPLACE(REPLACE(COALESCE(m.telefone1pais,''),' ',''),'-',''),'(',''),')','') LIKE '%{suffix}' "
+        f"    OR REPLACE(REPLACE(REPLACE(REPLACE(COALESCE(m.telefone2pais,''),' ',''),'-',''),'(',''),')','') LIKE '%{suffix}') "
+        "ORDER BY caa.id DESC LIMIT 1"
+    )
+    try:
+        rows = run_sql(query)
+        if rows:
+            row = rows[0]
+            return {
+                "id_analise": row.get("id_analise"),
+                "id_atendimento": row.get("id_atendimento"),
+                "id_paciente": row.get("id_paciente"),
+                "chat_url": (row.get("chat_url") or "").strip(),
+                "nome_paciente": row.get("nome_paciente"),
+            }
+    except Exception:
+        log.exception("Falha ao buscar atendimento por telefone %s", phone_digits)
+    return None
+
+
+def lookup_atendimento_by_name(name: str) -> Optional[Dict[str, Any]]:
+    """Fallback: find atendimento by patient name (for saved WhatsApp contacts)."""
+    if not name or len(name) < 3:
+        return None
+    # Escape single quotes for SQL
+    safe_name = name.replace("'", "''")
+    query = (
+        "SELECT caa.id AS id_analise, caa.id_atendimento, caa.id_paciente, "
+        "       caa.chat_url, m.nome AS nome_paciente, "
+        "       COALESCE(m.telefone1, m.telefone2, m.telefone1pais, m.telefone2pais) AS telefone "
+        "FROM chatgpt_atendimentos_analise caa "
+        "JOIN membros m ON m.id = caa.id_paciente "
+        "WHERE caa.chat_url IS NOT NULL AND caa.chat_url <> '' "
+        "  AND caa.status = 'concluido' "
+        f"  AND m.nome LIKE '%{safe_name}%' "
+        "ORDER BY caa.id DESC LIMIT 1"
+    )
+    try:
+        rows = run_sql(query)
+        if rows:
+            row = rows[0]
+            return {
+                "id_analise": row.get("id_analise"),
+                "id_atendimento": row.get("id_atendimento"),
+                "id_paciente": row.get("id_paciente"),
+                "chat_url": (row.get("chat_url") or "").strip(),
+                "nome_paciente": row.get("nome_paciente"),
+                "telefone": normalize_phone(row.get("telefone")),
+            }
+    except Exception:
+        log.exception("Falha ao buscar atendimento por nome '%s'", name)
+    return None
+
+
 class WhatsAppWebClient:
     """Wraps Playwright browser in a dedicated thread.
 
@@ -690,6 +770,155 @@ class WhatsAppWebClient:
 
         return self._run_on_browser_thread(_do)
 
+    # -- New methods for listening to ANY incoming message ---------------------
+
+    def scan_unread_chats(self) -> List[Dict[str, Any]]:
+        """Scan sidebar for chats with unread message badges.
+        Returns [{title, unread_count}]."""
+        self.start()
+
+        def _do():
+            return self._page.evaluate(
+                """() => {
+                    const root = document.querySelector('#pane-side');
+                    if (!root) return [];
+                    const rows = root.querySelectorAll('div[role="row"]');
+                    const results = [];
+
+                    for (const row of rows) {
+                        // Strategy 1: aria-label with unread info
+                        let unread = 0;
+                        const ariaEls = row.querySelectorAll('[aria-label]');
+                        for (const el of ariaEls) {
+                            const label = (el.getAttribute('aria-label') || '').toLowerCase();
+                            const m = label.match(/(\\d+)\\s*(unread|não lida|nova|new)/);
+                            if (m) { unread = parseInt(m[1]); break; }
+                        }
+
+                        // Strategy 2: look for a small span with a colored background
+                        // containing just a number (the unread badge)
+                        if (!unread) {
+                            const spans = row.querySelectorAll('span');
+                            for (const span of spans) {
+                                const text = span.textContent.trim();
+                                if (!/^\\d{1,4}$/.test(text)) continue;
+                                const style = window.getComputedStyle(span);
+                                const bg = style.backgroundColor;
+                                // Badge has a visible background (green or accent color)
+                                if (bg && bg !== 'rgba(0, 0, 0, 0)' && bg !== 'transparent'
+                                    && bg !== 'rgb(255, 255, 255)' && bg !== 'rgb(0, 0, 0)') {
+                                    unread = parseInt(text);
+                                    break;
+                                }
+                            }
+                        }
+
+                        if (!unread) continue;
+
+                        const nameArea = row.querySelector('div._ak8q');
+                        if (!nameArea) continue;
+                        const nameSpan = nameArea.querySelector('span[title]');
+                        if (!nameSpan) continue;
+                        const title = (nameSpan.getAttribute('title') || '').trim();
+                        if (!title) continue;
+
+                        results.push({ title: title, unread_count: unread });
+                    }
+                    return results;
+                }"""
+            )
+
+        return self._run_on_browser_thread(_do)
+
+    def open_chat_by_sidebar_click(self, title: str) -> bool:
+        """Click on a chat in the sidebar by its title. Returns True if opened."""
+        self.start()
+
+        def _do():
+            clicked = self._page.evaluate(
+                """(targetTitle) => {
+                    const root = document.querySelector('#pane-side');
+                    if (!root) return false;
+                    const rows = root.querySelectorAll('div[role="row"]');
+                    for (const row of rows) {
+                        const nameArea = row.querySelector('div._ak8q');
+                        if (!nameArea) continue;
+                        const nameSpan = nameArea.querySelector('span[title]');
+                        if (!nameSpan) continue;
+                        const t = (nameSpan.getAttribute('title') || '').trim();
+                        if (t === targetTitle) {
+                            row.click();
+                            return true;
+                        }
+                    }
+                    return false;
+                }""",
+                title,
+            )
+            if clicked:
+                # Wait for chat to load
+                try:
+                    self._page.wait_for_selector(
+                        "#main header, p._aupe, footer div[contenteditable='true']",
+                        timeout=8000,
+                    )
+                    self._page.wait_for_timeout(500)
+                except Exception:
+                    log.warning("Timeout aguardando chat abrir para título: %s", title)
+            return bool(clicked)
+
+        return self._run_on_browser_thread(_do)
+
+    def extract_phone_from_open_chat(self) -> Optional[str]:
+        """Try to extract the phone number from the currently open chat header."""
+        self.start()
+
+        def _do():
+            return self._page.evaluate(
+                """() => {
+                    const header = document.querySelector('#main header');
+                    if (!header) return null;
+
+                    // Collect all text content from header spans
+                    const spans = header.querySelectorAll('span[title], span[dir="auto"], span');
+                    for (const span of spans) {
+                        const text = (span.getAttribute('title') || span.textContent || '').trim();
+                        if (!text) continue;
+                        const digits = text.replace(/\\D/g, '');
+                        // A phone number has 10-15 digits
+                        if (digits.length >= 10 && digits.length <= 15) {
+                            return digits;
+                        }
+                    }
+                    return null;
+                }"""
+            )
+
+        return self._run_on_browser_thread(_do)
+
+    def read_all_inbound_from_open_chat(self) -> List[Dict[str, str]]:
+        """Read ALL inbound messages from the currently open chat."""
+        self.start()
+
+        def _do():
+            return self._page.evaluate(
+                """() => {
+                    const msgs = Array.from(document.querySelectorAll('div.message-in'));
+                    const results = [];
+                    for (const msg of msgs) {
+                        const textNode = msg.querySelector('span.selectable-text.copyable-text span') ||
+                                         msg.querySelector('span.selectable-text span');
+                        const text = textNode ? textNode.textContent.trim() : '';
+                        if (!text) continue;
+                        const msgId = msg.getAttribute('data-id') || msg.id || '';
+                        results.push({ id: msgId || text, text: text });
+                    }
+                    return results;
+                }"""
+            )
+
+        return self._run_on_browser_thread(_do)
+
 
 wa_web = WhatsAppWebClient()
 
@@ -833,61 +1062,169 @@ def _build_skip_reason_summary(stats: Dict[str, Any]) -> str:
     return "; ".join(reasons) if reasons else "nenhum motivo classificado"
 
 
+def _phone_from_title(title: str) -> Optional[str]:
+    """Try to extract a phone number from a WhatsApp chat sidebar title."""
+    digits = re.sub(r"\D", "", title or "")
+    if len(digits) >= 10:
+        return normalize_phone(digits)
+    return None
+
+
+def _resolve_chat_to_atendimento(
+    title: str, phone_hint: Optional[str]
+) -> Optional[Dict[str, Any]]:
+    """Given a chat title (and optional phone), find the matching atendimento.
+
+    Tries: phone from title → phone from hint → DB lookup by name.
+    Returns dict with id_analise, id_atendimento, id_paciente, chat_url,
+    nome_paciente, telefone.
+    """
+    # Try phone extracted from title first
+    phone = _phone_from_title(title)
+    if phone:
+        result = lookup_atendimento_by_phone(phone)
+        if result:
+            result.setdefault("telefone", phone)
+            return result
+
+    # Try phone hint (extracted from open chat header)
+    if phone_hint:
+        norm = normalize_phone(phone_hint)
+        if norm:
+            result = lookup_atendimento_by_phone(norm)
+            if result:
+                result.setdefault("telefone", norm)
+                return result
+
+    # Fallback: try matching by name
+    result = lookup_atendimento_by_name(title)
+    return result
+
+
 def process_incoming_replies_once() -> Dict[str, int]:
+    """Scan WhatsApp sidebar for unread chats, resolve each to a
+    chatgpt_atendimentos_analise record, forward the patient reply to
+    the ChatGPT simulator via chat_url, and reply back."""
     processed = 0
     skipped = 0
+    no_match = 0
 
-    contexts = state.all_phone_contexts()
-    for phone, ctx in contexts.items():
+    # 1) Scan sidebar for chats with unread messages
+    unread_chats = wa_web.scan_unread_chats()
+    if not unread_chats:
+        return {"processed": 0, "skipped": 0, "no_match": 0}
+
+    log.info(
+        "Chats com mensagens não lidas: %s",
+        " | ".join(f"[{c['title']}]({c['unread_count']})" for c in unread_chats),
+    )
+
+    for chat in unread_chats:
+        title = chat["title"]
         try:
-            inbound = wa_web.read_last_inbound(phone)
-            if not inbound:
+            # 2) Open the chat by clicking in the sidebar
+            if not wa_web.open_chat_by_sidebar_click(title):
+                log.warning("Não foi possível abrir chat '%s' pela sidebar", title)
                 skipped += 1
                 continue
 
-            msg_key = inbound.get("id") or hashlib.sha1(inbound["text"].encode("utf-8")).hexdigest()
-            if msg_key == state.get_last_seen_inbound(phone):
+            # 3) Try to extract phone from the open chat header
+            phone_hint = wa_web.extract_phone_from_open_chat()
+
+            # 4) Resolve to an atendimento record (phone or name lookup)
+            atendimento = _resolve_chat_to_atendimento(title, phone_hint)
+            if not atendimento or not atendimento.get("chat_url"):
+                log.info(
+                    "Chat '%s' não corresponde a nenhum atendimento com chat_url "
+                    "(phone_hint=%s) — ignorando.",
+                    title,
+                    phone_hint,
+                )
+                no_match += 1
+                continue
+
+            phone = atendimento.get("telefone") or phone_hint or _phone_from_title(title)
+            chat_url = atendimento["chat_url"]
+            id_atendimento = atendimento.get("id_atendimento")
+            id_paciente = atendimento.get("id_paciente")
+            nome_paciente = atendimento.get("nome_paciente") or title
+
+            log.info(
+                "Chat '%s' → atendimento id=%s | paciente=%s | phone=%s | chat_url=%s",
+                title,
+                id_atendimento,
+                nome_paciente,
+                phone,
+                build_preview_with_ellipsis(chat_url, 60),
+            )
+
+            # 5) Read inbound messages from the open chat
+            inbound_msgs = wa_web.read_all_inbound_from_open_chat()
+            if not inbound_msgs:
                 skipped += 1
                 continue
 
-            dedupe_key = f"{phone}:{msg_key}"
+            # Process the last inbound message
+            last = inbound_msgs[-1]
+            msg_key = last.get("id") or hashlib.sha1(last["text"].encode("utf-8")).hexdigest()
+            phone_key = phone or title
+            if msg_key == state.get_last_seen_inbound(phone_key):
+                skipped += 1
+                continue
+
+            dedupe_key = f"{phone_key}:{msg_key}"
             if state.was_forwarded(dedupe_key):
-                state.set_last_seen_inbound(phone, msg_key)
+                state.set_last_seen_inbound(phone_key, msg_key)
                 skipped += 1
                 continue
 
-            url_chatgpt = (ctx.get("url_chatgpt") or "").strip()
-            if not url_chatgpt:
-                skipped += 1
-                continue
-
-            prompt = build_forward_prompt(ctx, inbound["text"])
+            # 6) Forward to ChatGPT simulator
+            ctx = {
+                "id_atendimento": id_atendimento,
+                "id_paciente": id_paciente,
+                "nome_paciente": nome_paciente,
+                "pergunta": state.get_phone_context_field(phone_key, "pergunta") or "(acompanhamento)",
+            }
+            prompt = build_forward_prompt(ctx, last["text"])
+            log.info(
+                "Encaminhando resposta do paciente '%s' ao ChatGPT simulator | msg: [%s]",
+                nome_paciente,
+                build_preview_with_ellipsis(last["text"], 120),
+            )
             res = send_to_chatgpt(
-                url_chatgpt=url_chatgpt,
+                url_chatgpt=chat_url,
                 text=prompt,
-                id_paciente=ctx.get("id_paciente"),
-                id_atendimento=ctx.get("id_atendimento"),
+                id_paciente=id_paciente,
+                id_atendimento=id_atendimento,
             )
             answer = (res.get("html") or "").strip() or "Recebido. A equipe entrará em contato se necessário."
-            wa_web.send_message(phone, answer)
+
+            # 7) Reply to the patient
+            dest_phone = TEST_DESTINATION_PHONE if TEST_DESTINATION_PHONE else phone
+            if dest_phone:
+                wa_web.send_message(dest_phone, answer)
+            else:
+                log.warning("Sem telefone para responder ao chat '%s'", title)
 
             state.mark_forwarded(
                 dedupe_key,
                 {
-                    "phone": phone,
+                    "phone": phone_key,
                     "at": utc_now_iso(),
-                    "ctx": ctx,
-                    "patient_text": inbound["text"],
+                    "id_atendimento": id_atendimento,
+                    "id_paciente": id_paciente,
+                    "patient_text": last["text"],
                     "inbound_key": msg_key,
+                    "chat_url": chat_url,
                 },
             )
-            state.set_last_seen_inbound(phone, msg_key)
+            state.set_last_seen_inbound(phone_key, msg_key)
             processed += 1
 
         except Exception:
-            log.exception("Falha ao processar resposta do telefone %s", phone)
+            log.exception("Falha ao processar resposta do chat '%s'", title)
 
-    return {"processed": processed, "skipped": skipped}
+    return {"processed": processed, "skipped": skipped, "no_match": no_match}
 
 
 def scheduler_loop() -> None:
@@ -919,12 +1256,17 @@ def scheduler_loop() -> None:
 
 
 def replies_loop() -> None:
-    log.info("Monitor de respostas iniciado. Intervalo: %ss", REPLY_POLL_INTERVAL_SEC)
+    log.info("Monitor de respostas iniciado (scan de sidebar). Intervalo: %ss", REPLY_POLL_INTERVAL_SEC)
     while True:
         try:
             stats = process_incoming_replies_once()
-            if stats["processed"] > 0:
-                log.info("Respostas processadas: %s", stats["processed"])
+            if stats.get("processed", 0) > 0 or stats.get("no_match", 0) > 0:
+                log.info(
+                    "Monitor respostas | processadas=%s ignoradas=%s sem_match=%s",
+                    stats.get("processed", 0),
+                    stats.get("skipped", 0),
+                    stats.get("no_match", 0),
+                )
         except Exception:
             log.exception("Falha no monitor de respostas")
         time.sleep(REPLY_POLL_INTERVAL_SEC)
