@@ -1528,8 +1528,33 @@ async def handle_sync_task(context, task):
         elif _sync_auto_downloads:
             await asyncio.sleep(1)
         if _sync_auto_downloads:
-            last_ai_idx = max((i for i, m in enumerate(msgs) if m.get('role') == 'assistant'), default=-1)
-            if last_ai_idx >= 0:
+            assistant_indices = [i for i, m in enumerate(msgs) if m.get('role') == 'assistant']
+            target_ai_idx = -1
+            if assistant_indices:
+                file_names = [str(dl.get("name") or "").strip().lower() for dl in _sync_auto_downloads]
+
+                def _score_msg_for_download(idx: int) -> int:
+                    txt = (msgs[idx].get('content') or '').lower()
+                    if not txt:
+                        return 0
+                    score = 0
+                    if '📎 arquivo:' in txt or '/api/downloads/' in txt:
+                        score += 5
+                    if 'arquivo:' in txt or 'planilha' in txt or 'download' in txt:
+                        score += 2
+                    for nm in file_names:
+                        if nm and nm in txt:
+                            score += 10
+                    return score
+
+                scored = [(idx, _score_msg_for_download(idx)) for idx in assistant_indices]
+                scored.sort(key=lambda item: (item[1], item[0]), reverse=True)
+                if scored and scored[0][1] > 0:
+                    target_ai_idx = scored[0][0]
+                else:
+                    target_ai_idx = assistant_indices[-1]  # fallback: última resposta da IA
+
+            if target_ai_idx >= 0:
                 extra_links = []
                 for dl in _sync_auto_downloads:
                     register_file(
@@ -1541,8 +1566,20 @@ async def handle_sync_task(context, task):
                     )
                     extra_links.append(f"📎 Arquivo: [{dl['name']}](/api/downloads/{dl['file_id']})")
                 if extra_links:
-                    base = msgs[last_ai_idx].get('content') or ''
-                    msgs[last_ai_idx]['content'] = (base + "\n\n" + "\n".join(extra_links)).strip()
+                    base = msgs[target_ai_idx].get('content') or ''
+                    existing = set(
+                        re.findall(r'/api/downloads/([A-Za-z0-9_\-]+)', base)
+                    )
+                    novos = [
+                        link for link, dl in zip(extra_links, _sync_auto_downloads)
+                        if dl.get("file_id") not in existing
+                    ]
+                    if novos:
+                        msgs[target_ai_idx]['content'] = (base + "\n\n" + "\n".join(novos)).strip()
+                    emit_log(
+                        q,
+                        f"📎 [SYNC] {len(novos)} link(s) de download anexado(s) à msg assistant #{target_ai_idx + 1}"
+                    )
 
         title = await get_chat_title(page)
         emit_event(q, 'syncresult', {

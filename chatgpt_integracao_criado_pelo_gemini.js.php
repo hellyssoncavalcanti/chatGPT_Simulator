@@ -4209,15 +4209,16 @@ header('Content-Type: application/javascript; charset=utf-8');
             for (const child of el.children) {
                 if (child.classList?.contains('ow-sql-actions-bar')) continue;
                 if (child.tagName === 'BR') continue; // <br> não conta
-                if (child.textContent?.includes('"sql_queries"')) {
+                if (/sql_queries/i.test(child.textContent || '')) {
                     isDeepest = false;
                     break;
                 }
             }
             if (!isDeepest) return;
 
-            // Evita processar containers gigantes (wrappers de página)
-            if (sourceText.length > 5000) return;
+            // Evita processar containers gigantes (wrappers de página),
+            // mas mantém tolerância para queries longas reais.
+            if (sourceText.length > 120000) return;
 
             const sqlQueries = extractSQLFromResponse(sourceText);
             if (sqlQueries && sqlQueries.length > 0) {
