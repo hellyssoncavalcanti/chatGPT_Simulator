@@ -749,6 +749,51 @@ def clean_html(html_content):
     return html
 
 
+async def _read_last_assistant_snapshot(page):
+    """
+    Lê o último balão do assistant diretamente do DOM, sem usar Locator.inner_html().
+
+    Motivo:
+    - Locator.inner_html() aguarda a existência do elemento e pode estourar timeout
+      quando o ChatGPT ainda não materializou o balão do assistant no DOM.
+    - Durante respostas longas, streaming, tools/browsing ou mudanças de layout,
+      o balão pode ser recriado e alguns locators ficam instáveis.
+
+    Retorna sempre um dict com `html` e `text`; se não houver mensagem ainda,
+    retorna strings vazias.
+    """
+    try:
+        snapshot = await page.evaluate("""() => {
+            const nodes = Array.from(document.querySelectorAll('[data-message-author-role="assistant"]'));
+            if (!nodes.length) {
+                return { html: '', text: '' };
+            }
+
+            const preferred =
+                [...nodes].reverse().find((node) => {
+                    if (!node) return false;
+                    const txt = (node.innerText || '').trim();
+                    const html = (node.innerHTML || '').trim();
+                    return !!txt || !!html;
+                }) || nodes[nodes.length - 1];
+
+            return {
+                html: preferred?.innerHTML || '',
+                text: (preferred?.innerText || '').trim(),
+            };
+        }""")
+    except Exception:
+        return {"html": "", "text": ""}
+
+    if not isinstance(snapshot, dict):
+        return {"html": "", "text": ""}
+
+    return {
+        "html": snapshot.get("html") or "",
+        "text": snapshot.get("text") or "",
+    }
+
+
 def _resolve_chatgpt_download_url(raw_url: str) -> str:
     """Normaliza URL de download do ChatGPT para forma absoluta."""
     if raw_url.startswith("/"):
@@ -2247,6 +2292,8 @@ async def handle_chat_task_inner(task, page, q, stop_event: asyncio.Event, activ
     stuck_count = 0
     loop_count  = 0
     idle_ready_count = 0
+    chat_error_reload_count = 0
+    max_chat_error_reloads = 2
 
     while True:
         if stop_event.is_set():
@@ -2254,6 +2301,53 @@ async def handle_chat_task_inner(task, page, q, stop_event: asyncio.Event, activ
             break
 
         loop_count += 1
+
+        chat_error_state = await page.evaluate("""() => {
+            const retryBtn = document.querySelector('button[data-testid="regenerate-thread-error-button"]');
+            const errorCard = document.querySelector('[data-message-author-role="assistant"] .text-token-text-error');
+            if (!retryBtn && !errorCard) {
+                return { hasError: false, message: '' };
+            }
+
+            const msgNode = (errorCard || retryBtn?.closest('[data-message-author-role="assistant"]'))?.querySelector('.markdown p, .markdown, p');
+            const message = (msgNode?.innerText || errorCard?.innerText || '').trim();
+            const lowered = message.toLowerCase();
+            const isLikelyInternalError =
+                lowered.includes('cannot read properties of undefined')
+                || lowered.includes('something went wrong')
+                || lowered.includes('ocorreu um erro')
+                || lowered.includes('erro inesperado')
+                || lowered.includes('undefined');
+            return {
+                hasError: !!(retryBtn || errorCard),
+                hasRetry: !!retryBtn,
+                message,
+                isLikelyInternalError,
+            };
+        }""")
+
+        if chat_error_state.get("hasError") and chat_error_state.get("isLikelyInternalError"):
+            err_msg = (chat_error_state.get("message") or "erro interno do ChatGPT").strip()
+            emit_log(q, f"⚠️ Erro detectado no ChatGPT: {err_msg[:220]}")
+            if chat_error_reload_count < max_chat_error_reloads:
+                chat_error_reload_count += 1
+                current_url = page.url
+                emit_event(q, "status", f"Erro interno do ChatGPT detectado. Recarregando página ({chat_error_reload_count}/{max_chat_error_reloads})...")
+                try:
+                    await page.goto(current_url, wait_until='domcontentloaded', timeout=30_000)
+                    await wait_for_chat_ready(page, current_url, q, timeout=30)
+                    await asyncio.sleep(1)
+                    started = False
+                    last_status_text = ""
+                    stuck_count = 0
+                    idle_ready_count = 0
+                    start_time = time.time()
+                    continue
+                except Exception as reload_err:
+                    emit_log(q, f"⚠️ Falha ao recarregar chat após erro interno: {reload_err}")
+            else:
+                emit_event(q, "error", f"Falha no ChatGPT após {max_chat_error_reloads} recarga(s): {err_msg[:300]}")
+                break
 
         status_txt = await page.evaluate("""() => {
             const asstMsgs = document.querySelectorAll('div[data-message-author-role="assistant"]');
@@ -2319,16 +2413,9 @@ async def handle_chat_task_inner(task, page, q, stop_event: asyncio.Event, activ
             stuck_count = 0
             idle_ready_count = 0
 
-        responses = await page.locator("div[data-message-author-role='assistant']").all()
-        curr_html = ""
-        curr_text = ""
-        if responses:
-            curr_html = await responses[-1].inner_html()
-            curr_html = clean_html(curr_html)
-            try:
-                curr_text = re.sub(r"\s+", " ", (await responses[-1].inner_text()) or "").strip()
-            except Exception:
-                curr_text = ""
+        assistant_snapshot = await _read_last_assistant_snapshot(page)
+        curr_html = clean_html(assistant_snapshot.get("html", ""))
+        curr_text = re.sub(r"\s+", " ", assistant_snapshot.get("text", "")).strip()
 
         markdown_text = md(curr_html, heading_style="ATX").strip()
         markdown_text = markdown_text.replace("\\_", "_").replace("\\*", "*")
