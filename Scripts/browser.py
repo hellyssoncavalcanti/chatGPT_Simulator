@@ -2329,7 +2329,8 @@ async def handle_chat_task_inner(task, page, q, stop_event: asyncio.Event, activ
     stuck_count = 0
     loop_count  = 0
     idle_ready_count = 0
-    early_meta_emitted = False
+    chat_error_reload_count = 0
+    max_chat_error_reloads = 2
 
     while True:
         if stop_event.is_set():
@@ -2338,21 +2339,52 @@ async def handle_chat_task_inner(task, page, q, stop_event: asyncio.Event, activ
 
         loop_count += 1
 
-        # Emite chat_id/url assim que a URL do chat ficar disponível
-        # (antes mesmo do finish), para o cliente remoto salvar contexto cedo.
-        if not early_meta_emitted:
-            try:
-                current_url = page.url or ""
-                m_chat = re.search(r'/c/([^/?#]+)', current_url)
-                if current_url.startswith('https://chatgpt.com') and m_chat:
-                    early_chat_id = m_chat.group(1)
-                    emit_event(q, "chat_meta", {
-                        "chat_id": early_chat_id,
-                        "url": current_url,
-                    })
-                    early_meta_emitted = True
-            except Exception:
-                pass
+        chat_error_state = await page.evaluate("""() => {
+            const retryBtn = document.querySelector('button[data-testid="regenerate-thread-error-button"]');
+            const errorCard = document.querySelector('[data-message-author-role="assistant"] .text-token-text-error');
+            if (!retryBtn && !errorCard) {
+                return { hasError: false, message: '' };
+            }
+
+            const msgNode = (errorCard || retryBtn?.closest('[data-message-author-role="assistant"]'))?.querySelector('.markdown p, .markdown, p');
+            const message = (msgNode?.innerText || errorCard?.innerText || '').trim();
+            const lowered = message.toLowerCase();
+            const isLikelyInternalError =
+                lowered.includes('cannot read properties of undefined')
+                || lowered.includes('something went wrong')
+                || lowered.includes('ocorreu um erro')
+                || lowered.includes('erro inesperado')
+                || lowered.includes('undefined');
+            return {
+                hasError: !!(retryBtn || errorCard),
+                hasRetry: !!retryBtn,
+                message,
+                isLikelyInternalError,
+            };
+        }""")
+
+        if chat_error_state.get("hasError") and chat_error_state.get("isLikelyInternalError"):
+            err_msg = (chat_error_state.get("message") or "erro interno do ChatGPT").strip()
+            emit_log(q, f"⚠️ Erro detectado no ChatGPT: {err_msg[:220]}")
+            if chat_error_reload_count < max_chat_error_reloads:
+                chat_error_reload_count += 1
+                current_url = page.url
+                emit_event(q, "status", f"Erro interno do ChatGPT detectado. Recarregando página ({chat_error_reload_count}/{max_chat_error_reloads})...")
+                try:
+                    await page.goto(current_url, wait_until='domcontentloaded', timeout=30_000)
+                    await wait_for_chat_ready(page, current_url, q, timeout=30)
+                    await asyncio.sleep(1)
+                    started = False
+                    last_status_text = ""
+                    stuck_count = 0
+                    idle_ready_count = 0
+                    start_time = time.time()
+                    continue
+                except Exception as reload_err:
+                    emit_log(q, f"⚠️ Falha ao recarregar chat após erro interno: {reload_err}")
+            else:
+                emit_event(q, "error", f"Falha no ChatGPT após {max_chat_error_reloads} recarga(s): {err_msg[:300]}")
+                break
 
         status_txt = await page.evaluate("""() => {
             const asstMsgs = document.querySelectorAll('div[data-message-author-role="assistant"]');
