@@ -44,8 +44,11 @@ PHP_API_KEY = os.getenv("PYWA_PHP_API_KEY", "CVAPI_2b9c80c2abf94a76baf8b3e68d89c
 SIMULATOR_URL = os.getenv("PYWA_SIMULATOR_URL", "http://127.0.0.1:3003/v1/chat/completions")
 SIMULATOR_API_KEY = os.getenv("PYWA_SIMULATOR_API_KEY", "CVAPI_2b9c80c2abf94a76baf8b3e68d89cb7e")
 
-WA_PHONE_ID = os.getenv("PYWA_PHONE_ID", "")
-WA_TOKEN = os.getenv("PYWA_TOKEN", "")
+WA_PHONE_ID = os.getenv("PYWA_PHONE_ID", "1106567639195947")
+WA_TOKEN = os.getenv(
+    "PYWA_TOKEN",
+    "EAASKcbitGH0BRMREZAXbsn4qlkGfjG0BTPEC8L5uRAodd3v0WSKNATp4JGdPcZCDrheBt8hdsJ8oPhwvjo8V0ZBt0jgVfOToeMNhgLTzb5ConKTyr9t2BDiCegxgKMOa2tSZCmBJy6OcRPgBQWkBxZBKh2HuA8QCGQUmZCu9R5ZAZCevwB0YAx942H9lvTxx88altk3tZBysBwv5r9HlQQjUDZAZBUDFDKiN3UzjcZCyxZAzEGo4nsoUbwdmjelxfakLRbvxWGMLmzS9IISxyZBlOWPyYNXz43FGmznK7oqQZDZD",
+)
 WA_VERIFY_TOKEN = os.getenv("PYWA_VERIFY_TOKEN", "").strip() or "pywa_local_verify_token"
 WA_APP_SECRET = os.getenv("PYWA_APP_SECRET", "").strip()
 
@@ -488,6 +491,9 @@ if __name__ == "__main__":
             "7) Aponte o callback do webhook para: https://SEU_DOMINIO/webhooks"
         )
         sys.exit(1)
+
+    log.info("Endpoint local do Simulator: %s", SIMULATOR_URL)
+    log.info("Endpoint PHP remoto: %s", PHP_URL)
 
     t = threading.Thread(target=scheduler_loop, daemon=True)
     t.start()

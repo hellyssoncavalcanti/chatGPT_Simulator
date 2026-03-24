@@ -36,7 +36,9 @@ if %errorLevel% neq 0 (
     echo [ERRO] Verifique variaveis: PYWA_PHONE_ID e PYWA_TOKEN.
     echo [ERRO] PYWA_VERIFY_TOKEN e opcional ^(se ausente, um token local padrao sera usado^).
     echo [ERRO] Recomendado configurar tambem PYWA_APP_SECRET para validar assinatura do webhook.
-    echo [ERRO] Tambem confirme conectividade com PHP_URL e SIMULATOR_URL.
+    echo [ERRO] Endpoints utilizados por padrao:
+    echo [ERRO] - SIMULATOR_URL: http://127.0.0.1:3003/v1/chat/completions
+    echo [ERRO] - PHP_URL: https://conexaovida.org/scripts/js/chatgpt_integracao_criado_pelo_gemini.js.php
     echo.
     echo [AJUDA] Guia de configuracao:
     echo [AJUDA] 1^) Meta Apps: https://developers.facebook.com/apps/
