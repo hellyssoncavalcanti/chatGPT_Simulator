@@ -35,6 +35,14 @@ from flask import Flask, jsonify
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from playwright.sync_api import sync_playwright
 
+try:
+    from playwright._impl._errors import TargetClosedError
+except ImportError:
+    # Fallback: define a placeholder so isinstance() checks still work.
+    # Actual TargetClosedError will be caught by the generic str-check.
+    class TargetClosedError(Exception):  # type: ignore[no-redef]
+        pass
+
 # ─────────────────────────────────────────────────────────────
 # CONFIG
 # ─────────────────────────────────────────────────────────────
@@ -296,7 +304,7 @@ def lookup_whatsapp_chat(phone: str) -> Optional[Dict[str, Any]]:
     suffix = safe_phone[-9:] if len(safe_phone) >= 9 else safe_phone
     query = (
         "SELECT id, id_paciente, id_atendimento, id_chatgpt_atendimentos_analise, "
-        "       url_chatgpt, whatsapp_paciente "
+        "       url_chatgpt, whatsapp_paciente, mensagens "
         "FROM chatgpt_chats "
         f"WHERE chat_mode = 'whatsapp' AND whatsapp_paciente LIKE '%{suffix}' "
         "ORDER BY id DESC LIMIT 1"
@@ -308,6 +316,45 @@ def lookup_whatsapp_chat(phone: str) -> Optional[Dict[str, Any]]:
     except Exception:
         log.exception("Falha ao buscar chatgpt_chats WhatsApp para phone=%s", phone)
     return None
+
+
+def was_message_already_sent_for_analise(id_analise: Any, message_text: str) -> bool:
+    """Check if a follow-up message was already sent for a given analysis.
+
+    Looks up chatgpt_chats by id_chatgpt_atendimentos_analise and checks
+    whether the message text already exists in the mensagens JSON column.
+    Returns True if the message is found (i.e. already sent), False otherwise.
+    """
+    if not id_analise:
+        return False
+    query = (
+        "SELECT mensagens FROM chatgpt_chats "
+        f"WHERE chat_mode = 'whatsapp' "
+        f"  AND id_chatgpt_atendimentos_analise = {int(id_analise)} "
+        "ORDER BY id DESC LIMIT 1"
+    )
+    try:
+        rows = run_sql(query)
+        if not rows:
+            return False
+        raw = rows[0].get("mensagens") or ""
+        if not raw:
+            return False
+        mensagens = json.loads(raw) if isinstance(raw, str) else raw
+        if not isinstance(mensagens, list):
+            return False
+        for msg in mensagens:
+            if not isinstance(msg, dict):
+                continue
+            content = (msg.get("content") or "").strip()
+            if content == message_text.strip():
+                return True
+    except Exception:
+        log.exception(
+            "Falha ao verificar duplicidade de mensagem para id_analise=%s",
+            id_analise,
+        )
+    return False
 
 
 def send_to_chatgpt(url_chatgpt: str, text: str, id_paciente: Any, id_atendimento: Any) -> Dict[str, Any]:
@@ -684,6 +731,8 @@ class WhatsAppWebClient:
     queue, avoiding ``greenlet.error: Cannot switch to a different thread``.
     """
 
+    _MAX_RECOVERY_ATTEMPTS = 3
+
     def __init__(self) -> None:
         self._task_queue: queue.Queue = queue.Queue()
         self._playwright = None
@@ -699,9 +748,79 @@ class WhatsAppWebClient:
         if self._thread is not None and self._thread.is_alive():
             self._ready.wait()
             return
+        self._ready.clear()
         self._thread = threading.Thread(target=self._browser_loop, daemon=True)
         self._thread.start()
         self._ready.wait()
+
+    # -- internal: browser launch / recovery ----------------------------------
+
+    def _launch_browser(self) -> None:
+        """Create or recreate the Playwright browser + page and navigate to
+        WhatsApp Web.  Called on first start and on auto-recovery."""
+        # Clean up previous instances if any
+        self._close_browser_quietly()
+
+        if self._playwright is None:
+            self._playwright = sync_playwright().start()
+
+        self._browser = self._playwright.chromium.launch_persistent_context(
+            user_data_dir=str(WHATSAPP_PROFILE_DIR),
+            headless=False,
+            args=["--start-maximized"],
+        )
+        self._page = self._browser.new_page()
+        self._page.goto(WHATSAPP_WEB_URL, wait_until="domcontentloaded")
+        self._wait_ready()
+        self._log_chat_list_snapshot("startup")
+        log.info("WhatsApp Web pronto.")
+
+    def _close_browser_quietly(self) -> None:
+        """Best-effort close of page / browser context (ignore errors)."""
+        for resource_name, resource in [("page", self._page), ("browser", self._browser)]:
+            if resource is None:
+                continue
+            try:
+                resource.close()
+            except Exception:
+                log.debug("Ignorando erro ao fechar %s durante cleanup.", resource_name)
+        self._page = None
+        self._browser = None
+
+    def _is_page_alive(self) -> bool:
+        """Quick check whether the page is still usable."""
+        if self._page is None:
+            return False
+        try:
+            self._page.evaluate("() => true")
+            return True
+        except Exception:
+            return False
+
+    def _recover_browser(self) -> None:
+        """Attempt to relaunch the browser after it was closed / crashed."""
+        for attempt in range(1, self._MAX_RECOVERY_ATTEMPTS + 1):
+            log.warning(
+                "Browser/página fechado(a). Tentativa de recuperação %s/%s...",
+                attempt,
+                self._MAX_RECOVERY_ATTEMPTS,
+            )
+            try:
+                self._launch_browser()
+                log.info("Browser recuperado com sucesso na tentativa %s.", attempt)
+                return
+            except Exception:
+                log.exception(
+                    "Recuperação do browser falhou (tentativa %s/%s).",
+                    attempt,
+                    self._MAX_RECOVERY_ATTEMPTS,
+                )
+                backoff = min(5 * attempt, 15)
+                time.sleep(backoff)
+        raise RuntimeError(
+            f"Não foi possível recuperar o browser após "
+            f"{self._MAX_RECOVERY_ATTEMPTS} tentativas."
+        )
 
     # -- internal: browser-owner thread main loop -----------------------------
 
@@ -709,17 +828,7 @@ class WhatsAppWebClient:
         """Runs on the dedicated browser thread. Creates Playwright, then
         processes tasks from the queue forever."""
         try:
-            self._playwright = sync_playwright().start()
-            self._browser = self._playwright.chromium.launch_persistent_context(
-                user_data_dir=str(WHATSAPP_PROFILE_DIR),
-                headless=False,
-                args=["--start-maximized"],
-            )
-            self._page = self._browser.new_page()
-            self._page.goto(WHATSAPP_WEB_URL, wait_until="domcontentloaded")
-            self._wait_ready()
-            self._log_chat_list_snapshot("startup")
-            log.info("WhatsApp Web pronto.")
+            self._launch_browser()
         except Exception:
             log.exception("Falha ao iniciar WhatsApp Web browser thread")
             self._ready.set()  # unblock waiters so they see the error
@@ -732,8 +841,29 @@ class WhatsAppWebClient:
             try:
                 result = func()
                 future.set_result(result)
-            except Exception as exc:
-                future.set_exception(exc)
+            except (TargetClosedError, Exception) as exc:
+                is_closed = isinstance(exc, TargetClosedError) or (
+                    "Target page, context or browser has been closed" in str(exc)
+                    or "target page" in str(exc).lower()
+                    or not self._is_page_alive()
+                )
+                if is_closed:
+                    log.warning(
+                        "Detectado browser/página fechado(a) durante operação: %s",
+                        exc,
+                    )
+                    try:
+                        self._recover_browser()
+                        # Retry the failed operation once after recovery
+                        try:
+                            result = func()
+                            future.set_result(result)
+                        except Exception as retry_exc:
+                            future.set_exception(retry_exc)
+                    except Exception as recovery_exc:
+                        future.set_exception(recovery_exc)
+                else:
+                    future.set_exception(exc)
 
     # -- helper: dispatch a callable to the browser thread --------------------
 
@@ -849,7 +979,14 @@ class WhatsAppWebClient:
             box = self._page.locator("p._aupe, footer div[contenteditable='true']").first
             before_out = self._page.locator("div.message-out").count()
             box.click()
-            self._page.keyboard.type(text, delay=5)
+            # Type text line by line, using Shift+Enter for newlines
+            # to avoid triggering message send on each line break.
+            lines = text.split("\n")
+            for i, line in enumerate(lines):
+                if line:
+                    self._page.keyboard.type(line, delay=5)
+                if i < len(lines) - 1:
+                    self._page.keyboard.press("Shift+Enter")
             send_icon = self._page.locator('span[data-icon="wds-ic-send-filled"]').first
             if send_icon.count() > 0:
                 send_icon.click(timeout=10000)
@@ -1099,6 +1236,21 @@ def send_pending_followups_once() -> Dict[str, Any]:
         skipped_not_due += len(all_itens) - len(itens)
 
         for key, pergunta in itens:
+            full_msg = f"{pergunta}\n\nPode me responder por aqui?"
+
+            # Dedupe: check chatgpt_chats.mensagens (DB) for this analysis
+            if was_message_already_sent_for_analise(id_analise, full_msg):
+                log.info(
+                    "Mensagem já presente em chatgpt_chats.mensagens para "
+                    "id_analise=%s | tipo=%s — ignorando.",
+                    id_analise,
+                    key,
+                )
+                skipped += 1
+                skipped_already_sent += 1
+                continue
+
+            # Dedupe fallback: check local state file
             dedupe_key = f"{id_atendimento}:{key}:{hashlib.sha1(pergunta.encode('utf-8')).hexdigest()}"
             if state.is_sent(dedupe_key):
                 skipped += 1
@@ -1128,11 +1280,7 @@ def send_pending_followups_once() -> Dict[str, Any]:
                     log.info("Aguardando %.1fs antes do próximo envio...", delay)
                     time.sleep(delay)
 
-                wa_web.send_message(
-                    TEST_DESTINATION_PHONE,
-                    f"{pergunta}\n\n"
-                    "Pode me responder por aqui?",
-                )
+                wa_web.send_message(TEST_DESTINATION_PHONE, full_msg)
 
                 state.mark_sent(
                     dedupe_key,
@@ -1158,7 +1306,6 @@ def send_pending_followups_once() -> Dict[str, Any]:
                 )
 
                 # Persist in chatgpt_chats with chat_mode='whatsapp' for later lookup
-                full_msg = f"{pergunta}\n\nPode me responder por aqui?"
                 insert_whatsapp_chat(
                     phone=phone,
                     id_paciente=id_paciente,
