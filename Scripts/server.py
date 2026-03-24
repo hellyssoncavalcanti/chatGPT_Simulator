@@ -1252,12 +1252,25 @@ def chat_completions():
     nome_membro = data.get("nome_membro_solicitante") or None
     id_membro   = data.get("id_membro_solicitante")   or None
     _quem = f', por "{nome_membro}" (id_membro: "{id_membro}")' if (nome_membro or id_membro) else ""
+    source_hint = (
+        data.get("request_source")
+        or request.headers.get("X-Request-Source")
+        or request.headers.get("X-Client-Source")
+        or ""
+    )
+    source_hint_norm = str(source_hint).strip().lower()
+    is_analyzer = (
+        'analisador_prontuarios' in source_hint_norm
+        or 'analisador-prontuarios' in source_hint_norm
+        or source_hint_norm == 'analyzer'
+    )
+    _origem = " [origem: analisador_prontuarios.py]" if is_analyzer else (f" [origem: {source_hint}]" if source_hint else "")
 
     if chat_id:
-        print(f"\n[📡 SERVIDOR] Requisição remota recebida{_quem}! Continuando Chat ID: {chat_id}")
+        print(f"\n[📡 SERVIDOR] Requisição remota recebida{_quem}{_origem}! Continuando Chat ID: {chat_id}")
     else:
         chat_id = str(uuid.uuid4())
-        print(f"\n[📡 SERVIDOR] Novo pedido remoto{_quem}. Gerando Chat ID: {chat_id}")
+        print(f"\n[📡 SERVIDOR] Novo pedido remoto{_quem}{_origem}. Gerando Chat ID: {chat_id}")
 
     # Tenta pegar a mensagem única (string)
     message = data.get("message", "")

@@ -2447,7 +2447,9 @@ async def handle_chat_task_inner(task, page, q, stop_event: asyncio.Event, activ
         if not is_gen and not status_txt:
             idle_ready_count += 1
             if len(last_html) > 0:
-                if stuck_count > 20 and idle_ready_count > 8: break
+                incomplete_json = _response_looks_incomplete_json(last_html)
+                if (not incomplete_json) and stuck_count > 120 and idle_ready_count > 40:
+                    break
             else:
                 # Evita encerrar cedo demais quando o ChatGPT demora para começar
                 # a emitir markdown visível (ex.: requests longas, tools, busy UI).

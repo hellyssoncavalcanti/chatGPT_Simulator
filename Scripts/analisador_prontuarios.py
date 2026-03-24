@@ -158,6 +158,14 @@ log = logging.getLogger("analisador")
 log.info(f"📄 Log: {_log_file}")
 
 
+def _headers_llm() -> dict:
+    return {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {API_KEY}",
+        "X-Request-Source": "analisador_prontuarios.py",
+    }
+
+
 def _strip_code_fences(texto: str) -> str:
     """Remove cercas Markdown ```...``` mantendo apenas o conteúdo interno."""
     texto = (texto or "").strip()
@@ -3811,10 +3819,7 @@ def analisar_prontuario(
     resp = requests.post(
         LLM_URL,
         json=payload,
-        headers={
-            "Content-Type":  "application/json",
-            "Authorization": f"Bearer {API_KEY}",
-        },
+        headers=_headers_llm(),
         stream=True,
         timeout=300,
     )
@@ -4476,10 +4481,7 @@ def gerar_dados_auxiliares_llm(resultado: dict, chat_url: str = None, chat_id: s
         resp = requests.post(
             LLM_URL,
             json=payload,
-            headers={
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {API_KEY}",
-            },
+            headers=_headers_llm(),
             stream=True,
             timeout=300,
         )
@@ -4587,10 +4589,7 @@ def gerar_queries_pesquisa_llm(resultado: dict, chat_url: str = None, chat_id: s
         resp = requests.post(
             LLM_URL,
             json=payload,
-            headers={
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {API_KEY}",
-            },
+            headers=_headers_llm(),
             stream=True,
             timeout=300,
         )
@@ -4786,10 +4785,7 @@ def enriquecer_com_evidencias(resultado: dict, resultados_web: list,
         resp = requests.post(
             LLM_URL,
             json=payload,
-            headers={
-                "Content-Type":  "application/json",
-                "Authorization": f"Bearer {API_KEY}",
-            },
+            headers=_headers_llm(),
             stream=True,
             timeout=300,
         )
