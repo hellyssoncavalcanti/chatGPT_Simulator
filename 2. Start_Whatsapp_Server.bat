@@ -1,6 +1,6 @@
 @echo off
 chcp 65001 >nul
-title WhatsApp Follow-up Server (PyWa)
+title WhatsApp Follow-up Server (Web)
 
 cd /d "C:\chatgpt_simulator"
 if not exist "logs" mkdir logs
@@ -19,33 +19,30 @@ if not defined PYTHON_BOOTSTRAP (
 
 echo.
 echo +------------------------------------------------------------------+
-echo   WHATSAPP FOLLOW-UP SERVER (PYWA)
-echo   Iniciando servico de envio de acompanhamento e resposta automatica
+echo   WHATSAPP FOLLOW-UP SERVER (WEB WHATSAPP)
+echo   Iniciando servico isolado via https://web.whatsapp.com/
 echo +------------------------------------------------------------------+
 echo.
 
 echo [INFO] Verificando dependencias minimas...
-%PYTHON_BOOTSTRAP% -m pip install -q requests "pywa[flask]"
+%PYTHON_BOOTSTRAP% -m pip install -q requests flask playwright
+%PYTHON_BOOTSTRAP% -m playwright install chromium
 
 echo [INFO] Iniciando servidor PyWa...
 echo [INFO] Arquivo: Scripts\pywa_acompanhamento_server.py
 %PYTHON_BOOTSTRAP% Scripts\pywa_acompanhamento_server.py
 if %errorLevel% neq 0 (
     echo.
-    echo [ERRO] Falha ao iniciar o servidor PyWa.
-    echo [ERRO] Verifique variaveis: PYWA_PHONE_ID e PYWA_TOKEN.
-    echo [ERRO] PYWA_VERIFY_TOKEN e opcional ^(se ausente, um token local padrao sera usado^).
-    echo [ERRO] Recomendado configurar tambem PYWA_APP_SECRET para validar assinatura do webhook.
+    echo [ERRO] Falha ao iniciar o servidor WhatsApp Web.
+    echo [ERRO] Verifique acesso a https://web.whatsapp.com/ e se o login QR foi realizado.
     echo [ERRO] Endpoints utilizados por padrao:
     echo [ERRO] - SIMULATOR_URL: http://127.0.0.1:3003/v1/chat/completions
     echo [ERRO] - PHP_URL: https://conexaovida.org/scripts/js/chatgpt_integracao_criado_pelo_gemini.js.php
     echo.
     echo [AJUDA] Guia de configuracao:
-    echo [AJUDA] 1^) Meta Apps: https://developers.facebook.com/apps/
-    echo [AJUDA] 2^) Cloud API: https://developers.facebook.com/docs/whatsapp/cloud-api/get-started
-    echo [AJUDA] 3^) Webhooks: https://developers.facebook.com/docs/graph-api/webhooks/getting-started
-    echo [AJUDA] 4^) Docs PyWa: https://pywa.readthedocs.io/
-    echo [AJUDA] 5^) Túnel HTTPS local ^(ngrok^): https://ngrok.com/docs/getting-started/
+    echo [AJUDA] 1^) Acesso WhatsApp Web: https://web.whatsapp.com/
+    echo [AJUDA] 2^) Playwright docs: https://playwright.dev/python/
+    echo [AJUDA] 3^) Se necessario, use tunel HTTPS local ^(ngrok^): https://ngrok.com/docs/getting-started/
 )
 
 pause

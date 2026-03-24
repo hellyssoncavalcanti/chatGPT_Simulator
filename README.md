@@ -109,31 +109,31 @@ Dentro do `main.py`, a inicialização acontece assim:
 
 ---
 
-## Servidor PyWa de acompanhamento (WhatsApp)
+## Servidor de acompanhamento WhatsApp Web (modo isolado, sem Meta)
 
 Foi adicionado o script `Scripts/pywa_acompanhamento_server.py`, responsável por:
 
 1. Buscar no banco os registros com `mensagens_acompanhamento`;
-2. Enviar as mensagens ao WhatsApp do paciente via **PyWa**;
+2. Enviar as mensagens ao WhatsApp do paciente via **automação do WhatsApp Web**;
 3. Receber a resposta do paciente e encaminhar automaticamente para a **URL específica do chat daquele paciente** (`url_chatgpt`) no endpoint local do Simulator (`/v1/chat/completions`);
 4. Responder o paciente com a saída retornada pelo ChatGPT Simulator.
 
 ### Como executar
 
 ```bash
-pip install -U "pywa[flask]" requests
-
-export PYWA_PHONE_ID="SEU_PHONE_NUMBER_ID"
-export PYWA_TOKEN="SEU_ACCESS_TOKEN"
-export PYWA_VERIFY_TOKEN="SEU_VERIFY_TOKEN"
+pip install -U requests flask playwright
+playwright install chromium
 
 python Scripts/pywa_acompanhamento_server.py
 ```
+
+> No primeiro uso, a janela do navegador abrirá em `https://web.whatsapp.com/` para login via QR Code.
 
 ### Endpoints auxiliares
 
 - `GET /health` — status básico do serviço
 - `POST /send-now` — força um ciclo imediato de envio de mensagens pendentes
+- `POST /process-replies-now` — força um ciclo imediato de captura e processamento de respostas
 
 ### Variáveis de ambiente principais
 
@@ -142,21 +142,16 @@ python Scripts/pywa_acompanhamento_server.py
 - `PYWA_SIMULATOR_URL` (default: `http://127.0.0.1:3003/v1/chat/completions`)
 - `PYWA_SIMULATOR_API_KEY`
 - `PYWA_POLL_INTERVAL_SEC` (default: `120`)
+- `PYWA_REPLY_POLL_INTERVAL_SEC` (default: `20`)
 - `PYWA_FETCH_SQL` (permite customizar a query de captação das mensagens de acompanhamento)
-- `PYWA_APP_SECRET` (**recomendado**) para validação de assinatura do webhook
 
-### Guia rápido de configuração do WhatsApp Cloud API (com links)
+### Guia rápido de configuração (modo isolado)
 
-1. Criar app no Meta for Developers:  
-   https://developers.facebook.com/apps/
-2. Ativar e configurar WhatsApp Cloud API:  
-   https://developers.facebook.com/docs/whatsapp/cloud-api/get-started
-3. Configurar Webhooks (callback URL + verify token):  
-   https://developers.facebook.com/docs/graph-api/webhooks/getting-started
-4. Documentação oficial do PyWa:  
-   https://pywa.readthedocs.io/
-5. Para rodar localmente recebendo webhook, expor HTTPS com túnel (ex.: ngrok):  
-   https://ngrok.com/docs/getting-started/
+1. Garanta acesso ao WhatsApp Web:  
+   https://web.whatsapp.com/
+2. Garanta Playwright + Chromium instalados:  
+   https://playwright.dev/python/
+3. Faça login via QR Code na primeira execução e mantenha o perfil persistente.
 
 ---
 
