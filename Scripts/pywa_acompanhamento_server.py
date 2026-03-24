@@ -35,6 +35,14 @@ from flask import Flask, jsonify
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from playwright.sync_api import sync_playwright
 
+try:
+    from playwright._impl._errors import TargetClosedError
+except ImportError:
+    # Fallback: define a placeholder so isinstance() checks still work.
+    # Actual TargetClosedError will be caught by the generic str-check.
+    class TargetClosedError(Exception):  # type: ignore[no-redef]
+        pass
+
 # ─────────────────────────────────────────────────────────────
 # CONFIG
 # ─────────────────────────────────────────────────────────────
@@ -723,6 +731,8 @@ class WhatsAppWebClient:
     queue, avoiding ``greenlet.error: Cannot switch to a different thread``.
     """
 
+    _MAX_RECOVERY_ATTEMPTS = 3
+
     def __init__(self) -> None:
         self._task_queue: queue.Queue = queue.Queue()
         self._playwright = None
@@ -738,9 +748,79 @@ class WhatsAppWebClient:
         if self._thread is not None and self._thread.is_alive():
             self._ready.wait()
             return
+        self._ready.clear()
         self._thread = threading.Thread(target=self._browser_loop, daemon=True)
         self._thread.start()
         self._ready.wait()
+
+    # -- internal: browser launch / recovery ----------------------------------
+
+    def _launch_browser(self) -> None:
+        """Create or recreate the Playwright browser + page and navigate to
+        WhatsApp Web.  Called on first start and on auto-recovery."""
+        # Clean up previous instances if any
+        self._close_browser_quietly()
+
+        if self._playwright is None:
+            self._playwright = sync_playwright().start()
+
+        self._browser = self._playwright.chromium.launch_persistent_context(
+            user_data_dir=str(WHATSAPP_PROFILE_DIR),
+            headless=False,
+            args=["--start-maximized"],
+        )
+        self._page = self._browser.new_page()
+        self._page.goto(WHATSAPP_WEB_URL, wait_until="domcontentloaded")
+        self._wait_ready()
+        self._log_chat_list_snapshot("startup")
+        log.info("WhatsApp Web pronto.")
+
+    def _close_browser_quietly(self) -> None:
+        """Best-effort close of page / browser context (ignore errors)."""
+        for resource_name, resource in [("page", self._page), ("browser", self._browser)]:
+            if resource is None:
+                continue
+            try:
+                resource.close()
+            except Exception:
+                log.debug("Ignorando erro ao fechar %s durante cleanup.", resource_name)
+        self._page = None
+        self._browser = None
+
+    def _is_page_alive(self) -> bool:
+        """Quick check whether the page is still usable."""
+        if self._page is None:
+            return False
+        try:
+            self._page.evaluate("() => true")
+            return True
+        except Exception:
+            return False
+
+    def _recover_browser(self) -> None:
+        """Attempt to relaunch the browser after it was closed / crashed."""
+        for attempt in range(1, self._MAX_RECOVERY_ATTEMPTS + 1):
+            log.warning(
+                "Browser/página fechado(a). Tentativa de recuperação %s/%s...",
+                attempt,
+                self._MAX_RECOVERY_ATTEMPTS,
+            )
+            try:
+                self._launch_browser()
+                log.info("Browser recuperado com sucesso na tentativa %s.", attempt)
+                return
+            except Exception:
+                log.exception(
+                    "Recuperação do browser falhou (tentativa %s/%s).",
+                    attempt,
+                    self._MAX_RECOVERY_ATTEMPTS,
+                )
+                backoff = min(5 * attempt, 15)
+                time.sleep(backoff)
+        raise RuntimeError(
+            f"Não foi possível recuperar o browser após "
+            f"{self._MAX_RECOVERY_ATTEMPTS} tentativas."
+        )
 
     # -- internal: browser-owner thread main loop -----------------------------
 
@@ -748,17 +828,7 @@ class WhatsAppWebClient:
         """Runs on the dedicated browser thread. Creates Playwright, then
         processes tasks from the queue forever."""
         try:
-            self._playwright = sync_playwright().start()
-            self._browser = self._playwright.chromium.launch_persistent_context(
-                user_data_dir=str(WHATSAPP_PROFILE_DIR),
-                headless=False,
-                args=["--start-maximized"],
-            )
-            self._page = self._browser.new_page()
-            self._page.goto(WHATSAPP_WEB_URL, wait_until="domcontentloaded")
-            self._wait_ready()
-            self._log_chat_list_snapshot("startup")
-            log.info("WhatsApp Web pronto.")
+            self._launch_browser()
         except Exception:
             log.exception("Falha ao iniciar WhatsApp Web browser thread")
             self._ready.set()  # unblock waiters so they see the error
@@ -771,8 +841,29 @@ class WhatsAppWebClient:
             try:
                 result = func()
                 future.set_result(result)
-            except Exception as exc:
-                future.set_exception(exc)
+            except (TargetClosedError, Exception) as exc:
+                is_closed = isinstance(exc, TargetClosedError) or (
+                    "Target page, context or browser has been closed" in str(exc)
+                    or "target page" in str(exc).lower()
+                    or not self._is_page_alive()
+                )
+                if is_closed:
+                    log.warning(
+                        "Detectado browser/página fechado(a) durante operação: %s",
+                        exc,
+                    )
+                    try:
+                        self._recover_browser()
+                        # Retry the failed operation once after recovery
+                        try:
+                            result = func()
+                            future.set_result(result)
+                        except Exception as retry_exc:
+                            future.set_exception(retry_exc)
+                    except Exception as recovery_exc:
+                        future.set_exception(recovery_exc)
+                else:
+                    future.set_exception(exc)
 
     # -- helper: dispatch a callable to the browser thread --------------------
 
