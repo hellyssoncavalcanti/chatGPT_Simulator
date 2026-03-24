@@ -271,6 +271,22 @@ def derive_age_from_row(row: Dict[str, Any]) -> str:
         return "N/D"
 
 
+def derive_age_from_birthdate(birth_raw: Any) -> str:
+    if not birth_raw:
+        return "N/D"
+    text = str(birth_raw).strip()
+    if not text:
+        return "N/D"
+    date_part = text.split("T")[0].split(" ")[0]
+    try:
+        dt = datetime.fromisoformat(date_part)
+        today = datetime.now().date()
+        years = today.year - dt.date().year - ((today.month, today.day) < (dt.date().month, dt.date().day))
+        return str(max(years, 0))
+    except Exception:
+        return "N/D"
+
+
 def derive_start_datetime_from_row(row: Dict[str, Any]) -> str:
     candidates = [
         "data_hora_inicio_atendimento",
@@ -284,6 +300,45 @@ def derive_start_datetime_from_row(row: Dict[str, Any]) -> str:
         if value is not None and str(value).strip():
             return str(value).strip()
     return "N/D"
+
+
+def build_preview_with_ellipsis(text: str, max_len: int = 120) -> str:
+    clean = (text or "").strip().replace("\n", " ")
+    if len(clean) <= max_len:
+        return clean
+    return clean[:max_len].rstrip() + "..."
+
+
+def fetch_patient_metadata(id_paciente: Any, id_atendimento: Any) -> Dict[str, Any]:
+    result = {"data_nascimento": None, "datetime_atendimento_inicio": None}
+    try:
+        id_p = int(id_paciente)
+    except (TypeError, ValueError):
+        return result
+    try:
+        id_a = int(id_atendimento)
+    except (TypeError, ValueError):
+        id_a = None
+
+    query = (
+        "SELECT m.data_nascimento, caa.datetime_atendimento_inicio "
+        "FROM membros m "
+        "LEFT JOIN chatgpt_atendimentos_analise caa ON caa.id_paciente = m.id "
+        f"WHERE m.id = {id_p} "
+    )
+    if id_a is not None:
+        query += f"AND caa.id_atendimento = {id_a} "
+    query += "ORDER BY caa.id_atendimento DESC LIMIT 1"
+
+    try:
+        rows = run_sql(query)
+        if rows:
+            row = rows[0] or {}
+            result["data_nascimento"] = row.get("data_nascimento")
+            result["datetime_atendimento_inicio"] = row.get("datetime_atendimento_inicio")
+    except Exception:
+        log.exception("Falha ao buscar metadados do paciente id_paciente=%s id_atendimento=%s", id_paciente, id_atendimento)
+    return result
 
 
 TEST_DESTINATION_PHONE = normalize_phone(TEST_DESTINATION_PHONE_RAW) or "5581981487277"
@@ -442,16 +497,28 @@ class WhatsAppWebClient:
         else:
             log.info("Abrindo novo chat (sem histórico identificado na lista lateral) para %s", phone)
         self._log_chat_list_snapshot(f"antes_open_chat:{phone}", limit=8)
+        log.info("Abrindo fluxo 'Nova conversa' para destino=%s", phone)
+        self._page.locator('button[aria-label="Nova conversa"]').first.click(timeout=10000)
+        self._page.wait_for_timeout(400)
 
-        url = f"https://web.whatsapp.com/send?phone={phone}&text={quote('')}&app_absent=0"
-        log.info("Navegando para URL de chat: %s", url)
-        self._page.goto(url, wait_until="domcontentloaded")
-        self._page.wait_for_timeout(1200)
-        self._page.wait_for_selector("footer div[contenteditable='true']", timeout=30000)
+        input_locator = self._page.locator("#_r_s_")
+        if input_locator.count() == 0:
+            input_locator = self._page.locator('input[placeholder*="Pesquisar"], input[type="text"]').first
+        input_locator.click()
+        input_locator.fill(phone)
+        log.info("Número digitado no campo de nova conversa: %s", phone)
+
+        result_item = self._page.locator("div._ak72").first
+        result_item.wait_for(timeout=15000)
+        log.info("Primeiro resultado encontrado em div._ak72; selecionando...")
+        result_item.click()
+
+        msg_box = self._page.locator("p._aupe").first
+        msg_box.wait_for(timeout=15000)
         inbound_count = self._page.locator("div.message-in").count()
         outbound_count = self._page.locator("div.message-out").count()
         log.info(
-            "Chat aberto para %s | mensagens_recebidas=%s | mensagens_enviadas=%s",
+            "Chat aberto via Nova conversa para %s | mensagens_recebidas=%s | mensagens_enviadas=%s",
             phone,
             inbound_count,
             outbound_count,
@@ -462,11 +529,12 @@ class WhatsAppWebClient:
             self.start()
             log.info("Iniciando fluxo de envio WhatsApp para %s", phone)
             self._open_chat(phone)
-            box = self._page.locator("footer div[contenteditable='true']").first
+            box = self._page.locator("p._aupe").first
             before_out = self._page.locator("div.message-out").count()
             box.click()
-            box.fill(text)
-            box.press("Enter")
+            self._page.keyboard.type(text, delay=5)
+            send_icon = self._page.locator('span[data-icon="wds-ic-send-filled"]').first
+            send_icon.click(timeout=10000)
             self._page.wait_for_timeout(1200)
             after_out = self._page.locator("div.message-out").count()
             if after_out > before_out:
@@ -549,20 +617,23 @@ def send_pending_followups_once() -> Dict[str, Any]:
                 continue
 
             try:
-                idade = derive_age_from_row(row)
-                inicio_atendimento = derive_start_datetime_from_row(row)
-                preview = pergunta.strip().replace("\n", " ")[:120]
+                metadata = fetch_patient_metadata(id_paciente=id_paciente, id_atendimento=id_atendimento)
+                idade = derive_age_from_birthdate(metadata.get("data_nascimento"))
+                if idade == "N/D":
+                    idade = derive_age_from_row(row)
+                inicio_atendimento = metadata.get("datetime_atendimento_inicio") or derive_start_datetime_from_row(row)
+                preview = build_preview_with_ellipsis(pergunta, max_len=140)
                 log.info(
-                    "Pré-envio | paciente=%s | idade=%s | telefone_contato=%s (origem=%s) "
-                    "| envio_teste=%s | id_atendimento=%s | inicio_atendimento=%s | inicio_mensagem=%s",
-                    nome_paciente or "N/D",
-                    idade,
-                    phone or "N/D",
+                    "Pré-envio | Paciente: [%s] | idade: [%s] | Telefone de contato: [%s] (origem=%s) "
+                    "| Telefone para testes: [%s] | Id do atendimento: [%s] | Data do atendimento: [%s] | Mensagem: [%s]",
+                    (nome_paciente or "N/D"),
+                    (idade or "N/D"),
+                    (phone or "N/D"),
                     phone_source,
                     TEST_DESTINATION_PHONE,
-                    id_atendimento,
-                    inicio_atendimento,
-                    preview,
+                    id_atendimento if id_atendimento is not None else "N/D",
+                    inicio_atendimento if inicio_atendimento is not None else "N/D",
+                    preview or "N/D",
                 )
                 wa_web.send_message(
                     TEST_DESTINATION_PHONE,
