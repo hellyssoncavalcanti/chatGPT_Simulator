@@ -221,7 +221,7 @@ def insert_whatsapp_chat(
     query = (
         "INSERT INTO chatgpt_chats "
         "(id_criador, id_paciente, id_atendimento, id_chatgpt_atendimentos_analise, "
-        " url_atual, titulo, id_chatgpt, url_chatgpt, chat_mode, link_whatsapp, mensagens) "
+        " url_atual, titulo, id_chatgpt, url_chatgpt, chat_mode, whatsapp_paciente, mensagens) "
         "VALUES ("
         f"NULL, "
         f"{int(id_paciente) if id_paciente else 'NULL'}, "
@@ -241,7 +241,7 @@ def insert_whatsapp_chat(
         # Retrieve the inserted id
         rows = run_sql(
             f"SELECT id FROM chatgpt_chats "
-            f"WHERE link_whatsapp = '{safe_phone}' AND chat_mode = 'whatsapp' "
+            f"WHERE whatsapp_paciente = '{safe_phone}' AND chat_mode = 'whatsapp' "
             f"ORDER BY id DESC LIMIT 1"
         )
         chat_id = int(rows[0]["id"]) if rows else None
@@ -275,7 +275,7 @@ def append_whatsapp_message(
         f"  THEN CONCAT('[', '{new_msg}', ']') "
         f"  ELSE JSON_ARRAY_APPEND(mensagens, '$', CAST('{new_msg}' AS JSON)) "
         f"END "
-        f"WHERE link_whatsapp = '{safe_phone}' AND chat_mode = 'whatsapp' "
+        f"WHERE whatsapp_paciente = '{safe_phone}' AND chat_mode = 'whatsapp' "
         f"ORDER BY id DESC LIMIT 1"
     )
     try:
@@ -288,7 +288,7 @@ def lookup_whatsapp_chat(phone: str) -> Optional[Dict[str, Any]]:
     """Find the most recent chatgpt_chats record for a WhatsApp phone.
 
     Returns dict with keys: id, id_paciente, id_atendimento,
-    id_chatgpt_atendimentos_analise, url_chatgpt, link_whatsapp.
+    id_chatgpt_atendimentos_analise, url_chatgpt, whatsapp_paciente.
     """
     if not phone:
         return None
@@ -296,9 +296,9 @@ def lookup_whatsapp_chat(phone: str) -> Optional[Dict[str, Any]]:
     suffix = safe_phone[-9:] if len(safe_phone) >= 9 else safe_phone
     query = (
         "SELECT id, id_paciente, id_atendimento, id_chatgpt_atendimentos_analise, "
-        "       url_chatgpt, link_whatsapp "
+        "       url_chatgpt, whatsapp_paciente "
         "FROM chatgpt_chats "
-        f"WHERE chat_mode = 'whatsapp' AND link_whatsapp LIKE '%{suffix}' "
+        f"WHERE chat_mode = 'whatsapp' AND whatsapp_paciente LIKE '%{suffix}' "
         "ORDER BY id DESC LIMIT 1"
     )
     try:
@@ -1216,7 +1216,7 @@ def _resolve_chat_to_atendimento(
     """Given a chat title (and optional phone), find the matching atendimento.
 
     Tries (in order):
-      1. chatgpt_chats.link_whatsapp (fastest — direct phone lookup)
+      1. chatgpt_chats.whatsapp_paciente (fastest — direct phone lookup)
       2. chatgpt_atendimentos_analise via membros phone columns
       3. chatgpt_atendimentos_analise via patient name fallback
 
@@ -1226,7 +1226,7 @@ def _resolve_chat_to_atendimento(
     # Try phone extracted from title first
     phone = _phone_from_title(title)
 
-    # 1) Fast path: lookup by link_whatsapp in chatgpt_chats
+    # 1) Fast path: lookup by whatsapp_paciente in chatgpt_chats
     for candidate_phone in [phone, normalize_phone(phone_hint) if phone_hint else None]:
         if not candidate_phone:
             continue
