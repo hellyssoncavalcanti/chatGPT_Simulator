@@ -440,40 +440,20 @@ class WhatsAppWebClient:
                 """(maxItems) => {
                     const root = document.querySelector('#pane-side');
                     if (!root) return [];
-                    const rows = root.querySelectorAll('div[role="listitem"], div[role="row"], div._ak8k');
+                    const rows = root.querySelectorAll('div[role="row"]');
                     const out = [];
-                    const skipExact = new Set([
-                        'Mensagem apagada',
-                        'Não foi possível carregar a mensagem. Use seu celular para acessá-la.',
-                    ]);
-                    const isTimeOnly = (txt) => /^\\d{1,2}:\\d{2}$/.test(txt);
-                    const isDateOnly = (txt) => /^\\d{1,2}\\/\\d{1,2}\\/\\d{2,4}$/.test(txt);
-                    const isNoise = (txt) => {
-                        if (!txt) return true;
-                        if (skipExact.has(txt)) return true;
-                        if (isTimeOnly(txt) || isDateOnly(txt)) return true;
-                        if (/^mensagem apagada$/i.test(txt)) return true;
-                        if (/^não foi possível carregar/i.test(txt)) return true;
-                        return false;
-                    };
 
                     for (const row of rows) {
-                        const candidates = [];
-                        const titleNodes = row.querySelectorAll('span[title]');
-                        for (const n of titleNodes) {
-                            const t = (n.getAttribute('title') || '').trim();
-                            if (t) candidates.push(t);
-                        }
-                        const autoNodes = row.querySelectorAll('span[dir="auto"]');
-                        for (const n of autoNodes) {
-                            const t = (n.textContent || '').trim();
-                            if (t) candidates.push(t);
-                        }
-
-                        const chosen = candidates.find((c) => !isNoise(c));
-                        if (!chosen) continue;
-                        if (out.includes(chosen)) continue;
-                        out.push(chosen);
+                        // Only look in the chat name/header area (div._ak8q),
+                        // NOT in the message preview area (div._ak8j / div._ak8k)
+                        const nameArea = row.querySelector('div._ak8q');
+                        if (!nameArea) continue;
+                        const nameSpan = nameArea.querySelector('span[title]');
+                        if (!nameSpan) continue;
+                        const name = (nameSpan.getAttribute('title') || '').trim();
+                        if (!name) continue;
+                        if (out.includes(name)) continue;
+                        out.push(name);
                         if (out.length >= maxItems) break;
                     }
                     return out;
