@@ -3497,6 +3497,23 @@ para avaliar resposta e tolerabilidade inicial.
 Se houver início de terapia ou necessidade de observar evolução comportamental,
 considerar o tempo razoável para surgirem melhora, piora ou efeitos colaterais detectáveis.
 
+REGRA OBRIGATÓRIA (DOSE-ALVO E RETORNO):
+
+Sempre que o texto indicar retorno relacionado a “dose alvo”, “dose-alvo”,
+“após atingir dose”, “quando alcançar dose”, “após titulação” ou equivalente,
+você DEVE:
+
+1) identificar no próprio prontuário qual medicação está sendo titulada;
+2) identificar, no texto, o ritmo de ajuste e o ponto de dose-alvo (se existirem);
+3) se faltar dado no prontuário, inferir o tempo médio plausível de titulação
+   com base em prática clínica usual para essa medicação (sem inventar dose não citada);
+4) converter “X semanas após dose alvo” em data calendário estimada;
+5) preencher "data_estimada" no formato YYYY-MM-DD sempre que houver base temporal mínima.
+
+Nesses casos, "data_estimada" não deve ficar vazia se existir referência temporal
+suficiente no prontuário (data da consulta, ritmo de ajuste, marco de dose-alvo
+ou janela usual de titulação). Explique o racional em "motivo_clinico" e "base_clinica".
+
 ══════════════════════════════════════
 PRIORIZAÇÃO DO RETORNO
 ══════════════════════════════════════
@@ -3710,6 +3727,14 @@ Responder SOMENTE com o JSON.
 def buscar_prompt_db():
     """Busca o prompt do analisador no banco via PHP (id_criador='atendimentos_analise').
     Retorna o conteudo se encontrado, ou None para usar o SYSTEM_PROMPT local."""
+    regra_dose_alvo = """
+
+REGRA OBRIGATÓRIA (DOSE-ALVO E RETORNO):
+- Se houver “dose alvo”, “após dose-alvo”, “após atingir dose” ou equivalente no contexto de seguimento,
+  identificar medicação e tempo de titulação (no prontuário ou por tempo médio plausível),
+  e preencher "seguimento_retorno_estimado.data_estimada" em YYYY-MM-DD quando houver base temporal mínima.
+- Se o intervalo estiver condicionado à dose-alvo, não deixar "data_estimada" vazia sem justificativa clínica explícita.
+"""
     try:
         data = sql_exec(
             "SELECT conteudo FROM chatgpt_prompts WHERE tipo='system' AND id_criador='atendimentos_analise' LIMIT 1",
@@ -3720,6 +3745,8 @@ def buscar_prompt_db():
             conteudo = rows[0]["conteudo"]
             if "[INICIO_TEXTO_COLADO]" not in conteudo:
                 conteudo = "[INICIO_TEXTO_COLADO]" + conteudo + "[FIM_TEXTO_COLADO]"
+            if "REGRA OBRIGATÓRIA (DOSE-ALVO E RETORNO)" not in conteudo:
+                conteudo = conteudo.replace("[FIM_TEXTO_COLADO]", regra_dose_alvo + "\n[FIM_TEXTO_COLADO]")
             log.info("Prompt do analisador carregado do banco (chatgpt_prompts).")
             return conteudo
         log.info("Prompt 'atendimentos_analise' nao encontrado no banco - usando prompt local.")
