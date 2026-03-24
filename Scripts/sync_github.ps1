@@ -148,6 +148,7 @@ function Import-Settings {
         analyzerPattern     = 'Scripts\\analisador_prontuarios.py'
         pywaPattern         = 'Scripts\\pywa_acompanhamento_server.py'
         whatsappServerBat   = '2. Start_Whatsapp_Server.bat'
+        whatsappWindowTitle = 'WhatsApp Follow-up Server (Web)'
         remotePhpSaveUrl    = if ($env:CHATGPT_SIMULATOR_REMOTE_PHP_SAVE_URL) { $env:CHATGPT_SIMULATOR_REMOTE_PHP_SAVE_URL } else { 'https://conexaovida.org/editar_php.php?action=save_file_remote' }
         remotePhpApiKey     = if ($env:CHATGPT_SIMULATOR_REMOTE_PHP_API_KEY) { $env:CHATGPT_SIMULATOR_REMOTE_PHP_API_KEY } else { 'CVAPI_2b9c80c2abf94a76baf8b3e68d89cb7e' }
         remotePhpLocalFile  = if ($env:CHATGPT_SIMULATOR_REMOTE_PHP_LOCAL_FILE) { $env:CHATGPT_SIMULATOR_REMOTE_PHP_LOCAL_FILE } else { 'chatgpt_integracao_criado_pelo_gemini.js.php' }
@@ -887,10 +888,21 @@ function Log-RunningProcessesStatus {
     Write-Section 'MONITORAMENTO DE PROCESSOS'
     $found = 0
 
+    $whatsappTitlePattern = [regex]::Escape(($script:Config.whatsappWindowTitle ?? 'WhatsApp Follow-up Server (Web)'))
+    $whatsappBatPattern = 'start[\s_]*whatsapp[\s_]*server\.bat'
+    $pywaScriptPattern = 'pywa_acompanhamento_server\.py'
+
     $cmds = Get-CimInstance Win32_Process | Where-Object { $_.Name -match 'cmd' }
     foreach ($c in $cmds) {
-        if ($c.CommandLine -match '0\. start\.bat' -or $c.CommandLine -match '1\. start_apenas_analisador_prontuarios\.bat') {
+        $isMainWindow = $c.CommandLine -match '0\. start\.bat'
+        $isAnalyzerWindow = $c.CommandLine -match '1\. start_apenas_analisador_prontuarios\.bat'
+        $isPywaWindow = ($c.CommandLine -match $whatsappBatPattern -or $c.CommandLine -match $pywaScriptPattern -or $c.CommandLine -match $whatsappTitlePattern)
+
+        if ($isMainWindow -or $isAnalyzerWindow) {
             Write-Info "Alvo encontrado [Janela Inicial] (PID $($c.ProcessId)): $($c.CommandLine)"
+            $found++
+        } elseif ($isPywaWindow) {
+            Write-Info "Alvo encontrado [Janela WhatsApp] (PID $($c.ProcessId)): $($c.CommandLine)"
             $found++
         }
     }
@@ -931,11 +943,15 @@ function Stop-ManagedProcesses {
     Write-Section 'PARANDO PROCESSOS E JANELAS'
     $killed = 0
 
+    $whatsappTitlePattern = [regex]::Escape(($script:Config.whatsappWindowTitle ?? 'WhatsApp Follow-up Server (Web)'))
+    $whatsappBatPattern = 'start[\s_]*whatsapp[\s_]*server\.bat'
+    $pywaScriptPattern = 'pywa_acompanhamento_server\.py'
+
     $cmds = Get-CimInstance Win32_Process | Where-Object { $_.Name -match 'cmd' }
     foreach ($c in $cmds) {
         $isMainWindow = $c.CommandLine -match '0\. start\.bat'
         $isAnalyzerWindow = $c.CommandLine -match '1\. start_apenas_analisador_prontuarios\.bat'
-        $isPywaWindow = $c.CommandLine -match '2\.\s*Start_Whatsapp_Server\.bat'
+        $isPywaWindow = ($c.CommandLine -match $whatsappBatPattern -or $c.CommandLine -match $pywaScriptPattern -or $c.CommandLine -match $whatsappTitlePattern)
 
         $mustKill = $false
         if ($Scope -eq 'pywa_only') {
