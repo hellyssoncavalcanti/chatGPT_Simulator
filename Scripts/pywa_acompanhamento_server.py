@@ -440,21 +440,49 @@ class WhatsAppWebClient:
                 """(maxItems) => {
                     const root = document.querySelector('#pane-side');
                     if (!root) return [];
-                    const names = [];
-                    const nodes = root.querySelectorAll('span[dir="auto"]');
-                    for (const n of nodes) {
-                        const t = (n.textContent || '').trim();
-                        if (!t) continue;
-                        if (names.includes(t)) continue;
-                        names.push(t);
-                        if (names.length >= maxItems) break;
+                    const rows = root.querySelectorAll('div[role="listitem"], div[role="row"], div._ak8k');
+                    const out = [];
+                    const skipExact = new Set([
+                        'Mensagem apagada',
+                        'Não foi possível carregar a mensagem. Use seu celular para acessá-la.',
+                    ]);
+                    const isTimeOnly = (txt) => /^\\d{1,2}:\\d{2}$/.test(txt);
+                    const isDateOnly = (txt) => /^\\d{1,2}\\/\\d{1,2}\\/\\d{2,4}$/.test(txt);
+                    const isNoise = (txt) => {
+                        if (!txt) return true;
+                        if (skipExact.has(txt)) return true;
+                        if (isTimeOnly(txt) || isDateOnly(txt)) return true;
+                        if (/^mensagem apagada$/i.test(txt)) return true;
+                        if (/^não foi possível carregar/i.test(txt)) return true;
+                        return false;
+                    };
+
+                    for (const row of rows) {
+                        const candidates = [];
+                        const titleNodes = row.querySelectorAll('span[title]');
+                        for (const n of titleNodes) {
+                            const t = (n.getAttribute('title') || '').trim();
+                            if (t) candidates.push(t);
+                        }
+                        const autoNodes = row.querySelectorAll('span[dir="auto"]');
+                        for (const n of autoNodes) {
+                            const t = (n.textContent || '').trim();
+                            if (t) candidates.push(t);
+                        }
+
+                        const chosen = candidates.find((c) => !isNoise(c));
+                        if (!chosen) continue;
+                        if (out.includes(chosen)) continue;
+                        out.push(chosen);
+                        if (out.length >= maxItems) break;
                     }
-                    return names;
+                    return out;
                 }""",
                 limit,
             )
             if chats:
-                log.info("Lista de chats visíveis (%s): %s", reason, " | ".join(chats))
+                formatted = " | ".join(f"[{c}]" for c in chats)
+                log.info("Lista de chats visíveis (%s): %s", reason, formatted)
             else:
                 log.warning("Não foi possível capturar a lista de chats visíveis (%s).", reason)
         except Exception:
