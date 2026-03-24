@@ -20,11 +20,12 @@ import json
 import logging
 import os
 import queue
+import random
 import re
 import threading
 import time
 from concurrent.futures import Future
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import quote
@@ -385,6 +386,76 @@ def extract_followup_items(mensagens_acompanhamento: Any) -> List[Tuple[str, str
     return [("mensagem", text)] if text else []
 
 
+# ---------------------------------------------------------------------------
+# Time-based follow-up selection
+# ---------------------------------------------------------------------------
+# Maps each message key to the (min_days, max_days) window in which it should
+# be sent, counted from the consultation date.
+FOLLOWUP_TIME_WINDOWS: Dict[str, Tuple[int, int]] = {
+    "mensagem_1_semana":    (5, 21),
+    "mensagem_1_mes":       (25, 50),
+    "mensagem_pre_retorno": (50, 90),
+}
+
+
+def _parse_datetime(value: Any) -> Optional[datetime]:
+    """Try to parse a datetime string from the database."""
+    if value is None:
+        return None
+    raw = str(value).strip()
+    if not raw or raw == "N/D":
+        return None
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d"):
+        try:
+            dt = datetime.strptime(raw, fmt)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt
+        except ValueError:
+            continue
+    return None
+
+
+def select_followup_for_timing(
+    items: List[Tuple[str, str]],
+    inicio_atendimento: Any,
+) -> List[Tuple[str, str]]:
+    """Return only the items whose time window matches the elapsed days since
+    the consultation.  If the consultation date is unknown, return nothing
+    (skip the row) to avoid sending the wrong message."""
+    dt_inicio = _parse_datetime(inicio_atendimento)
+    if dt_inicio is None:
+        log.warning(
+            "Data do atendimento indisponível — nenhuma mensagem selecionada "
+            "por falta de referência temporal."
+        )
+        return []
+
+    now = datetime.now(timezone.utc)
+    elapsed_days = (now - dt_inicio).days
+
+    selected: List[Tuple[str, str]] = []
+    for key, text in items:
+        window = FOLLOWUP_TIME_WINDOWS.get(key)
+        if window is None:
+            # Unknown key — treat as eligible immediately
+            selected.append((key, text))
+            continue
+        min_d, max_d = window
+        if min_d <= elapsed_days <= max_d:
+            selected.append((key, text))
+
+    if not selected:
+        log.info(
+            "Nenhuma mensagem elegível para envio — dias desde atendimento: %s "
+            "(janelas configuradas: %s)",
+            elapsed_days,
+            {k: f"{v[0]}-{v[1]}d" for k, v in FOLLOWUP_TIME_WINDOWS.items()},
+        )
+
+    return selected
+
+
 def build_forward_prompt(ctx: Dict[str, Any], patient_text: str) -> str:
     pergunta = ctx.get("pergunta") or "(não identificada)"
     nome = ctx.get("nome_paciente") or "Paciente"
@@ -632,6 +703,7 @@ def send_pending_followups_once() -> Dict[str, Any]:
     skipped_missing_phone = 0
     skipped_empty_followup = 0
     skipped_already_sent = 0
+    skipped_not_due = 0
     errors = 0
     recovered_member_phone = 0
 
@@ -650,12 +722,24 @@ def send_pending_followups_once() -> Dict[str, Any]:
             skipped_missing_phone += 1
             continue
 
-        itens = extract_followup_items(row.get("mensagens_acompanhamento"))
-        if not itens:
+        all_itens = extract_followup_items(row.get("mensagens_acompanhamento"))
+        if not all_itens:
             skipped += 1
             skipped_empty_followup += 1
             continue
-        total_followup_items += len(itens)
+        total_followup_items += len(all_itens)
+
+        # Fetch consultation date once per row to determine which message
+        # is appropriate based on elapsed time.
+        metadata = fetch_patient_metadata(id_paciente=id_paciente, id_atendimento=id_atendimento)
+        idade = derive_age_from_birthdate(metadata.get("data_nascimento"))
+        if idade == "N/D":
+            idade = derive_age_from_row(row)
+        inicio_atendimento = metadata.get("datetime_atendimento_inicio") or derive_start_datetime_from_row(row)
+
+        # Filter: only send the message(s) whose time window matches now.
+        itens = select_followup_for_timing(all_itens, inicio_atendimento)
+        skipped_not_due += len(all_itens) - len(itens)
 
         for key, pergunta in itens:
             dedupe_key = f"{id_atendimento}:{key}:{hashlib.sha1(pergunta.encode('utf-8')).hexdigest()}"
@@ -665,15 +749,11 @@ def send_pending_followups_once() -> Dict[str, Any]:
                 continue
 
             try:
-                metadata = fetch_patient_metadata(id_paciente=id_paciente, id_atendimento=id_atendimento)
-                idade = derive_age_from_birthdate(metadata.get("data_nascimento"))
-                if idade == "N/D":
-                    idade = derive_age_from_row(row)
-                inicio_atendimento = metadata.get("datetime_atendimento_inicio") or derive_start_datetime_from_row(row)
                 preview = build_preview_with_ellipsis(pergunta, max_len=140)
                 log.info(
                     "Pré-envio | Paciente: [%s] | idade: [%s] | Telefone de contato: [%s] (origem=%s) "
-                    "| Telefone para testes: [%s] | Id do atendimento: [%s] | Data do atendimento: [%s] | Mensagem: [%s]",
+                    "| Telefone para testes: [%s] | Id do atendimento: [%s] | Data do atendimento: [%s] "
+                    "| Tipo: [%s] | Mensagem: [%s]",
                     (nome_paciente or "N/D"),
                     (idade or "N/D"),
                     (phone or "N/D"),
@@ -681,11 +761,18 @@ def send_pending_followups_once() -> Dict[str, Any]:
                     TEST_DESTINATION_PHONE,
                     id_atendimento if id_atendimento is not None else "N/D",
                     inicio_atendimento if inicio_atendimento is not None else "N/D",
+                    key,
                     preview or "N/D",
                 )
+
+                # Random delay between sends to simulate human behaviour.
+                if sent > 0:
+                    delay = random.uniform(10, 45)
+                    log.info("Aguardando %.1fs antes do próximo envio...", delay)
+                    time.sleep(delay)
+
                 wa_web.send_message(
                     TEST_DESTINATION_PHONE,
-                    "Olá! Aqui é o acompanhamento da sua consulta.\n\n"
                     f"{pergunta}\n\n"
                     "Pode me responder por aqui?",
                 )
@@ -725,6 +812,7 @@ def send_pending_followups_once() -> Dict[str, Any]:
         "skipped_missing_phone": skipped_missing_phone,
         "skipped_empty_followup": skipped_empty_followup,
         "skipped_already_sent": skipped_already_sent,
+        "skipped_not_due": skipped_not_due,
         "errors": errors,
         "recovered_member_phone": recovered_member_phone,
     }
@@ -738,6 +826,8 @@ def _build_skip_reason_summary(stats: Dict[str, Any]) -> str:
         reasons.append(f"sem mensagem de acompanhamento={stats['skipped_empty_followup']}")
     if stats.get("skipped_already_sent", 0):
         reasons.append(f"já enviado anteriormente={stats['skipped_already_sent']}")
+    if stats.get("skipped_not_due", 0):
+        reasons.append(f"fora da janela temporal={stats['skipped_not_due']}")
     if stats.get("errors", 0):
         reasons.append(f"falha ao enviar={stats['errors']}")
     return "; ".join(reasons) if reasons else "nenhum motivo classificado"
@@ -808,7 +898,7 @@ def scheduler_loop() -> None:
             motivos = _build_skip_reason_summary(stats)
             log.info(
                 "Envio acompanhamento | total=%s itens=%s enviados=%s ignorados=%s "
-                "(sem_telefone=%s, sem_mensagem=%s, ja_enviado=%s, erros=%s, recuperado_membros=%s, motivos=%s)",
+                "(sem_telefone=%s, sem_mensagem=%s, ja_enviado=%s, fora_janela=%s, erros=%s, recuperado_membros=%s, motivos=%s)",
                 stats["total"],
                 stats["total_followup_items"],
                 stats["sent"],
@@ -816,6 +906,7 @@ def scheduler_loop() -> None:
                 stats["skipped_missing_phone"],
                 stats["skipped_empty_followup"],
                 stats["skipped_already_sent"],
+                stats["skipped_not_due"],
                 stats["errors"],
                 stats["recovered_member_phone"],
                 motivos,
