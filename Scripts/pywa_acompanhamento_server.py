@@ -203,6 +203,51 @@ def normalize_phone(raw: Any) -> Optional[str]:
     return digits
 
 
+def is_valid_br_mobile_phone(phone: Optional[str]) -> bool:
+    """
+    Valida número celular BR em formato normalizado:
+    - 55 + DDD(2) + número(9), total 13 dígitos
+    - primeiro dígito do número local deve ser 9
+    """
+    if not phone:
+        return False
+    digits = re.sub(r"\D", "", str(phone))
+    if len(digits) != 13 or not digits.startswith("55"):
+        return False
+    return digits[4] == "9"
+
+
+def resolve_phone_with_member_fallback(raw_phone: Any, id_paciente: Any) -> Optional[str]:
+    direct = normalize_phone(raw_phone)
+    if is_valid_br_mobile_phone(direct):
+        return direct
+
+    try:
+        id_int = int(id_paciente)
+    except (TypeError, ValueError):
+        return direct if direct else None
+
+    try:
+        rows = run_sql(
+            f"SELECT telefone1, telefone2 FROM membros WHERE id = {id_int} LIMIT 1"
+        )
+    except Exception:
+        log.exception("Falha ao buscar telefone fallback em membros para id_paciente=%s", id_paciente)
+        return direct if direct else None
+
+    if not rows:
+        return direct if direct else None
+
+    row = rows[0] or {}
+    candidates = [row.get("telefone1"), row.get("telefone2"), raw_phone]
+    for candidate in candidates:
+        normalized = normalize_phone(candidate)
+        if is_valid_br_mobile_phone(normalized):
+            return normalized
+
+    return direct if direct else None
+
+
 def extract_followup_items(mensagens_acompanhamento: Any) -> List[Tuple[str, str]]:
     if mensagens_acompanhamento is None:
         return []
@@ -340,13 +385,17 @@ def send_pending_followups_once() -> Dict[str, Any]:
     skipped_empty_followup = 0
     skipped_already_sent = 0
     errors = 0
+    recovered_member_phone = 0
 
     for row in rows:
         id_atendimento = row.get("id_atendimento")
         id_paciente = row.get("id_paciente")
         nome_paciente = row.get("nome_paciente")
         url_chatgpt = (row.get("url_chatgpt") or "").strip()
-        phone = normalize_phone(row.get("telefone"))
+        original_phone = normalize_phone(row.get("telefone"))
+        phone = resolve_phone_with_member_fallback(row.get("telefone"), id_paciente)
+        if (not original_phone or not is_valid_br_mobile_phone(original_phone)) and phone:
+            recovered_member_phone += 1
 
         if not phone:
             skipped += 1
@@ -411,6 +460,7 @@ def send_pending_followups_once() -> Dict[str, Any]:
         "skipped_empty_followup": skipped_empty_followup,
         "skipped_already_sent": skipped_already_sent,
         "errors": errors,
+        "recovered_member_phone": recovered_member_phone,
     }
 
 
@@ -492,7 +542,7 @@ def scheduler_loop() -> None:
             motivos = _build_skip_reason_summary(stats)
             log.info(
                 "Envio acompanhamento | total=%s itens=%s enviados=%s ignorados=%s "
-                "(sem_telefone=%s, sem_mensagem=%s, ja_enviado=%s, erros=%s, motivos=%s)",
+                "(sem_telefone=%s, sem_mensagem=%s, ja_enviado=%s, erros=%s, recuperado_membros=%s, motivos=%s)",
                 stats["total"],
                 stats["total_followup_items"],
                 stats["sent"],
@@ -501,6 +551,7 @@ def scheduler_loop() -> None:
                 stats["skipped_empty_followup"],
                 stats["skipped_already_sent"],
                 stats["errors"],
+                stats["recovered_member_phone"],
                 motivos,
             )
             if stats["sent"] == 0 and stats["total"] > 0:
