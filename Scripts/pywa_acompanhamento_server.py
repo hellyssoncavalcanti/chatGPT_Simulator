@@ -296,7 +296,7 @@ def lookup_whatsapp_chat(phone: str) -> Optional[Dict[str, Any]]:
     suffix = safe_phone[-9:] if len(safe_phone) >= 9 else safe_phone
     query = (
         "SELECT id, id_paciente, id_atendimento, id_chatgpt_atendimentos_analise, "
-        "       url_chatgpt, whatsapp_paciente "
+        "       url_chatgpt, whatsapp_paciente, mensagens "
         "FROM chatgpt_chats "
         f"WHERE chat_mode = 'whatsapp' AND whatsapp_paciente LIKE '%{suffix}' "
         "ORDER BY id DESC LIMIT 1"
@@ -308,6 +308,45 @@ def lookup_whatsapp_chat(phone: str) -> Optional[Dict[str, Any]]:
     except Exception:
         log.exception("Falha ao buscar chatgpt_chats WhatsApp para phone=%s", phone)
     return None
+
+
+def was_message_already_sent_for_analise(id_analise: Any, message_text: str) -> bool:
+    """Check if a follow-up message was already sent for a given analysis.
+
+    Looks up chatgpt_chats by id_chatgpt_atendimentos_analise and checks
+    whether the message text already exists in the mensagens JSON column.
+    Returns True if the message is found (i.e. already sent), False otherwise.
+    """
+    if not id_analise:
+        return False
+    query = (
+        "SELECT mensagens FROM chatgpt_chats "
+        f"WHERE chat_mode = 'whatsapp' "
+        f"  AND id_chatgpt_atendimentos_analise = {int(id_analise)} "
+        "ORDER BY id DESC LIMIT 1"
+    )
+    try:
+        rows = run_sql(query)
+        if not rows:
+            return False
+        raw = rows[0].get("mensagens") or ""
+        if not raw:
+            return False
+        mensagens = json.loads(raw) if isinstance(raw, str) else raw
+        if not isinstance(mensagens, list):
+            return False
+        for msg in mensagens:
+            if not isinstance(msg, dict):
+                continue
+            content = (msg.get("content") or "").strip()
+            if content == message_text.strip():
+                return True
+    except Exception:
+        log.exception(
+            "Falha ao verificar duplicidade de mensagem para id_analise=%s",
+            id_analise,
+        )
+    return False
 
 
 def send_to_chatgpt(url_chatgpt: str, text: str, id_paciente: Any, id_atendimento: Any) -> Dict[str, Any]:
@@ -1099,6 +1138,21 @@ def send_pending_followups_once() -> Dict[str, Any]:
         skipped_not_due += len(all_itens) - len(itens)
 
         for key, pergunta in itens:
+            full_msg = f"{pergunta}\n\nPode me responder por aqui?"
+
+            # Dedupe: check chatgpt_chats.mensagens (DB) for this analysis
+            if was_message_already_sent_for_analise(id_analise, full_msg):
+                log.info(
+                    "Mensagem já presente em chatgpt_chats.mensagens para "
+                    "id_analise=%s | tipo=%s — ignorando.",
+                    id_analise,
+                    key,
+                )
+                skipped += 1
+                skipped_already_sent += 1
+                continue
+
+            # Dedupe fallback: check local state file
             dedupe_key = f"{id_atendimento}:{key}:{hashlib.sha1(pergunta.encode('utf-8')).hexdigest()}"
             if state.is_sent(dedupe_key):
                 skipped += 1
@@ -1128,11 +1182,7 @@ def send_pending_followups_once() -> Dict[str, Any]:
                     log.info("Aguardando %.1fs antes do próximo envio...", delay)
                     time.sleep(delay)
 
-                wa_web.send_message(
-                    TEST_DESTINATION_PHONE,
-                    f"{pergunta}\n\n"
-                    "Pode me responder por aqui?",
-                )
+                wa_web.send_message(TEST_DESTINATION_PHONE, full_msg)
 
                 state.mark_sent(
                     dedupe_key,
@@ -1158,7 +1208,6 @@ def send_pending_followups_once() -> Dict[str, Any]:
                 )
 
                 # Persist in chatgpt_chats with chat_mode='whatsapp' for later lookup
-                full_msg = f"{pergunta}\n\nPode me responder por aqui?"
                 insert_whatsapp_chat(
                     phone=phone,
                     id_paciente=id_paciente,
