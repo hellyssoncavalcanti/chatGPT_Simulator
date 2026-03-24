@@ -749,6 +749,51 @@ def clean_html(html_content):
     return html
 
 
+async def _read_last_assistant_snapshot(page):
+    """
+    Lê o último balão do assistant diretamente do DOM, sem usar Locator.inner_html().
+
+    Motivo:
+    - Locator.inner_html() aguarda a existência do elemento e pode estourar timeout
+      quando o ChatGPT ainda não materializou o balão do assistant no DOM.
+    - Durante respostas longas, streaming, tools/browsing ou mudanças de layout,
+      o balão pode ser recriado e alguns locators ficam instáveis.
+
+    Retorna sempre um dict com `html` e `text`; se não houver mensagem ainda,
+    retorna strings vazias.
+    """
+    try:
+        snapshot = await page.evaluate("""() => {
+            const nodes = Array.from(document.querySelectorAll('[data-message-author-role="assistant"]'));
+            if (!nodes.length) {
+                return { html: '', text: '' };
+            }
+
+            const preferred =
+                [...nodes].reverse().find((node) => {
+                    if (!node) return false;
+                    const txt = (node.innerText || '').trim();
+                    const html = (node.innerHTML || '').trim();
+                    return !!txt || !!html;
+                }) || nodes[nodes.length - 1];
+
+            return {
+                html: preferred?.innerHTML || '',
+                text: (preferred?.innerText || '').trim(),
+            };
+        }""")
+    except Exception:
+        return {"html": "", "text": ""}
+
+    if not isinstance(snapshot, dict):
+        return {"html": "", "text": ""}
+
+    return {
+        "html": snapshot.get("html") or "",
+        "text": snapshot.get("text") or "",
+    }
+
+
 def _resolve_chatgpt_download_url(raw_url: str) -> str:
     """Normaliza URL de download do ChatGPT para forma absoluta."""
     if raw_url.startswith("/"):
@@ -1483,8 +1528,33 @@ async def handle_sync_task(context, task):
         elif _sync_auto_downloads:
             await asyncio.sleep(1)
         if _sync_auto_downloads:
-            last_ai_idx = max((i for i, m in enumerate(msgs) if m.get('role') == 'assistant'), default=-1)
-            if last_ai_idx >= 0:
+            assistant_indices = [i for i, m in enumerate(msgs) if m.get('role') == 'assistant']
+            target_ai_idx = -1
+            if assistant_indices:
+                file_names = [str(dl.get("name") or "").strip().lower() for dl in _sync_auto_downloads]
+
+                def _score_msg_for_download(idx: int) -> int:
+                    txt = (msgs[idx].get('content') or '').lower()
+                    if not txt:
+                        return 0
+                    score = 0
+                    if '📎 arquivo:' in txt or '/api/downloads/' in txt:
+                        score += 5
+                    if 'arquivo:' in txt or 'planilha' in txt or 'download' in txt:
+                        score += 2
+                    for nm in file_names:
+                        if nm and nm in txt:
+                            score += 10
+                    return score
+
+                scored = [(idx, _score_msg_for_download(idx)) for idx in assistant_indices]
+                scored.sort(key=lambda item: (item[1], item[0]), reverse=True)
+                if scored and scored[0][1] > 0:
+                    target_ai_idx = scored[0][0]
+                else:
+                    target_ai_idx = assistant_indices[-1]  # fallback: última resposta da IA
+
+            if target_ai_idx >= 0:
                 extra_links = []
                 for dl in _sync_auto_downloads:
                     register_file(
@@ -1496,8 +1566,20 @@ async def handle_sync_task(context, task):
                     )
                     extra_links.append(f"📎 Arquivo: [{dl['name']}](/api/downloads/{dl['file_id']})")
                 if extra_links:
-                    base = msgs[last_ai_idx].get('content') or ''
-                    msgs[last_ai_idx]['content'] = (base + "\n\n" + "\n".join(extra_links)).strip()
+                    base = msgs[target_ai_idx].get('content') or ''
+                    existing = set(
+                        re.findall(r'/api/downloads/([A-Za-z0-9_\-]+)', base)
+                    )
+                    novos = [
+                        link for link, dl in zip(extra_links, _sync_auto_downloads)
+                        if dl.get("file_id") not in existing
+                    ]
+                    if novos:
+                        msgs[target_ai_idx]['content'] = (base + "\n\n" + "\n".join(novos)).strip()
+                    emit_log(
+                        q,
+                        f"📎 [SYNC] {len(novos)} link(s) de download anexado(s) à msg assistant #{target_ai_idx + 1}"
+                    )
 
         title = await get_chat_title(page)
         emit_event(q, 'syncresult', {
@@ -2319,16 +2401,9 @@ async def handle_chat_task_inner(task, page, q, stop_event: asyncio.Event, activ
             stuck_count = 0
             idle_ready_count = 0
 
-        responses = await page.locator("div[data-message-author-role='assistant']").all()
-        curr_html = ""
-        curr_text = ""
-        if responses:
-            curr_html = await responses[-1].inner_html()
-            curr_html = clean_html(curr_html)
-            try:
-                curr_text = re.sub(r"\s+", " ", (await responses[-1].inner_text()) or "").strip()
-            except Exception:
-                curr_text = ""
+        assistant_snapshot = await _read_last_assistant_snapshot(page)
+        curr_html = clean_html(assistant_snapshot.get("html", ""))
+        curr_text = re.sub(r"\s+", " ", assistant_snapshot.get("text", "")).strip()
 
         markdown_text = md(curr_html, heading_style="ATX").strip()
         markdown_text = markdown_text.replace("\\_", "_").replace("\\*", "*")
@@ -2374,7 +2449,12 @@ async def handle_chat_task_inner(task, page, q, stop_event: asyncio.Event, activ
             if len(last_html) > 0:
                 if stuck_count > 20 and idle_ready_count > 8: break
             else:
-                if time.time() - start_time > 60 and idle_ready_count > 8: break
+                # Evita encerrar cedo demais quando o ChatGPT demora para começar
+                # a emitir markdown visível (ex.: requests longas, tools, busy UI).
+                # Já existe timeout global de 600s no loop.
+                if time.time() - start_time > 300 and idle_ready_count > 20:
+                    emit_log(q, "⏳ Sem markdown visível por 300s; encerrando leitura desta tarefa.")
+                    break
         else:
             idle_ready_count = 0
 
