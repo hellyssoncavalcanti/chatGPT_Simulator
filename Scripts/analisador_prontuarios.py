@@ -256,6 +256,24 @@ def _json_parece_incompleto(texto: str) -> bool:
     return in_string or depth_obj > 0 or depth_arr > 0 or not bruto.rstrip().endswith('}')
 
 
+def _extrair_markdown_visivel_llm(texto: str) -> str:
+    """
+    Remove blocos/markers de raciocínio interno para identificar apenas a
+    resposta visível já entregue pela LLM ao usuário.
+    """
+    bruto = texto or ""
+    if not bruto.strip():
+        return ""
+
+    # Caso o bloco <think> ainda esteja aberto, consideramos que a resposta
+    # visível ainda não começou.
+    if "<think>" in bruto and "</think>" not in bruto:
+        return ""
+
+    sem_think = re.sub(r"<think>[\s\S]*?</think>", "", bruto, flags=re.IGNORECASE)
+    return sem_think.strip()
+
+
 def _salvar_debug_json_falha(id_atendimento: int | None, etapa: str, markdown: str, erro: Exception | str):
     """Salva artefatos para depurar falhas de parse JSON da resposta da LLM."""
     os.makedirs('logs/json_debug', exist_ok=True)
@@ -3817,10 +3835,11 @@ def analisar_prontuario(
 
         elif t == "markdown":
                    markdown = obj.get("content", "")
-                   if "<think>" in markdown and "</think>" not in markdown:
-                       _inline_status('⏳', f"Pensando... ({len(markdown)} chars)")
+                   markdown_visivel = _extrair_markdown_visivel_llm(markdown)
+                   if markdown_visivel:
+                       _inline_status('📝', f"Recebendo: {len(markdown_visivel)} chars...")
                    else:
-                       _inline_status('📝', f"Recebendo: {len(markdown)} chars...")
+                       _inline_status('⏳', "Pensando...")
                    inline_active = True
 
         elif t == "finish":
@@ -4784,10 +4803,11 @@ def enriquecer_com_evidencias(resultado: dict, resultados_web: list,
                 log.info(f"  📎 chat_id: {new_chat_id}")
             elif t == "markdown":
                        markdown = obj.get("content", "")
-                       if "<think>" in markdown and "</think>" not in markdown:
-                           _inline_status('⏳', f"Pensando... ({len(markdown)} chars)")
+                       markdown_visivel = _extrair_markdown_visivel_llm(markdown)
+                       if markdown_visivel:
+                           _inline_status('📝', f"Recebendo: {len(markdown_visivel)} chars...")
                        else:
-                           _inline_status('📝', f"Recebendo: {len(markdown)} chars...")
+                           _inline_status('⏳', "Pensando...")
                        inline_active = True
             elif t == "finish":
                 if inline_active:
