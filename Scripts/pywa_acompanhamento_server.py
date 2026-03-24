@@ -45,6 +45,7 @@ SIMULATOR_URL = os.getenv("PYWA_SIMULATOR_URL", "http://127.0.0.1:3003/v1/chat/c
 SIMULATOR_API_KEY = os.getenv("PYWA_SIMULATOR_API_KEY", "CVAPI_2b9c80c2abf94a76baf8b3e68d89cb7e")
 
 WHATSAPP_WEB_URL = os.getenv("WHATSAPP_WEB_URL", "https://web.whatsapp.com/")
+TEST_DESTINATION_PHONE_RAW = os.getenv("PYWA_TEST_DESTINATION_PHONE", "81981487277")
 POLL_INTERVAL_SEC = int(os.getenv("PYWA_POLL_INTERVAL_SEC", "120"))
 REPLY_POLL_INTERVAL_SEC = int(os.getenv("PYWA_REPLY_POLL_INTERVAL_SEC", "20"))
 REQUEST_TIMEOUT_SEC = int(os.getenv("PYWA_REQUEST_TIMEOUT_SEC", "45"))
@@ -217,15 +218,15 @@ def is_valid_br_mobile_phone(phone: Optional[str]) -> bool:
     return digits[4] == "9"
 
 
-def resolve_phone_with_member_fallback(raw_phone: Any, id_paciente: Any) -> Optional[str]:
+def resolve_phone_with_member_fallback(raw_phone: Any, id_paciente: Any) -> Tuple[Optional[str], str]:
     direct = normalize_phone(raw_phone)
     if is_valid_br_mobile_phone(direct):
-        return direct
+        return direct, "analises"
 
     try:
         id_int = int(id_paciente)
     except (TypeError, ValueError):
-        return direct if direct else None
+        return (direct if direct else None), ("analises" if direct else "indisponivel")
 
     try:
         rows = run_sql(
@@ -233,19 +234,59 @@ def resolve_phone_with_member_fallback(raw_phone: Any, id_paciente: Any) -> Opti
         )
     except Exception:
         log.exception("Falha ao buscar telefone fallback em membros para id_paciente=%s", id_paciente)
-        return direct if direct else None
+        return (direct if direct else None), ("analises" if direct else "indisponivel")
 
     if not rows:
-        return direct if direct else None
+        return (direct if direct else None), ("analises" if direct else "indisponivel")
 
     row = rows[0] or {}
     candidates = [row.get("telefone1"), row.get("telefone2"), raw_phone]
     for candidate in candidates:
         normalized = normalize_phone(candidate)
         if is_valid_br_mobile_phone(normalized):
-            return normalized
+            source = "membros" if candidate != raw_phone else "analises"
+            return normalized, source
 
-    return direct if direct else None
+    return (direct if direct else None), ("analises" if direct else "indisponivel")
+
+
+def derive_age_from_row(row: Dict[str, Any]) -> str:
+    idade = row.get("idade")
+    if idade is not None and str(idade).strip():
+        return str(idade).strip()
+
+    birth_raw = row.get("data_nascimento")
+    if not birth_raw:
+        return "N/D"
+    text = str(birth_raw).strip()
+    if not text:
+        return "N/D"
+    date_part = text.split("T")[0].split(" ")[0]
+    try:
+        dt = datetime.fromisoformat(date_part)
+        today = datetime.now().date()
+        years = today.year - dt.date().year - ((today.month, today.day) < (dt.date().month, dt.date().day))
+        return str(max(years, 0))
+    except Exception:
+        return "N/D"
+
+
+def derive_start_datetime_from_row(row: Dict[str, Any]) -> str:
+    candidates = [
+        "data_hora_inicio_atendimento",
+        "inicio_atendimento",
+        "data_inicio_atendimento",
+        "created_at",
+        "data_atendimento",
+    ]
+    for key in candidates:
+        value = row.get(key)
+        if value is not None and str(value).strip():
+            return str(value).strip()
+    return "N/D"
+
+
+TEST_DESTINATION_PHONE = normalize_phone(TEST_DESTINATION_PHONE_RAW) or "5581981487277"
 
 
 def extract_followup_items(mensagens_acompanhamento: Any) -> List[Tuple[str, str]]:
@@ -393,7 +434,7 @@ def send_pending_followups_once() -> Dict[str, Any]:
         nome_paciente = row.get("nome_paciente")
         url_chatgpt = (row.get("url_chatgpt") or "").strip()
         original_phone = normalize_phone(row.get("telefone"))
-        phone = resolve_phone_with_member_fallback(row.get("telefone"), id_paciente)
+        phone, phone_source = resolve_phone_with_member_fallback(row.get("telefone"), id_paciente)
         if (not original_phone or not is_valid_br_mobile_phone(original_phone)) and phone:
             recovered_member_phone += 1
 
@@ -417,8 +458,23 @@ def send_pending_followups_once() -> Dict[str, Any]:
                 continue
 
             try:
+                idade = derive_age_from_row(row)
+                inicio_atendimento = derive_start_datetime_from_row(row)
+                preview = pergunta.strip().replace("\n", " ")[:120]
+                log.info(
+                    "Pré-envio | paciente=%s | idade=%s | telefone_contato=%s (origem=%s) "
+                    "| envio_teste=%s | id_atendimento=%s | inicio_atendimento=%s | inicio_mensagem=%s",
+                    nome_paciente or "N/D",
+                    idade,
+                    phone or "N/D",
+                    phone_source,
+                    TEST_DESTINATION_PHONE,
+                    id_atendimento,
+                    inicio_atendimento,
+                    preview,
+                )
                 wa_web.send_message(
-                    phone,
+                    TEST_DESTINATION_PHONE,
                     "Olá! Aqui é o acompanhamento da sua consulta.\n\n"
                     f"{pergunta}\n\n"
                     "Pode me responder por aqui?",
@@ -583,6 +639,7 @@ def health():
             "whatsapp_web_url": WHATSAPP_WEB_URL,
             "simulator_url": SIMULATOR_URL,
             "php_url": PHP_URL,
+            "test_destination_phone": TEST_DESTINATION_PHONE,
             "poll_interval_sec": POLL_INTERVAL_SEC,
             "reply_poll_interval_sec": REPLY_POLL_INTERVAL_SEC,
         }
@@ -604,6 +661,7 @@ if __name__ == "__main__":
     log.info("WhatsApp Web: %s", WHATSAPP_WEB_URL)
     log.info("Simulator local: %s", SIMULATOR_URL)
     log.info("PHP remoto: %s", PHP_URL)
+    log.info("Modo teste ativo: todos os envios serão direcionados para %s", TEST_DESTINATION_PHONE)
 
     log.info("Iniciando browser WhatsApp. Se necessário, faça login via QR Code...")
     wa_web.start()
