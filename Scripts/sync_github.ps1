@@ -13,6 +13,7 @@ $script:IsScheduled = $false
 $script:InstallTask = $false
 $script:UninstallTask = $false
 $script:RestartRequested = $false
+$script:RestartScope = 'none'
 $script:UpdatedFiles = New-Object System.Collections.Generic.List[string]
 $script:AddedFiles = New-Object System.Collections.Generic.List[string]
 $script:ProtectedFiles = New-Object System.Collections.Generic.List[string]
@@ -145,6 +146,8 @@ function Import-Settings {
         syncIntervalMinutes = 10
         chatProcessPattern  = 'Scripts\\main.py'
         analyzerPattern     = 'Scripts\\analisador_prontuarios.py'
+        pywaPattern         = 'Scripts\\pywa_acompanhamento_server.py'
+        whatsappServerBat   = '2. Start_Whatsapp_Server.bat'
         remotePhpSaveUrl    = if ($env:CHATGPT_SIMULATOR_REMOTE_PHP_SAVE_URL) { $env:CHATGPT_SIMULATOR_REMOTE_PHP_SAVE_URL } else { 'https://conexaovida.org/editar_php.php?action=save_file_remote' }
         remotePhpApiKey     = if ($env:CHATGPT_SIMULATOR_REMOTE_PHP_API_KEY) { $env:CHATGPT_SIMULATOR_REMOTE_PHP_API_KEY } else { 'CVAPI_2b9c80c2abf94a76baf8b3e68d89cb7e' }
         remotePhpLocalFile  = if ($env:CHATGPT_SIMULATOR_REMOTE_PHP_LOCAL_FILE) { $env:CHATGPT_SIMULATOR_REMOTE_PHP_LOCAL_FILE } else { 'chatgpt_integracao_criado_pelo_gemini.js.php' }
@@ -727,25 +730,26 @@ function Sync-FilesFromMirror {
     if ($added -gt 0 -or $updated -gt 0) {
         # Captura o caminho relativo exato do nosso arquivo PHP
         $localPhpRelative = Normalize-RelativePath $script:Config.remotePhpLocalFile
-        $requiresRestart = $false
-        
-        # Junta todos os arquivos novos e atualizados numa única lista
-        $changedFiles = @($script:AddedFiles) + @($script:UpdatedFiles)
-        
-        # Inspeciona cada arquivo modificado
-        foreach ($file in $changedFiles) {
-            # Se encontrar QUALQUER arquivo que não seja o PHP, o reinício é obrigatório
-            if ((Normalize-RelativePath $file) -ne $localPhpRelative) {
-                $requiresRestart = $true
-                break
-            }
-        }
+        $pywaRelative = Normalize-RelativePath $script:Config.pywaPattern
 
-        # Decide o que fazer
-        if ($requiresRestart) {
-            $script:RestartRequested = $true
-        } else {
+        # Junta todos os arquivos novos e atualizados numa única lista (normalizada e sem duplicatas)
+        $changedFiles = @($script:AddedFiles) + @($script:UpdatedFiles) | ForEach-Object { Normalize-RelativePath $_ }
+        $changedUnique = @($changedFiles | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique)
+
+        $onlyPhp = ($changedUnique.Count -gt 0) -and ($changedUnique | Where-Object { $_ -ne $localPhpRelative }).Count -eq 0
+        $onlyPywa = ($changedUnique.Count -eq 1) -and ($changedUnique[0] -eq $pywaRelative)
+
+        if ($onlyPhp) {
+            $script:RestartRequested = $false
+            $script:RestartScope = 'none'
             Write-Info "Atualizacao exclusiva do PHP detectada. O reinicio dos processos locais (BATs) sera ignorado." -Color Yellow
+        } elseif ($onlyPywa) {
+            $script:RestartRequested = $true
+            $script:RestartScope = 'pywa_only'
+            Write-Info "Atualizacao exclusiva de $pywaRelative detectada. Reinicio seletivo do servidor WhatsApp sera executado." -Color Yellow
+        } else {
+            $script:RestartRequested = $true
+            $script:RestartScope = 'full'
         }
     }
 
@@ -893,10 +897,11 @@ function Log-RunningProcessesStatus {
 
     $mainName = [System.IO.Path]::GetFileName($script:Config.chatProcessPattern)
     $analyzerName = [System.IO.Path]::GetFileName($script:Config.analyzerPattern)
+    $pywaName = [System.IO.Path]::GetFileName($script:Config.pywaPattern)
 
     $pys = Get-CimInstance Win32_Process | Where-Object { $_.Name -match 'python' -or $_.Name -match 'py' }
     foreach ($p in $pys) {
-        if ($p.CommandLine -match [regex]::Escape($mainName) -or $p.CommandLine -match [regex]::Escape($analyzerName)) {
+        if ($p.CommandLine -match [regex]::Escape($mainName) -or $p.CommandLine -match [regex]::Escape($analyzerName) -or $p.CommandLine -match [regex]::Escape($pywaName)) {
             Write-Info "Alvo encontrado [Servidor Python] (PID $($p.ProcessId)): $($p.CommandLine)"
             $found++
         }
@@ -918,12 +923,28 @@ function Log-RunningProcessesStatus {
 }
 
 function Stop-ManagedProcesses {
+    param(
+        [ValidateSet('full', 'pywa_only')]
+        [string]$Scope = 'full'
+    )
+
     Write-Section 'PARANDO PROCESSOS E JANELAS'
     $killed = 0
 
     $cmds = Get-CimInstance Win32_Process | Where-Object { $_.Name -match 'cmd' }
     foreach ($c in $cmds) {
-        if ($c.CommandLine -match '0\. start\.bat' -or $c.CommandLine -match '1\. start_apenas_analisador_prontuarios\.bat') {
+        $isMainWindow = $c.CommandLine -match '0\. start\.bat'
+        $isAnalyzerWindow = $c.CommandLine -match '1\. start_apenas_analisador_prontuarios\.bat'
+        $isPywaWindow = $c.CommandLine -match '2\.\s*Start_Whatsapp_Server\.bat'
+
+        $mustKill = $false
+        if ($Scope -eq 'pywa_only') {
+            $mustKill = $isPywaWindow
+        } else {
+            $mustKill = ($isMainWindow -or $isAnalyzerWindow -or $isPywaWindow)
+        }
+
+        if ($mustKill) {
             try {
                 & taskkill.exe /F /T /PID $c.ProcessId 2>&1 | Out-Null
                 $killed++
@@ -934,10 +955,22 @@ function Stop-ManagedProcesses {
 
     $mainName = [System.IO.Path]::GetFileName($script:Config.chatProcessPattern)
     $analyzerName = [System.IO.Path]::GetFileName($script:Config.analyzerPattern)
+    $pywaName = [System.IO.Path]::GetFileName($script:Config.pywaPattern)
 
     $pys = Get-CimInstance Win32_Process | Where-Object { $_.Name -match 'python' -or $_.Name -match 'py' }
     foreach ($p in $pys) {
-        if ($p.CommandLine -match [regex]::Escape($mainName) -or $p.CommandLine -match [regex]::Escape($analyzerName)) {
+        $isMainPy = $p.CommandLine -match [regex]::Escape($mainName)
+        $isAnalyzerPy = $p.CommandLine -match [regex]::Escape($analyzerName)
+        $isPywaPy = $p.CommandLine -match [regex]::Escape($pywaName)
+
+        $mustKill = $false
+        if ($Scope -eq 'pywa_only') {
+            $mustKill = $isPywaPy
+        } else {
+            $mustKill = ($isMainPy -or $isAnalyzerPy -or $isPywaPy)
+        }
+
+        if ($mustKill) {
             try {
                 & taskkill.exe /F /T /PID $p.ProcessId 2>&1 | Out-Null
                 $killed++
@@ -946,14 +979,16 @@ function Stop-ManagedProcesses {
         }
     }
 
-    $browsers = Get-CimInstance Win32_Process | Where-Object { $_.Name -match 'chrome' -or $_.Name -match 'ms-playwright' -or $_.Name -match 'chromium' }
-    foreach ($b in $browsers) {
-        if ($b.ExecutablePath -match 'ms-playwright' -or $b.CommandLine -match 'playwright') {
-            try {
-                & taskkill.exe /F /T /PID $b.ProcessId 2>&1 | Out-Null
-                $killed++
-                Write-Info "Navegador Playwright oculto encerrado (PID $($b.ProcessId))"
-            } catch { }
+    if ($Scope -eq 'full') {
+        $browsers = Get-CimInstance Win32_Process | Where-Object { $_.Name -match 'chrome' -or $_.Name -match 'ms-playwright' -or $_.Name -match 'chromium' }
+        foreach ($b in $browsers) {
+            if ($b.ExecutablePath -match 'ms-playwright' -or $b.CommandLine -match 'playwright') {
+                try {
+                    & taskkill.exe /F /T /PID $b.ProcessId 2>&1 | Out-Null
+                    $killed++
+                    Write-Info "Navegador Playwright oculto encerrado (PID $($b.ProcessId))"
+                } catch { }
+            }
         }
     }
 
@@ -961,10 +996,24 @@ function Stop-ManagedProcesses {
 }
 
 function Start-ManagedProcesses {
+    param(
+        [ValidateSet('full', 'pywa_only')]
+        [string]$Scope = 'full'
+    )
+
     Write-Section 'REINICIANDO PROCESSOS'
 
     $batMain = Join-Path $script:Config.localDir '0. start.bat'
     $batAnalyzer = Join-Path $script:Config.localDir '1. start_apenas_analisador_prontuarios.bat'
+    $batWhatsapp = Join-Path $script:Config.localDir $script:Config.whatsappServerBat
+
+    if ($Scope -eq 'pywa_only') {
+        if (-not (Test-Path $batWhatsapp)) { throw "Arquivo .bat nao encontrado: $batWhatsapp" }
+        Write-Info "Iniciando $batWhatsapp..."
+        Start-Process -FilePath $batWhatsapp -WorkingDirectory $script:Config.localDir | Out-Null
+        Write-Ok 'Servidor WhatsApp reiniciado de forma seletiva.'
+        return
+    }
 
     if (-not (Test-Path $batMain)) { throw "Arquivo .bat nao encontrado: $batMain" }
     if (-not (Test-Path $batAnalyzer)) { throw "Arquivo .bat nao encontrado: $batAnalyzer" }
@@ -1021,12 +1070,14 @@ function Show-Summary {
     Write-Host ("Arquivos atualizados: {0}" -f $script:UpdatedFiles.Count)
     Write-Host ("Arquivos protegidos:  {0}" -f $script:ProtectedFiles.Count)
     Write-Host ("Reinicio executado:   {0}" -f ($(if ($script:RestartRequested) { 'sim' } else { 'nao' })))
+    Write-Host ("Escopo do reinicio:   {0}" -f $script:RestartScope)
     Write-Host ("Log:                  {0}" -f $script:LogFile)
     Write-Host '========================================' -ForegroundColor White
 }
 
 function Reset-CycleState {
     $script:RestartRequested = $false
+    $script:RestartScope = 'none'
     $script:UpdatedFiles = New-Object System.Collections.Generic.List[string]
     $script:AddedFiles = New-Object System.Collections.Generic.List[string]
     $script:ProtectedFiles = New-Object System.Collections.Generic.List[string]
@@ -1055,8 +1106,9 @@ function Run-SyncCycle {
         Sync-RemotePhpIfNeeded
 
         if ($script:RestartRequested) {
-            Stop-ManagedProcesses
-            Start-ManagedProcesses
+            $scope = if ($script:RestartScope -eq 'pywa_only') { 'pywa_only' } else { 'full' }
+            Stop-ManagedProcesses -Scope $scope
+            Start-ManagedProcesses -Scope $scope
         } else {
             Write-Info 'Nenhum arquivo novo/atualizado. Reinicio nao necessario.'
         }

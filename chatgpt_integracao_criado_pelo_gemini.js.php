@@ -2197,29 +2197,38 @@ if(isset($active_system_prompt) && !empty($active_system_prompt))
 // HELPER: EXTRAIR JSON
 // -----------------------------------------------------
 function extract_json_from_text($text) {
-    $text = trim($text);
+    $text = sanitize_json_string(trim($text));
     $json = json_decode($text, true);
     if (json_last_error() === JSON_ERROR_NONE && isset($json['sql_queries'])) return $json;
-    if (preg_match('/```(?:\w+)?\s*(\{.*?"sql_queries".*?\})\s*```/s', $text, $matches)) {
-        $candidate = sanitize_json_string($matches[1]);
-        $j = json_decode($candidate, true);
-        if ($j && isset($j['sql_queries'])) return $j;
+
+    if (preg_match_all('/```(?:\w+)?\s*([\s\S]*?)```/s', $text, $matches)) {
+        foreach($matches[1] as $block) {
+            $candidate = sanitize_json_string($block);
+            $j = json_decode($candidate, true);
+            if ($j && isset($j['sql_queries'])) return $j;
+        }
     }
+
     if (preg_match_all('/\{(?:[^{}]|(?R))*\}/s', $text, $matches)) {
         foreach($matches[0] as $candidate) {
-            if (strpos($candidate, '"sql_queries"') !== false) {
-                $candidateClean = sanitize_json_string($candidate);
-                $j = json_decode($candidateClean, true);
-                if ($j && isset($j['sql_queries'])) return $j;
-            }
+            if (stripos($candidate, 'sql_queries') === false) continue;
+            $candidateClean = sanitize_json_string($candidate);
+            $j = json_decode($candidateClean, true);
+            if ($j && isset($j['sql_queries'])) return $j;
         }
     }
     return null;
 }
 
 function sanitize_json_string($str) {
+    $str = str_replace(
+        ["\xE2\x80\x98", "\xE2\x80\x99", "\xE2\x80\x9C", "\xE2\x80\x9D", "\xC2\xA0", "\\_", "\\*"],
+        ["'", "'", '"', '"', ' ', '_', '*'],
+        $str
+    );
     $str = preg_replace('/\n\s*\/\/[^\n]*/', '', $str);
     $str = preg_replace('!/\*.*?\*/!s', '', $str);
+    $str = preg_replace('/,\s*([}\]])/', '$1', $str);
     return $str; 
 }
 
@@ -3259,8 +3268,11 @@ header('Content-Type: application/javascript; charset=utf-8');
             flex-direction: column;
             gap: 15px;
             scroll-behavior: smooth;
+            -webkit-overflow-scrolling: touch;
+            overscroll-behavior: contain;
             /* padding-bottom removido — não é mais necessário */
         }
+        #ow-messages > * { flex-shrink: 0; }
 
         #ow-input-area {
             flex-shrink: 0;          /* ← ocupa espaço real no flex, não sobrepõe */
@@ -3292,7 +3304,7 @@ header('Content-Type: application/javascript; charset=utf-8');
         #ow-mic.recording { background: #ffebee; border-color: #ef5350; color: #d32f2f; animation: pulseRed 1.5s infinite; }
         
         /* === ANÁLISE PRÉVIA DA LLM EXPOSTA NO CHAT — DESIGN SYSTEM = INICIO === */
-        #ow-analise-previa{font-family:Inter,system-ui,-apple-system,Segoe UI,Roboto,sans-serif;border:1px solid #e2e8f0;border-radius:14px;background:#fff;box-shadow:0 8px 24px rgba(0,0,0,0.08);margin:10px 0;overflow:visible;width:100%;box-sizing:border-box}
+        #ow-analise-previa{font-family:Inter,system-ui,-apple-system,Segoe UI,Roboto,sans-serif;border:1px solid #e2e8f0;border-radius:14px;background:#fff;box-shadow:0 8px 24px rgba(0,0,0,0.08);margin:10px 0;overflow:visible;width:100%;max-width:100%;box-sizing:border-box;flex-shrink:0;align-self:stretch}
         #ow-analise-previa .ia-header{display:flex;align-items:flex-start;justify-content:space-between;padding:14px 16px;border-bottom:1px solid #e2e8f0;background:#f8fafc;gap:8px;flex-wrap:wrap}
         #ow-analise-previa .ia-title{font-weight:700;font-size:16px;color:#0f172a}
         #ow-analise-previa .ia-actions{display:flex;gap:6px;flex-wrap:wrap}
@@ -3335,19 +3347,19 @@ header('Content-Type: application/javascript; charset=utf-8');
         #ow-analise-previa .ia-prio{font-size:11px;font-weight:700;padding:2px 9px;border-radius:999px;color:#fff}
         #iap-toast{position:fixed;bottom:20px;right:20px;background:#0f172a;color:#fff;padding:8px 12px;border-radius:8px;font-size:13px;opacity:0;transform:translateY(10px);transition:0.2s;z-index:9999}
         #iap-toast.show{opacity:1;transform:translateY(0)}
-        #ow-analise-pendente{font-family:Inter,system-ui,-apple-system,Segoe UI,Roboto,sans-serif;border:1px solid #fde68a;border-radius:14px;background:linear-gradient(135deg,#fffdf5 0%,#fff7db 100%);box-shadow:0 8px 24px rgba(180,83,9,.08);margin:10px 0;overflow:hidden;width:100%;box-sizing:border-box}
+        #ow-analise-pendente{font-family:Inter,system-ui,-apple-system,Segoe UI,Roboto,sans-serif;border:1px solid #fde68a;border-radius:14px;background:linear-gradient(135deg,#fffdf5 0%,#fff7db 100%);box-shadow:0 8px 24px rgba(180,83,9,.08);margin:10px 0;overflow:visible;width:100%;max-width:100%;box-sizing:border-box;flex-shrink:0;align-self:stretch}
         #ow-analise-pendente .iap-header{display:flex;align-items:flex-start;justify-content:space-between;padding:14px 16px;border-bottom:1px solid #fde68a;background:rgba(255,251,235,.9);gap:8px;flex-wrap:wrap}
         #ow-analise-pendente .iap-title{font-weight:700;font-size:15px;color:#92400e}
         #ow-analise-pendente .iap-subtitle{font-size:12px;color:#b45309;margin-top:3px}
-        #ow-analise-pendente .iap-list{padding:14px 16px;display:flex;flex-direction:column;gap:10px}
-        #ow-analise-pendente .iap-item{border:1px solid #fcd34d;border-radius:10px;background:#fff;padding:12px 13px}
+        #ow-analise-pendente .iap-list{padding:14px 16px;display:flex;flex-direction:column;gap:10px;min-width:0}
+        #ow-analise-pendente .iap-item{border:1px solid #fcd34d;border-radius:10px;background:#fff;padding:12px 13px;min-width:0}
         #ow-analise-pendente .iap-item-head{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap}
         #ow-analise-pendente .iap-item-title{font-size:13px;font-weight:700;color:#78350f}
         #ow-analise-pendente .iap-badge{font-size:11px;font-weight:800;padding:4px 10px;border-radius:999px;color:#fff}
         #ow-analise-pendente .iap-badge.pendente{background:#d97706}
         #ow-analise-pendente .iap-badge.processando{background:#2563eb}
         #ow-analise-pendente .iap-badge.erro{background:#dc2626}
-        #ow-analise-pendente .iap-item-text{font-size:12px;line-height:1.5;color:#7c5a10;margin-top:7px}
+        #ow-analise-pendente .iap-item-text{font-size:12px;line-height:1.5;color:#7c5a10;margin-top:7px;overflow-wrap:anywhere;word-break:break-word}
         /* === ANÁLISE PRÉVIA DA LLM EXPOSTA NO CHAT — DESIGN SYSTEM = FIM === */
         
         @keyframes pulseRed { 0% { box-shadow: 0 0 0 0 rgba(211, 47, 47, 0.4); } 70% { box-shadow: 0 0 0 10px rgba(211, 47, 47, 0); } 100% { box-shadow: 0 0 0 0 rgba(211, 47, 47, 0); } }
@@ -4013,6 +4025,8 @@ header('Content-Type: application/javascript; charset=utf-8');
         btnExec.onclick = async () => {
             btnExec.disabled = true;
             btnExec.innerHTML = `<span style="font-size:12px;color:#ff9800;font-weight:bold">⏳ Executando...</span>`;
+            _setOwProcessing(true);
+            try {
 
             // UI de resultado
             let resultUI = el.nextElementSibling;
@@ -4163,6 +4177,13 @@ header('Content-Type: application/javascript; charset=utf-8');
             btnExec.disabled = false;
             btnExec.innerHTML = `<span style="font-size:12px;color:#0d652d;font-weight:bold">✅ Concluído</span>`;
             setTimeout(() => { btnExec.innerHTML = execHTML; }, 3000);
+            } catch (err) {
+                console.error(`${FILE_PREFIX} ❌ Erro na execução manual de SQL:`, err);
+                btnExec.disabled = false;
+                btnExec.innerHTML = execHTML;
+            } finally {
+                _setOwProcessing(false);
+            }
         };
 
         actionBar.appendChild(btnCopy);
@@ -4181,7 +4202,8 @@ header('Content-Type: application/javascript; charset=utf-8');
             // (classe sobrevive a innerHTML replacement, barra não)
             if (el.querySelector('.ow-sql-actions-bar')) return;
 
-            if (!el.textContent || !el.textContent.includes('"sql_queries"')) return;
+            const sourceText = el.closest('.msg-ai')?.innerText || el.textContent || '';
+            if (!sourceText || !/sql_queries/i.test(sourceText)) return;
 
             // [FIX BUG 1] Para <code> dentro de <pre>: opera no <pre>
             // (só <pre> tem o contexto CSS necessário para position:absolute)
@@ -4204,9 +4226,9 @@ header('Content-Type: application/javascript; charset=utf-8');
             if (!isDeepest) return;
 
             // Evita processar containers gigantes (wrappers de página)
-            if (el.textContent.length > 5000) return;
+            if (sourceText.length > 5000) return;
 
-            const sqlQueries = extractSQLFromResponse(el.textContent);
+            const sqlQueries = extractSQLFromResponse(sourceText);
             if (sqlQueries && sqlQueries.length > 0) {
                 _attachSQLButtons(target, sqlQueries);
             }
@@ -6241,8 +6263,8 @@ header('Content-Type: application/javascript; charset=utf-8');
         return lines.join('\n').trim();
     }
 
-    async function handleDirectToolModeMessage(userTxt) {
-        const parsed = parseDirectToolRequest(userTxt);
+    async function handleDirectToolModeMessage(userTxt, parsedRequest = null) {
+        const parsed = parsedRequest || parseDirectToolRequest(userTxt);
         if (!parsed.ok) {
             appendAssistantMarkdown(formatDirectToolError(userTxt));
             return false;
@@ -6304,6 +6326,7 @@ header('Content-Type: application/javascript; charset=utf-8');
 
     async function init() {
         console.groupCollapsed(`%c🔧 ${FILE_PREFIX} [SYSTEM] Inicialização ChatJS`, "color: #e67e22; font-weight: bold;");
+        _initOwProcessingObserver();
         const streamPref = localStorage.getItem(KEY_STREAM);
         document.getElementById('ow-stream-check').checked = streamPref === 'false' ? false : true;
 
@@ -6955,7 +6978,7 @@ header('Content-Type: application/javascript; charset=utf-8');
             return null;
         }
 
-        if (!text.includes('"sql_queries"')) {
+        if (!/sql_queries/i.test(text)) {
             return null;
         }
         
@@ -6964,17 +6987,22 @@ header('Content-Type: application/javascript; charset=utf-8');
                 .replace(/[\u2018\u2019]/g, "'")  
                 .replace(/[\u201C\u201D]/g, '"')  
                 .replace(/[\u00A0]/g, " ") // Corrige espaços invisíveis que quebram o Parse
+                .replace(/\\_/g, '_')
+                .replace(/\\\*/g, '*')
+                .replace(/,(\s*[}\]])/g, '$1')
                 .trim();
         }
         
         try {
             // 1. Tenta primeiro encontrar um bloco Markdown (Padrão seguro)
-            const markdownMatch = text.match(/```(?:json)?\s*(\{[\s\S]*?"sql_queries"[\s\S]*?\})\s*```/);
-            if (markdownMatch) {
-                const json = JSON.parse(sanitizeJSON(markdownMatch[1]));
-                if (json.sql_queries && Array.isArray(json.sql_queries) && json.sql_queries.length > 0) {
-                    console.log(`${FILE_PREFIX} 🐬 SQL extraído (Markdown)`);
-                    return json.sql_queries;
+            const markdownBlocks = [...text.matchAll(/```(?:json)?\s*([\s\S]*?)```/gi)];
+            if (markdownBlocks.length) {
+                for (const match of markdownBlocks) {
+                    const json = JSON.parse(sanitizeJSON(match[1]));
+                    if (json.sql_queries && Array.isArray(json.sql_queries) && json.sql_queries.length > 0) {
+                        console.log(`${FILE_PREFIX} 🐬 SQL extraído (Markdown)`);
+                        return json.sql_queries;
+                    }
                 }
             }
             
@@ -6986,7 +7014,7 @@ header('Content-Type: application/javascript; charset=utf-8');
                 
                 if (closeIndex > 0) {
                     let jsonStr = candidate.substring(0, closeIndex + 1);
-                    if (jsonStr.includes('"sql_queries"')) {
+                    if (/sql_queries/i.test(jsonStr)) {
                         try {
                             const json = JSON.parse(sanitizeJSON(jsonStr));
                             if (json.sql_queries && Array.isArray(json.sql_queries)) {
@@ -7358,8 +7386,7 @@ header('Content-Type: application/javascript; charset=utf-8');
             return false;
         }
 
-        const _sendBtn = document.getElementById('ow-send');
-        if (_sendBtn) { _sendBtn.disabled = true; _sendBtn.classList.add('stop-mode'); }
+        _setOwProcessing(true);
 
         console.groupCollapsed(`%c${FILE_PREFIX} 🔍 Pesquisa web detectada na resposta`, "color: #4caf50; font-weight: bold; background: #e8f5e9; padding: 4px 8px; border-radius: 4px;");
         console.log(`Queries: ${searchQueries.length}`);
@@ -7439,9 +7466,9 @@ header('Content-Type: application/javascript; charset=utf-8');
                 const mEl = document.getElementById(ui.mID);
                 if (mEl) mEl.innerText = 'Erro ao pesquisar na web: ' + e.message;
             }
+        } finally {
+            _setOwProcessing(false);
         }
-
-        if (_sendBtn) { _sendBtn.disabled = false; _sendBtn.classList.remove('stop-mode'); }
         return true;
     }
 
@@ -7486,8 +7513,7 @@ header('Content-Type: application/javascript; charset=utf-8');
         btnExec.onclick = async () => {
             btnExec.disabled = true;
             btnExec.innerHTML = `<span style="font-size:12px;color:#ff9800;font-weight:bold">⏳ Pesquisando...</span>`;
-            const _owSend = document.getElementById('ow-send');
-            if (_owSend) { _owSend.disabled = true; _owSend.classList.add('stop-mode'); }
+            _setOwProcessing(true);
 
             try {
                 const searchData = await executeWebSearch(searchQueries);
@@ -7525,12 +7551,13 @@ header('Content-Type: application/javascript; charset=utf-8');
 
             } catch(e) {
                 console.error('Erro pesquisa manual:', e);
+            } finally {
+                _setOwProcessing(false);
             }
 
             btnExec.disabled = false;
             btnExec.innerHTML = `<span style="font-size:12px;color:#2e7d32;font-weight:bold">✅ Concluído</span>`;
             setTimeout(() => { btnExec.innerHTML = execHTML; }, 3000);
-            if (_owSend) { _owSend.disabled = false; _owSend.classList.remove('stop-mode'); }
         };
 
         actionBar.appendChild(btnExec);
@@ -7690,13 +7717,15 @@ header('Content-Type: application/javascript; charset=utf-8');
             return false;
         }
 
-        console.groupCollapsed(`%c${FILE_PREFIX} 🐬 SQL detectado na resposta`, "color: #00bcd4; font-weight: bold; background: #e0f7fa; padding: 4px 8px; border-radius: 4px;");
-        console.log(`Queries encontradas: ${sqlQueries.length}`);
-        sqlQueries.forEach((q, i) => {
-            console.log(`[${i + 1}] ${q.reason || 'Sem descrição'}`);
-            console.log(`    SQL: ${q.query.substring(0, 80)}...`);
-        });
-        console.groupEnd();
+        _setOwProcessing(true);
+        try {
+            console.groupCollapsed(`%c${FILE_PREFIX} 🐬 SQL detectado na resposta`, "color: #00bcd4; font-weight: bold; background: #e0f7fa; padding: 4px 8px; border-radius: 4px;");
+            console.log(`Queries encontradas: ${sqlQueries.length}`);
+            sqlQueries.forEach((q, i) => {
+                console.log(`[${i + 1}] ${q.reason || 'Sem descrição'}`);
+                console.log(`    SQL: ${q.query.substring(0, 80)}...`);
+            });
+            console.groupEnd();
 
         // Renderiza UI de execução
         if (ui && ui.mID && document.getElementById(ui.mID)) {
@@ -7781,7 +7810,11 @@ header('Content-Type: application/javascript; charset=utf-8');
             }
         }
 
-        return formatSQLResultsForLLM(sqlResults, originalQuestion, originalContext);
+            const sqlResultContext = formatSQLResultsForLLM(sqlResults, originalQuestion, originalContext);
+            return sqlResultContext;
+        } finally {
+            _setOwProcessing(false);
+        }
     }
 
 
@@ -7866,6 +7899,52 @@ header('Content-Type: application/javascript; charset=utf-8');
     
     function clearRecoveryState() {
         localStorage.removeItem(RECOVERY_KEY);
+    }
+
+    let _owProcessingDepth = 0;
+    function _hasActiveBlinkCursor() {
+        return !!document.querySelector('#ow-messages .cursor-blink');
+    }
+
+    function _refreshOwSendButtonState() {
+        const btn = document.getElementById('ow-send');
+        if (!btn) return;
+
+        const hasInternalProcessing = _owProcessingDepth > 0;
+        const hasUiStreaming = _hasActiveBlinkCursor();
+        const isProcessing = hasInternalProcessing || hasUiStreaming;
+
+        if (isProcessing) {
+            btn.innerText = 'Parar';
+            btn.classList.add('stop-mode');
+            // Se há processamento interno (SQL/search em background), bloqueia envio.
+            // Se for apenas streaming da LLM (cursor-blink), mantém clicável para Abort.
+            btn.disabled = hasInternalProcessing;
+            return;
+        }
+
+        btn.innerText = 'Enviar';
+        btn.classList.remove('stop-mode');
+        btn.disabled = false;
+    }
+
+    function _initOwProcessingObserver() {
+        const root = document.getElementById('ow-messages');
+        if (!root || root.__owProcessingObserverAttached) return;
+
+        const obs = new MutationObserver(() => _refreshOwSendButtonState());
+        obs.observe(root, { childList: true, subtree: true, attributes: true, attributeFilter: ['class'] });
+        root.__owProcessingObserverAttached = true;
+        _refreshOwSendButtonState();
+    }
+
+    function _setOwProcessing(active) {
+        if (active) {
+            _owProcessingDepth += 1;
+        } else {
+            _owProcessingDepth = Math.max(0, _owProcessingDepth - 1);
+        }
+        _refreshOwSendButtonState();
     }
 
     async function sendWithRecovery(userTxt, ctx, retryCount = 0, partialContent = "", attachments = []) {
@@ -8175,14 +8254,31 @@ header('Content-Type: application/javascript; charset=utf-8');
             }
         }
         
-        currentAbortController = new AbortController();
         const attachmentsPayload = _collectAttachmentsPayload();
+        const parsedDirectRequest = userTxt ? parseDirectToolRequest(userTxt) : { ok: false };
+        const shouldAutoRunDirectTool = !!parsedDirectRequest?.ok;
+
+        currentAbortController = new AbortController();
         _clearAttachments();
         inp.value = '';
         addSimpleMsg('user', userTxt || (attachmentsPayload.length ? `[${attachmentsPayload.length} anexo(s)]` : ''));
         scroll(true);
         btn.innerText = 'Parar'; 
         btn.classList.add('stop-mode');
+
+        if (shouldAutoRunDirectTool) {
+            if (attachmentsPayload.length > 0) {
+                appendAssistantMarkdown(
+                    'ℹ️ **Payload `sql_queries/search_queries` detectado.** ' +
+                    'Os anexos pendentes foram ignorados nesta execução para evitar que o simulador trate o pedido como análise de arquivo.'
+                );
+            }
+
+            state.messages.push({ role: 'user', content: userTxt });
+            saveLocal();
+            await handleDirectToolModeMessage(userTxt, parsedDirectRequest);
+            return;
+        }
 
         if (isDirectToolMode()) {
             state.messages.push({ role: 'user', content: userTxt });
