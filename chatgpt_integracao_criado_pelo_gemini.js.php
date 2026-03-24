@@ -6650,10 +6650,6 @@ header('Content-Type: application/javascript; charset=utf-8');
                 const { done, value } = await reader.read();
                 if (done) break;
                 const chunk = decoder.decode(value, { stream: true });
-                // -----------------------------------------------------
-                // 👉 ADICIONA ESTE LOG AQUI PARA VER O TEXTO BRUTO QUE CHEGA
-                // -----------------------------------------------------
-                console.log(`%c🔎 CHUNK BRUTO RECEBIDO:`, "color: #ff9800; font-weight: bold;", chunk);
                 buffer += chunk;
                 const lines = buffer.split('\n');
                 buffer = lines.pop();
@@ -6670,6 +6666,16 @@ header('Content-Type: application/javascript; charset=utf-8');
                                 console.dir(json.js_log.data);
                                 console.groupEnd();
                                 continue;
+                            }
+
+                            if (json.type === 'screenshot') {
+                                const capturedAt = json.content?.captured_at
+                                    ? new Date(json.content.captured_at * 1000).toLocaleString('pt-BR')
+                                    : new Date().toLocaleString('pt-BR');
+                                console.log(
+                                    `%c${FILE_PREFIX} 📸 Screenshot recebido em ${capturedAt}`,
+                                    "color: #03a9f4; font-weight: bold;"
+                                );
                             }
 
                             const txt = json.choices?.[0]?.delta?.content || "";
