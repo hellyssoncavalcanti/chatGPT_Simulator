@@ -33,7 +33,8 @@ echo [INFO] Arquivo: Scripts\pywa_acompanhamento_server.py
 if %errorLevel% neq 0 (
     echo.
     echo [ERRO] Falha ao iniciar o servidor PyWa.
-    echo [ERRO] Verifique variaveis: PYWA_PHONE_ID, PYWA_TOKEN, PYWA_VERIFY_TOKEN.
+    echo [ERRO] Verifique variaveis: PYWA_PHONE_ID e PYWA_TOKEN.
+    echo [ERRO] PYWA_VERIFY_TOKEN e opcional ^(se ausente, um token local padrao sera usado^).
     echo [ERRO] Tambem confirme conectividade com PHP_URL e SIMULATOR_URL.
 )
 

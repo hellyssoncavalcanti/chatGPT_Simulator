@@ -20,10 +20,10 @@ import json
 import logging
 import os
 import re
+import sys
 import threading
 import time
-from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -46,7 +46,7 @@ SIMULATOR_API_KEY = os.getenv("PYWA_SIMULATOR_API_KEY", "CVAPI_2b9c80c2abf94a76b
 
 WA_PHONE_ID = os.getenv("PYWA_PHONE_ID", "")
 WA_TOKEN = os.getenv("PYWA_TOKEN", "")
-WA_VERIFY_TOKEN = os.getenv("PYWA_VERIFY_TOKEN", "")
+WA_VERIFY_TOKEN = os.getenv("PYWA_VERIFY_TOKEN", "").strip() or "pywa_local_verify_token"
 
 HOST = os.getenv("PYWA_HOST", "0.0.0.0")
 PORT = int(os.getenv("PYWA_PORT", "3011"))
@@ -86,6 +86,10 @@ logging.basicConfig(
 log = logging.getLogger("pywa_acompanhamento")
 
 
+def utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
 # ─────────────────────────────────────────────────────────────
 # ESTADO LOCAL
 # ─────────────────────────────────────────────────────────────
@@ -101,7 +105,7 @@ class StateStore:
                 "sent_questions": {},
                 "phone_context": {},
                 "forwarded_messages": {},
-                "updated_at": datetime.utcnow().isoformat(),
+                "updated_at": utc_now_iso(),
             }
         try:
             return json.loads(self.path.read_text(encoding="utf-8"))
@@ -110,12 +114,12 @@ class StateStore:
                 "sent_questions": {},
                 "phone_context": {},
                 "forwarded_messages": {},
-                "updated_at": datetime.utcnow().isoformat(),
+                "updated_at": utc_now_iso(),
             }
 
     def save(self) -> None:
         with self.lock:
-            self.state["updated_at"] = datetime.utcnow().isoformat()
+            self.state["updated_at"] = utc_now_iso()
             self.path.write_text(json.dumps(self.state, ensure_ascii=False, indent=2), encoding="utf-8")
 
     def is_sent(self, key: str) -> bool:
@@ -328,7 +332,7 @@ def on_patient_message(_: WhatsApp, msg: types.Message):
                 msg_id,
                 {
                     "phone": sender,
-                    "at": datetime.utcnow().isoformat(),
+                    "at": utc_now_iso(),
                     "ctx": ctx,
                     "patient_text": text,
                 },
@@ -388,7 +392,7 @@ def send_pending_followups_once() -> Dict[str, Any]:
                         "phone": phone,
                         "question_key": key,
                         "pergunta": pergunta,
-                        "sent_at": datetime.utcnow().isoformat(),
+                        "sent_at": utc_now_iso(),
                     },
                 )
 
@@ -454,10 +458,15 @@ def send_now():
 
 
 if __name__ == "__main__":
-    if not WA_PHONE_ID or not WA_TOKEN or not WA_VERIFY_TOKEN:
-        raise RuntimeError(
-            "Configure PYWA_PHONE_ID, PYWA_TOKEN e PYWA_VERIFY_TOKEN antes de iniciar o servidor."
+    if os.getenv("PYWA_VERIFY_TOKEN", "").strip() == "":
+        log.warning(
+            "PYWA_VERIFY_TOKEN não informado. Usando token local padrão: %s",
+            WA_VERIFY_TOKEN,
         )
+
+    if not WA_PHONE_ID or not WA_TOKEN:
+        log.error("Configure PYWA_PHONE_ID e PYWA_TOKEN antes de iniciar o servidor.")
+        sys.exit(1)
 
     t = threading.Thread(target=scheduler_loop, daemon=True)
     t.start()
