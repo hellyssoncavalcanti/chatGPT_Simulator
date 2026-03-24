@@ -400,7 +400,7 @@ def build_forward_prompt(ctx: Dict[str, Any], patient_text: str) -> str:
 
 class WhatsAppWebClient:
     def __init__(self) -> None:
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self._playwright = None
         self._browser = None
         self._page = None
