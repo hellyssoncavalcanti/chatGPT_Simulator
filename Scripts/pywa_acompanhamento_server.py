@@ -497,47 +497,18 @@ class WhatsAppWebClient:
         else:
             log.info("Abrindo novo chat (sem histórico identificado na lista lateral) para %s", phone)
         self._log_chat_list_snapshot(f"antes_open_chat:{phone}", limit=8)
-        try:
-            log.info("Abrindo fluxo 'Nova conversa' para destino=%s", phone)
-            btn_new = self._page.locator('button[aria-label="Nova conversa"]').first
-            btn_new.wait_for(state="visible", timeout=8000)
-            btn_new.click(timeout=8000)
-            log.info("Botão 'Nova conversa' clicado com sucesso.")
-            self._page.wait_for_timeout(400)
-
-            input_locator = self._page.locator("#_r_s_")
-            if input_locator.count() == 0:
-                input_locator = self._page.locator('input[placeholder*="Pesquisar"], input[type="text"]').first
-            input_locator.wait_for(state="visible", timeout=8000)
-            input_locator.click(timeout=8000)
-            input_locator.fill(phone, timeout=8000)
-            log.info("Número digitado no campo de nova conversa: %s", phone)
-
-            result_item = self._page.locator("div._ak72").first
-            result_item.wait_for(state="visible", timeout=12000)
-            log.info("Primeiro resultado encontrado em div._ak72; selecionando...")
-            result_item.click(timeout=8000)
-
-            msg_box = self._page.locator("p._aupe").first
-            msg_box.wait_for(state="visible", timeout=12000)
-            inbound_count = self._page.locator("div.message-in").count()
-            outbound_count = self._page.locator("div.message-out").count()
-            log.info(
-                "Chat aberto via Nova conversa para %s | mensagens_recebidas=%s | mensagens_enviadas=%s",
-                phone,
-                inbound_count,
-                outbound_count,
-            )
-            return
-        except Exception as exc:
-            log.exception("Falha no fluxo 'Nova conversa' para %s: %s", phone, exc)
-
-        # fallback anti-travamento
-        log.warning("Fallback: abrindo chat via URL para %s", phone)
+        log.info("Abrindo chat EXCLUSIVAMENTE via URL send para %s", phone)
         url = f"https://web.whatsapp.com/send?phone={phone}&text={quote('')}&app_absent=0"
         self._page.goto(url, wait_until="domcontentloaded")
         self._page.wait_for_selector("p._aupe, footer div[contenteditable='true']", timeout=15000)
-        log.info("Fallback via URL concluído para %s", phone)
+        inbound_count = self._page.locator("div.message-in").count()
+        outbound_count = self._page.locator("div.message-out").count()
+        log.info(
+            "Chat aberto via URL send para %s | mensagens_recebidas=%s | mensagens_enviadas=%s",
+            phone,
+            inbound_count,
+            outbound_count,
+        )
 
     def send_message(self, phone: str, text: str) -> None:
         with self._lock:
