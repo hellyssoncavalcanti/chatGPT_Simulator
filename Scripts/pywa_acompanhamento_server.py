@@ -19,9 +19,11 @@ import hashlib
 import json
 import logging
 import os
+import queue
 import re
 import threading
 import time
+from concurrent.futures import Future
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -399,16 +401,37 @@ def build_forward_prompt(ctx: Dict[str, Any], patient_text: str) -> str:
 
 
 class WhatsAppWebClient:
+    """Wraps Playwright browser in a dedicated thread.
+
+    All Playwright calls are dispatched to the browser-owner thread via a task
+    queue, avoiding ``greenlet.error: Cannot switch to a different thread``.
+    """
+
     def __init__(self) -> None:
-        self._lock = threading.RLock()
+        self._task_queue: queue.Queue = queue.Queue()
         self._playwright = None
         self._browser = None
         self._page = None
+        self._ready = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+
+    # -- public entry point ---------------------------------------------------
 
     def start(self) -> None:
-        with self._lock:
-            if self._page is not None:
-                return
+        """Spawn the browser thread (idempotent) and block until ready."""
+        if self._thread is not None and self._thread.is_alive():
+            self._ready.wait()
+            return
+        self._thread = threading.Thread(target=self._browser_loop, daemon=True)
+        self._thread.start()
+        self._ready.wait()
+
+    # -- internal: browser-owner thread main loop -----------------------------
+
+    def _browser_loop(self) -> None:
+        """Runs on the dedicated browser thread. Creates Playwright, then
+        processes tasks from the queue forever."""
+        try:
             self._playwright = sync_playwright().start()
             self._browser = self._playwright.chromium.launch_persistent_context(
                 user_data_dir=str(WHATSAPP_PROFILE_DIR),
@@ -420,6 +443,28 @@ class WhatsAppWebClient:
             self._wait_ready()
             self._log_chat_list_snapshot("startup")
             log.info("WhatsApp Web pronto.")
+        except Exception:
+            log.exception("Falha ao iniciar WhatsApp Web browser thread")
+            self._ready.set()  # unblock waiters so they see the error
+            return
+
+        self._ready.set()
+
+        while True:
+            func, future = self._task_queue.get()
+            try:
+                result = func()
+                future.set_result(result)
+            except Exception as exc:
+                future.set_exception(exc)
+
+    # -- helper: dispatch a callable to the browser thread --------------------
+
+    def _run_on_browser_thread(self, func):
+        """Submit *func* to the browser thread and block until it finishes."""
+        fut: Future = Future()
+        self._task_queue.put((func, fut))
+        return fut.result()  # blocks caller until browser thread completes
 
     def _wait_ready(self, timeout_ms: int = 180000) -> None:
         assert self._page is not None
@@ -519,8 +564,9 @@ class WhatsAppWebClient:
         )
 
     def send_message(self, phone: str, text: str) -> None:
-        with self._lock:
-            self.start()
+        self.start()
+
+        def _do():
             log.info("Iniciando fluxo de envio WhatsApp para %s", phone)
             self._open_chat(phone)
             box = self._page.locator("p._aupe, footer div[contenteditable='true']").first
@@ -550,11 +596,14 @@ class WhatsAppWebClient:
                     after_out,
                 )
 
+        self._run_on_browser_thread(_do)
+
     def read_last_inbound(self, phone: str) -> Optional[Dict[str, str]]:
-        with self._lock:
-            self.start()
+        self.start()
+
+        def _do():
             self._open_chat(phone)
-            data = self._page.evaluate(
+            return self._page.evaluate(
                 """() => {
                     const msgs = Array.from(document.querySelectorAll('div.message-in'));
                     if (!msgs.length) return null;
@@ -567,7 +616,8 @@ class WhatsAppWebClient:
                     return { id: msgId || text, text };
                 }"""
             )
-            return data
+
+        return self._run_on_browser_thread(_do)
 
 
 wa_web = WhatsAppWebClient()
