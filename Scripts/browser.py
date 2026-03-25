@@ -401,6 +401,29 @@ def _response_looks_incomplete_json(markdown_text: str) -> bool:
     return in_string or depth_obj > 0 or depth_arr > 0 or not texto.rstrip().endswith('}')
 
 
+def _response_requests_followup_actions(markdown_text: str) -> bool:
+    """
+    Detecta respostas intermediárias que normalmente exigem rodada adicional
+    (ex.: sql_queries/search_queries/json de ferramenta) antes da resposta final.
+    """
+    texto = (markdown_text or "").strip().lower()
+    if not texto:
+        return False
+
+    if texto.startswith("```"):
+        texto = re.sub(r'^```(?:json)?\s*', '', texto, flags=re.IGNORECASE)
+        texto = re.sub(r'\s*```$', '', texto)
+        texto = texto.strip().lower()
+
+    hints = (
+        '"sql_queries"', "'sql_queries'", "sql_queries",
+        '"search_queries"', "'search_queries'", "search_queries",
+        '"queries_sql"', "'queries_sql'", "queries_sql",
+        '"tool_name"', '"tool_calls"', '"function_call"',
+    )
+    return any(h in texto for h in hints)
+
+
 async def smart_input(page, message, q=None, activityts=None):
     import re
 
@@ -2497,7 +2520,10 @@ async def handle_chat_task_inner(task, page, q, stop_event: asyncio.Event, activ
             idle_ready_count += 1
             if len(last_html) > 0:
                 incomplete_json = _response_looks_incomplete_json(last_html)
-                if (not incomplete_json) and stuck_count > 120 and idle_ready_count > 40:
+                needs_followup = _response_requests_followup_actions(last_html)
+                max_stuck = 240 if needs_followup else 120
+                max_idle = 90 if needs_followup else 40
+                if (not incomplete_json) and stuck_count > max_stuck and idle_ready_count > max_idle:
                     break
             else:
                 # Evita encerrar cedo demais quando o ChatGPT demora para começar
