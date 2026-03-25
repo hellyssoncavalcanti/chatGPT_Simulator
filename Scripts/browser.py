@@ -401,6 +401,29 @@ def _response_looks_incomplete_json(markdown_text: str) -> bool:
     return in_string or depth_obj > 0 or depth_arr > 0 or not texto.rstrip().endswith('}')
 
 
+def _response_requests_followup_actions(markdown_text: str) -> bool:
+    """
+    Detecta respostas intermediárias que normalmente exigem rodada adicional
+    (ex.: sql_queries/search_queries/json de ferramenta) antes da resposta final.
+    """
+    texto = (markdown_text or "").strip().lower()
+    if not texto:
+        return False
+
+    if texto.startswith("```"):
+        texto = re.sub(r'^```(?:json)?\s*', '', texto, flags=re.IGNORECASE)
+        texto = re.sub(r'\s*```$', '', texto)
+        texto = texto.strip().lower()
+
+    hints = (
+        '"sql_queries"', "'sql_queries'", "sql_queries",
+        '"search_queries"', "'search_queries'", "search_queries",
+        '"queries_sql"', "'queries_sql'", "queries_sql",
+        '"tool_name"', '"tool_calls"', '"function_call"',
+    )
+    return any(h in texto for h in hints)
+
+
 async def smart_input(page, message, q=None, activityts=None):
     import re
 
@@ -2203,6 +2226,34 @@ async def handle_chat_task_inner(task, page, q, stop_event: asyncio.Event, activ
     # Sem salvar em disco: payload em memória (ou URL fallback).
     _auto_downloads = []
     _download_tasks = []
+    last_chat_meta_url = None
+
+    async def emit_chat_meta_if_ready():
+        nonlocal last_chat_meta_url
+        try:
+            current_url = (page.url or "").strip()
+        except Exception:
+            return
+        if not current_url:
+            return
+
+        m = re.search(r"https://chatgpt\.com/(?:g/[^/]+/)?c/([A-Za-z0-9\-]+)", current_url)
+        if not m:
+            return
+
+        canonical_url = m.group(0)
+        if canonical_url == last_chat_meta_url:
+            return
+
+        payload = {
+            "chat_id": chat_id,
+            "url": canonical_url,
+            "browser_chat_id": m.group(1),
+            "source": "browser_url",
+        }
+        emit_event(q, "chat_meta", payload)
+        emit_log(q, f"🔗 Chat URL detectada e enviada via stream: {canonical_url}")
+        last_chat_meta_url = canonical_url
 
     def _on_download(download):
         async def _save():
@@ -2244,6 +2295,7 @@ async def handle_chat_task_inner(task, page, q, stop_event: asyncio.Event, activ
     if url and url != 'None':
         emit_log(q, f'Abrindo chat existente: {url}')
         await page.goto(url, wait_until='domcontentloaded')
+        await emit_chat_meta_if_ready()
     else:
         emit_log(q, 'Iniciando nova aba de chat...')
         await page.goto('https://chatgpt.com', wait_until='domcontentloaded')
@@ -2267,6 +2319,7 @@ async def handle_chat_task_inner(task, page, q, stop_event: asyncio.Event, activ
                 await project_loc.click()
                 await page.wait_for_selector('#prompt-textarea', timeout=10000)
                 await asyncio.sleep(1)
+                await emit_chat_meta_if_ready()
             else:
                 print("DICA: Projeto ConexaoVida não encontrado na barra lateral.")
         except Exception:
@@ -2313,6 +2366,7 @@ async def handle_chat_task_inner(task, page, q, stop_event: asyncio.Event, activ
 
     if not sent:
         await page.keyboard.press("Enter")
+    await emit_chat_meta_if_ready()
 
     emit_event(q, "status", "Aguardando resposta...")
 
@@ -2333,6 +2387,8 @@ async def handle_chat_task_inner(task, page, q, stop_event: asyncio.Event, activ
     max_chat_error_reloads = 2
 
     while True:
+        await emit_chat_meta_if_ready()
+
         if stop_event.is_set():
             emit_event(q, "error", "⚠️ Aba travada detectada durante recepção da resposta.")
             break
@@ -2497,7 +2553,10 @@ async def handle_chat_task_inner(task, page, q, stop_event: asyncio.Event, activ
             idle_ready_count += 1
             if len(last_html) > 0:
                 incomplete_json = _response_looks_incomplete_json(last_html)
-                if (not incomplete_json) and stuck_count > 120 and idle_ready_count > 40:
+                needs_followup = _response_requests_followup_actions(last_html)
+                max_stuck = 240 if needs_followup else 120
+                max_idle = 90 if needs_followup else 40
+                if (not incomplete_json) and stuck_count > max_stuck and idle_ready_count > max_idle:
                     break
             else:
                 # Evita encerrar cedo demais quando o ChatGPT demora para começar
@@ -2555,6 +2614,7 @@ async def handle_chat_task_inner(task, page, q, stop_event: asyncio.Event, activ
 
     final_title = await get_chat_title(page)
     final_url   = page.url
+    await emit_chat_meta_if_ready()
     emit_event(q, "finish", {"chat_id": chat_id, "title": final_title, "url": final_url})  # ✅ era chat_id, corrigido para chat_id
 
 async def handle_download_file(context, task):
