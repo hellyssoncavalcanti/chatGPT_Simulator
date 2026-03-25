@@ -4203,7 +4203,7 @@ header('Content-Type: application/javascript; charset=utf-8');
             const sqlQueries = extractSQLFromResponse(sourceText);
             if (!sqlQueries || sqlQueries.length === 0) return;
 
-            const sourceText = el.closest('.msg-ai')?.innerText || el.textContent || '';
+            sourceText = el.closest('.msg-ai')?.innerText || el.textContent || '';
             if (!sourceText || !/sql_queries/i.test(sourceText)) return;
 
             // Se já injetou para o mesmo payload nesta bolha, não duplica.
@@ -4224,7 +4224,7 @@ header('Content-Type: application/javascript; charset=utf-8');
             // Evita processar containers gigantes (wrappers de página)
             if (sourceText.length > 5000) return;
 
-            const sqlQueries = extractSQLFromResponse(sourceText);
+            sqlQueries = extractSQLFromResponse(sourceText);
             if (sqlQueries && sqlQueries.length > 0) {
                 _attachSQLButtons(target, sqlQueries);
             }
