@@ -60,6 +60,7 @@ TEST_DESTINATION_PHONE_RAW = os.getenv("PYWA_TEST_DESTINATION_PHONE", "819814872
 POLL_INTERVAL_SEC = int(os.getenv("PYWA_POLL_INTERVAL_SEC", "120"))
 REPLY_POLL_INTERVAL_SEC = int(os.getenv("PYWA_REPLY_POLL_INTERVAL_SEC", "20"))
 REQUEST_TIMEOUT_SEC = int(os.getenv("PYWA_REQUEST_TIMEOUT_SEC", "45"))
+TEST_ONLY_ID_PACIENTE_RAW = os.getenv("PYWA_TEST_ONLY_ID_PACIENTE", "1712836976").strip()
 
 HOST = os.getenv("PYWA_HOST", "0.0.0.0")
 PORT = int(os.getenv("PYWA_PORT", "3011"))
@@ -122,6 +123,18 @@ WHERE caa.mensagens_acompanhamento IS NOT NULL
   AND caa.datetime_atendimento_inicio IS NOT NULL
   AND DATEDIFF(CURDATE(), DATE(caa.datetime_atendimento_inicio)) BETWEEN 5 AND 90
 """.strip()
+
+try:
+    TEST_ONLY_ID_PACIENTE = int(TEST_ONLY_ID_PACIENTE_RAW) if TEST_ONLY_ID_PACIENTE_RAW else None
+except ValueError:
+    TEST_ONLY_ID_PACIENTE = None
+
+if TEST_ONLY_ID_PACIENTE is not None:
+    FETCH_SQL = FETCH_SQL.replace(
+        "ORDER BY caa.datetime_atendimento_inicio ASC",
+        f"  AND caa.id_paciente = {TEST_ONLY_ID_PACIENTE}\nORDER BY caa.datetime_atendimento_inicio ASC",
+    )
+    SUMMARY_SQL = SUMMARY_SQL + f"\n  AND caa.id_paciente = {TEST_ONLY_ID_PACIENTE}"
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("whatsapp_web_acompanhamento")
@@ -1784,6 +1797,8 @@ if __name__ == "__main__":
     log.info("Simulator local: %s", SIMULATOR_URL)
     log.info("PHP remoto: %s", PHP_URL)
     log.info("Modo teste ativo: todos os envios serão direcionados para %s", TEST_DESTINATION_PHONE)
+    if TEST_ONLY_ID_PACIENTE is not None:
+        log.info("Filtro de teste ativo: processando apenas id_paciente=%s", TEST_ONLY_ID_PACIENTE)
 
     log.info("Iniciando browser WhatsApp. Se necessário, faça login via QR Code...")
     wa_web.start()
