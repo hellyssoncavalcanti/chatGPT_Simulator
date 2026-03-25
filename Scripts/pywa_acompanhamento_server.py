@@ -60,6 +60,7 @@ TEST_DESTINATION_PHONE_RAW = os.getenv("PYWA_TEST_DESTINATION_PHONE", "819814872
 POLL_INTERVAL_SEC = int(os.getenv("PYWA_POLL_INTERVAL_SEC", "120"))
 REPLY_POLL_INTERVAL_SEC = int(os.getenv("PYWA_REPLY_POLL_INTERVAL_SEC", "20"))
 REQUEST_TIMEOUT_SEC = int(os.getenv("PYWA_REQUEST_TIMEOUT_SEC", "45"))
+TEST_ONLY_ID_PACIENTE_RAW = os.getenv("PYWA_TEST_ONLY_ID_PACIENTE", "1712836976").strip()
 
 HOST = os.getenv("PYWA_HOST", "0.0.0.0")
 PORT = int(os.getenv("PYWA_PORT", "3011"))
@@ -122,6 +123,18 @@ WHERE caa.mensagens_acompanhamento IS NOT NULL
   AND caa.datetime_atendimento_inicio IS NOT NULL
   AND DATEDIFF(CURDATE(), DATE(caa.datetime_atendimento_inicio)) BETWEEN 5 AND 90
 """.strip()
+
+try:
+    TEST_ONLY_ID_PACIENTE = int(TEST_ONLY_ID_PACIENTE_RAW) if TEST_ONLY_ID_PACIENTE_RAW else None
+except ValueError:
+    TEST_ONLY_ID_PACIENTE = None
+
+if TEST_ONLY_ID_PACIENTE is not None:
+    FETCH_SQL = FETCH_SQL.replace(
+        "ORDER BY caa.datetime_atendimento_inicio ASC",
+        f"  AND caa.id_paciente = {TEST_ONLY_ID_PACIENTE}\nORDER BY caa.datetime_atendimento_inicio ASC",
+    )
+    SUMMARY_SQL = SUMMARY_SQL + f"\n  AND caa.id_paciente = {TEST_ONLY_ID_PACIENTE}"
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("whatsapp_web_acompanhamento")
@@ -387,6 +400,62 @@ def was_message_already_sent_for_analise(id_analise: Any, message_text: str) -> 
             id_analise,
         )
     return False
+
+
+def preload_sent_messages_for_analises(id_analises: List[Any]) -> Dict[int, set]:
+    """
+    Carrega em lote as mensagens já registradas em chatgpt_chats.mensagens
+    para os id_chatgpt_atendimentos_analise informados.
+
+    Retorna:
+      { id_analise: {conteudo_msg_1, conteudo_msg_2, ...}, ... }
+    """
+    normalized_ids: List[int] = []
+    for raw in id_analises:
+        try:
+            normalized_ids.append(int(raw))
+        except (TypeError, ValueError):
+            continue
+    if not normalized_ids:
+        return {}
+
+    unique_ids = sorted(set(normalized_ids))
+    id_list = ",".join(str(i) for i in unique_ids)
+    query = (
+        "SELECT id_chatgpt_atendimentos_analise, mensagens "
+        "FROM chatgpt_chats "
+        "WHERE chat_mode = 'whatsapp' "
+        f"  AND id_chatgpt_atendimentos_analise IN ({id_list})"
+    )
+
+    out: Dict[int, set] = {i: set() for i in unique_ids}
+    try:
+        rows = run_sql(query)
+        for row in rows:
+            try:
+                aid = int(row.get("id_chatgpt_atendimentos_analise"))
+            except (TypeError, ValueError):
+                continue
+            raw = row.get("mensagens") or ""
+            if not raw:
+                continue
+            try:
+                mensagens = json.loads(raw, strict=False) if isinstance(raw, str) else raw
+            except Exception:
+                continue
+            if not isinstance(mensagens, list):
+                continue
+            bucket = out.setdefault(aid, set())
+            for msg in mensagens:
+                if not isinstance(msg, dict):
+                    continue
+                content = (msg.get("content") or "").strip()
+                if content:
+                    bucket.add(content)
+    except Exception:
+        log.exception("Falha ao pré-carregar mensagens enviadas em lote para dedupe")
+
+    return out
 
 
 def send_to_chatgpt(url_chatgpt: str, text: str, id_paciente: Any, id_atendimento: Any) -> Dict[str, Any]:
@@ -1214,13 +1283,27 @@ def _log_cycle_summary() -> Dict[str, int]:
     """Query DB for an overview of eligible follow-ups and log a summary."""
     summary = {"total_elegiveis": 0, "faixa_1_semana": 0, "faixa_1_mes": 0, "faixa_pre_retorno": 0}
     try:
-        rows = run_sql(SUMMARY_SQL)
-        if rows:
-            r = rows[0]
-            summary["total_elegiveis"] = int(r.get("total_elegiveis") or 0)
-            summary["faixa_1_semana"] = int(r.get("faixa_1_semana") or 0)
-            summary["faixa_1_mes"] = int(r.get("faixa_1_mes") or 0)
-            summary["faixa_pre_retorno"] = int(r.get("faixa_pre_retorno") or 0)
+        if TEST_ONLY_ID_PACIENTE is not None:
+            # Força resumo consistente com o filtro de teste, independente de SQL customizado por env.
+            rows = run_sql(FETCH_SQL)
+            rows = [r for r in rows if str(r.get("id_paciente")) == str(TEST_ONLY_ID_PACIENTE)]
+            summary["total_elegiveis"] = len(rows)
+            for row in rows:
+                dias = int(row.get("dias_desde_atendimento") or 0)
+                if 5 <= dias <= 21:
+                    summary["faixa_1_semana"] += 1
+                if 25 <= dias <= 50:
+                    summary["faixa_1_mes"] += 1
+                if 50 <= dias <= 90:
+                    summary["faixa_pre_retorno"] += 1
+        else:
+            rows = run_sql(SUMMARY_SQL)
+            if rows:
+                r = rows[0]
+                summary["total_elegiveis"] = int(r.get("total_elegiveis") or 0)
+                summary["faixa_1_semana"] = int(r.get("faixa_1_semana") or 0)
+                summary["faixa_1_mes"] = int(r.get("faixa_1_mes") or 0)
+                summary["faixa_pre_retorno"] = int(r.get("faixa_pre_retorno") or 0)
     except Exception:
         log.exception("Falha ao obter resumo de elegíveis")
 
@@ -1247,6 +1330,14 @@ def send_pending_followups_once() -> Dict[str, Any]:
 
     # ── Buscar registros elegíveis (já filtrados por data no SQL) ─────────
     rows = run_sql(FETCH_SQL)
+    if TEST_ONLY_ID_PACIENTE is not None:
+        before = len(rows)
+        rows = [r for r in rows if str(r.get("id_paciente")) == str(TEST_ONLY_ID_PACIENTE)]
+        if before != len(rows):
+            log.info(
+                "Filtro de teste aplicado em memória (id_paciente=%s): %s -> %s registros.",
+                TEST_ONLY_ID_PACIENTE, before, len(rows),
+            )
     total_rows = len(rows)
     total_followup_items = 0
     sent = 0
@@ -1258,10 +1349,16 @@ def send_pending_followups_once() -> Dict[str, Any]:
     errors = 0
     recovered_member_phone = 0
 
+    # Pré-carrega dedupe por id_analise para evitar N consultas remotas
+    sent_cache = preload_sent_messages_for_analises([r.get("id_analise") for r in rows])
+
     # ── Montar fila de envios ─────────────────────────────────────────────
     send_queue: List[Dict[str, Any]] = []
 
-    for row in rows:
+    for idx, row in enumerate(rows, start=1):
+        if idx == 1 or idx % 25 == 0 or idx == len(rows):
+            log.info("Preparando fila de envios: %s/%s", idx, len(rows))
+
         id_atendimento = row.get("id_atendimento")
         id_paciente = row.get("id_paciente")
         id_analise = row.get("id_analise")
@@ -1302,8 +1399,13 @@ def send_pending_followups_once() -> Dict[str, Any]:
         for key, pergunta in itens:
             full_msg = f"{pergunta}\n\nPode me responder por aqui?"
 
-            # Dedupe: check chatgpt_chats.mensagens (DB) for this analysis
-            if was_message_already_sent_for_analise(id_analise, full_msg):
+            # Dedupe (rápido): usa cache pré-carregado de mensagens por análise
+            try:
+                aid_int = int(id_analise) if id_analise is not None else None
+            except (TypeError, ValueError):
+                aid_int = None
+            cached_sent = sent_cache.get(aid_int, set()) if aid_int is not None else set()
+            if full_msg.strip() in cached_sent:
                 skipped += 1
                 skipped_already_sent += 1
                 continue
@@ -1717,6 +1819,8 @@ if __name__ == "__main__":
     log.info("Simulator local: %s", SIMULATOR_URL)
     log.info("PHP remoto: %s", PHP_URL)
     log.info("Modo teste ativo: todos os envios serão direcionados para %s", TEST_DESTINATION_PHONE)
+    if TEST_ONLY_ID_PACIENTE is not None:
+        log.info("Filtro de teste ativo: processando apenas id_paciente=%s", TEST_ONLY_ID_PACIENTE)
 
     log.info("Iniciando browser WhatsApp. Se necessário, faça login via QR Code...")
     wa_web.start()
