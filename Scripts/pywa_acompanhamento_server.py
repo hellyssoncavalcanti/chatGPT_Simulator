@@ -389,6 +389,67 @@ def was_message_already_sent_for_analise(id_analise: Any, message_text: str) -> 
     return False
 
 
+def preload_sent_messages_for_analises(id_analises: List[Any]) -> Tuple[Dict[int, set], set]:
+    """
+    Carrega em lote as mensagens já registradas em chatgpt_chats.mensagens
+    para os id_chatgpt_atendimentos_analise informados.
+
+    Retorna tupla:
+      (
+        { id_analise: {conteudo_msg_1, conteudo_msg_2, ...}, ... },
+        {id_analise_com_ao_menos_um_chat}
+      )
+    """
+    normalized_ids: List[int] = []
+    for raw in id_analises:
+        try:
+            normalized_ids.append(int(raw))
+        except (TypeError, ValueError):
+            continue
+    if not normalized_ids:
+        return {}, set()
+
+    unique_ids = sorted(set(normalized_ids))
+    id_list = ",".join(str(i) for i in unique_ids)
+    query = (
+        "SELECT id_chatgpt_atendimentos_analise, mensagens "
+        "FROM chatgpt_chats "
+        "WHERE chat_mode = 'whatsapp' "
+        f"  AND id_chatgpt_atendimentos_analise IN ({id_list})"
+    )
+
+    out: Dict[int, set] = {i: set() for i in unique_ids}
+    ids_with_chat_rows: set = set()
+    try:
+        rows = run_sql(query)
+        for row in rows:
+            try:
+                aid = int(row.get("id_chatgpt_atendimentos_analise"))
+            except (TypeError, ValueError):
+                continue
+            ids_with_chat_rows.add(aid)
+            raw = row.get("mensagens") or ""
+            if not raw:
+                continue
+            try:
+                mensagens = json.loads(raw, strict=False) if isinstance(raw, str) else raw
+            except Exception:
+                continue
+            if not isinstance(mensagens, list):
+                continue
+            bucket = out.setdefault(aid, set())
+            for msg in mensagens:
+                if not isinstance(msg, dict):
+                    continue
+                content = (msg.get("content") or "").strip()
+                if content:
+                    bucket.add(content)
+    except Exception:
+        log.exception("Falha ao pré-carregar mensagens enviadas em lote para dedupe")
+
+    return out, ids_with_chat_rows
+
+
 def send_to_chatgpt(url_chatgpt: str, text: str, id_paciente: Any, id_atendimento: Any) -> Dict[str, Any]:
     headers = {"Authorization": f"Bearer {SIMULATOR_API_KEY}"}
     payload = {
@@ -1258,10 +1319,16 @@ def send_pending_followups_once() -> Dict[str, Any]:
     errors = 0
     recovered_member_phone = 0
 
+    # Pré-carrega dedupe por id_analise para evitar N consultas remotas
+    sent_cache, ids_with_chat_rows = preload_sent_messages_for_analises([r.get("id_analise") for r in rows])
+
     # ── Montar fila de envios ─────────────────────────────────────────────
     send_queue: List[Dict[str, Any]] = []
 
-    for row in rows:
+    for idx, row in enumerate(rows, start=1):
+        if idx == 1 or idx % 25 == 0 or idx == len(rows):
+            log.info("Preparando fila de envios: %s/%s", idx, len(rows))
+
         id_atendimento = row.get("id_atendimento")
         id_paciente = row.get("id_paciente")
         id_analise = row.get("id_analise")
@@ -1302,15 +1369,22 @@ def send_pending_followups_once() -> Dict[str, Any]:
         for key, pergunta in itens:
             full_msg = f"{pergunta}\n\nPode me responder por aqui?"
 
-            # Dedupe: check chatgpt_chats.mensagens (DB) for this analysis
-            if was_message_already_sent_for_analise(id_analise, full_msg):
+            # Dedupe (rápido): usa cache pré-carregado de mensagens por análise
+            try:
+                aid_int = int(id_analise) if id_analise is not None else None
+            except (TypeError, ValueError):
+                aid_int = None
+            cached_sent = sent_cache.get(aid_int, set()) if aid_int is not None else set()
+            if full_msg.strip() in cached_sent:
                 skipped += 1
                 skipped_already_sent += 1
                 continue
 
-            # Dedupe fallback: check local state file
+            # Dedupe fallback (state local):
+            # só aplica quando já existe chat WhatsApp persistido para essa análise.
+            # Sem chat DB, NÃO deve bloquear o primeiro envio.
             dedupe_key = f"{id_atendimento}:{key}:{hashlib.sha1(pergunta.encode('utf-8')).hexdigest()}"
-            if state.is_sent(dedupe_key):
+            if aid_int is not None and aid_int in ids_with_chat_rows and state.is_sent(dedupe_key):
                 skipped += 1
                 skipped_already_sent += 1
                 continue
