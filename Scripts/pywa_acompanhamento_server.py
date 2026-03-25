@@ -71,25 +71,57 @@ STATE_FILE = DB_DIR / "pywa_followup_state.json"
 WHATSAPP_PROFILE_DIR = BASE_DIR / "chrome_profile_whatsapp"
 WHATSAPP_PROFILE_DIR.mkdir(parents=True, exist_ok=True)
 
+# ---------------------------------------------------------------------------
+# SQL: busca apenas registros elegíveis com base na data do atendimento
+# ---------------------------------------------------------------------------
+# Janela global: 5–90 dias desde datetime_atendimento_inicio (cobre
+# mensagem_1_semana 5-21d, mensagem_1_mes 25-50d, mensagem_pre_retorno 50-90d).
+# Ordenado por datetime_atendimento_inicio ASC → pacientes mais antigos primeiro
+# (mais perto do retorno = maior prioridade).
 DEFAULT_FETCH_SQL = """
 SELECT
-  caa.id AS id_analise,
+  caa.id                              AS id_analise,
   caa.id_atendimento,
   caa.id_paciente,
-  COALESCE(m.telefone1,m.telefone2,m.telefone1pais,m.telefone2pais) AS telefone,
-  m.nome AS nome_paciente,
+  caa.datetime_atendimento_inicio,
+  DATEDIFF(CURDATE(), DATE(caa.datetime_atendimento_inicio)) AS dias_desde_atendimento,
+  caa.status,
+  COALESCE(m.telefone1, m.telefone2, m.telefone1pais, m.telefone2pais) AS telefone,
+  m.nome                              AS nome_paciente,
+  m.data_nascimento,
   caa.mensagens_acompanhamento,
   caa.chat_url,
   cc.url_chatgpt
 FROM chatgpt_atendimentos_analise caa
 JOIN membros m ON m.id = caa.id_paciente
-LEFT JOIN chatgpt_chats cc ON cc.id_atendimento = caa.id_atendimento
+LEFT JOIN chatgpt_chats cc
+       ON cc.id_chatgpt_atendimentos_analise = caa.id
+      AND cc.chat_mode = 'whatsapp'
 WHERE caa.mensagens_acompanhamento IS NOT NULL
   AND caa.mensagens_acompanhamento <> ''
-ORDER BY caa.id_atendimento DESC
-LIMIT 100
+  AND caa.status = 'concluido'
+  AND caa.datetime_atendimento_inicio IS NOT NULL
+  AND DATEDIFF(CURDATE(), DATE(caa.datetime_atendimento_inicio)) BETWEEN 5 AND 90
+ORDER BY caa.datetime_atendimento_inicio ASC
+LIMIT 200
 """.strip()
 FETCH_SQL = os.getenv("PYWA_FETCH_SQL", DEFAULT_FETCH_SQL)
+
+# SQL de resumo: contagem por janela temporal
+SUMMARY_SQL = """
+SELECT
+  COUNT(*)                                                              AS total_elegiveis,
+  SUM(DATEDIFF(CURDATE(), DATE(caa.datetime_atendimento_inicio)) BETWEEN  5 AND 21) AS faixa_1_semana,
+  SUM(DATEDIFF(CURDATE(), DATE(caa.datetime_atendimento_inicio)) BETWEEN 25 AND 50) AS faixa_1_mes,
+  SUM(DATEDIFF(CURDATE(), DATE(caa.datetime_atendimento_inicio)) BETWEEN 50 AND 90) AS faixa_pre_retorno
+FROM chatgpt_atendimentos_analise caa
+JOIN membros m ON m.id = caa.id_paciente
+WHERE caa.mensagens_acompanhamento IS NOT NULL
+  AND caa.mensagens_acompanhamento <> ''
+  AND caa.status = 'concluido'
+  AND caa.datetime_atendimento_inicio IS NOT NULL
+  AND DATEDIFF(CURDATE(), DATE(caa.datetime_atendimento_inicio)) BETWEEN 5 AND 90
+""".strip()
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("whatsapp_web_acompanhamento")
@@ -624,14 +656,6 @@ def select_followup_for_timing(
         min_d, max_d = window
         if min_d <= elapsed_days <= max_d:
             selected.append((key, text))
-
-    if not selected:
-        log.info(
-            "Nenhuma mensagem elegível para envio — dias desde atendimento: %s "
-            "(janelas configuradas: %s)",
-            elapsed_days,
-            {k: f"{v[0]}-{v[1]}d" for k, v in FOLLOWUP_TIME_WINDOWS.items()},
-        )
 
     return selected
 
@@ -1186,7 +1210,42 @@ class WhatsAppWebClient:
 wa_web = WhatsAppWebClient()
 
 
+def _log_cycle_summary() -> Dict[str, int]:
+    """Query DB for an overview of eligible follow-ups and log a summary."""
+    summary = {"total_elegiveis": 0, "faixa_1_semana": 0, "faixa_1_mes": 0, "faixa_pre_retorno": 0}
+    try:
+        rows = run_sql(SUMMARY_SQL)
+        if rows:
+            r = rows[0]
+            summary["total_elegiveis"] = int(r.get("total_elegiveis") or 0)
+            summary["faixa_1_semana"] = int(r.get("faixa_1_semana") or 0)
+            summary["faixa_1_mes"] = int(r.get("faixa_1_mes") or 0)
+            summary["faixa_pre_retorno"] = int(r.get("faixa_pre_retorno") or 0)
+    except Exception:
+        log.exception("Falha ao obter resumo de elegíveis")
+
+    log.info("── Resumo acompanhamento WhatsApp %s", "─" * 40)
+    log.info("   Pacientes elegiveis (5-90 dias) : %s", summary["total_elegiveis"])
+    log.info("   Faixa 1 semana   (5-21 dias)    : %s", summary["faixa_1_semana"])
+    log.info("   Faixa 1 mes      (25-50 dias)   : %s", summary["faixa_1_mes"])
+    log.info("   Faixa pre-retorno (50-90 dias)   : %s", summary["faixa_pre_retorno"])
+    return summary
+
+
 def send_pending_followups_once() -> Dict[str, Any]:
+    # ── Resumo inicial ────────────────────────────────────────────────────
+    cycle_summary = _log_cycle_summary()
+
+    if cycle_summary["total_elegiveis"] == 0:
+        log.info("   Nenhum paciente elegivel neste ciclo.")
+        return {
+            "total": 0, "total_followup_items": 0, "sent": 0,
+            "skipped": 0, "skipped_missing_phone": 0,
+            "skipped_empty_followup": 0, "skipped_already_sent": 0,
+            "skipped_not_due": 0, "errors": 0, "recovered_member_phone": 0,
+        }
+
+    # ── Buscar registros elegíveis (já filtrados por data no SQL) ─────────
     rows = run_sql(FETCH_SQL)
     total_rows = len(rows)
     total_followup_items = 0
@@ -1199,6 +1258,9 @@ def send_pending_followups_once() -> Dict[str, Any]:
     errors = 0
     recovered_member_phone = 0
 
+    # ── Montar fila de envios ─────────────────────────────────────────────
+    send_queue: List[Dict[str, Any]] = []
+
     for row in rows:
         id_atendimento = row.get("id_atendimento")
         id_paciente = row.get("id_paciente")
@@ -1206,6 +1268,15 @@ def send_pending_followups_once() -> Dict[str, Any]:
         nome_paciente = row.get("nome_paciente")
         chat_url = (row.get("chat_url") or "").strip()
         url_chatgpt = (row.get("url_chatgpt") or "").strip()
+        dias = int(row.get("dias_desde_atendimento") or 0)
+        inicio_atendimento = row.get("datetime_atendimento_inicio") or "N/D"
+
+        # Idade: usar data_nascimento já vinda do SQL
+        idade = derive_age_from_birthdate(row.get("data_nascimento"))
+        if idade == "N/D":
+            idade = derive_age_from_row(row)
+
+        # Telefone
         original_phone = normalize_phone(row.get("telefone"))
         phone, phone_source = resolve_phone_with_member_fallback(row.get("telefone"), id_paciente)
         if (not original_phone or not is_valid_br_mobile_phone(original_phone)) and phone:
@@ -1223,15 +1294,8 @@ def send_pending_followups_once() -> Dict[str, Any]:
             continue
         total_followup_items += len(all_itens)
 
-        # Fetch consultation date once per row to determine which message
-        # is appropriate based on elapsed time.
-        metadata = fetch_patient_metadata(id_paciente=id_paciente, id_atendimento=id_atendimento)
-        idade = derive_age_from_birthdate(metadata.get("data_nascimento"))
-        if idade == "N/D":
-            idade = derive_age_from_row(row)
-        inicio_atendimento = metadata.get("datetime_atendimento_inicio") or derive_start_datetime_from_row(row)
-
-        # Filter: only send the message(s) whose time window matches now.
+        # Filter: use dias_desde_atendimento (já calculado no SQL) para
+        # selecionar apenas a(s) mensagem(ns) da janela correta.
         itens = select_followup_for_timing(all_itens, inicio_atendimento)
         skipped_not_due += len(all_itens) - len(itens)
 
@@ -1240,12 +1304,6 @@ def send_pending_followups_once() -> Dict[str, Any]:
 
             # Dedupe: check chatgpt_chats.mensagens (DB) for this analysis
             if was_message_already_sent_for_analise(id_analise, full_msg):
-                log.info(
-                    "Mensagem já presente em chatgpt_chats.mensagens para "
-                    "id_analise=%s | tipo=%s — ignorando.",
-                    id_analise,
-                    key,
-                )
                 skipped += 1
                 skipped_already_sent += 1
                 continue
@@ -1257,68 +1315,110 @@ def send_pending_followups_once() -> Dict[str, Any]:
                 skipped_already_sent += 1
                 continue
 
-            try:
-                preview = build_preview_with_ellipsis(pergunta, max_len=140)
-                log.info(
-                    "Pré-envio | Paciente: [%s] | idade: [%s] | Telefone de contato: [%s] (origem=%s) "
-                    "| Telefone para testes: [%s] | Id do atendimento: [%s] | Data do atendimento: [%s] "
-                    "| Tipo: [%s] | Mensagem: [%s]",
-                    (nome_paciente or "N/D"),
-                    (idade or "N/D"),
-                    (phone or "N/D"),
-                    phone_source,
-                    TEST_DESTINATION_PHONE,
-                    id_atendimento if id_atendimento is not None else "N/D",
-                    inicio_atendimento if inicio_atendimento is not None else "N/D",
-                    key,
-                    preview or "N/D",
-                )
+            send_queue.append({
+                "id_atendimento": id_atendimento,
+                "id_paciente": id_paciente,
+                "id_analise": id_analise,
+                "nome_paciente": nome_paciente,
+                "chat_url": chat_url,
+                "url_chatgpt": url_chatgpt,
+                "phone": phone,
+                "phone_source": phone_source,
+                "idade": idade,
+                "dias": dias,
+                "inicio_atendimento": inicio_atendimento,
+                "key": key,
+                "pergunta": pergunta,
+                "full_msg": full_msg,
+                "dedupe_key": dedupe_key,
+            })
 
-                # Random delay between sends to simulate human behaviour.
-                if sent > 0:
-                    delay = random.uniform(10, 45)
-                    log.info("Aguardando %.1fs antes do próximo envio...", delay)
-                    time.sleep(delay)
+    # ── Log da fila antes de iniciar envios ───────────────────────────────
+    log.info("── Fila de envios %s", "─" * 50)
+    log.info(
+        "   Total na fila: %s | Ignorados: %s (sem_tel=%s, sem_msg=%s, ja_enviado=%s, fora_janela=%s)",
+        len(send_queue), skipped, skipped_missing_phone,
+        skipped_empty_followup, skipped_already_sent, skipped_not_due,
+    )
+    for i, item in enumerate(send_queue, 1):
+        log.info(
+            "   #%s | %s | %s dias | %s | tipo=%s | tel=%s",
+            i,
+            item["nome_paciente"] or "N/D",
+            item["dias"],
+            item["inicio_atendimento"],
+            item["key"],
+            item["phone"],
+        )
 
-                wa_web.send_message(TEST_DESTINATION_PHONE, full_msg)
+    # ── Executar envios (pacientes mais antigos primeiro — já ordenados) ──
+    for item in send_queue:
+        try:
+            preview = build_preview_with_ellipsis(item["pergunta"], max_len=140)
+            log.info(
+                "Enviando | Paciente: [%s] | idade: [%s] | %s dias desde atendimento "
+                "| Telefone: [%s] (origem=%s) | Teste: [%s] | Atend: [%s] | Data: [%s] "
+                "| Tipo: [%s] | Msg: [%s]",
+                item["nome_paciente"] or "N/D",
+                item["idade"] or "N/D",
+                item["dias"],
+                item["phone"] or "N/D",
+                item["phone_source"],
+                TEST_DESTINATION_PHONE,
+                item["id_atendimento"] if item["id_atendimento"] is not None else "N/D",
+                item["inicio_atendimento"],
+                item["key"],
+                preview or "N/D",
+            )
 
-                state.mark_sent(
-                    dedupe_key,
-                    {
-                        "id_atendimento": id_atendimento,
-                        "id_paciente": id_paciente,
-                        "phone": phone,
-                        "question_key": key,
-                        "pergunta": pergunta,
-                        "sent_at": utc_now_iso(),
-                    },
-                )
-                state.set_phone_context(
-                    phone,
-                    {
-                        "id_atendimento": id_atendimento,
-                        "id_paciente": id_paciente,
-                        "nome_paciente": nome_paciente,
-                        "pergunta": pergunta,
-                        "question_key": key,
-                        "url_chatgpt": url_chatgpt,
-                    },
-                )
+            # Random delay between sends to simulate human behaviour.
+            if sent > 0:
+                delay = random.uniform(10, 45)
+                log.info("Aguardando %.1fs antes do proximo envio...", delay)
+                time.sleep(delay)
 
-                # Persist in chatgpt_chats with chat_mode='whatsapp' for later lookup
-                insert_whatsapp_chat(
-                    phone=phone,
-                    id_paciente=id_paciente,
-                    id_atendimento=id_atendimento,
-                    id_analise=id_analise,
-                    chat_url=chat_url or url_chatgpt,
-                    first_message=full_msg,
-                )
+            wa_web.send_message(TEST_DESTINATION_PHONE, item["full_msg"])
 
-                sent += 1
-            except Exception:
-                errors += 1
-                log.exception("Falha no envio para %s (atendimento=%s)", phone, id_atendimento)
+            state.mark_sent(
+                item["dedupe_key"],
+                {
+                    "id_atendimento": item["id_atendimento"],
+                    "id_paciente": item["id_paciente"],
+                    "phone": item["phone"],
+                    "question_key": item["key"],
+                    "pergunta": item["pergunta"],
+                    "sent_at": utc_now_iso(),
+                },
+            )
+            state.set_phone_context(
+                item["phone"],
+                {
+                    "id_atendimento": item["id_atendimento"],
+                    "id_paciente": item["id_paciente"],
+                    "nome_paciente": item["nome_paciente"],
+                    "pergunta": item["pergunta"],
+                    "question_key": item["key"],
+                    "url_chatgpt": item["url_chatgpt"],
+                },
+            )
+
+            # Persist in chatgpt_chats with chat_mode='whatsapp' for later lookup
+            insert_whatsapp_chat(
+                phone=item["phone"],
+                id_paciente=item["id_paciente"],
+                id_atendimento=item["id_atendimento"],
+                id_analise=item["id_analise"],
+                chat_url=item["chat_url"] or item["url_chatgpt"],
+                first_message=item["full_msg"],
+            )
+
+            sent += 1
+        except Exception:
+            errors += 1
+            log.exception(
+                "Falha no envio para %s (atendimento=%s)",
+                item["phone"], item["id_atendimento"],
+            )
 
     return {
         "total": total_rows,
