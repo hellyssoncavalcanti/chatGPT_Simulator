@@ -372,7 +372,7 @@ def was_message_already_sent_for_analise(id_analise: Any, message_text: str) -> 
         raw = rows[0].get("mensagens") or ""
         if not raw:
             return False
-        mensagens = json.loads(raw) if isinstance(raw, str) else raw
+        mensagens = json.loads(raw, strict=False) if isinstance(raw, str) else raw
         if not isinstance(mensagens, list):
             return False
         for msg in mensagens:
