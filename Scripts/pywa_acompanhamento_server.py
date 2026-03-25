@@ -60,7 +60,9 @@ TEST_DESTINATION_PHONE_RAW = os.getenv("PYWA_TEST_DESTINATION_PHONE", "819814872
 POLL_INTERVAL_SEC = int(os.getenv("PYWA_POLL_INTERVAL_SEC", "120"))
 REPLY_POLL_INTERVAL_SEC = int(os.getenv("PYWA_REPLY_POLL_INTERVAL_SEC", "20"))
 REQUEST_TIMEOUT_SEC = int(os.getenv("PYWA_REQUEST_TIMEOUT_SEC", "45"))
-TEST_ONLY_ID_PACIENTE_RAW = os.getenv("PYWA_TEST_ONLY_ID_PACIENTE", "").strip()
+# Modo de teste por padrão: restringe varredura para um único paciente.
+# Pode ser sobrescrito por variável de ambiente.
+TEST_ONLY_ID_PACIENTE_RAW = os.getenv("PYWA_TEST_ONLY_ID_PACIENTE", "1712836976").strip()
 
 HOST = os.getenv("PYWA_HOST", "0.0.0.0")
 PORT = int(os.getenv("PYWA_PORT", "3011"))
@@ -634,7 +636,7 @@ TEST_DESTINATION_PHONE = normalize_phone(TEST_DESTINATION_PHONE_RAW) or "5581981
 TEST_ONLY_ID_PACIENTE = (
     int(TEST_ONLY_ID_PACIENTE_RAW)
     if TEST_ONLY_ID_PACIENTE_RAW.isdigit()
-    else None
+    else 1712836976
 )
 
 
