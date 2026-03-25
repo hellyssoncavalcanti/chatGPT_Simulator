@@ -2226,6 +2226,34 @@ async def handle_chat_task_inner(task, page, q, stop_event: asyncio.Event, activ
     # Sem salvar em disco: payload em memória (ou URL fallback).
     _auto_downloads = []
     _download_tasks = []
+    last_chat_meta_url = None
+
+    async def emit_chat_meta_if_ready():
+        nonlocal last_chat_meta_url
+        try:
+            current_url = (page.url or "").strip()
+        except Exception:
+            return
+        if not current_url:
+            return
+
+        m = re.search(r"https://chatgpt\.com/(?:g/[^/]+/)?c/([A-Za-z0-9\-]+)", current_url)
+        if not m:
+            return
+
+        canonical_url = m.group(0)
+        if canonical_url == last_chat_meta_url:
+            return
+
+        payload = {
+            "chat_id": chat_id,
+            "url": canonical_url,
+            "browser_chat_id": m.group(1),
+            "source": "browser_url",
+        }
+        emit_event(q, "chat_meta", payload)
+        emit_log(q, f"🔗 Chat URL detectada e enviada via stream: {canonical_url}")
+        last_chat_meta_url = canonical_url
 
     def _on_download(download):
         async def _save():
@@ -2267,6 +2295,7 @@ async def handle_chat_task_inner(task, page, q, stop_event: asyncio.Event, activ
     if url and url != 'None':
         emit_log(q, f'Abrindo chat existente: {url}')
         await page.goto(url, wait_until='domcontentloaded')
+        await emit_chat_meta_if_ready()
     else:
         emit_log(q, 'Iniciando nova aba de chat...')
         await page.goto('https://chatgpt.com', wait_until='domcontentloaded')
@@ -2290,6 +2319,7 @@ async def handle_chat_task_inner(task, page, q, stop_event: asyncio.Event, activ
                 await project_loc.click()
                 await page.wait_for_selector('#prompt-textarea', timeout=10000)
                 await asyncio.sleep(1)
+                await emit_chat_meta_if_ready()
             else:
                 print("DICA: Projeto ConexaoVida não encontrado na barra lateral.")
         except Exception:
@@ -2336,6 +2366,7 @@ async def handle_chat_task_inner(task, page, q, stop_event: asyncio.Event, activ
 
     if not sent:
         await page.keyboard.press("Enter")
+    await emit_chat_meta_if_ready()
 
     emit_event(q, "status", "Aguardando resposta...")
 
@@ -2356,6 +2387,8 @@ async def handle_chat_task_inner(task, page, q, stop_event: asyncio.Event, activ
     max_chat_error_reloads = 2
 
     while True:
+        await emit_chat_meta_if_ready()
+
         if stop_event.is_set():
             emit_event(q, "error", "⚠️ Aba travada detectada durante recepção da resposta.")
             break
@@ -2581,6 +2614,7 @@ async def handle_chat_task_inner(task, page, q, stop_event: asyncio.Event, activ
 
     final_title = await get_chat_title(page)
     final_url   = page.url
+    await emit_chat_meta_if_ready()
     emit_event(q, "finish", {"chat_id": chat_id, "title": final_title, "url": final_url})  # ✅ era chat_id, corrigido para chat_id
 
 async def handle_download_file(context, task):
