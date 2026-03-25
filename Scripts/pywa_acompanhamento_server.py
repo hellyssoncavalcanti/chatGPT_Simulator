@@ -1283,13 +1283,27 @@ def _log_cycle_summary() -> Dict[str, int]:
     """Query DB for an overview of eligible follow-ups and log a summary."""
     summary = {"total_elegiveis": 0, "faixa_1_semana": 0, "faixa_1_mes": 0, "faixa_pre_retorno": 0}
     try:
-        rows = run_sql(SUMMARY_SQL)
-        if rows:
-            r = rows[0]
-            summary["total_elegiveis"] = int(r.get("total_elegiveis") or 0)
-            summary["faixa_1_semana"] = int(r.get("faixa_1_semana") or 0)
-            summary["faixa_1_mes"] = int(r.get("faixa_1_mes") or 0)
-            summary["faixa_pre_retorno"] = int(r.get("faixa_pre_retorno") or 0)
+        if TEST_ONLY_ID_PACIENTE is not None:
+            # Força resumo consistente com o filtro de teste, independente de SQL customizado por env.
+            rows = run_sql(FETCH_SQL)
+            rows = [r for r in rows if str(r.get("id_paciente")) == str(TEST_ONLY_ID_PACIENTE)]
+            summary["total_elegiveis"] = len(rows)
+            for row in rows:
+                dias = int(row.get("dias_desde_atendimento") or 0)
+                if 5 <= dias <= 21:
+                    summary["faixa_1_semana"] += 1
+                if 25 <= dias <= 50:
+                    summary["faixa_1_mes"] += 1
+                if 50 <= dias <= 90:
+                    summary["faixa_pre_retorno"] += 1
+        else:
+            rows = run_sql(SUMMARY_SQL)
+            if rows:
+                r = rows[0]
+                summary["total_elegiveis"] = int(r.get("total_elegiveis") or 0)
+                summary["faixa_1_semana"] = int(r.get("faixa_1_semana") or 0)
+                summary["faixa_1_mes"] = int(r.get("faixa_1_mes") or 0)
+                summary["faixa_pre_retorno"] = int(r.get("faixa_pre_retorno") or 0)
     except Exception:
         log.exception("Falha ao obter resumo de elegíveis")
 
@@ -1316,6 +1330,14 @@ def send_pending_followups_once() -> Dict[str, Any]:
 
     # ── Buscar registros elegíveis (já filtrados por data no SQL) ─────────
     rows = run_sql(FETCH_SQL)
+    if TEST_ONLY_ID_PACIENTE is not None:
+        before = len(rows)
+        rows = [r for r in rows if str(r.get("id_paciente")) == str(TEST_ONLY_ID_PACIENTE)]
+        if before != len(rows):
+            log.info(
+                "Filtro de teste aplicado em memória (id_paciente=%s): %s -> %s registros.",
+                TEST_ONLY_ID_PACIENTE, before, len(rows),
+            )
     total_rows = len(rows)
     total_followup_items = 0
     sent = 0
