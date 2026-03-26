@@ -6649,6 +6649,7 @@ header('Content-Type: application/javascript; charset=utf-8');
             const reader = response.body.getReader();
             const decoder = new TextDecoder("utf-8");
             let buffer = ''; let fullText = '';
+            let streamChunkIdx = 0;
             
             let isT = false; 
 
@@ -6682,9 +6683,27 @@ header('Content-Type: application/javascript; charset=utf-8');
                                     `%c${FILE_PREFIX} 📸 Screenshot recebido em ${capturedAt}`,
                                     "color: #03a9f4; font-weight: bold;"
                                 );
+                            } else if (json.type) {
+                                streamChunkIdx += 1;
+                                const info = {
+                                    idx: streamChunkIdx,
+                                    type: json.type,
+                                    size: typeof json.content === 'string'
+                                        ? json.content.length
+                                        : (json.content ? JSON.stringify(json.content).length : 0)
+                                };
+                                console.log(`%c${FILE_PREFIX} 🧩 Stream chunk`, "color:#8e24aa; font-weight:bold;", info);
                             }
 
                             const txt = json.choices?.[0]?.delta?.content || "";
+                            if (txt) {
+                                streamChunkIdx += 1;
+                                console.log(
+                                    `%c${FILE_PREFIX} 🧩 Stream delta`,
+                                    "color:#8e24aa; font-weight:bold;",
+                                    { idx: streamChunkIdx, size: txt.length }
+                                );
+                            }
                             
                             if (txt.includes('<think>')) isT = true;
                             if (txt.includes('</think>')) {
