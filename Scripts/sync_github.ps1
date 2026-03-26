@@ -900,7 +900,8 @@ function Log-RunningProcessesStatus {
     Write-Section 'MONITORAMENTO DE PROCESSOS'
     $found = 0
 
-    $whatsappTitlePattern = [regex]::Escape(($script:Config.whatsappWindowTitle ?? 'WhatsApp Follow-up Server (Web)'))
+    $whatsappTitle = if ([string]::IsNullOrWhiteSpace($script:Config.whatsappWindowTitle)) { 'WhatsApp Follow-up Server (Web)' } else { $script:Config.whatsappWindowTitle }
+    $whatsappTitlePattern = [regex]::Escape($whatsappTitle)
     $whatsappBatPattern = 'start[\s_]*whatsapp[\s_]*server\.bat'
     $pywaScriptPattern = 'pywa_acompanhamento_server\.py'
 
@@ -955,7 +956,8 @@ function Stop-ManagedProcesses {
     Write-Section 'PARANDO PROCESSOS E JANELAS'
     $killed = 0
 
-    $whatsappTitlePattern = [regex]::Escape(($script:Config.whatsappWindowTitle ?? 'WhatsApp Follow-up Server (Web)'))
+    $whatsappTitle = if ([string]::IsNullOrWhiteSpace($script:Config.whatsappWindowTitle)) { 'WhatsApp Follow-up Server (Web)' } else { $script:Config.whatsappWindowTitle }
+    $whatsappTitlePattern = [regex]::Escape($whatsappTitle)
     $whatsappBatPattern = 'start[\s_]*whatsapp[\s_]*server\.bat'
     $pywaScriptPattern = 'pywa_acompanhamento_server\.py'
 
