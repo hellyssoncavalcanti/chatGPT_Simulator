@@ -1463,6 +1463,22 @@ def send_pending_followups_once(cycle_no: int) -> Dict[str, Any]:
                 aid_int = None
             cached_sent = sent_cache.get(aid_int, set()) if aid_int is not None else set()
             if full_msg.strip() in cached_sent:
+                # Mesmo quando já enviado, mantém contexto para o monitor de
+                # respostas (caso o processo tenha reiniciado).
+                existing_sent_at = state.get_phone_context_field(phone, "sent_at")
+                fallback_sent_at = existing_sent_at or (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
+                state.set_phone_context(
+                    phone,
+                    {
+                        "id_atendimento": id_atendimento,
+                        "id_paciente": id_paciente,
+                        "nome_paciente": nome_paciente,
+                        "pergunta": pergunta,
+                        "question_key": key,
+                        "url_chatgpt": url_chatgpt,
+                        "sent_at": fallback_sent_at,
+                    },
+                )
                 skipped += 1
                 skipped_already_sent += 1
                 continue
@@ -1471,10 +1487,20 @@ def send_pending_followups_once(cycle_no: int) -> Dict[str, Any]:
             # só aplica quando já existe chat WhatsApp persistido para essa análise.
             # Sem chat DB, NÃO deve bloquear o primeiro envio.
             dedupe_key = f"{id_atendimento}:{key}:{hashlib.sha1(pergunta.encode('utf-8')).hexdigest()}"
-            if aid_int is not None and aid_int in ids_with_chat_rows and state.is_sent(dedupe_key):
-                log.info(
-                    "Ignorado por ja_enviado (state local + chat DB) | ciclo=%s id_analise=%s id_paciente=%s tipo=%s",
-                    cycle_no, id_analise, id_paciente, key,
+            if state.is_sent(dedupe_key):
+                existing_sent_at = state.get_phone_context_field(phone, "sent_at")
+                fallback_sent_at = existing_sent_at or (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
+                state.set_phone_context(
+                    phone,
+                    {
+                        "id_atendimento": id_atendimento,
+                        "id_paciente": id_paciente,
+                        "nome_paciente": nome_paciente,
+                        "pergunta": pergunta,
+                        "question_key": key,
+                        "url_chatgpt": url_chatgpt,
+                        "sent_at": fallback_sent_at,
+                    },
                 )
                 skipped += 1
                 skipped_already_sent += 1
@@ -1756,6 +1782,7 @@ def process_incoming_replies_once() -> Dict[str, int]:
     chat_rows = wa_web.scan_chat_list_rows()
     if not chat_rows:
         return {"processed": 0, "skipped": 0, "no_match": 0}
+    log.info("Scan sidebar WhatsApp: %s chats visíveis.", len(chat_rows))
 
     contexts = state.all_phone_contexts()
     candidates: List[Dict[str, Any]] = []
@@ -1770,14 +1797,17 @@ def process_incoming_replies_once() -> Dict[str, int]:
         phone_key, ctx = matched
         sent_at_raw = (ctx or {}).get("sent_at") or ""
         sent_at = _parse_datetime(sent_at_raw)
-        if not sent_at:
-            # sem sent_at não há como comparar; não abrir chat à toa
-            continue
         list_dt = _parse_sidebar_datetime(chat.get("time_text") or "", now=now_local)
         if not list_dt:
             continue
-        if list_dt <= sent_at:
-            continue
+        if sent_at:
+            if list_dt <= sent_at:
+                continue
+        else:
+            # Fallback de compatibilidade: sem sent_at persistido, considera
+            # somente chats com sinal de atividade recente (unread/preview).
+            if int(chat.get("unread_count") or 0) <= 0 and not (chat.get("preview_text") or "").strip():
+                continue
         candidates.append({
             "title": title,
             "phone_key": phone_key,
