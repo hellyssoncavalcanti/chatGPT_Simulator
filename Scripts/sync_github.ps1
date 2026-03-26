@@ -200,6 +200,8 @@ function Import-Settings {
         'Scripts\sync_github.settings.ps1',
         'chrome_profile'
     )
+    # Garante que Scripts\sync_github.py nunca fique protegido contra update.
+    $script:Config.protectedItems = @($script:Config.protectedItems | Where-Object { (Normalize-RelativePath $_) -ne (Normalize-RelativePath 'Scripts\sync_github.py') })
 }
 
 function Assert-Configuration {
@@ -733,17 +735,20 @@ function Sync-FilesFromMirror {
         $localPhpRelative = Normalize-RelativePath $script:Config.remotePhpLocalFile
         $pywaRelative = Normalize-RelativePath $script:Config.pywaPattern
         $readmeRelative = Normalize-RelativePath 'README.md'
+        $syncPythonRelative = Normalize-RelativePath 'Scripts\sync_github.py'
+        $restartIgnoredFiles = @($readmeRelative, $syncPythonRelative)
 
         # Junta todos os arquivos novos e atualizados numa única lista (normalizada e sem duplicatas)
         $changedFiles = @($script:AddedFiles) + @($script:UpdatedFiles) | ForEach-Object { Normalize-RelativePath $_ }
         $changedUnique = @(
             $changedFiles |
-            Where-Object { -not [string]::IsNullOrWhiteSpace($_) -and $_ -ne $readmeRelative } |
+            Where-Object { -not [string]::IsNullOrWhiteSpace($_) -and $_ -notin $restartIgnoredFiles } |
             Select-Object -Unique
         )
 
-        if (($changedFiles -contains $readmeRelative) -and $changedUnique.Count -eq 0) {
-            Write-Info 'Apenas README.md foi alterado neste ciclo. Nenhum reinicio sera executado.' -Color Yellow
+        $ignoredOnlyChanged = ($changedFiles.Count -gt 0) -and (($changedFiles | Where-Object { $_ -notin $restartIgnoredFiles }).Count -eq 0)
+        if ($ignoredOnlyChanged) {
+            Write-Info 'Apenas arquivos ignorados para reinicio (README.md e/ou Scripts\sync_github.py) foram alterados neste ciclo. Nenhum reinicio sera executado.' -Color Yellow
         }
 
         $onlyPhp = ($changedUnique.Count -gt 0) -and ($changedUnique | Where-Object { $_ -ne $localPhpRelative }).Count -eq 0
