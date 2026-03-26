@@ -1579,6 +1579,74 @@ class WhatsAppWebClient:
 
 
 wa_web = WhatsAppWebClient()
+_LAST_SIDEBAR_ENRICHMENT_TS = 0.0
+
+
+def _is_named_chat_title(title: str) -> bool:
+    """True when the title looks like a saved contact name (not plain number)."""
+    if not title:
+        return False
+    return _phone_from_title(title) is None
+
+
+def enrich_named_contacts_from_sidebar(
+    chat_rows: List[Dict[str, Any]],
+    *,
+    max_per_cycle: int = 3,
+    min_interval_sec: int = 180,
+) -> int:
+    """Opens a few visible named chats to capture phone/profile and cache them.
+
+    This runs even when no follow-up was sent in the current cycle, ensuring we
+    still build contact mappings for chats shown only by display name.
+    """
+    global _LAST_SIDEBAR_ENRICHMENT_TS
+    now_mono = time.monotonic()
+    if now_mono - _LAST_SIDEBAR_ENRICHMENT_TS < float(min_interval_sec):
+        return 0
+    _LAST_SIDEBAR_ENRICHMENT_TS = now_mono
+
+    aliases = state.get_contact_aliases()
+    enriched = 0
+    for row in chat_rows:
+        if enriched >= max_per_cycle:
+            break
+        title = (row.get("title") or "").strip()
+        if not _is_named_chat_title(title):
+            continue
+        title_key = re.sub(r"\s+", " ", title.lower())
+        if aliases.get(title_key):
+            # Already mapped in local cache.
+            continue
+        try:
+            if not wa_web.open_chat_by_sidebar_click(title):
+                continue
+            details = wa_web.get_open_contact_details()
+            resolved_phone = normalize_phone(
+                details.get("profile_phone") or details.get("phone") or ""
+            )
+            if not resolved_phone:
+                continue
+            _upsert_whatsapp_contact_profile(
+                phone=resolved_phone,
+                display_name=details.get("title") or title,
+                profile_name=details.get("profile_name") or "",
+                wa_chat_title=title,
+                source="sidebar_enrichment",
+            )
+            state.set_contact_alias(title, resolved_phone)
+            log.info(
+                "Enriquecimento sidebar: contato nomeado '%s' -> %s",
+                title,
+                resolved_phone,
+            )
+            enriched += 1
+        except Exception:
+            log.exception("Falha no enriquecimento de contato da sidebar para '%s'", title)
+
+    if enriched:
+        log.info("Enriquecimento de contatos nomeados concluído: %s atualizados.", enriched)
+    return enriched
 
 
 def _log_cycle_summary(cycle_no: int) -> Dict[str, int]:
@@ -2153,6 +2221,13 @@ def process_incoming_replies_once() -> Dict[str, int]:
     if not chat_rows:
         return {"processed": 0, "skipped": 0, "no_match": 0}
     log.info("Scan sidebar WhatsApp: %s chats visíveis.", len(chat_rows))
+
+    # Mesmo sem envio recente, enriquece alguns contatos nomeados para
+    # materializar mapeamentos nome->telefone na tabela dedicada.
+    try:
+        enrich_named_contacts_from_sidebar(chat_rows, max_per_cycle=3, min_interval_sec=180)
+    except Exception:
+        log.exception("Falha no enriquecimento preventivo de contatos nomeados")
 
     contexts = state.all_phone_contexts()
     aliases = state.get_contact_aliases()

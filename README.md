@@ -161,6 +161,8 @@ Objetivo dessa tabela:
 3. Relacionar o contato com `id_paciente` / `id_atendimento` quando possível;
 4. Permitir que o monitor resolva chats cujo título é nome próprio (não número),
    reduzindo falhas de correlação de respostas.
+5. Executar enriquecimento preventivo da sidebar (amostra de chats nomeados),
+   mesmo sem envio novo no ciclo, para popular o cache nome→telefone.
 
 ### Guia rápido de configuração (modo isolado)
 
