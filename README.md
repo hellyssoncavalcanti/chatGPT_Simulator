@@ -145,6 +145,23 @@ python Scripts/pywa_acompanhamento_server.py
 - `PYWA_REPLY_POLL_INTERVAL_SEC` (default: `20`)
 - `PYWA_FETCH_SQL` (permite customizar a query de captação das mensagens de acompanhamento)
 
+### Tabela SQL dedicada para contatos WhatsApp nomeados
+
+Além de `chatgpt_chats` (histórico da conversa), o serviço de acompanhamento
+passa a usar uma tabela de identidade/cache chamada `chatgpt_whatsapp`, criada
+pela migration:
+
+- `Scripts/migrations/002_create_chatgpt_whatsapp.sql`
+
+Objetivo dessa tabela:
+
+1. Guardar telefone WhatsApp normalizado (`whatsapp_phone`);
+2. Guardar nome exibido no chat (`wa_display_name`) e nome do painel
+   **Dados do contato** (`wa_profile_name`);
+3. Relacionar o contato com `id_paciente` / `id_atendimento` quando possível;
+4. Permitir que o monitor resolva chats cujo título é nome próprio (não número),
+   reduzindo falhas de correlação de respostas.
+
 ### Guia rápido de configuração (modo isolado)
 
 1. Garanta acesso ao WhatsApp Web:  
