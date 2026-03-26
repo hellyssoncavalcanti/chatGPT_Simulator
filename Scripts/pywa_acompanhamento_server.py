@@ -1378,34 +1378,14 @@ class WhatsAppWebClient:
         self.start()
 
         def _do():
-            clicked = self._page.evaluate(
-                """(targetTitle) => {
-                    const root = document.querySelector('#pane-side');
-                    if (!root) return false;
-                    const rows = root.querySelectorAll('div[role="row"]');
-                    for (const row of rows) {
-                        const nameArea = row.querySelector('div._ak8q');
-                        if (!nameArea) continue;
-                        const nameSpan = nameArea.querySelector('span[title]');
-                        if (!nameSpan) continue;
-                        const t = (nameSpan.getAttribute('title') || '').trim();
-                        if (t === targetTitle) {
-                            row.click();
-                            return true;
-                        }
-                    }
-                    return false;
-                }""",
-                title,
-            )
-            if clicked:
-                # Wait for chat to load
+            def _wait_chat_loaded() -> bool:
                 try:
                     self._page.wait_for_selector(
                         "#main header, p._aupe, footer div[contenteditable='true']",
                         timeout=8000,
                     )
                     self._page.wait_for_timeout(500)
+                    return True
                 except Exception:
                     log.warning("Timeout aguardando chat abrir para título: %s", title)
                     try:
@@ -1422,7 +1402,75 @@ class WhatsAppWebClient:
                         )
                     except Exception:
                         log.exception("Falha ao coletar diagnóstico de header após timeout para '%s'", title)
-            else:
+                    return False
+
+            clicked = False
+            # Estratégia 1: clique JS por varredura da sidebar (rápido).
+            try:
+                clicked = bool(
+                    self._page.evaluate(
+                        """(targetTitle) => {
+                            const root = document.querySelector('#pane-side');
+                            if (!root) return false;
+                            const rows = root.querySelectorAll('div[role="row"]');
+                            for (const row of rows) {
+                                const nameArea = row.querySelector('div._ak8q');
+                                if (!nameArea) continue;
+                                const nameSpan = nameArea.querySelector('span[title]');
+                                if (!nameSpan) continue;
+                                const t = (nameSpan.getAttribute('title') || '').trim();
+                                if (t === targetTitle) {
+                                    row.click();
+                                    return true;
+                                }
+                            }
+                            return false;
+                        }""",
+                        title,
+                    )
+                )
+            except Exception:
+                log.exception("Falha na estratégia JS de abrir chat '%s'", title)
+
+            # Estratégia 2: locator Playwright (mais robusto com virtualização/scroll).
+            if not clicked:
+                try:
+                    row = self._page.locator("#pane-side div[role='row']").filter(
+                        has=self._page.locator("span[title]").filter(has_text=title)
+                    ).first
+                    if row.count() > 0:
+                        row.scroll_into_view_if_needed(timeout=3000)
+                        row.click(timeout=5000)
+                        clicked = True
+                except Exception:
+                    log.exception("Falha na estratégia locator para abrir chat '%s'", title)
+
+            if clicked and _wait_chat_loaded():
+                return True
+
+            # Estratégia 3 (fallback): usa caixa de pesquisa da sidebar e Enter.
+            try:
+                search = self._page.locator(
+                    "#side div[contenteditable='true'][role='textbox'], "
+                    "div[aria-label='Pesquisar ou começar uma nova conversa'][contenteditable='true'], "
+                    "div[aria-label='Search or start new chat'][contenteditable='true']"
+                ).first
+                if search.count() > 0:
+                    search.click(timeout=3000)
+                    self._page.keyboard.press("Control+A")
+                    self._page.keyboard.press("Backspace")
+                    self._page.keyboard.type(title, delay=20)
+                    self._page.keyboard.press("Enter")
+                    clicked = _wait_chat_loaded()
+                    log.info(
+                        "Fallback pesquisa sidebar para '%s' | sucesso=%s",
+                        title,
+                        clicked,
+                    )
+            except Exception:
+                log.exception("Falha na estratégia de pesquisa para abrir chat '%s'", title)
+
+            if not clicked:
                 try:
                     visible_titles = self._page.evaluate(
                         """() => {
@@ -1632,6 +1680,7 @@ def enrich_named_contacts_from_sidebar(
     chat_rows: List[Dict[str, Any]],
     *,
     max_per_cycle: int = 3,
+    max_attempts: int = 3,
     min_interval_sec: int = 180,
 ) -> int:
     """Opens a few visible named chats to capture phone/profile and cache them.
@@ -1656,14 +1705,18 @@ def enrich_named_contacts_from_sidebar(
     skipped_alias_exists = 0
     skipped_open_failed = 0
     skipped_no_phone = 0
+    attempts = 0
     log.info(
-        "Enriquecimento sidebar iniciado | chats_visíveis=%s | aliases_cache=%s | max_por_ciclo=%s",
+        "Enriquecimento sidebar iniciado | chats_visíveis=%s | aliases_cache=%s | max_por_ciclo=%s | max_tentativas=%s",
         len(chat_rows),
         len(aliases),
         max_per_cycle,
+        max_attempts,
     )
     for row in chat_rows:
         if enriched >= max_per_cycle:
+            break
+        if attempts >= max_attempts:
             break
         title = (row.get("title") or "").strip()
         if not _is_named_chat_title(title):
@@ -1674,6 +1727,7 @@ def enrich_named_contacts_from_sidebar(
             # Already mapped in local cache.
             skipped_alias_exists += 1
             continue
+        attempts += 1
         log.info("Enriquecimento sidebar: tentando capturar contato nomeado '%s'", title)
         try:
             if not wa_web.open_chat_by_sidebar_click(title):
@@ -1710,12 +1764,13 @@ def enrich_named_contacts_from_sidebar(
 
     log.info(
         "Enriquecimento sidebar finalizado | atualizados=%s | skip_not_named=%s | "
-        "skip_alias_exists=%s | skip_open_failed=%s | skip_no_phone=%s",
+        "skip_alias_exists=%s | skip_open_failed=%s | skip_no_phone=%s | tentativas=%s",
         enriched,
         skipped_not_named,
         skipped_alias_exists,
         skipped_open_failed,
         skipped_no_phone,
+        attempts,
     )
     return enriched
 
