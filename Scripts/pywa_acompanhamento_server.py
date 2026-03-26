@@ -1674,31 +1674,114 @@ class WhatsAppWebClient:
                     const pickPhone = (txt) => {
                         if (!txt) return '';
                         const m = String(txt).match(/\\+?\\d[\\d\\s\\-()]{7,}/);
-                        return m ? m[0].replace(/\\D/g, '') : '';
+                        if (!m) return '';
+                        const digits = m[0].replace(/\\D/g, '');
+                        return (digits.length >= 10 && digits.length <= 15) ? digits : '';
+                    };
+                    const isVisible = (el) => {
+                        if (!el) return false;
+                        const style = window.getComputedStyle(el);
+                        if (!style) return false;
+                        if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
+                        const rect = el.getBoundingClientRect();
+                        return rect.width > 0 && rect.height > 0;
                     };
                     const out = { profile_name: '', profile_phone: '' };
-                    const panelRoot =
-                        document.querySelector('div[aria-label=\"Dados do contato\"], div[aria-label=\"Contact info\"], div[role=\"dialog\"]')
-                        || document.body;
+                    const isNoiseText = (txt) => {
+                        const lower = String(txt || '').trim().toLowerCase();
+                        if (!lower) return true;
+                        return (
+                            lower.includes('dados do contato')
+                            || lower.includes('contact info')
+                            || lower.includes('mídia')
+                            || lower.includes('media')
+                            || lower.includes('mensagens favoritas')
+                            || lower.includes('silenciar')
+                            || lower.includes('wa-wordmark')
+                            || lower.includes('meta ai')
+                        );
+                    };
 
-                    const preferredName = panelRoot.querySelector('h2, h1');
-                    if (preferredName) {
-                        out.profile_name = (preferredName.textContent || '').trim();
+                    let panelRoot = null;
+                    const heading = Array.from(
+                        document.querySelectorAll('h1, h2, div[role=\"heading\"], span[dir=\"auto\"], span')
+                    ).find((n) => /dados do contato|contact info/i.test((n.textContent || '').trim()));
+                    if (heading) {
+                        const candidate = heading.closest('section, aside, div[role=\"dialog\"], div[role=\"region\"]');
+                        if (candidate && isVisible(candidate)) {
+                            const rect = candidate.getBoundingClientRect();
+                            if (rect.width >= 220 && rect.height >= 180 && rect.left >= (window.innerWidth * 0.45)) {
+                                panelRoot = candidate;
+                            }
+                        }
                     }
+
+                    if (!panelRoot) {
+                        const direct =
+                            document.querySelector('div[aria-label=\"Dados do contato\"]')
+                            || document.querySelector('div[aria-label=\"Contact info\"]')
+                            || document.querySelector('aside[aria-label=\"Dados do contato\"]')
+                            || document.querySelector('aside[aria-label=\"Contact info\"]');
+                        if (direct && isVisible(direct)) {
+                            const rect = direct.getBoundingClientRect();
+                            if (rect.width >= 220 && rect.height >= 180 && rect.left >= (window.innerWidth * 0.45)) {
+                                panelRoot = direct;
+                            }
+                        }
+                    }
+
+                    if (!panelRoot) {
+                        const phoneNodes = Array.from(
+                            document.querySelectorAll('[data-testid=\"selectable-text\"], span[dir=\"auto\"], span')
+                        ).filter((n) => !!pickPhone((n.textContent || '').trim()));
+                        for (const n of phoneNodes) {
+                            const candidate = n.closest('section, aside, div[role=\"dialog\"], div[role=\"region\"], div');
+                            if (!candidate || !isVisible(candidate)) continue;
+                            const rect = candidate.getBoundingClientRect();
+                            if (rect.width < 220 || rect.height < 180) continue;
+                            if (rect.left < (window.innerWidth * 0.45)) continue;
+                            panelRoot = candidate;
+                            break;
+                        }
+                    }
+                    if (!panelRoot) return out;
+
+                    const preferredName = Array.from(
+                        panelRoot.querySelectorAll('h1, h2, div[role=\"heading\"], span[dir=\"auto\"], span[title]')
+                    ).find((n) => {
+                        const txt = (n.getAttribute?.('title') || n.textContent || '').trim();
+                        if (!txt) return false;
+                        if (!isVisible(n)) return false;
+                        if (isNoiseText(txt)) return false;
+                        return txt.length >= 3;
+                    });
+                    if (preferredName) out.profile_name = (preferredName.getAttribute?.('title') || preferredName.textContent || '').trim();
 
                     if (!out.profile_name) {
                         const candidates = panelRoot.querySelectorAll('span[dir=\"auto\"], div[role=\"heading\"]');
                         for (const c of candidates) {
-                            const txt = (c.textContent || '').trim();
+                            const txt = (c.getAttribute?.('title') || c.textContent || '').trim();
                             if (!txt) continue;
-                            if (/dados do contato|contact info|mídia|media|mensagens favoritas|silenciar/i.test(txt.toLowerCase())) continue;
+                            if (!isVisible(c)) continue;
+                            if (isNoiseText(txt)) continue;
                             out.profile_name = txt;
                             break;
                         }
                     }
 
+                    const selectable = panelRoot.querySelectorAll('[data-testid=\"selectable-text\"]');
+                    for (const t of selectable) {
+                        if (!isVisible(t)) continue;
+                        const txt = (t.textContent || '').trim();
+                        if (!txt) continue;
+                        const p = pickPhone(txt);
+                        if (p.length >= 10) { out.profile_phone = p; break; }
+                    }
+
                     const texts = panelRoot.querySelectorAll('span, div, p');
                     for (const t of texts) {
+                        if (out.profile_phone) break;
+                        if (!isVisible(t)) continue;
                         const txt = (t.textContent || '').trim();
                         if (!txt) continue;
                         const p = pickPhone(txt);
@@ -1720,6 +1803,8 @@ class WhatsAppWebClient:
                 "profile_name": str(data.get("profile_name") or "").strip(),
                 "profile_phone": str(data.get("profile_phone") or "").strip(),
             }
+            if not result["profile_name"] and result["title"] and _phone_from_title(result["title"]) is None:
+                result["profile_name"] = result["title"]
             if not panel_visible:
                 log.warning(
                     "Painel Dados do contato não ficou visível ao extrair detalhes | base=%s",
