@@ -54,15 +54,30 @@
     return { title, phone };
   };
 
+  const isPanelContainer = (el) => {
+    if (!el) return false;
+    const role = (el.getAttribute('role') || '').toLowerCase();
+    if (role === 'menu' || role === 'menuitem') return false;
+    const rect = el.getBoundingClientRect();
+    if (rect.width < 240 || rect.height < 220) return false;
+    // Painel de contato normalmente ocupa lado direito da viewport.
+    if (rect.left < window.innerWidth * 0.45) return false;
+    return true;
+  };
+
   const pickPanel = () => {
-    const heading = Array.from(document.querySelectorAll('h1,h2,div[role="heading"],span'))
-      .find((n) => /dados do contato|contact info/i.test(norm(n.textContent)));
+    const heading = Array.from(document.querySelectorAll('h1,h2,div[role="heading"]'))
+      .find((n) => /^(dados do contato|contact info)$/i.test(norm(n.textContent)));
 
     let root = null;
-    if (heading) root = heading.closest('section,aside,div[role="dialog"],div[role="region"]');
+    if (heading) {
+      const candidate = heading.closest('section,aside,div[role="dialog"],div[role="region"]');
+      if (isPanelContainer(candidate)) root = candidate;
+    }
 
     if (!root) {
-      root = document.querySelector('div[aria-label="Dados do contato"],div[aria-label="Contact info"],aside[aria-label="Dados do contato"],aside[aria-label="Contact info"]');
+      const direct = document.querySelector('div[aria-label="Dados do contato"],div[aria-label="Contact info"],aside[aria-label="Dados do contato"],aside[aria-label="Contact info"]');
+      if (isPanelContainer(direct)) root = direct;
     }
 
     const panelVisible = !!root;
