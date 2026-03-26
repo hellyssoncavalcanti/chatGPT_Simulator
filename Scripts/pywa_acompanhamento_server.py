@@ -262,6 +262,129 @@ def run_sql(query: str) -> List[Dict[str, Any]]:
     return res.get("data") or []
 
 
+def _sql_escape(value: Any) -> str:
+    """Escape value for string interpolation in SQL built by this service."""
+    return str(value or "").replace("\\", "\\\\").replace("'", "''")
+
+
+def _upsert_whatsapp_contact_profile(
+    *,
+    phone: Optional[str],
+    display_name: str,
+    profile_name: str,
+    source: str,
+    wa_chat_title: str = "",
+    id_paciente: Any = None,
+    id_atendimento: Any = None,
+) -> None:
+    """Persist WhatsApp contact metadata in chatgpt_whatsapp table."""
+    safe_phone = _sql_escape(normalize_phone(phone) or "")
+    safe_display_name = _sql_escape(display_name)
+    safe_profile_name = _sql_escape(profile_name)
+    safe_chat_title = _sql_escape(wa_chat_title)
+    safe_source = _sql_escape(source)
+    profile_json = json.dumps(
+        {
+            "captured_at_utc": utc_now_iso(),
+            "display_name": display_name or "",
+            "profile_name": profile_name or "",
+            "wa_chat_title": wa_chat_title or "",
+            "source": source or "",
+        },
+        ensure_ascii=False,
+    )
+    safe_profile_json = _sql_escape(profile_json)
+    id_paciente_sql = str(int(id_paciente)) if str(id_paciente).strip().isdigit() else "NULL"
+    id_atendimento_sql = str(int(id_atendimento)) if str(id_atendimento).strip().isdigit() else "NULL"
+    is_named_contact = 0
+    has_display_name = bool((display_name or "").strip())
+    has_phone_title = bool(_phone_from_title(display_name))
+    if has_display_name and not has_phone_title:
+        is_named_contact = 1
+
+    query = (
+        "INSERT INTO chatgpt_whatsapp "
+        "(whatsapp_phone, wa_display_name, wa_profile_name, wa_chat_title, "
+        " id_paciente, id_atendimento, is_named_contact, profile_payload_json, "
+        " source, first_seen_at, last_seen_at, updated_at) "
+        "VALUES ("
+        f"'{safe_phone}', "
+        f"'{safe_display_name}', "
+        f"'{safe_profile_name}', "
+        f"'{safe_chat_title}', "
+        f"{id_paciente_sql}, "
+        f"{id_atendimento_sql}, "
+        f"{is_named_contact}, "
+        f"'{safe_profile_json}', "
+        f"'{safe_source}', "
+        "UTC_TIMESTAMP(), UTC_TIMESTAMP(), UTC_TIMESTAMP()"
+        ") "
+        "ON DUPLICATE KEY UPDATE "
+        "wa_display_name = VALUES(wa_display_name), "
+        "wa_profile_name = VALUES(wa_profile_name), "
+        "wa_chat_title = VALUES(wa_chat_title), "
+        "is_named_contact = VALUES(is_named_contact), "
+        "id_paciente = COALESCE(VALUES(id_paciente), id_paciente), "
+        "id_atendimento = COALESCE(VALUES(id_atendimento), id_atendimento), "
+        "profile_payload_json = VALUES(profile_payload_json), "
+        "source = VALUES(source), "
+        "last_seen_at = UTC_TIMESTAMP(), "
+        "updated_at = UTC_TIMESTAMP()"
+    )
+    try:
+        run_sql(query)
+    except Exception:
+        log.exception(
+            "Falha ao persistir perfil do contato WhatsApp | phone=%s display='%s'",
+            phone,
+            display_name,
+        )
+
+
+def lookup_whatsapp_contact_profile(phone: str) -> Optional[Dict[str, Any]]:
+    """Fetch a normalized WhatsApp contact profile from chatgpt_whatsapp."""
+    norm = normalize_phone(phone)
+    if not norm:
+        return None
+    safe_phone = _sql_escape(norm)
+    query = (
+        "SELECT whatsapp_phone, wa_display_name, wa_profile_name, wa_chat_title, "
+        "       id_paciente, id_atendimento, is_named_contact, last_seen_at "
+        "FROM chatgpt_whatsapp "
+        f"WHERE whatsapp_phone = '{safe_phone}' "
+        "ORDER BY id DESC LIMIT 1"
+    )
+    try:
+        rows = run_sql(query)
+        if rows:
+            return rows[0]
+    except Exception:
+        log.exception("Falha ao buscar perfil de contato WhatsApp para phone=%s", phone)
+    return None
+
+
+def lookup_whatsapp_contact_by_display_name(display_name: str) -> Optional[Dict[str, Any]]:
+    """Find the latest WhatsApp contact profile by saved display name."""
+    norm_name = re.sub(r"\s+", " ", str(display_name or "").strip())
+    if len(norm_name) < 2:
+        return None
+    safe_name = _sql_escape(norm_name)
+    query = (
+        "SELECT whatsapp_phone, wa_display_name, wa_profile_name, wa_chat_title, "
+        "       id_paciente, id_atendimento, is_named_contact, last_seen_at "
+        "FROM chatgpt_whatsapp "
+        f"WHERE wa_display_name = '{safe_name}' "
+        "ORDER BY id DESC LIMIT 1"
+    )
+    try:
+        rows = run_sql(query)
+        if rows:
+            return rows[0]
+    except Exception:
+        log.exception("Falha ao buscar perfil WhatsApp por nome='%s'", norm_name)
+    return None
+
+
 def insert_whatsapp_chat(
     phone: str,
     id_paciente: Any,
@@ -1255,36 +1378,133 @@ class WhatsAppWebClient:
         self.start()
 
         def _do():
-            clicked = self._page.evaluate(
-                """(targetTitle) => {
-                    const root = document.querySelector('#pane-side');
-                    if (!root) return false;
-                    const rows = root.querySelectorAll('div[role="row"]');
-                    for (const row of rows) {
-                        const nameArea = row.querySelector('div._ak8q');
-                        if (!nameArea) continue;
-                        const nameSpan = nameArea.querySelector('span[title]');
-                        if (!nameSpan) continue;
-                        const t = (nameSpan.getAttribute('title') || '').trim();
-                        if (t === targetTitle) {
-                            row.click();
-                            return true;
-                        }
-                    }
-                    return false;
-                }""",
-                title,
-            )
-            if clicked:
-                # Wait for chat to load
+            # Garante que nenhum drawer lateral (ex.: "Dados do contato")
+            # esteja bloqueando o fluxo de abertura do chat.
+            try:
+                self._page.keyboard.press("Escape")
+                self._page.wait_for_timeout(150)
+                self._page.keyboard.press("Escape")
+                self._page.wait_for_timeout(150)
+            except Exception:
+                pass
+
+            def _wait_chat_loaded() -> bool:
                 try:
                     self._page.wait_for_selector(
                         "#main header, p._aupe, footer div[contenteditable='true']",
                         timeout=8000,
                     )
                     self._page.wait_for_timeout(500)
+                    return True
                 except Exception:
                     log.warning("Timeout aguardando chat abrir para título: %s", title)
+                    try:
+                        header_title = self._page.evaluate(
+                            """() => {
+                                const h = document.querySelector('#main header span[title], #main header span[dir="auto"]');
+                                return h ? (h.getAttribute('title') || h.textContent || '').trim() : '';
+                            }"""
+                        )
+                        log.warning(
+                            "Diagnóstico timeout open_chat_by_sidebar_click | alvo='%s' | header_atual='%s'",
+                            title,
+                            header_title or "(vazio)",
+                        )
+                    except Exception:
+                        log.exception("Falha ao coletar diagnóstico de header após timeout para '%s'", title)
+                    return False
+
+            clicked = False
+            # Estratégia 1: clique JS por varredura da sidebar (rápido).
+            try:
+                clicked = bool(
+                    self._page.evaluate(
+                        """(targetTitle) => {
+                            const root = document.querySelector('#pane-side');
+                            if (!root) return false;
+                            const rows = root.querySelectorAll('div[role="row"]');
+                            for (const row of rows) {
+                                const nameArea = row.querySelector('div._ak8q');
+                                if (!nameArea) continue;
+                                const nameSpan = nameArea.querySelector('span[title]');
+                                if (!nameSpan) continue;
+                                const t = (nameSpan.getAttribute('title') || '').trim();
+                                if (t === targetTitle) {
+                                    row.click();
+                                    return true;
+                                }
+                            }
+                            return false;
+                        }""",
+                        title,
+                    )
+                )
+            except Exception:
+                log.exception("Falha na estratégia JS de abrir chat '%s'", title)
+
+            # Estratégia 2: locator Playwright (mais robusto com virtualização/scroll).
+            if not clicked:
+                try:
+                    row = self._page.locator("#pane-side div[role='row']").filter(
+                        has=self._page.locator("span[title]").filter(has_text=title)
+                    ).first
+                    if row.count() > 0:
+                        row.scroll_into_view_if_needed(timeout=3000)
+                        row.click(timeout=5000)
+                        clicked = True
+                except Exception:
+                    log.exception("Falha na estratégia locator para abrir chat '%s'", title)
+
+            if clicked and _wait_chat_loaded():
+                return True
+
+            # Estratégia 3 (fallback): usa caixa de pesquisa da sidebar e Enter.
+            try:
+                search = self._page.locator(
+                    "#side div[contenteditable='true'][role='textbox'], "
+                    "div[aria-label='Pesquisar ou começar uma nova conversa'][contenteditable='true'], "
+                    "div[aria-label='Search or start new chat'][contenteditable='true']"
+                ).first
+                if search.count() > 0:
+                    search.click(timeout=3000)
+                    self._page.keyboard.press("Control+A")
+                    self._page.keyboard.press("Backspace")
+                    self._page.keyboard.type(title, delay=20)
+                    self._page.keyboard.press("Enter")
+                    clicked = _wait_chat_loaded()
+                    log.info(
+                        "Fallback pesquisa sidebar para '%s' | sucesso=%s",
+                        title,
+                        clicked,
+                    )
+            except Exception:
+                log.exception("Falha na estratégia de pesquisa para abrir chat '%s'", title)
+
+            if not clicked:
+                try:
+                    visible_titles = self._page.evaluate(
+                        """() => {
+                            const root = document.querySelector('#pane-side');
+                            if (!root) return [];
+                            const rows = root.querySelectorAll('div[role="row"]');
+                            const out = [];
+                            for (const row of rows) {
+                                const n = row.querySelector('div._ak8q span[title]');
+                                const t = (n?.getAttribute?.('title') || '').trim();
+                                if (!t) continue;
+                                out.push(t);
+                                if (out.length >= 12) break;
+                            }
+                            return out;
+                        }"""
+                    )
+                    log.warning(
+                        "Chat não encontrado para clique na sidebar | alvo='%s' | visíveis=%s",
+                        title,
+                        " | ".join(visible_titles or []),
+                    )
+                except Exception:
+                    log.exception("Falha ao coletar títulos visíveis no diagnóstico de clique '%s'", title)
             return bool(clicked)
 
         return self._run_on_browser_thread(_do)
@@ -1378,8 +1598,240 @@ class WhatsAppWebClient:
             "phone": normalize_phone(result.get("phone")) or "",
         }
 
+    def get_open_contact_details(self) -> Dict[str, str]:
+        """Open contact details panel and extract visible profile information.
+
+        Returns:
+          {title, phone, profile_name, profile_phone}
+        """
+        self.start()
+
+        def _do():
+            # Fecha possível painel já aberto e volta ao chat.
+            try:
+                self._page.keyboard.press("Escape")
+                self._page.wait_for_timeout(150)
+            except Exception:
+                pass
+
+            header = self._page.locator("#main header").first
+            if header.count() == 0:
+                return {"title": "", "phone": "", "profile_name": "", "profile_phone": ""}
+
+            # Captura identidade visível no header ANTES de abrir o painel.
+            base = self._page.evaluate(
+                """() => {
+                    const pickPhone = (txt) => {
+                        if (!txt) return '';
+                        const m = String(txt).match(/\\+?\\d[\\d\\s\\-()]{7,}/);
+                        return m ? m[0].replace(/\\D/g, '') : '';
+                    };
+                    const header = document.querySelector('#main header');
+                    if (!header) return { title: '', phone: '' };
+                    const titleEl = header.querySelector('span[title]') || header.querySelector('span[dir="auto"]');
+                    const title = (titleEl?.getAttribute?.('title') || titleEl?.textContent || '').trim();
+                    let phone = '';
+                    for (const s of header.querySelectorAll('span[title], span[dir=\"auto\"], span')) {
+                        const txt = (s.getAttribute?.('title') || s.textContent || '').trim();
+                        const p = pickPhone(txt);
+                        if (p.length >= 10) { phone = p; break; }
+                    }
+                    return { title, phone };
+                }"""
+            ) or {}
+
+            try:
+                header.click(timeout=3000)
+            except Exception:
+                return {
+                    "title": str(base.get("title") or "").strip(),
+                    "phone": str(base.get("phone") or "").strip(),
+                    "profile_name": "",
+                    "profile_phone": "",
+                }
+
+            panel_visible = False
+            try:
+                self._page.wait_for_selector("text=/Dados do contato|Contact info/i", timeout=5000)
+                panel_visible = True
+            except Exception:
+                panel_visible = False
+
+            data = self._page.evaluate(
+                """() => {
+                    const pickPhone = (txt) => {
+                        if (!txt) return '';
+                        const m = String(txt).match(/\\+?\\d[\\d\\s\\-()]{7,}/);
+                        return m ? m[0].replace(/\\D/g, '') : '';
+                    };
+                    const out = { profile_name: '', profile_phone: '' };
+                    const panelRoot =
+                        document.querySelector('div[aria-label=\"Dados do contato\"], div[aria-label=\"Contact info\"], div[role=\"dialog\"]')
+                        || document.body;
+
+                    const preferredName = panelRoot.querySelector('h2, h1');
+                    if (preferredName) {
+                        out.profile_name = (preferredName.textContent || '').trim();
+                    }
+
+                    if (!out.profile_name) {
+                        const candidates = panelRoot.querySelectorAll('span[dir=\"auto\"], div[role=\"heading\"]');
+                        for (const c of candidates) {
+                            const txt = (c.textContent || '').trim();
+                            if (!txt) continue;
+                            if (/dados do contato|contact info|mídia|media|mensagens favoritas|silenciar/i.test(txt.toLowerCase())) continue;
+                            out.profile_name = txt;
+                            break;
+                        }
+                    }
+
+                    const texts = panelRoot.querySelectorAll('span, div, p');
+                    for (const t of texts) {
+                        const txt = (t.textContent || '').trim();
+                        if (!txt) continue;
+                        const p = pickPhone(txt);
+                        if (p.length >= 10) { out.profile_phone = p; break; }
+                    }
+                    return out;
+                }"""
+            ) or {}
+
+            try:
+                self._page.keyboard.press("Escape")
+                self._page.wait_for_timeout(150)
+            except Exception:
+                pass
+
+            result = {
+                "title": str(base.get("title") or "").strip(),
+                "phone": str(base.get("phone") or "").strip(),
+                "profile_name": str(data.get("profile_name") or "").strip(),
+                "profile_phone": str(data.get("profile_phone") or "").strip(),
+            }
+            if not panel_visible:
+                log.warning(
+                    "Painel Dados do contato não ficou visível ao extrair detalhes | base=%s",
+                    json.dumps(result, ensure_ascii=False),
+                )
+            return result
+
+        result = self._run_on_browser_thread(_do) or {}
+        return {
+            "title": str(result.get("title") or "").strip(),
+            "phone": normalize_phone(result.get("phone")) or "",
+            "profile_name": str(result.get("profile_name") or "").strip(),
+            "profile_phone": normalize_phone(result.get("profile_phone")) or "",
+        }
+
 
 wa_web = WhatsAppWebClient()
+_LAST_SIDEBAR_ENRICHMENT_TS = 0.0
+
+
+def _is_named_chat_title(title: str) -> bool:
+    """True when the title looks like a saved contact name (not plain number)."""
+    if not title:
+        return False
+    return _phone_from_title(title) is None
+
+
+def enrich_named_contacts_from_sidebar(
+    chat_rows: List[Dict[str, Any]],
+    *,
+    max_per_cycle: int = 3,
+    max_attempts: int = 3,
+    min_interval_sec: int = 180,
+) -> int:
+    """Opens a few visible named chats to capture phone/profile and cache them.
+
+    This runs even when no follow-up was sent in the current cycle, ensuring we
+    still build contact mappings for chats shown only by display name.
+    """
+    global _LAST_SIDEBAR_ENRICHMENT_TS
+    now_mono = time.monotonic()
+    if now_mono - _LAST_SIDEBAR_ENRICHMENT_TS < float(min_interval_sec):
+        log.info(
+            "Enriquecimento sidebar: pulado por intervalo mínimo | delta=%.1fs < %ss",
+            now_mono - _LAST_SIDEBAR_ENRICHMENT_TS,
+            min_interval_sec,
+        )
+        return 0
+    _LAST_SIDEBAR_ENRICHMENT_TS = now_mono
+
+    aliases = state.get_contact_aliases()
+    enriched = 0
+    skipped_not_named = 0
+    skipped_alias_exists = 0
+    skipped_open_failed = 0
+    skipped_no_phone = 0
+    attempts = 0
+    log.info(
+        "Enriquecimento sidebar iniciado | chats_visíveis=%s | aliases_cache=%s | max_por_ciclo=%s | max_tentativas=%s",
+        len(chat_rows),
+        len(aliases),
+        max_per_cycle,
+        max_attempts,
+    )
+    for row in chat_rows:
+        if enriched >= max_per_cycle:
+            break
+        if attempts >= max_attempts:
+            break
+        title = (row.get("title") or "").strip()
+        if not _is_named_chat_title(title):
+            skipped_not_named += 1
+            continue
+        title_key = re.sub(r"\s+", " ", title.lower())
+        if aliases.get(title_key):
+            # Already mapped in local cache.
+            skipped_alias_exists += 1
+            continue
+        attempts += 1
+        log.info("Enriquecimento sidebar: tentando capturar contato nomeado '%s'", title)
+        try:
+            if not wa_web.open_chat_by_sidebar_click(title):
+                skipped_open_failed += 1
+                continue
+            details = wa_web.get_open_contact_details()
+            resolved_phone = normalize_phone(
+                details.get("profile_phone") or details.get("phone") or ""
+            )
+            if not resolved_phone:
+                skipped_no_phone += 1
+                log.warning(
+                    "Enriquecimento sidebar sem telefone extraído | title='%s' | details=%s",
+                    title,
+                    json.dumps(details, ensure_ascii=False),
+                )
+                continue
+            _upsert_whatsapp_contact_profile(
+                phone=resolved_phone,
+                display_name=details.get("title") or title,
+                profile_name=details.get("profile_name") or "",
+                wa_chat_title=title,
+                source="sidebar_enrichment",
+            )
+            state.set_contact_alias(title, resolved_phone)
+            log.info(
+                "Enriquecimento sidebar: contato nomeado '%s' -> %s",
+                title,
+                resolved_phone,
+            )
+            enriched += 1
+        except Exception:
+            log.exception("Falha no enriquecimento de contato da sidebar para '%s'", title)
+
+    log.info(
+        "Enriquecimento sidebar finalizado | atualizados=%s | skip_not_named=%s | "
+        "skip_alias_exists=%s | skip_open_failed=%s | skip_no_phone=%s | tentativas=%s",
+        enriched,
+        skipped_not_named,
+        skipped_alias_exists,
+        skipped_open_failed,
+        skipped_no_phone,
+        attempts,
+    )
+    return enriched
 
 
 def _log_cycle_summary(cycle_no: int) -> Dict[str, int]:
@@ -1667,6 +2119,26 @@ def send_pending_followups_once(cycle_no: int) -> Dict[str, Any]:
             except Exception:
                 log.exception("Falha ao mapear alias do contato após envio WhatsApp")
 
+            # Captura dados de "Dados do contato" no WhatsApp e persiste em tabela dedicada.
+            try:
+                details = wa_web.get_open_contact_details()
+                mapped_phone = (
+                    details.get("profile_phone")
+                    or details.get("phone")
+                    or item["phone"]
+                )
+                _upsert_whatsapp_contact_profile(
+                    phone=mapped_phone,
+                    display_name=details.get("title") or item["nome_paciente"] or "",
+                    profile_name=details.get("profile_name") or "",
+                    wa_chat_title=details.get("title") or "",
+                    id_paciente=item.get("id_paciente"),
+                    id_atendimento=item.get("id_atendimento"),
+                    source="send_followup",
+                )
+            except Exception:
+                log.exception("Falha ao persistir dados do contato WhatsApp após envio")
+
             sent_at_iso = utc_now_iso()
             state.mark_sent(
                 item["dedupe_key"],
@@ -1866,7 +2338,56 @@ def _resolve_chat_to_atendimento(
                 result.setdefault("telefone", norm)
                 return result
 
-    # 3) Fallback: try matching by name
+    # 3) Lookup em tabela dedicada de contatos WhatsApp (quando o chat aparece
+    # por nome salvo e o telefone não está explícito na lista).
+    for candidate_phone in [phone, normalize_phone(phone_hint) if phone_hint else None]:
+        if not candidate_phone:
+            continue
+        profile = lookup_whatsapp_contact_profile(candidate_phone)
+        if not profile:
+            continue
+        profile_patient = profile.get("id_paciente")
+        profile_atendimento = profile.get("id_atendimento")
+        if profile_patient:
+            try:
+                rows = run_sql(
+                    "SELECT caa.id AS id_analise, caa.id_atendimento, caa.id_paciente, "
+                    "       caa.chat_url, m.nome AS nome_paciente "
+                    "FROM chatgpt_atendimentos_analise caa "
+                    "JOIN membros m ON m.id = caa.id_paciente "
+                    f"WHERE caa.id_paciente = {int(profile_patient)} "
+                    "  AND caa.chat_url IS NOT NULL AND caa.chat_url <> '' "
+                    "  AND caa.status = 'concluido' "
+                    + (f"AND caa.id_atendimento = {int(profile_atendimento)} " if profile_atendimento else "")
+                    + "ORDER BY caa.id DESC LIMIT 1"
+                )
+                if rows:
+                    row = rows[0]
+                    return {
+                        "id_analise": row.get("id_analise"),
+                        "id_atendimento": row.get("id_atendimento"),
+                        "id_paciente": row.get("id_paciente"),
+                        "chat_url": (row.get("chat_url") or "").strip(),
+                        "nome_paciente": row.get("nome_paciente") or profile.get("wa_display_name"),
+                        "telefone": candidate_phone,
+                    }
+            except Exception:
+                log.exception(
+                    "Falha ao resolver atendimento via chatgpt_whatsapp para phone=%s",
+                    candidate_phone,
+                )
+
+    # 4) Lookup por nome previamente armazenado em chatgpt_whatsapp.
+    by_name_profile = lookup_whatsapp_contact_by_display_name(title)
+    if by_name_profile:
+        by_name_phone = normalize_phone(by_name_profile.get("whatsapp_phone"))
+        if by_name_phone:
+            result = lookup_atendimento_by_phone(by_name_phone)
+            if result:
+                result.setdefault("telefone", by_name_phone)
+                return result
+
+    # 5) Fallback: try matching by name
     result = lookup_atendimento_by_name(title)
     return result
 
@@ -1886,30 +2407,50 @@ def process_incoming_replies_once() -> Dict[str, int]:
         return {"processed": 0, "skipped": 0, "no_match": 0}
     log.info("Scan sidebar WhatsApp: %s chats visíveis.", len(chat_rows))
 
+    # Mesmo sem envio recente, enriquece alguns contatos nomeados para
+    # materializar mapeamentos nome->telefone na tabela dedicada.
+    try:
+        enrich_named_contacts_from_sidebar(chat_rows, max_per_cycle=3, min_interval_sec=180)
+    except Exception:
+        log.exception("Falha no enriquecimento preventivo de contatos nomeados")
+
     contexts = state.all_phone_contexts()
     aliases = state.get_contact_aliases()
+    log.info(
+        "Monitor replies: contextos_monitorados=%s | aliases_cache=%s",
+        len(contexts),
+        len(aliases),
+    )
     candidates: List[Dict[str, Any]] = []
     now_local = datetime.now()
+    skipped_not_matched = 0
+    skipped_no_time = 0
+    skipped_before_sent = 0
+    skipped_no_recent_signal = 0
     for chat in chat_rows:
         title = (chat.get("title") or "").strip()
         if not title:
             continue
         matched = _match_context_for_chat_title(title, contexts, aliases=aliases)
         if not matched:
+            skipped_not_matched += 1
             continue
         phone_key, ctx = matched
         sent_at_raw = (ctx or {}).get("sent_at") or ""
         sent_at = _parse_datetime(sent_at_raw)
         list_dt = _parse_sidebar_datetime(chat.get("time_text") or "", now=now_local)
         if not list_dt:
+            skipped_no_time += 1
             continue
         if sent_at:
             if list_dt <= sent_at:
+                skipped_before_sent += 1
                 continue
         else:
             # Fallback de compatibilidade: sem sent_at persistido, considera
             # somente chats com sinal de atividade recente (unread/preview).
             if int(chat.get("unread_count") or 0) <= 0 and not (chat.get("preview_text") or "").strip():
+                skipped_no_recent_signal += 1
                 continue
         candidates.append({
             "title": title,
@@ -1921,6 +2462,15 @@ def process_incoming_replies_once() -> Dict[str, int]:
         })
 
     if not candidates:
+        log.info(
+            "Monitor replies: nenhum candidato após filtros | total_chats=%s | "
+            "skip_not_matched=%s | skip_no_time=%s | skip_before_sent=%s | skip_no_recent_signal=%s",
+            len(chat_rows),
+            skipped_not_matched,
+            skipped_no_time,
+            skipped_before_sent,
+            skipped_no_recent_signal,
+        )
         return {"processed": 0, "skipped": 0, "no_match": 0}
 
     log.info(
@@ -1958,6 +2508,29 @@ def process_incoming_replies_once() -> Dict[str, int]:
             phone = atendimento.get("telefone") or phone_hint or chat.get("phone_key") or _phone_from_title(title)
             if phone:
                 state.set_contact_alias(title, phone)
+
+            # Atualiza snapshot do contato da sidebar/painel de dados do contato.
+            try:
+                details = wa_web.get_open_contact_details()
+                resolved_phone = (
+                    details.get("profile_phone")
+                    or details.get("phone")
+                    or phone
+                    or chat.get("phone_key")
+                )
+                _upsert_whatsapp_contact_profile(
+                    phone=resolved_phone,
+                    display_name=details.get("title") or title,
+                    profile_name=details.get("profile_name") or "",
+                    wa_chat_title=title,
+                    id_paciente=atendimento.get("id_paciente"),
+                    id_atendimento=atendimento.get("id_atendimento"),
+                    source="monitor_incoming",
+                )
+                if resolved_phone and title:
+                    state.set_contact_alias(title, resolved_phone)
+            except Exception:
+                log.exception("Falha ao atualizar snapshot de contato para chat '%s'", title)
             chat_url = atendimento["chat_url"]
             id_atendimento = atendimento.get("id_atendimento")
             id_paciente = atendimento.get("id_paciente")
