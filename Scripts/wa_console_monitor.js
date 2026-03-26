@@ -22,6 +22,9 @@
     timer: null,
     lastEmitTs: 0,
     lastHash: '',
+    clickTrackerOn: false,
+    clickHandler: null,
+    selectionHandler: null,
   };
 
   const norm = (s) => String(s || '').replace(/\s+/g, ' ').trim();
@@ -34,6 +37,27 @@
   };
 
   const now = () => new Date().toISOString();
+  const short = (s, n = 140) => {
+    const t = norm(s);
+    return t.length > n ? `${t.slice(0, n)}…` : t;
+  };
+  const nodeCssPath = (el) => {
+    if (!el || !el.tagName) return '';
+    const parts = [];
+    let cur = el;
+    let depth = 0;
+    while (cur && cur.nodeType === 1 && depth < 5) {
+      let part = cur.tagName.toLowerCase();
+      const id = cur.getAttribute('id');
+      const cls = (cur.getAttribute('class') || '').split(/\s+/).filter(Boolean).slice(0, 2);
+      if (id) part += `#${id}`;
+      if (cls.length) part += `.${cls.join('.')}`;
+      parts.unshift(part);
+      cur = cur.parentElement;
+      depth += 1;
+    }
+    return parts.join(' > ');
+  };
 
   const pickHeader = () => {
     const header = document.querySelector('#main header');
@@ -66,8 +90,8 @@
   };
 
   const pickPanel = () => {
-    const heading = Array.from(document.querySelectorAll('h1,h2,div[role="heading"]'))
-      .find((n) => /^(dados do contato|contact info)$/i.test(norm(n.textContent)));
+    const heading = Array.from(document.querySelectorAll('h1,h2,div[role="heading"],span[dir="auto"],span'))
+      .find((n) => /dados do contato|contact info/i.test(norm(n.textContent)));
 
     let root = null;
     if (heading) {
@@ -78,6 +102,20 @@
     if (!root) {
       const direct = document.querySelector('div[aria-label="Dados do contato"],div[aria-label="Contact info"],aside[aria-label="Dados do contato"],aside[aria-label="Contact info"]');
       if (isPanelContainer(direct)) root = direct;
+    }
+
+    // Fallback importante para o DOM atual do WhatsApp:
+    // tenta achar número dentro de [data-testid="selectable-text"] no painel da direita.
+    if (!root) {
+      const nodes = Array.from(document.querySelectorAll('[data-testid="selectable-text"], span[dir="auto"], span'))
+        .filter((n) => maybePhone(n.textContent || ''));
+      for (const n of nodes) {
+        const candidate = n.closest('section,aside,div[role="dialog"],div[role="region"],div');
+        if (isPanelContainer(candidate)) {
+          root = candidate;
+          break;
+        }
+      }
     }
 
     const panelVisible = !!root;
@@ -171,6 +209,10 @@
         '  waMon.snap()                 -> snapshot manual',
         '  waMon.traceOpen("Nome")      -> tenta abrir chat por título e loga etapas',
         '  waMon.proveCapture("Nome")   -> prova guiada com confirm() para validar abertura/painel/captura',
+        '  waMon.startClickTracker()     -> rastreia cliques (x,y,elemento,path curto)',
+        '  waMon.stopClickTracker()      -> para rastreio de cliques',
+        '  waMon.captureSelectionAndClose() -> captura texto selecionado + localizador e fecha painel',
+        '  waMon.scanPhoneNodes()          -> lista nós visíveis com telefone (texto+path curto)',
         '  waMon.openContactPanel()      -> clica no header para abrir dados de contato',
         '  waMon.closePanel()            -> ESC',
         '  waMon.sidebar()               -> amostra de títulos da sidebar',
@@ -187,6 +229,99 @@
     closePanel() {
       document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
       emit('closePanel');
+    },
+    startClickTracker() {
+      if (state.clickTrackerOn) return true;
+      state.clickHandler = (ev) => {
+        const target = ev.target;
+        const item = {
+          ts: now(),
+          reason: 'click',
+          x: ev.clientX,
+          y: ev.clientY,
+          button: ev.button,
+          targetTag: (target?.tagName || '').toLowerCase(),
+          targetText: short(target?.textContent || ''),
+          targetTitle: short(target?.getAttribute?.('title') || ''),
+          path: nodeCssPath(target),
+        };
+        pushEvent({
+          ts: item.ts,
+          reason: `click@${item.x},${item.y}`,
+          headerTitle: item.targetTag,
+          headerPhone: '',
+          panelVisible: false,
+          profileName: item.targetTitle || item.targetText || '',
+          profilePhone: '',
+          panelRoot: item.path || '',
+        });
+      };
+      document.addEventListener('click', state.clickHandler, true);
+      state.clickTrackerOn = true;
+      console.log('[WA-MON] click tracker ON');
+      return true;
+    },
+    stopClickTracker() {
+      if (state.clickHandler) document.removeEventListener('click', state.clickHandler, true);
+      state.clickTrackerOn = false;
+      state.clickHandler = null;
+      console.log('[WA-MON] click tracker OFF');
+      return true;
+    },
+    captureSelectionAndClose() {
+      const sel = window.getSelection?.();
+      const txt = short(sel?.toString?.() || '', 220);
+      const node = sel?.anchorNode?.nodeType === 3 ? sel.anchorNode.parentElement : sel?.anchorNode;
+      const locator = nodeCssPath(node);
+      const item = {
+        ts: now(),
+        selectedText: txt,
+        locator,
+      };
+      console.log('[WA-MON] selected:', item);
+      pushEvent({
+        ts: item.ts,
+        reason: 'selection:capture',
+        headerTitle: '',
+        headerPhone: '',
+        panelVisible: false,
+        profileName: item.selectedText || '',
+        profilePhone: '',
+        panelRoot: item.locator || '',
+      });
+      api.closePanel();
+      return item;
+    },
+    scanPhoneNodes() {
+      const out = [];
+      const nodes = document.querySelectorAll('[data-testid="selectable-text"], span[dir="auto"], span, div, p');
+      for (const n of nodes) {
+        const txt = short(n.textContent || '', 120);
+        const phone = maybePhone(txt);
+        if (!phone) continue;
+        const rect = n.getBoundingClientRect();
+        if (!rect || rect.width < 8 || rect.height < 8) continue;
+        out.push({
+          phone,
+          text: txt,
+          path: nodeCssPath(n),
+          x: Math.round(rect.left),
+          y: Math.round(rect.top),
+        });
+        if (out.length >= 20) break;
+      }
+      console.log('[WA-MON] scanPhoneNodes:', out);
+      pushEvent({
+        ts: now(),
+        reason: 'scanPhoneNodes',
+        headerTitle: '',
+        headerPhone: '',
+        panelVisible: false,
+        profileName: `${out.length} nodes`,
+        profilePhone: out[0]?.phone || '',
+        panelRoot: out[0]?.path || '',
+      });
+      return out;
     },
     openContactPanel() {
       const header = document.querySelector('#main header');
@@ -319,12 +454,32 @@
       return payload;
     },
     stop() {
+      api.stopClickTracker();
       if (state.observer) state.observer.disconnect();
       if (state.timer) clearInterval(state.timer);
       delete window.waMon;
       console.log('[WA-MON] stopped');
     }
   };
+
+  // Trigger log das funções expostas no waMon (baixo volume, útil para replay).
+  for (const key of Object.keys(api)) {
+    if (typeof api[key] !== 'function') continue;
+    const original = api[key];
+    api[key] = function(...args) {
+      pushEvent({
+        ts: now(),
+        reason: `fn:${key}`,
+        headerTitle: '',
+        headerPhone: '',
+        panelVisible: false,
+        profileName: short(JSON.stringify(args || []), 120),
+        profilePhone: '',
+        panelRoot: '',
+      });
+      return original.apply(this, args);
+    };
+  }
 
   observe();
   state.timer = setInterval(() => emit('tick'), 2000);
