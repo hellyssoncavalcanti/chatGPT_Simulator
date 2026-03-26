@@ -1378,6 +1378,8 @@ class WhatsAppWebClient:
         self.start()
 
         def _do():
+            target_norm = re.sub(r"\s+", " ", (title or "").strip().lower())
+
             # Garante que nenhum drawer lateral (ex.: "Dados do contato")
             # esteja bloqueando o fluxo de abertura do chat.
             try:
@@ -1390,29 +1392,39 @@ class WhatsAppWebClient:
 
             def _wait_chat_loaded() -> bool:
                 try:
-                    self._page.wait_for_selector(
-                        "#main header, p._aupe, footer div[contenteditable='true']",
-                        timeout=8000,
-                    )
-                    self._page.wait_for_timeout(500)
-                    return True
+                    deadline = time.time() + 8.0
+                    while time.time() < deadline:
+                        identity = self._page.evaluate(
+                            """() => {
+                                const header = document.querySelector('#main header');
+                                if (!header) return { title: '' };
+                                const el = header.querySelector('span[title], span[dir=\"auto\"]');
+                                const title = (el?.getAttribute?.('title') || el?.textContent || '').trim();
+                                return { title };
+                            }"""
+                        ) or {}
+                        current_title = re.sub(r"\s+", " ", str(identity.get("title") or "").strip().lower())
+                        if current_title and (current_title == target_norm or target_norm in current_title):
+                            return True
+                        self._page.wait_for_timeout(200)
+                    log.warning("Timeout aguardando chat abrir para título: %s", title)
                 except Exception:
                     log.warning("Timeout aguardando chat abrir para título: %s", title)
-                    try:
-                        header_title = self._page.evaluate(
-                            """() => {
-                                const h = document.querySelector('#main header span[title], #main header span[dir="auto"]');
-                                return h ? (h.getAttribute('title') || h.textContent || '').trim() : '';
-                            }"""
-                        )
-                        log.warning(
-                            "Diagnóstico timeout open_chat_by_sidebar_click | alvo='%s' | header_atual='%s'",
-                            title,
-                            header_title or "(vazio)",
-                        )
-                    except Exception:
-                        log.exception("Falha ao coletar diagnóstico de header após timeout para '%s'", title)
-                    return False
+                try:
+                    header_title = self._page.evaluate(
+                        """() => {
+                            const h = document.querySelector('#main header span[title], #main header span[dir="auto"]');
+                            return h ? (h.getAttribute('title') || h.textContent || '').trim() : '';
+                        }"""
+                    )
+                    log.warning(
+                        "Diagnóstico timeout open_chat_by_sidebar_click | alvo='%s' | header_atual='%s'",
+                        title,
+                        header_title or "(vazio)",
+                    )
+                except Exception:
+                    log.exception("Falha ao coletar diagnóstico de header após timeout para '%s'", title)
+                return False
 
             clicked = False
             # Estratégia 1: clique JS por varredura da sidebar (rápido).
@@ -1756,7 +1768,6 @@ def enrich_named_contacts_from_sidebar(
             min_interval_sec,
         )
         return 0
-    _LAST_SIDEBAR_ENRICHMENT_TS = now_mono
 
     aliases = state.get_contact_aliases()
     enriched = 0
@@ -1792,6 +1803,16 @@ def enrich_named_contacts_from_sidebar(
             if not wa_web.open_chat_by_sidebar_click(title):
                 skipped_open_failed += 1
                 continue
+            open_identity = wa_web.get_open_chat_identity()
+            open_title = (open_identity.get("title") or "").strip()
+            if not open_title:
+                skipped_open_failed += 1
+                log.warning(
+                    "Enriquecimento sidebar: chat não abriu após clique | alvo='%s' | identidade=%s",
+                    title,
+                    json.dumps(open_identity, ensure_ascii=False),
+                )
+                continue
             details = wa_web.get_open_contact_details()
             resolved_phone = normalize_phone(
                 details.get("profile_phone") or details.get("phone") or ""
@@ -1821,15 +1842,24 @@ def enrich_named_contacts_from_sidebar(
         except Exception:
             log.exception("Falha no enriquecimento de contato da sidebar para '%s'", title)
 
+    # Só aplica cooldown cheio quando houve enriquecimento real.
+    # Quando tudo falha, mantém retry rápido para facilitar recuperação automática.
+    if enriched > 0:
+        _LAST_SIDEBAR_ENRICHMENT_TS = time.monotonic()
+    else:
+        retry_backoff_sec = min(20, max(5, int(min_interval_sec)))
+        _LAST_SIDEBAR_ENRICHMENT_TS = time.monotonic() - max(0, min_interval_sec - retry_backoff_sec)
+
     log.info(
         "Enriquecimento sidebar finalizado | atualizados=%s | skip_not_named=%s | "
-        "skip_alias_exists=%s | skip_open_failed=%s | skip_no_phone=%s | tentativas=%s",
+        "skip_alias_exists=%s | skip_open_failed=%s | skip_no_phone=%s | tentativas=%s | prox_tentativa_em~%ss",
         enriched,
         skipped_not_named,
         skipped_alias_exists,
         skipped_open_failed,
         skipped_no_phone,
         attempts,
+        min_interval_sec if enriched > 0 else min(20, max(5, int(min_interval_sec))),
     )
     return enriched
 
