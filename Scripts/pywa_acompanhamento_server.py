@@ -701,6 +701,13 @@ def _parse_datetime(value: Any) -> Optional[datetime]:
     raw = str(value).strip()
     if not raw or raw == "N/D":
         return None
+    try:
+        dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
+    except Exception:
+        pass
     for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d"):
         try:
             dt = datetime.strptime(raw, fmt)
@@ -1143,9 +1150,9 @@ class WhatsAppWebClient:
 
     # -- New methods for listening to ANY incoming message ---------------------
 
-    def scan_unread_chats(self) -> List[Dict[str, Any]]:
-        """Scan sidebar for chats with unread message badges.
-        Returns [{title, unread_count}]."""
+    def scan_chat_list_rows(self) -> List[Dict[str, Any]]:
+        """Scan sidebar and return lightweight chat rows metadata.
+        Returns [{title, unread_count, time_text, preview_text}]."""
         self.start()
 
         def _do():
@@ -1184,8 +1191,6 @@ class WhatsAppWebClient:
                             }
                         }
 
-                        if (!unread) continue;
-
                         const nameArea = row.querySelector('div._ak8q');
                         if (!nameArea) continue;
                         const nameSpan = nameArea.querySelector('span[title]');
@@ -1193,7 +1198,30 @@ class WhatsAppWebClient:
                         const title = (nameSpan.getAttribute('title') || '').trim();
                         if (!title) continue;
 
-                        results.push({ title: title, unread_count: unread });
+                        let timeText = '';
+                        const timeCandidates = row.querySelectorAll('div._ak8i span, div[role="gridcell"] span');
+                        for (const t of timeCandidates) {
+                            const txt = (t.textContent || '').trim();
+                            if (!txt) continue;
+                            if (/^\\d{1,2}:\\d{2}$/.test(txt) || /^\\d{2}\\/\\d{2}\\/\\d{4}$/.test(txt) || /^\\d{2}\\/\\d{2}\\/\\d{2}$/.test(txt)
+                                || /ontem|yesterday|hoje|today/i.test(txt)) {
+                                timeText = txt;
+                                break;
+                            }
+                        }
+
+                        let previewText = '';
+                        const previewNode = row.querySelector('div._ak8k span[title], div._ak8k span[dir="ltr"], div._ak8k span[dir="auto"]');
+                        if (previewNode) {
+                            previewText = (previewNode.getAttribute('title') || previewNode.textContent || '').trim();
+                        }
+
+                        results.push({
+                            title: title,
+                            unread_count: unread,
+                            time_text: timeText,
+                            preview_text: previewText
+                        });
                     }
                     return results;
                 }"""
@@ -1523,6 +1551,7 @@ def send_pending_followups_once(cycle_no: int) -> Dict[str, Any]:
 
             wa_web.send_message(TEST_DESTINATION_PHONE, item["full_msg"])
 
+            sent_at_iso = utc_now_iso()
             state.mark_sent(
                 item["dedupe_key"],
                 {
@@ -1531,7 +1560,7 @@ def send_pending_followups_once(cycle_no: int) -> Dict[str, Any]:
                     "phone": item["phone"],
                     "question_key": item["key"],
                     "pergunta": item["pergunta"],
-                    "sent_at": utc_now_iso(),
+                    "sent_at": sent_at_iso,
                 },
             )
             state.set_phone_context(
@@ -1543,6 +1572,7 @@ def send_pending_followups_once(cycle_no: int) -> Dict[str, Any]:
                     "pergunta": item["pergunta"],
                     "question_key": item["key"],
                     "url_chatgpt": item["url_chatgpt"],
+                    "sent_at": sent_at_iso,
                 },
             )
 
@@ -1601,6 +1631,64 @@ def _phone_from_title(title: str) -> Optional[str]:
     digits = re.sub(r"\D", "", title or "")
     if len(digits) >= 10:
         return normalize_phone(digits)
+    return None
+
+
+def _parse_sidebar_datetime(time_text: str, now: Optional[datetime] = None) -> Optional[datetime]:
+    """
+    Converte o texto de horário/data exibido na lista lateral do WhatsApp
+    para datetime UTC aproximado.
+    Exemplos: "22:18", "05/03/2026", "Ontem".
+    """
+    if not time_text:
+        return None
+    raw = (time_text or "").strip().lower()
+    now_local = now or datetime.now()
+
+    if re.match(r"^\d{1,2}:\d{2}$", raw):
+        h, m = raw.split(":")
+        dt = now_local.replace(hour=int(h), minute=int(m), second=0, microsecond=0)
+        return dt.astimezone(timezone.utc) if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+    for fmt in ("%d/%m/%Y", "%d/%m/%y"):
+        try:
+            dt = datetime.strptime(raw, fmt).replace(hour=12, minute=0, second=0, microsecond=0)
+            return dt.replace(tzinfo=timezone.utc)
+        except ValueError:
+            continue
+
+    if raw in ("ontem", "yesterday"):
+        dt = (now_local - timedelta(days=1)).replace(hour=23, minute=59, second=0, microsecond=0)
+        return dt.astimezone(timezone.utc) if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+    if raw in ("hoje", "today"):
+        dt = now_local.replace(hour=23, minute=59, second=0, microsecond=0)
+        return dt.astimezone(timezone.utc) if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+    return None
+
+
+def _match_context_for_chat_title(title: str, contexts: Dict[str, Dict[str, Any]]) -> Optional[Tuple[str, Dict[str, Any]]]:
+    """
+    Tenta vincular o título do chat a um contexto monitorado, sem abrir o chat.
+    Prioriza match por telefone no título; fallback por nome do paciente.
+    """
+    if not title:
+        return None
+
+    phone_from_title = _phone_from_title(title)
+    if phone_from_title:
+        for phone_key, ctx in contexts.items():
+            if phones_match(phone_key, phone_from_title):
+                return phone_key, ctx
+
+    title_norm = re.sub(r"\s+", " ", title.strip().lower())
+    for phone_key, ctx in contexts.items():
+        nome = (ctx or {}).get("nome_paciente") or ""
+        nome_norm = re.sub(r"\s+", " ", str(nome).strip().lower())
+        if not nome_norm:
+            continue
+        if nome_norm in title_norm or title_norm in nome_norm:
+            return phone_key, ctx
+
     return None
 
 
@@ -1663,17 +1751,54 @@ def process_incoming_replies_once() -> Dict[str, int]:
     skipped = 0
     no_match = 0
 
-    # 1) Scan sidebar for chats with unread messages
-    unread_chats = wa_web.scan_unread_chats()
-    if not unread_chats:
+    # 1) Scan sidebar completo e pré-filtra por chats monitorados cujo
+    # timestamp visível é posterior ao envio da pergunta.
+    chat_rows = wa_web.scan_chat_list_rows()
+    if not chat_rows:
+        return {"processed": 0, "skipped": 0, "no_match": 0}
+
+    contexts = state.all_phone_contexts()
+    candidates: List[Dict[str, Any]] = []
+    now_local = datetime.now()
+    for chat in chat_rows:
+        title = (chat.get("title") or "").strip()
+        if not title:
+            continue
+        matched = _match_context_for_chat_title(title, contexts)
+        if not matched:
+            continue
+        phone_key, ctx = matched
+        sent_at_raw = (ctx or {}).get("sent_at") or ""
+        sent_at = _parse_datetime(sent_at_raw)
+        if not sent_at:
+            # sem sent_at não há como comparar; não abrir chat à toa
+            continue
+        list_dt = _parse_sidebar_datetime(chat.get("time_text") or "", now=now_local)
+        if not list_dt:
+            continue
+        if list_dt <= sent_at:
+            continue
+        candidates.append({
+            "title": title,
+            "phone_key": phone_key,
+            "ctx": ctx,
+            "time_text": chat.get("time_text") or "",
+            "unread_count": int(chat.get("unread_count") or 0),
+            "preview_text": chat.get("preview_text") or "",
+        })
+
+    if not candidates:
         return {"processed": 0, "skipped": 0, "no_match": 0}
 
     log.info(
-        "Chats com mensagens não lidas: %s",
-        " | ".join(f"[{c['title']}]({c['unread_count']})" for c in unread_chats),
+        "Chats candidatos por data (msg após envio): %s",
+        " | ".join(
+            f"[{c['title']}]({c.get('time_text') or 'sem_hora'}, unread={c.get('unread_count', 0)})"
+            for c in candidates
+        ),
     )
 
-    for chat in unread_chats:
+    for chat in candidates:
         title = chat["title"]
         try:
             # 2) Open the chat by clicking in the sidebar
@@ -1697,7 +1822,7 @@ def process_incoming_replies_once() -> Dict[str, int]:
                 no_match += 1
                 continue
 
-            phone = atendimento.get("telefone") or phone_hint or _phone_from_title(title)
+            phone = atendimento.get("telefone") or phone_hint or chat.get("phone_key") or _phone_from_title(title)
             chat_url = atendimento["chat_url"]
             id_atendimento = atendimento.get("id_atendimento")
             id_paciente = atendimento.get("id_paciente")
