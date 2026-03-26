@@ -189,6 +189,12 @@ class StateStore:
             self.state["sent_questions"][key] = payload
         self.save()
 
+    def unmark_sent(self, key: str) -> None:
+        with self.lock:
+            if key in self.state["sent_questions"]:
+                del self.state["sent_questions"][key]
+        self.save()
+
     def set_phone_context(self, phone: str, ctx: Dict[str, Any]) -> None:
         with self.lock:
             self.state["phone_context"][phone] = ctx
@@ -1517,6 +1523,13 @@ def send_pending_followups_once(cycle_no: int) -> Dict[str, Any]:
                 aid_int = None
             cached_sent = sent_cache.get(aid_int, set()) if aid_int is not None else set()
             if full_msg.strip() in cached_sent:
+                log.info(
+                    "Ignorado por ja_enviado (confirmado no SQL) | ciclo=%s id_analise=%s id_paciente=%s tipo=%s",
+                    cycle_summary.get("cycle", "N/A") if isinstance(cycle_summary, dict) else "N/A",
+                    aid_int,
+                    id_paciente,
+                    key,
+                )
                 # Mesmo quando já enviado, mantém contexto para o monitor de
                 # respostas (caso o processo tenha reiniciado).
                 existing_sent_at = state.get_phone_context_field(phone, "sent_at")
@@ -1542,23 +1555,34 @@ def send_pending_followups_once(cycle_no: int) -> Dict[str, Any]:
             # Sem chat DB, NÃO deve bloquear o primeiro envio.
             dedupe_key = f"{id_atendimento}:{key}:{hashlib.sha1(pergunta.encode('utf-8')).hexdigest()}"
             if state.is_sent(dedupe_key):
-                existing_sent_at = state.get_phone_context_field(phone, "sent_at")
-                fallback_sent_at = existing_sent_at or (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
-                state.set_phone_context(
-                    phone,
-                    {
-                        "id_atendimento": id_atendimento,
-                        "id_paciente": id_paciente,
-                        "nome_paciente": nome_paciente,
-                        "pergunta": pergunta,
-                        "question_key": key,
-                        "url_chatgpt": url_chatgpt,
-                        "sent_at": fallback_sent_at,
-                    },
+                # Regra solicitada: "já enviado" deve estar confirmado no SQL.
+                # Se estiver apenas no state local, considera stale.
+                if full_msg.strip() in cached_sent:
+                    existing_sent_at = state.get_phone_context_field(phone, "sent_at")
+                    fallback_sent_at = existing_sent_at or (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
+                    state.set_phone_context(
+                        phone,
+                        {
+                            "id_atendimento": id_atendimento,
+                            "id_paciente": id_paciente,
+                            "nome_paciente": nome_paciente,
+                            "pergunta": pergunta,
+                            "question_key": key,
+                            "url_chatgpt": url_chatgpt,
+                            "sent_at": fallback_sent_at,
+                        },
+                    )
+                    skipped += 1
+                    skipped_already_sent += 1
+                    continue
+                log.warning(
+                    "State local marcava ja_enviado sem evidência no SQL. Limpando dedupe local e reenfileirando. "
+                    "| id_atendimento=%s id_paciente=%s tipo=%s",
+                    id_atendimento,
+                    id_paciente,
+                    key,
                 )
-                skipped += 1
-                skipped_already_sent += 1
-                continue
+                state.unmark_sent(dedupe_key)
 
             send_queue.append({
                 "id_atendimento": id_atendimento,
