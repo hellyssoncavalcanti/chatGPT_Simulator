@@ -170,6 +170,7 @@
         'Comandos:',
         '  waMon.snap()                 -> snapshot manual',
         '  waMon.traceOpen("Nome")      -> tenta abrir chat por título e loga etapas',
+        '  waMon.proveCapture("Nome")   -> prova guiada com confirm() para validar abertura/painel/captura',
         '  waMon.openContactPanel()      -> clica no header para abrir dados de contato',
         '  waMon.closePanel()            -> ESC',
         '  waMon.sidebar()               -> amostra de títulos da sidebar',
@@ -218,6 +219,94 @@
       }
       emit(clicked ? 'traceOpen:clicked' : 'traceOpen:not-found');
       return clicked;
+    },
+    async proveCapture(targetTitle) {
+      const target = norm(targetTitle);
+      if (!target) {
+        console.warn('[WA-MON] informe um título para proveCapture');
+        return { ok: false, reason: 'missing_target' };
+      }
+
+      const out = {
+        target,
+        clicked: false,
+        chatConfirmed: false,
+        panelConfirmed: false,
+        snapshotAfterOpen: null,
+        snapshotAfterPanel: null,
+      };
+
+      console.log(`[WA-MON] Iniciando prova guiada para: "${target}"`);
+      out.clicked = api.traceOpen(target);
+      await new Promise((r) => setTimeout(r, 1200));
+      emit('proveCapture:afterOpen');
+      out.snapshotAfterOpen = snapshot('proveCapture:afterOpen');
+
+      out.chatConfirmed = confirm(
+        `O chat aberto no WhatsApp é realmente "${target}"?\\n\\n` +
+        `Header atual: "${out.snapshotAfterOpen.headerTitle || '(vazio)'}"\\n\\n` +
+        'Clique em OK se SIM, ou Cancel se NÃO.'
+      );
+
+      if (!out.chatConfirmed) {
+        console.warn('[WA-MON] Usuário confirmou que o chat alvo NÃO abriu corretamente.');
+        pushEvent({
+          ts: now(),
+          reason: 'proveCapture:user_chat_not_opened',
+          headerTitle: out.snapshotAfterOpen.headerTitle || '',
+          headerPhone: out.snapshotAfterOpen.headerPhone || '',
+          panelVisible: out.snapshotAfterOpen.panelVisible || false,
+          profileName: out.snapshotAfterOpen.profileName || '',
+          profilePhone: out.snapshotAfterOpen.profilePhone || '',
+          panelRoot: out.snapshotAfterOpen.panelRoot || '',
+        });
+        return { ok: false, ...out, reason: 'chat_not_opened' };
+      }
+
+      api.openContactPanel();
+      await new Promise((r) => setTimeout(r, 1500));
+      emit('proveCapture:afterPanelOpen');
+      out.snapshotAfterPanel = snapshot('proveCapture:afterPanelOpen');
+
+      out.panelConfirmed = confirm(
+        'O painel "Dados do contato / Contact info" está visível na lateral direita?\\n\\n' +
+        `Detecção automática: panel=${out.snapshotAfterPanel.panelVisible ? 'Y' : 'N'} ` +
+        `| root=${out.snapshotAfterPanel.panelRoot || '-'}\\n\\n` +
+        'Clique em OK se SIM, ou Cancel se NÃO.'
+      );
+
+      if (!out.panelConfirmed) {
+        console.warn('[WA-MON] Usuário informou que painel de contato não ficou visível.');
+        pushEvent({
+          ts: now(),
+          reason: 'proveCapture:user_panel_not_visible',
+          headerTitle: out.snapshotAfterPanel.headerTitle || '',
+          headerPhone: out.snapshotAfterPanel.headerPhone || '',
+          panelVisible: out.snapshotAfterPanel.panelVisible || false,
+          profileName: out.snapshotAfterPanel.profileName || '',
+          profilePhone: out.snapshotAfterPanel.profilePhone || '',
+          panelRoot: out.snapshotAfterPanel.panelRoot || '',
+        });
+        return { ok: false, ...out, reason: 'panel_not_visible' };
+      }
+
+      const finalPhone = out.snapshotAfterPanel.profilePhone || out.snapshotAfterPanel.headerPhone || '';
+      const ok = !!finalPhone;
+      console.log(
+        `[WA-MON] Prova concluída | ok=${ok} | phone=${finalPhone || '-'} | profileName="${out.snapshotAfterPanel.profileName || '-'}"`
+      );
+      pushEvent({
+        ts: now(),
+        reason: ok ? 'proveCapture:success' : 'proveCapture:no_phone',
+        headerTitle: out.snapshotAfterPanel.headerTitle || '',
+        headerPhone: out.snapshotAfterPanel.headerPhone || '',
+        panelVisible: out.snapshotAfterPanel.panelVisible || false,
+        profileName: out.snapshotAfterPanel.profileName || '',
+        profilePhone: out.snapshotAfterPanel.profilePhone || '',
+        panelRoot: out.snapshotAfterPanel.panelRoot || '',
+      });
+
+      return { ok, ...out, phone: finalPhone, reason: ok ? 'success' : 'phone_not_found' };
     },
     export() {
       const payload = {
