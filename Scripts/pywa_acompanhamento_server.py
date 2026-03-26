@@ -1378,6 +1378,16 @@ class WhatsAppWebClient:
         self.start()
 
         def _do():
+            # Garante que nenhum drawer lateral (ex.: "Dados do contato")
+            # esteja bloqueando o fluxo de abertura do chat.
+            try:
+                self._page.keyboard.press("Escape")
+                self._page.wait_for_timeout(150)
+                self._page.keyboard.press("Escape")
+                self._page.wait_for_timeout(150)
+            except Exception:
+                pass
+
             def _wait_chat_loaded() -> bool:
                 try:
                     self._page.wait_for_selector(
@@ -1597,64 +1607,113 @@ class WhatsAppWebClient:
         self.start()
 
         def _do():
-            return self._page.evaluate(
+            # Fecha possível painel já aberto e volta ao chat.
+            try:
+                self._page.keyboard.press("Escape")
+                self._page.wait_for_timeout(150)
+            except Exception:
+                pass
+
+            header = self._page.locator("#main header").first
+            if header.count() == 0:
+                return {"title": "", "phone": "", "profile_name": "", "profile_phone": ""}
+
+            # Captura identidade visível no header ANTES de abrir o painel.
+            base = self._page.evaluate(
                 """() => {
                     const pickPhone = (txt) => {
                         if (!txt) return '';
                         const m = String(txt).match(/\\+?\\d[\\d\\s\\-()]{7,}/);
-                        if (!m) return '';
-                        return m[0].replace(/\\D/g, '');
+                        return m ? m[0].replace(/\\D/g, '') : '';
                     };
-
                     const header = document.querySelector('#main header');
-                    if (!header) return { title: '', phone: '', profile_name: '', profile_phone: '' };
-
+                    if (!header) return { title: '', phone: '' };
                     const titleEl = header.querySelector('span[title]') || header.querySelector('span[dir="auto"]');
                     const title = (titleEl?.getAttribute?.('title') || titleEl?.textContent || '').trim();
                     let phone = '';
-                    for (const s of header.querySelectorAll('span[title], span[dir="auto"], span')) {
+                    for (const s of header.querySelectorAll('span[title], span[dir=\"auto\"], span')) {
                         const txt = (s.getAttribute?.('title') || s.textContent || '').trim();
                         const p = pickPhone(txt);
                         if (p.length >= 10) { phone = p; break; }
                     }
+                    return { title, phone };
+                }"""
+            ) or {}
 
-                    header.click();
+            try:
+                header.click(timeout=3000)
+            except Exception:
+                return {
+                    "title": str(base.get("title") or "").strip(),
+                    "phone": str(base.get("phone") or "").strip(),
+                    "profile_name": "",
+                    "profile_phone": "",
+                }
 
-                    const waitUntil = Date.now() + 6000;
-                    while (Date.now() < waitUntil) {
-                        const side = document.querySelector('[aria-label="Contact info"], [aria-label="Dados do contato"]');
-                        const titleNode = Array.from(document.querySelectorAll('h2, div[role="heading"], span[title]'))
-                          .find(n => /dados do contato|contact info/i.test((n.textContent || '').trim()));
-                        if (side || titleNode) break;
+            panel_visible = False
+            try:
+                self._page.wait_for_selector("text=/Dados do contato|Contact info/i", timeout=5000)
+                panel_visible = True
+            except Exception:
+                panel_visible = False
+
+            data = self._page.evaluate(
+                """() => {
+                    const pickPhone = (txt) => {
+                        if (!txt) return '';
+                        const m = String(txt).match(/\\+?\\d[\\d\\s\\-()]{7,}/);
+                        return m ? m[0].replace(/\\D/g, '') : '';
+                    };
+                    const out = { profile_name: '', profile_phone: '' };
+                    const panelRoot =
+                        document.querySelector('div[aria-label=\"Dados do contato\"], div[aria-label=\"Contact info\"], div[role=\"dialog\"]')
+                        || document.body;
+
+                    const preferredName = panelRoot.querySelector('h2, h1');
+                    if (preferredName) {
+                        out.profile_name = (preferredName.textContent || '').trim();
                     }
 
-                    let profile_name = '';
-                    let profile_phone = '';
-                    const rightPane = document.querySelector('div[role="dialog"], div[aria-label="Contact info"], div[aria-label="Dados do contato"]') || document.body;
-                    const names = rightPane.querySelectorAll('h2, h1, span[dir="auto"], div[role="heading"]');
-                    for (const n of names) {
-                        const txt = (n.textContent || '').trim();
-                        if (!txt) continue;
-                        if (/dados do contato|contact info|pesquisar|mídia|media, links/i.test(txt.toLowerCase())) continue;
-                        if (txt.length >= 3) { profile_name = txt; break; }
-                    }
-
-                    if (!profile_phone) {
-                        const texts = rightPane.querySelectorAll('span, div, p');
-                        for (const t of texts) {
-                            const txt = (t.textContent || '').trim();
+                    if (!out.profile_name) {
+                        const candidates = panelRoot.querySelectorAll('span[dir=\"auto\"], div[role=\"heading\"]');
+                        for (const c of candidates) {
+                            const txt = (c.textContent || '').trim();
                             if (!txt) continue;
-                            const p = pickPhone(txt);
-                            if (p.length >= 10) { profile_phone = p; break; }
+                            if (/dados do contato|contact info|mídia|media|mensagens favoritas|silenciar/i.test(txt.toLowerCase())) continue;
+                            out.profile_name = txt;
+                            break;
                         }
                     }
 
-                    // Close side panel (Esc) to keep flow unchanged
-                    document.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', bubbles: true}));
-
-                    return { title, phone, profile_name, profile_phone };
+                    const texts = panelRoot.querySelectorAll('span, div, p');
+                    for (const t of texts) {
+                        const txt = (t.textContent || '').trim();
+                        if (!txt) continue;
+                        const p = pickPhone(txt);
+                        if (p.length >= 10) { out.profile_phone = p; break; }
+                    }
+                    return out;
                 }"""
-            )
+            ) or {}
+
+            try:
+                self._page.keyboard.press("Escape")
+                self._page.wait_for_timeout(150)
+            except Exception:
+                pass
+
+            result = {
+                "title": str(base.get("title") or "").strip(),
+                "phone": str(base.get("phone") or "").strip(),
+                "profile_name": str(data.get("profile_name") or "").strip(),
+                "profile_phone": str(data.get("profile_phone") or "").strip(),
+            }
+            if not panel_visible:
+                log.warning(
+                    "Painel Dados do contato não ficou visível ao extrair detalhes | base=%s",
+                    json.dumps(result, ensure_ascii=False),
+                )
+            return result
 
         result = self._run_on_browser_thread(_do) or {}
         return {
