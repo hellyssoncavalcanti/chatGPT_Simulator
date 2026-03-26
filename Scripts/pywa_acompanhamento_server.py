@@ -158,6 +158,7 @@ class StateStore:
         return {
             "sent_questions": {},
             "phone_context": {},
+            "contact_aliases": {},
             "forwarded_messages": {},
             "last_seen_inbound": {},
             "updated_at": utc_now_iso(),
@@ -203,6 +204,20 @@ class StateStore:
             if ctx and isinstance(ctx, dict):
                 return ctx.get(field)
             return None
+
+    def set_contact_alias(self, title: str, phone: str) -> None:
+        t = re.sub(r"\s+", " ", (title or "").strip().lower())
+        p = normalize_phone(phone)
+        if not t or not p:
+            return
+        with self.lock:
+            self.state["contact_aliases"][t] = p
+        self.save()
+
+    def get_contact_aliases(self) -> Dict[str, str]:
+        with self.lock:
+            aliases = self.state.get("contact_aliases") or {}
+            return dict(aliases if isinstance(aliases, dict) else {})
 
     def mark_forwarded(self, dedupe_key: str, payload: Dict[str, Any]) -> None:
         with self.lock:
@@ -1318,6 +1333,45 @@ class WhatsAppWebClient:
 
         return self._run_on_browser_thread(_do)
 
+    def get_open_chat_identity(self) -> Dict[str, str]:
+        """Return current open chat header identity {title, phone} when possible."""
+        self.start()
+
+        def _do():
+            return self._page.evaluate(
+                """() => {
+                    const header = document.querySelector('#main header');
+                    if (!header) return { title: '', phone: '' };
+
+                    let title = '';
+                    const titleEl = header.querySelector('span[title]');
+                    if (titleEl) title = (titleEl.getAttribute('title') || '').trim();
+                    if (!title) {
+                        const auto = header.querySelector('span[dir="auto"]');
+                        if (auto) title = (auto.textContent || '').trim();
+                    }
+
+                    let phone = '';
+                    const spans = header.querySelectorAll('span[title], span[dir="auto"], span');
+                    for (const s of spans) {
+                        const txt = (s.getAttribute('title') || s.textContent || '').trim();
+                        if (!txt) continue;
+                        const digits = txt.replace(/\\D/g, '');
+                        if (digits.length >= 10 && digits.length <= 15) {
+                            phone = digits;
+                            break;
+                        }
+                    }
+                    return { title, phone };
+                }"""
+            )
+
+        result = self._run_on_browser_thread(_do) or {}
+        return {
+            "title": str(result.get("title") or "").strip(),
+            "phone": normalize_phone(result.get("phone")) or "",
+        }
+
 
 wa_web = WhatsAppWebClient()
 
@@ -1577,6 +1631,18 @@ def send_pending_followups_once(cycle_no: int) -> Dict[str, Any]:
 
             wa_web.send_message(TEST_DESTINATION_PHONE, item["full_msg"])
 
+            # Se o contato estiver salvo por nome no WhatsApp, persiste alias
+            # (nome exibido -> telefone) para o monitor correlacionar respostas.
+            try:
+                ident = wa_web.get_open_chat_identity()
+                alias_title = (ident.get("title") or "").strip()
+                alias_phone = (ident.get("phone") or "").strip() or item["phone"]
+                if alias_title and alias_phone:
+                    state.set_contact_alias(alias_title, alias_phone)
+                    log.info("Alias contato mapeado: '%s' -> %s", alias_title, alias_phone)
+            except Exception:
+                log.exception("Falha ao mapear alias do contato após envio WhatsApp")
+
             sent_at_iso = utc_now_iso()
             state.mark_sent(
                 item["dedupe_key"],
@@ -1692,13 +1758,25 @@ def _parse_sidebar_datetime(time_text: str, now: Optional[datetime] = None) -> O
     return None
 
 
-def _match_context_for_chat_title(title: str, contexts: Dict[str, Dict[str, Any]]) -> Optional[Tuple[str, Dict[str, Any]]]:
+def _match_context_for_chat_title(
+    title: str,
+    contexts: Dict[str, Dict[str, Any]],
+    aliases: Optional[Dict[str, str]] = None
+) -> Optional[Tuple[str, Dict[str, Any]]]:
     """
     Tenta vincular o título do chat a um contexto monitorado, sem abrir o chat.
     Prioriza match por telefone no título; fallback por nome do paciente.
     """
     if not title:
         return None
+
+    if aliases:
+        title_key = re.sub(r"\s+", " ", title.strip().lower())
+        alias_phone = normalize_phone(aliases.get(title_key))
+        if alias_phone:
+            for phone_key, ctx in contexts.items():
+                if phones_match(phone_key, alias_phone):
+                    return phone_key, ctx
 
     phone_from_title = _phone_from_title(title)
     if phone_from_title:
@@ -1785,13 +1863,14 @@ def process_incoming_replies_once() -> Dict[str, int]:
     log.info("Scan sidebar WhatsApp: %s chats visíveis.", len(chat_rows))
 
     contexts = state.all_phone_contexts()
+    aliases = state.get_contact_aliases()
     candidates: List[Dict[str, Any]] = []
     now_local = datetime.now()
     for chat in chat_rows:
         title = (chat.get("title") or "").strip()
         if not title:
             continue
-        matched = _match_context_for_chat_title(title, contexts)
+        matched = _match_context_for_chat_title(title, contexts, aliases=aliases)
         if not matched:
             continue
         phone_key, ctx = matched
@@ -1853,6 +1932,8 @@ def process_incoming_replies_once() -> Dict[str, int]:
                 continue
 
             phone = atendimento.get("telefone") or phone_hint or chat.get("phone_key") or _phone_from_title(title)
+            if phone:
+                state.set_contact_alias(title, phone)
             chat_url = atendimento["chat_url"]
             id_atendimento = atendimento.get("id_atendimento")
             id_paciente = atendimento.get("id_paciente")
