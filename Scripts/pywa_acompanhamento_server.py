@@ -389,6 +389,62 @@ def was_message_already_sent_for_analise(id_analise: Any, message_text: str) -> 
     return False
 
 
+def preload_sent_messages_for_analises(id_analises: List[Any]) -> Dict[int, set]:
+    """
+    Carrega em lote as mensagens já registradas em chatgpt_chats.mensagens
+    para os id_chatgpt_atendimentos_analise informados.
+
+    Retorna:
+      { id_analise: {conteudo_msg_1, conteudo_msg_2, ...}, ... }
+    """
+    normalized_ids: List[int] = []
+    for raw in id_analises:
+        try:
+            normalized_ids.append(int(raw))
+        except (TypeError, ValueError):
+            continue
+    if not normalized_ids:
+        return {}
+
+    unique_ids = sorted(set(normalized_ids))
+    id_list = ",".join(str(i) for i in unique_ids)
+    query = (
+        "SELECT id_chatgpt_atendimentos_analise, mensagens "
+        "FROM chatgpt_chats "
+        "WHERE chat_mode = 'whatsapp' "
+        f"  AND id_chatgpt_atendimentos_analise IN ({id_list})"
+    )
+
+    out: Dict[int, set] = {i: set() for i in unique_ids}
+    try:
+        rows = run_sql(query)
+        for row in rows:
+            try:
+                aid = int(row.get("id_chatgpt_atendimentos_analise"))
+            except (TypeError, ValueError):
+                continue
+            raw = row.get("mensagens") or ""
+            if not raw:
+                continue
+            try:
+                mensagens = json.loads(raw, strict=False) if isinstance(raw, str) else raw
+            except Exception:
+                continue
+            if not isinstance(mensagens, list):
+                continue
+            bucket = out.setdefault(aid, set())
+            for msg in mensagens:
+                if not isinstance(msg, dict):
+                    continue
+                content = (msg.get("content") or "").strip()
+                if content:
+                    bucket.add(content)
+    except Exception:
+        log.exception("Falha ao pré-carregar mensagens enviadas em lote para dedupe")
+
+    return out
+
+
 def send_to_chatgpt(url_chatgpt: str, text: str, id_paciente: Any, id_atendimento: Any) -> Dict[str, Any]:
     headers = {"Authorization": f"Bearer {SIMULATOR_API_KEY}"}
     payload = {
@@ -557,6 +613,19 @@ def fetch_patient_metadata(id_paciente: Any, id_atendimento: Any) -> Dict[str, A
 
 
 TEST_DESTINATION_PHONE = normalize_phone(TEST_DESTINATION_PHONE_RAW) or "5581981487277"
+TEST_MODE_STRICT_SINGLE_PATIENT = os.getenv("PYWA_TEST_STRICT_SINGLE_PATIENT", "1").strip().lower() not in ("0", "false", "no")
+
+
+def phones_match(a: Optional[str], b: Optional[str]) -> bool:
+    """Compares phones using normalized digits, tolerating country-code variants."""
+    na = normalize_phone(a)
+    nb = normalize_phone(b)
+    if not na or not nb:
+        return False
+    if na == nb:
+        return True
+    # fallback by suffix (DDD+numero) when one side came with different prefix
+    return na[-10:] == nb[-10:] or na[-9:] == nb[-9:]
 
 
 def extract_followup_items(mensagens_acompanhamento: Any) -> List[Tuple[str, str]]:
@@ -1242,7 +1311,8 @@ def send_pending_followups_once() -> Dict[str, Any]:
             "total": 0, "total_followup_items": 0, "sent": 0,
             "skipped": 0, "skipped_missing_phone": 0,
             "skipped_empty_followup": 0, "skipped_already_sent": 0,
-            "skipped_not_due": 0, "errors": 0, "recovered_member_phone": 0,
+            "skipped_not_due": 0, "skipped_test_filter": 0,
+            "errors": 0, "recovered_member_phone": 0,
         }
 
     # ── Buscar registros elegíveis (já filtrados por data no SQL) ─────────
@@ -1255,13 +1325,20 @@ def send_pending_followups_once() -> Dict[str, Any]:
     skipped_empty_followup = 0
     skipped_already_sent = 0
     skipped_not_due = 0
+    skipped_test_filter = 0
     errors = 0
     recovered_member_phone = 0
+
+    # Pré-carrega dedupe por id_analise para evitar N consultas remotas
+    sent_cache = preload_sent_messages_for_analises([r.get("id_analise") for r in rows])
 
     # ── Montar fila de envios ─────────────────────────────────────────────
     send_queue: List[Dict[str, Any]] = []
 
-    for row in rows:
+    for idx, row in enumerate(rows, start=1):
+        if idx == 1 or idx % 25 == 0 or idx == len(rows):
+            log.info("Preparando fila de envios: %s/%s", idx, len(rows))
+
         id_atendimento = row.get("id_atendimento")
         id_paciente = row.get("id_paciente")
         id_analise = row.get("id_analise")
@@ -1287,6 +1364,14 @@ def send_pending_followups_once() -> Dict[str, Any]:
             skipped_missing_phone += 1
             continue
 
+        # Modo de teste estrito: processa somente o paciente cujo telefone
+        # corresponde ao telefone de destino de testes.
+        if TEST_MODE_STRICT_SINGLE_PATIENT and TEST_DESTINATION_PHONE:
+            if not phones_match(phone, TEST_DESTINATION_PHONE):
+                skipped += 1
+                skipped_test_filter += 1
+                continue
+
         all_itens = extract_followup_items(row.get("mensagens_acompanhamento"))
         if not all_itens:
             skipped += 1
@@ -1302,8 +1387,13 @@ def send_pending_followups_once() -> Dict[str, Any]:
         for key, pergunta in itens:
             full_msg = f"{pergunta}\n\nPode me responder por aqui?"
 
-            # Dedupe: check chatgpt_chats.mensagens (DB) for this analysis
-            if was_message_already_sent_for_analise(id_analise, full_msg):
+            # Dedupe (rápido): usa cache pré-carregado de mensagens por análise
+            try:
+                aid_int = int(id_analise) if id_analise is not None else None
+            except (TypeError, ValueError):
+                aid_int = None
+            cached_sent = sent_cache.get(aid_int, set()) if aid_int is not None else set()
+            if full_msg.strip() in cached_sent:
                 skipped += 1
                 skipped_already_sent += 1
                 continue
@@ -1429,6 +1519,7 @@ def send_pending_followups_once() -> Dict[str, Any]:
         "skipped_empty_followup": skipped_empty_followup,
         "skipped_already_sent": skipped_already_sent,
         "skipped_not_due": skipped_not_due,
+        "skipped_test_filter": skipped_test_filter,
         "errors": errors,
         "recovered_member_phone": recovered_member_phone,
     }
@@ -1444,6 +1535,8 @@ def _build_skip_reason_summary(stats: Dict[str, Any]) -> str:
         reasons.append(f"já enviado anteriormente={stats['skipped_already_sent']}")
     if stats.get("skipped_not_due", 0):
         reasons.append(f"fora da janela temporal={stats['skipped_not_due']}")
+    if stats.get("skipped_test_filter", 0):
+        reasons.append(f"bloqueado por filtro de teste={stats['skipped_test_filter']}")
     if stats.get("errors", 0):
         reasons.append(f"falha ao enviar={stats['errors']}")
     return "; ".join(reasons) if reasons else "nenhum motivo classificado"
@@ -1647,7 +1740,7 @@ def scheduler_loop() -> None:
             motivos = _build_skip_reason_summary(stats)
             log.info(
                 "Envio acompanhamento | total=%s itens=%s enviados=%s ignorados=%s "
-                "(sem_telefone=%s, sem_mensagem=%s, ja_enviado=%s, fora_janela=%s, erros=%s, recuperado_membros=%s, motivos=%s)",
+                "(sem_telefone=%s, sem_mensagem=%s, ja_enviado=%s, fora_janela=%s, filtro_teste=%s, erros=%s, recuperado_membros=%s, motivos=%s)",
                 stats["total"],
                 stats["total_followup_items"],
                 stats["sent"],
@@ -1656,6 +1749,7 @@ def scheduler_loop() -> None:
                 stats["skipped_empty_followup"],
                 stats["skipped_already_sent"],
                 stats["skipped_not_due"],
+                stats.get("skipped_test_filter", 0),
                 stats["errors"],
                 stats["recovered_member_phone"],
                 motivos,
@@ -1717,6 +1811,7 @@ if __name__ == "__main__":
     log.info("Simulator local: %s", SIMULATOR_URL)
     log.info("PHP remoto: %s", PHP_URL)
     log.info("Modo teste ativo: todos os envios serão direcionados para %s", TEST_DESTINATION_PHONE)
+    log.info("Filtro teste estrito (somente paciente do telefone de teste): %s", TEST_MODE_STRICT_SINGLE_PATIENT)
 
     log.info("Iniciando browser WhatsApp. Se necessário, faça login via QR Code...")
     wa_web.start()
