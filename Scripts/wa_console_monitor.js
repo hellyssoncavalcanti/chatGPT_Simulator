@@ -90,8 +90,8 @@
   };
 
   const pickPanel = () => {
-    const heading = Array.from(document.querySelectorAll('h1,h2,div[role="heading"]'))
-      .find((n) => /^(dados do contato|contact info)$/i.test(norm(n.textContent)));
+    const heading = Array.from(document.querySelectorAll('h1,h2,div[role="heading"],span[dir="auto"],span'))
+      .find((n) => /dados do contato|contact info/i.test(norm(n.textContent)));
 
     let root = null;
     if (heading) {
@@ -102,6 +102,20 @@
     if (!root) {
       const direct = document.querySelector('div[aria-label="Dados do contato"],div[aria-label="Contact info"],aside[aria-label="Dados do contato"],aside[aria-label="Contact info"]');
       if (isPanelContainer(direct)) root = direct;
+    }
+
+    // Fallback importante para o DOM atual do WhatsApp:
+    // tenta achar número dentro de [data-testid="selectable-text"] no painel da direita.
+    if (!root) {
+      const nodes = Array.from(document.querySelectorAll('[data-testid="selectable-text"], span[dir="auto"], span'))
+        .filter((n) => maybePhone(n.textContent || ''));
+      for (const n of nodes) {
+        const candidate = n.closest('section,aside,div[role="dialog"],div[role="region"],div');
+        if (isPanelContainer(candidate)) {
+          root = candidate;
+          break;
+        }
+      }
     }
 
     const panelVisible = !!root;
@@ -198,6 +212,7 @@
         '  waMon.startClickTracker()     -> rastreia cliques (x,y,elemento,path curto)',
         '  waMon.stopClickTracker()      -> para rastreio de cliques',
         '  waMon.captureSelectionAndClose() -> captura texto selecionado + localizador e fecha painel',
+        '  waMon.scanPhoneNodes()          -> lista nós visíveis com telefone (texto+path curto)',
         '  waMon.openContactPanel()      -> clica no header para abrir dados de contato',
         '  waMon.closePanel()            -> ESC',
         '  waMon.sidebar()               -> amostra de títulos da sidebar',
@@ -276,6 +291,37 @@
       });
       api.closePanel();
       return item;
+    },
+    scanPhoneNodes() {
+      const out = [];
+      const nodes = document.querySelectorAll('[data-testid="selectable-text"], span[dir="auto"], span, div, p');
+      for (const n of nodes) {
+        const txt = short(n.textContent || '', 120);
+        const phone = maybePhone(txt);
+        if (!phone) continue;
+        const rect = n.getBoundingClientRect();
+        if (!rect || rect.width < 8 || rect.height < 8) continue;
+        out.push({
+          phone,
+          text: txt,
+          path: nodeCssPath(n),
+          x: Math.round(rect.left),
+          y: Math.round(rect.top),
+        });
+        if (out.length >= 20) break;
+      }
+      console.log('[WA-MON] scanPhoneNodes:', out);
+      pushEvent({
+        ts: now(),
+        reason: 'scanPhoneNodes',
+        headerTitle: '',
+        headerPhone: '',
+        panelVisible: false,
+        profileName: `${out.length} nodes`,
+        profilePhone: out[0]?.phone || '',
+        panelRoot: out[0]?.path || '',
+      });
+      return out;
     },
     openContactPanel() {
       const header = document.querySelector('#main header');
