@@ -732,15 +732,27 @@ function Sync-FilesFromMirror {
         # Captura o caminho relativo exato do nosso arquivo PHP
         $localPhpRelative = Normalize-RelativePath $script:Config.remotePhpLocalFile
         $pywaRelative = Normalize-RelativePath $script:Config.pywaPattern
+        $readmeRelative = Normalize-RelativePath 'README.md'
 
         # Junta todos os arquivos novos e atualizados numa única lista (normalizada e sem duplicatas)
         $changedFiles = @($script:AddedFiles) + @($script:UpdatedFiles) | ForEach-Object { Normalize-RelativePath $_ }
-        $changedUnique = @($changedFiles | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique)
+        $changedUnique = @(
+            $changedFiles |
+            Where-Object { -not [string]::IsNullOrWhiteSpace($_) -and $_ -ne $readmeRelative } |
+            Select-Object -Unique
+        )
+
+        if (($changedFiles -contains $readmeRelative) -and $changedUnique.Count -eq 0) {
+            Write-Info 'Apenas README.md foi alterado neste ciclo. Nenhum reinicio sera executado.' -Color Yellow
+        }
 
         $onlyPhp = ($changedUnique.Count -gt 0) -and ($changedUnique | Where-Object { $_ -ne $localPhpRelative }).Count -eq 0
         $onlyPywa = ($changedUnique.Count -eq 1) -and ($changedUnique[0] -eq $pywaRelative)
 
-        if ($onlyPhp) {
+        if ($changedUnique.Count -eq 0) {
+            $script:RestartRequested = $false
+            $script:RestartScope = 'none'
+        } elseif ($onlyPhp) {
             $script:RestartRequested = $false
             $script:RestartScope = 'none'
             Write-Info "Atualizacao exclusiva do PHP detectada. O reinicio dos processos locais (BATs) sera ignorado." -Color Yellow
