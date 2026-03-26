@@ -1408,6 +1408,45 @@ class WhatsAppWebClient:
                     self._page.wait_for_timeout(500)
                 except Exception:
                     log.warning("Timeout aguardando chat abrir para título: %s", title)
+                    try:
+                        header_title = self._page.evaluate(
+                            """() => {
+                                const h = document.querySelector('#main header span[title], #main header span[dir="auto"]');
+                                return h ? (h.getAttribute('title') || h.textContent || '').trim() : '';
+                            }"""
+                        )
+                        log.warning(
+                            "Diagnóstico timeout open_chat_by_sidebar_click | alvo='%s' | header_atual='%s'",
+                            title,
+                            header_title or "(vazio)",
+                        )
+                    except Exception:
+                        log.exception("Falha ao coletar diagnóstico de header após timeout para '%s'", title)
+            else:
+                try:
+                    visible_titles = self._page.evaluate(
+                        """() => {
+                            const root = document.querySelector('#pane-side');
+                            if (!root) return [];
+                            const rows = root.querySelectorAll('div[role="row"]');
+                            const out = [];
+                            for (const row of rows) {
+                                const n = row.querySelector('div._ak8q span[title]');
+                                const t = (n?.getAttribute?.('title') || '').trim();
+                                if (!t) continue;
+                                out.push(t);
+                                if (out.length >= 12) break;
+                            }
+                            return out;
+                        }"""
+                    )
+                    log.warning(
+                        "Chat não encontrado para clique na sidebar | alvo='%s' | visíveis=%s",
+                        title,
+                        " | ".join(visible_titles or []),
+                    )
+                except Exception:
+                    log.exception("Falha ao coletar títulos visíveis no diagnóstico de clique '%s'", title)
             return bool(clicked)
 
         return self._run_on_browser_thread(_do)
@@ -1603,29 +1642,54 @@ def enrich_named_contacts_from_sidebar(
     global _LAST_SIDEBAR_ENRICHMENT_TS
     now_mono = time.monotonic()
     if now_mono - _LAST_SIDEBAR_ENRICHMENT_TS < float(min_interval_sec):
+        log.info(
+            "Enriquecimento sidebar: pulado por intervalo mínimo | delta=%.1fs < %ss",
+            now_mono - _LAST_SIDEBAR_ENRICHMENT_TS,
+            min_interval_sec,
+        )
         return 0
     _LAST_SIDEBAR_ENRICHMENT_TS = now_mono
 
     aliases = state.get_contact_aliases()
     enriched = 0
+    skipped_not_named = 0
+    skipped_alias_exists = 0
+    skipped_open_failed = 0
+    skipped_no_phone = 0
+    log.info(
+        "Enriquecimento sidebar iniciado | chats_visíveis=%s | aliases_cache=%s | max_por_ciclo=%s",
+        len(chat_rows),
+        len(aliases),
+        max_per_cycle,
+    )
     for row in chat_rows:
         if enriched >= max_per_cycle:
             break
         title = (row.get("title") or "").strip()
         if not _is_named_chat_title(title):
+            skipped_not_named += 1
             continue
         title_key = re.sub(r"\s+", " ", title.lower())
         if aliases.get(title_key):
             # Already mapped in local cache.
+            skipped_alias_exists += 1
             continue
+        log.info("Enriquecimento sidebar: tentando capturar contato nomeado '%s'", title)
         try:
             if not wa_web.open_chat_by_sidebar_click(title):
+                skipped_open_failed += 1
                 continue
             details = wa_web.get_open_contact_details()
             resolved_phone = normalize_phone(
                 details.get("profile_phone") or details.get("phone") or ""
             )
             if not resolved_phone:
+                skipped_no_phone += 1
+                log.warning(
+                    "Enriquecimento sidebar sem telefone extraído | title='%s' | details=%s",
+                    title,
+                    json.dumps(details, ensure_ascii=False),
+                )
                 continue
             _upsert_whatsapp_contact_profile(
                 phone=resolved_phone,
@@ -1644,8 +1708,15 @@ def enrich_named_contacts_from_sidebar(
         except Exception:
             log.exception("Falha no enriquecimento de contato da sidebar para '%s'", title)
 
-    if enriched:
-        log.info("Enriquecimento de contatos nomeados concluído: %s atualizados.", enriched)
+    log.info(
+        "Enriquecimento sidebar finalizado | atualizados=%s | skip_not_named=%s | "
+        "skip_alias_exists=%s | skip_open_failed=%s | skip_no_phone=%s",
+        enriched,
+        skipped_not_named,
+        skipped_alias_exists,
+        skipped_open_failed,
+        skipped_no_phone,
+    )
     return enriched
 
 
@@ -2231,28 +2302,41 @@ def process_incoming_replies_once() -> Dict[str, int]:
 
     contexts = state.all_phone_contexts()
     aliases = state.get_contact_aliases()
+    log.info(
+        "Monitor replies: contextos_monitorados=%s | aliases_cache=%s",
+        len(contexts),
+        len(aliases),
+    )
     candidates: List[Dict[str, Any]] = []
     now_local = datetime.now()
+    skipped_not_matched = 0
+    skipped_no_time = 0
+    skipped_before_sent = 0
+    skipped_no_recent_signal = 0
     for chat in chat_rows:
         title = (chat.get("title") or "").strip()
         if not title:
             continue
         matched = _match_context_for_chat_title(title, contexts, aliases=aliases)
         if not matched:
+            skipped_not_matched += 1
             continue
         phone_key, ctx = matched
         sent_at_raw = (ctx or {}).get("sent_at") or ""
         sent_at = _parse_datetime(sent_at_raw)
         list_dt = _parse_sidebar_datetime(chat.get("time_text") or "", now=now_local)
         if not list_dt:
+            skipped_no_time += 1
             continue
         if sent_at:
             if list_dt <= sent_at:
+                skipped_before_sent += 1
                 continue
         else:
             # Fallback de compatibilidade: sem sent_at persistido, considera
             # somente chats com sinal de atividade recente (unread/preview).
             if int(chat.get("unread_count") or 0) <= 0 and not (chat.get("preview_text") or "").strip():
+                skipped_no_recent_signal += 1
                 continue
         candidates.append({
             "title": title,
@@ -2264,6 +2348,15 @@ def process_incoming_replies_once() -> Dict[str, int]:
         })
 
     if not candidates:
+        log.info(
+            "Monitor replies: nenhum candidato após filtros | total_chats=%s | "
+            "skip_not_matched=%s | skip_no_time=%s | skip_before_sent=%s | skip_no_recent_signal=%s",
+            len(chat_rows),
+            skipped_not_matched,
+            skipped_no_time,
+            skipped_before_sent,
+            skipped_no_recent_signal,
+        )
         return {"processed": 0, "skipped": 0, "no_match": 0}
 
     log.info(
