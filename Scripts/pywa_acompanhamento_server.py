@@ -1370,7 +1370,8 @@ class WhatsAppWebClient:
             )
 
         return self._run_on_browser_thread(_do)
-def open_chat_by_sidebar_click(self, target_title: str) -> bool:
+
+    def open_chat_by_sidebar_click(self, target_title: str) -> bool:
         """
         Busca o contato na sidebar do WhatsApp Web pelo título exato e clica nele.
         Retorna True se conseguiu clicar, False caso contrário.
@@ -1439,7 +1440,7 @@ def open_chat_by_sidebar_click(self, target_title: str) -> bool:
 
         return self._run_on_browser_thread(_do)
 
-def open_chat_by_sidebar_click(self, target_title: str) -> bool:
+    def open_chat_by_sidebar_click(self, target_title: str) -> bool:
         self.start()
 
         def _do():
@@ -1447,15 +1448,15 @@ def open_chat_by_sidebar_click(self, target_title: str) -> bool:
                 return False
 
             title = " ".join(target_title.split())
-            
+
             clicked = self._page.evaluate("""(target) => {
                 const norm = (s) => String(s || '').replace(/\\s+/g, ' ').trim();
                 const rows = Array.from(document.querySelectorAll('#pane-side div[role="row"]'));
-                
+
                 for (const row of rows) {
                     const span = row.querySelector('div._ak8q span[title], span[title]');
                     const txt = norm(span?.getAttribute?.('title') || span?.textContent || '');
-                    
+
                     if (txt && txt === target) {
                         row.scrollIntoView({ block: 'center' });
                         const clickable = row.querySelector('div[role="gridcell"]') || row;
@@ -1466,7 +1467,7 @@ def open_chat_by_sidebar_click(self, target_title: str) -> bool:
                 }
                 return false;
             }""", title)
-            
+
             if clicked:
                 try:
                     self._page.wait_for_selector('#main header', timeout=3000)
@@ -1902,47 +1903,47 @@ def _is_named_chat_title(title: str) -> bool:
     return _phone_from_title(title) is None
 
 def open_chat_by_sidebar_click(self, target_title: str) -> bool:
-        """
-        Busca o contato na sidebar do WhatsApp Web pelo título exato e clica nele.
-        Retorna True se conseguiu clicar, False caso contrário.
-        """
-        if not self.page:
-            return False
-
-        target_title = " ".join(target_title.split())  # normaliza espaços
-        
-        try:
-            clicked = self.page.evaluate("""(target) => {
-                const norm = (s) => String(s || '').replace(/\\s+/g, ' ').trim();
-                const rows = Array.from(document.querySelectorAll('#pane-side div[role="row"]'));
-                
-                for (const row of rows) {
-                    const span = row.querySelector('div._ak8q span[title], span[title]');
-                    const txt = norm(span?.getAttribute?.('title') || span?.textContent || '');
-                    
-                    if (txt && txt === target) {
-                        row.scrollIntoView({ block: 'center' });
-                        // Encontra a área clicável exata dentro da linha
-                        const clickable = row.querySelector('div[role="gridcell"]') || row;
-                        
-                        // Dispara mousedown e click nativo para o React entender
-                        clickable.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
-                        clickable.click();
-                        return true;
-                    }
-                }
-                return false;
-            }""", target_title)
-            
-            if clicked:
-                # Aguarda o header do chat principal renderizar para confirmar abertura
-                self.page.wait_for_selector('#main header', timeout=3000)
-                return True
-                
-        except Exception as e:
-            log.warning(f"Erro ao tentar clicar na sidebar para '{target_title}': {e}")
-            
+    """
+    Busca o contato na sidebar do WhatsApp Web pelo título exato e clica nele.
+    Retorna True se conseguiu clicar, False caso contrário.
+    """
+    if not self.page:
         return False
+
+    target_title = " ".join(target_title.split())  # normaliza espaços
+
+    try:
+        clicked = self.page.evaluate("""(target) => {
+            const norm = (s) => String(s || '').replace(/\\s+/g, ' ').trim();
+            const rows = Array.from(document.querySelectorAll('#pane-side div[role="row"]'));
+
+            for (const row of rows) {
+                const span = row.querySelector('div._ak8q span[title], span[title]');
+                const txt = norm(span?.getAttribute?.('title') || span?.textContent || '');
+
+                if (txt && txt === target) {
+                    row.scrollIntoView({ block: 'center' });
+                    // Encontra a área clicável exata dentro da linha
+                    const clickable = row.querySelector('div[role="gridcell"]') || row;
+
+                    // Dispara mousedown e click nativo para o React entender
+                    clickable.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+                    clickable.click();
+                    return true;
+                }
+            }
+            return false;
+        }""", target_title)
+
+        if clicked:
+            # Aguarda o header do chat principal renderizar para confirmar abertura
+            self.page.wait_for_selector('#main header', timeout=3000)
+            return True
+
+    except Exception as e:
+        log.warning(f"Erro ao tentar clicar na sidebar para '{target_title}': {e}")
+
+    return False
 
 def _log_cycle_summary(cycle_no: int) -> Dict[str, int]:
     """Query DB for an overview of eligible follow-ups and log a summary."""
