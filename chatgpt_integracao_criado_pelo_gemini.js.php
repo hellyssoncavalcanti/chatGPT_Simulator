@@ -8057,6 +8057,37 @@ header('Content-Type: application/javascript; charset=utf-8');
         if (tWrapEl) tWrapEl.style.display = 'block';
         if (tElInit) tElInit.innerText = 'Enviando pedido...';
         let fullC = partialContent, fullT = '', openedT = true;
+        let streamInThinkTag = false;
+        const splitThinkAndVisible = (inputText) => {
+            let remaining = String(inputText || '');
+            let visible = '';
+            let thinking = '';
+
+            while (remaining.length > 0) {
+                const lower = remaining.toLowerCase();
+                if (!streamInThinkTag) {
+                    const openIdx = lower.indexOf('<think>');
+                    if (openIdx === -1) {
+                        visible += remaining;
+                        break;
+                    }
+                    visible += remaining.slice(0, openIdx);
+                    remaining = remaining.slice(openIdx + 7);
+                    streamInThinkTag = true;
+                } else {
+                    const closeIdx = lower.indexOf('</think>');
+                    if (closeIdx === -1) {
+                        thinking += remaining;
+                        break;
+                    }
+                    thinking += remaining.slice(0, closeIdx);
+                    remaining = remaining.slice(closeIdx + 8);
+                    streamInThinkTag = false;
+                }
+            }
+
+            return { visible, thinking };
+        };
 
         if (partialContent) {
             document.getElementById(ui.mID).innerHTML = formatMarkdown(partialContent) +
@@ -8112,6 +8143,15 @@ header('Content-Type: application/javascript; charset=utf-8');
                             fullT += r;
                             document.getElementById(ui.tID).innerText += r;
                         }
+                    }
+                }
+
+                if (c) {
+                    const split = splitThinkAndVisible(c);
+                    c = split.visible || '';
+                    if (split.thinking && split.thinking.trim()) {
+                        if (!openedT) { document.getElementById(ui.tID).parentElement.style.display = 'block'; openedT = true; }
+                        fullT += split.thinking;
                     }
                 }
 
@@ -8174,9 +8214,17 @@ header('Content-Type: application/javascript; charset=utf-8');
             } else if (tWrapEl) {
                 tWrapEl.style.display = 'none';
             }
+
+            // Se o modelo só mandou <think>/reasoning, não tratar como resposta final ao usuário.
+            if (!fullC.trim() && fullT.trim()) {
+                const warnEl = document.getElementById(ui.mID);
+                if (warnEl) {
+                    warnEl.innerHTML = formatMarkdown('⚠️ O modelo retornou apenas raciocínio interno e não gerou resposta final. Vou tentar novamente se você reenviar.');
+                }
+            }
             
-            //só salva se houver conteúdo real:
-            if (fullC.trim() || fullT.trim()) {
+            // Só salva se houver resposta final visível (não apenas thinking).
+            if (fullC.trim()) {
                 state.messages.push({role: 'assistant', content: fullT ? `<think>${fullT}</think>${fullC}` : fullC});
                 saveLocal();
             }
