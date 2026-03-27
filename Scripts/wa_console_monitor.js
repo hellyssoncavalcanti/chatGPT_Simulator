@@ -83,34 +83,42 @@
     const role = (el.getAttribute('role') || '').toLowerCase();
     if (role === 'menu' || role === 'menuitem') return false;
     const rect = el.getBoundingClientRect();
-    if (rect.width < 240 || rect.height < 220) return false;
-    // Painel de contato normalmente ocupa lado direito da viewport.
-    if (rect.left < window.innerWidth * 0.45) return false;
+    if (rect.width < 150 || rect.height < 100) return false;
     return true;
   };
 
   const pickPanel = () => {
-    const heading = Array.from(document.querySelectorAll('h1,h2,div[role="heading"],span[dir="auto"],span'))
-      .find((n) => /dados do contato|contact info/i.test(norm(n.textContent)));
+    // Estratégia 1: data-testid (mais confiável no WA Web moderno)
+    let root = document.querySelector('[data-testid="contact-info-drawer"]');
 
-    let root = null;
-    if (heading) {
-      const candidate = heading.closest('section,aside,div[role="dialog"],div[role="region"]');
-      if (isPanelContainer(candidate)) root = candidate;
+    // Estratégia 2: aria-label
+    if (!root) {
+      root = document.querySelector(
+        'div[aria-label="Dados do contato"],div[aria-label="Contact info"],' +
+        'aside[aria-label="Dados do contato"],aside[aria-label="Contact info"]'
+      );
     }
 
+    // Estratégia 3: heading textual
     if (!root) {
-      const direct = document.querySelector('div[aria-label="Dados do contato"],div[aria-label="Contact info"],aside[aria-label="Dados do contato"],aside[aria-label="Contact info"]');
-      if (isPanelContainer(direct)) root = direct;
+      const heading = Array.from(document.querySelectorAll('h1,h2,div[role="heading"],span[dir="auto"],span'))
+        .find((n) => /dados do contato|contact info|informações do contato/i.test(norm(n.textContent)));
+      if (heading) {
+        const candidate = heading.closest('section,aside,div[role="dialog"],div[role="region"],div[class]');
+        if (isPanelContainer(candidate)) root = candidate;
+      }
     }
 
-    // Fallback importante para o DOM atual do WhatsApp:
-    // tenta achar número dentro de [data-testid="selectable-text"] no painel da direita.
+    // Estratégia 4: procura nó com telefone em container lateral
     if (!root) {
-      const nodes = Array.from(document.querySelectorAll('[data-testid="selectable-text"], span[dir="auto"], span'))
-        .filter((n) => maybePhone(n.textContent || ''));
+      const nodes = Array.from(document.querySelectorAll(
+        '[data-testid="cell-frame-container"] span,' +
+        '[data-testid="selectable-text"],' +
+        'aside span[dir="auto"],' +
+        'section span[dir="auto"]'
+      )).filter((n) => maybePhone(n.textContent || ''));
       for (const n of nodes) {
-        const candidate = n.closest('section,aside,div[role="dialog"],div[role="region"],div');
+        const candidate = n.closest('section,aside,div[role="dialog"],div[role="region"],div[class]');
         if (isPanelContainer(candidate)) {
           root = candidate;
           break;
@@ -121,10 +129,15 @@
     const panelVisible = !!root;
     if (!root) return { panelVisible, profileName: '', profilePhone: '', rootTag: '' };
 
-    const rootTag = `${root.tagName.toLowerCase()}${root.getAttribute('role') ? `[role=${root.getAttribute('role')}]` : ''}`;
+    const testid = root.getAttribute('data-testid') || '';
+    const ariaLabel = root.getAttribute('aria-label') || '';
+    const rootTag = `${root.tagName.toLowerCase()}` +
+      (testid ? `[data-testid=${testid}]` : '') +
+      (ariaLabel ? `[aria-label=${ariaLabel}]` : '') +
+      (root.getAttribute('role') ? `[role=${root.getAttribute('role')}]` : '');
 
     const candidates = Array.from(root.querySelectorAll('h1,h2,div[role="heading"],span[dir="auto"],span[title]'));
-    const noise = /dados do contato|contact info|mídia|media|silenciar|wa-wordmark|meta ai/i;
+    const noise = /dados do contato|contact info|informações do contato|mídia|media|silenciar|wa-wordmark|meta ai/i;
 
     let profileName = '';
     for (const c of candidates) {
@@ -134,13 +147,23 @@
       break;
     }
 
+    // Busca telefone: prioriza cell-frame-container, depois selectable-text, depois varredura ampla
     let profilePhone = '';
-    for (const c of root.querySelectorAll('span,div,p')) {
-      const txt = norm(c.textContent || '');
-      const p = maybePhone(txt);
-      if (p) {
-        profilePhone = p;
-        break;
+    const cellFrames = root.querySelectorAll('[data-testid="cell-frame-container"],[data-testid="cell-frame-secondary"]');
+    for (const cf of cellFrames) {
+      const p = maybePhone(norm(cf.textContent || ''));
+      if (p) { profilePhone = p; break; }
+    }
+    if (!profilePhone) {
+      for (const c of root.querySelectorAll('[data-testid="selectable-text"]')) {
+        const p = maybePhone(norm(c.textContent || ''));
+        if (p) { profilePhone = p; break; }
+      }
+    }
+    if (!profilePhone) {
+      for (const c of root.querySelectorAll('span,div,p')) {
+        const p = maybePhone(norm(c.textContent || ''));
+        if (p) { profilePhone = p; break; }
       }
     }
 
@@ -151,7 +174,7 @@
     const out = [];
     const rows = document.querySelectorAll('#pane-side div[role="row"]');
     for (const row of rows) {
-      const span = row.querySelector('div._ak8q span[title], span[title]');
+      const span = row.querySelector('span[title]');
       const t = norm(span?.getAttribute?.('title') || span?.textContent || '');
       if (!t) continue;
       out.push(t);
@@ -206,18 +229,20 @@
     help() {
       console.log([
         'Comandos:',
-        '  waMon.snap()                 -> snapshot manual',
-        '  waMon.traceOpen("Nome")      -> tenta abrir chat por título e loga etapas',
-        '  waMon.proveCapture("Nome")   -> prova guiada com confirm() para validar abertura/painel/captura',
-        '  waMon.startClickTracker()     -> rastreia cliques (x,y,elemento,path curto)',
-        '  waMon.stopClickTracker()      -> para rastreio de cliques',
+        '  waMon.snap()                    -> snapshot manual',
+        '  waMon.fullCapture("Nome")       -> *** FLUXO COMPLETO: sidebar→chat→painel→deepScan ***',
+        '  waMon.deepPhoneScan()           -> varredura de TODOS os nós com telefone (com path+testid)',
+        '  waMon.traceOpen("Nome")         -> tenta abrir chat por título e loga etapas',
+        '  waMon.proveCapture("Nome")      -> prova guiada com confirm() para validar abertura/painel/captura',
+        '  waMon.startClickTracker()       -> rastreia cliques (x,y,elemento,path curto)',
+        '  waMon.stopClickTracker()        -> para rastreio de cliques',
         '  waMon.captureSelectionAndClose() -> captura texto selecionado + localizador e fecha painel',
         '  waMon.scanPhoneNodes()          -> lista nós visíveis com telefone (texto+path curto)',
-        '  waMon.openContactPanel()      -> clica no header para abrir dados de contato',
-        '  waMon.closePanel()            -> ESC',
-        '  waMon.sidebar()               -> amostra de títulos da sidebar',
-        '  waMon.export()                -> JSON compacto dos eventos',
-        '  waMon.stop()                  -> para monitor',
+        '  waMon.openContactPanel()        -> clica no header para abrir dados de contato',
+        '  waMon.closePanel()              -> ESC',
+        '  waMon.sidebar()                 -> amostra de títulos da sidebar',
+        '  waMon.export()                  -> JSON compacto dos eventos',
+        '  waMon.stop()                    -> para monitor',
       ].join('\n'));
     },
     snap() { emit('manual'); },
@@ -333,6 +358,97 @@
       emit('openContactPanel');
       return true;
     },
+    deepPhoneScan() {
+      // Varredura completa de todos os nós que contêm telefone, com path + contexto
+      console.log('[WA-MON] === DEEP PHONE SCAN ===');
+      const results = [];
+      const allNodes = document.querySelectorAll('*');
+      for (const n of allNodes) {
+        if (n.children.length > 0) continue; // só nós folha
+        const txt = norm(n.textContent || '');
+        const phone = maybePhone(txt);
+        if (!phone) continue;
+        const rect = n.getBoundingClientRect();
+        if (!rect || rect.width < 1 || rect.height < 1) continue;
+        const testid = n.closest('[data-testid]')?.getAttribute('data-testid') || '';
+        const ariaLabel = n.closest('[aria-label]')?.getAttribute('aria-label') || '';
+        const entry = {
+          phone,
+          text: short(txt, 80),
+          tag: n.tagName.toLowerCase(),
+          path: nodeCssPath(n),
+          testid,
+          ariaLabel,
+          x: Math.round(rect.left),
+          y: Math.round(rect.top),
+          w: Math.round(rect.width),
+          h: Math.round(rect.height),
+        };
+        results.push(entry);
+        console.log(`  [${results.length}] phone=${phone} testid=${testid || '-'} aria=${ariaLabel || '-'} path=${entry.path}`);
+      }
+      console.log(`[WA-MON] Total phone nodes encontrados: ${results.length}`);
+      return results;
+    },
+    async fullCapture(targetTitle) {
+      // Fluxo completo: clica sidebar → abre chat → abre painel → deep scan
+      const target = norm(targetTitle);
+      if (!target) { console.warn('[WA-MON] informe título'); return null; }
+      console.log(`[WA-MON] === FULL CAPTURE para "${target}" ===`);
+
+      // 1) Clica na sidebar
+      const rows = Array.from(document.querySelectorAll('#pane-side div[role="row"]'));
+      let found = false;
+      for (const row of rows) {
+        const span = row.querySelector('span[title]');
+        const txt = norm(span?.getAttribute?.('title') || span?.textContent || '');
+        if (txt === target) {
+          row.scrollIntoView({ block: 'center' });
+          const cell = row.querySelector('div[role="gridcell"]') || row;
+          cell.click();
+          found = true;
+          console.log('[WA-MON] 1/4 Sidebar click OK');
+          break;
+        }
+      }
+      if (!found) { console.warn('[WA-MON] Título não encontrado na sidebar'); return null; }
+
+      await new Promise(r => setTimeout(r, 1500));
+      const hdr = pickHeader();
+      console.log(`[WA-MON] 2/4 Header: title="${hdr.title}" phone="${hdr.phone}"`);
+      if (hdr.phone) {
+        console.log(`[WA-MON] Telefone já visível no header: ${hdr.phone}`);
+        return { source: 'header', phone: hdr.phone, title: hdr.title };
+      }
+
+      // 3) Abre painel de contato
+      const header = document.querySelector('#main header');
+      if (header) header.click();
+      console.log('[WA-MON] 3/4 Abrindo painel de contato...');
+      await new Promise(r => setTimeout(r, 2000));
+
+      const panel = pickPanel();
+      console.log(`[WA-MON] Panel: visible=${panel.panelVisible} root=${panel.rootTag} name=${panel.profileName} phone=${panel.profilePhone}`);
+
+      if (panel.profilePhone) {
+        console.log(`[WA-MON] Telefone capturado via painel: ${panel.profilePhone}`);
+        document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+        return { source: 'panel', phone: panel.profilePhone, name: panel.profileName, root: panel.rootTag };
+      }
+
+      // 4) Deep scan como último recurso
+      console.log('[WA-MON] 4/4 Painel não teve telefone, fazendo deep scan...');
+      const deep = api.deepPhoneScan();
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+
+      if (deep.length > 0) {
+        console.log(`[WA-MON] Deep scan encontrou ${deep.length} nós com telefone. Primeiro: ${deep[0].phone}`);
+        return { source: 'deepScan', phone: deep[0].phone, allPhones: deep };
+      }
+
+      console.warn('[WA-MON] Nenhum telefone encontrado por nenhuma estratégia.');
+      return { source: 'none', phone: '' };
+    },
     traceOpen(targetTitle) {
       const target = norm(targetTitle);
       if (!target) {
@@ -342,7 +458,7 @@
       const rows = Array.from(document.querySelectorAll('#pane-side div[role="row"]'));
       let clicked = false;
       for (const row of rows) {
-        const span = row.querySelector('div._ak8q span[title], span[title]');
+        const span = row.querySelector('span[title]');
         const txt = norm(span?.getAttribute?.('title') || span?.textContent || '');
         if (!txt) continue;
         if (txt === target) {
