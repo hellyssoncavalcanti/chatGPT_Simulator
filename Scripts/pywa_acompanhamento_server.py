@@ -1403,7 +1403,7 @@ class WhatsAppWebClient:
     def open_chat_by_sidebar_click(self, target_title: str) -> bool:
         """
         Busca o contato na sidebar do WhatsApp Web pelo título exato e clica nele.
-        Usa Playwright locator nativo para clique confiável no React.
+        Usa evaluate_handle + ElementHandle.click() para clique real a nível de browser.
         Retorna True se conseguiu abrir o chat, False caso contrário.
         """
         self.start()
@@ -1414,52 +1414,140 @@ class WhatsAppWebClient:
 
             title = " ".join(target_title.split())
 
-            # 1) Localiza o índice da row via JS (mais rápido que iterar locators)
-            row_index = self._page.evaluate("""(target) => {
+            # 1) Obtém referência direta ao elemento DOM via evaluate_handle
+            el_handle = self._page.evaluate_handle("""(target) => {
                 const norm = (s) => String(s || '').replace(/\\s+/g, ' ').trim();
                 const rows = document.querySelectorAll('#pane-side div[role="row"]');
-                for (let i = 0; i < rows.length; i++) {
-                    const span = rows[i].querySelector('span[title]');
+                for (const row of rows) {
+                    const span = row.querySelector('span[title]');
                     if (!span) continue;
                     const txt = norm(span.getAttribute('title') || span.textContent || '');
-                    if (txt === target) return i;
+                    if (txt === target) {
+                        row.scrollIntoView({ block: 'center' });
+                        return row;
+                    }
                 }
-                return -1;
+                return null;
             }""", title)
 
-            if row_index < 0:
+            el = el_handle.as_element() if el_handle else None
+            if not el:
                 log.warning("open_chat_by_sidebar_click: título '%s' não encontrado na sidebar", title)
                 return False
 
-            # 2) Scroll para visibilidade e clique nativo via Playwright locator
-            row_locator = self._page.locator('#pane-side div[role="row"]').nth(row_index)
+            # 2) Clique real via Playwright ElementHandle (eventos mousedown/mouseup/click reais)
             try:
-                row_locator.scroll_into_view_if_needed(timeout=2000)
                 self._page.wait_for_timeout(200)
-            except Exception:
-                pass
-
-            # Tenta clicar no gridcell ou na row inteira
-            cell = row_locator.locator('div[role="gridcell"]').first
-            try:
-                if cell.count() > 0:
-                    cell.click(timeout=3000)
-                else:
-                    row_locator.click(timeout=3000)
+                el.click(timeout=5000)
             except Exception as e:
                 log.warning("open_chat_by_sidebar_click: falha no clique para '%s': %s", title, e)
                 return False
 
-            # 3) Aguarda o header do chat renderizar
+            # 3) Aguarda o header do chat renderizar e confirma que é o chat certo
             try:
-                self._page.wait_for_selector('#main header', timeout=5000)
-                self._page.wait_for_timeout(300)
+                self._page.wait_for_selector('#main header span[title]', timeout=5000)
+                self._page.wait_for_timeout(500)
                 return True
             except Exception:
                 log.warning("open_chat_by_sidebar_click: header não apareceu após clicar '%s'", title)
                 return False
 
         return self._run_on_browser_thread(_do)
+
+    def resolve_phone_via_wa_store(self, chat_title: str) -> Optional[str]:
+        """
+        Tenta resolver o telefone de um contato pelo título usando o store
+        interno do WhatsApp Web (window.Store), sem necessidade de abrir o chat.
+        Retorna o telefone normalizado ou None.
+        """
+        self.start()
+
+        def _do():
+            if not getattr(self, '_page', None):
+                return None
+
+            title = " ".join(chat_title.split())
+
+            phone = self._page.evaluate("""(target) => {
+                const norm = (s) => String(s || '').replace(/\\s+/g, ' ').trim();
+
+                // Estratégia 1: window.Store.Chat (API interna do WA Web)
+                try {
+                    const Store = window.Store || window.require?.('WAWebCollections');
+                    if (Store && Store.Chat) {
+                        const chats = Store.Chat.getModelsArray?.() || Store.Chat._models || [];
+                        for (const chat of chats) {
+                            const name = norm(chat.name || chat.formattedTitle || chat.contact?.pushname || '');
+                            if (name === target || norm(chat.formattedTitle || '') === target) {
+                                const id = chat.id?._serialized || chat.id?.user || '';
+                                const digits = id.replace(/\\D/g, '');
+                                if (digits.length >= 10 && digits.length <= 15) return digits;
+                            }
+                        }
+                    }
+                } catch(e) {}
+
+                // Estratégia 2: window.Store.Contact
+                try {
+                    const Store = window.Store || window.require?.('WAWebCollections');
+                    if (Store && Store.Contact) {
+                        const contacts = Store.Contact.getModelsArray?.() || Store.Contact._models || [];
+                        for (const c of contacts) {
+                            const name = norm(c.pushname || c.name || c.formattedName || '');
+                            if (name === target || norm(c.formattedName || '') === target) {
+                                const id = c.id?._serialized || c.id?.user || '';
+                                const digits = id.replace(/\\D/g, '');
+                                if (digits.length >= 10 && digits.length <= 15) return digits;
+                            }
+                        }
+                    }
+                } catch(e) {}
+
+                // Estratégia 3: busca na sidebar o data-id da row correspondente
+                try {
+                    const rows = document.querySelectorAll('#pane-side div[role="row"]');
+                    for (const row of rows) {
+                        const span = row.querySelector('span[title]');
+                        if (!span) continue;
+                        const txt = norm(span.getAttribute('title') || span.textContent || '');
+                        if (txt !== target) continue;
+
+                        // O link da row ou container pai pode ter o phone no data-id
+                        const container = row.closest('[data-id]') || row.querySelector('[data-id]');
+                        if (container) {
+                            const dataId = container.getAttribute('data-id') || '';
+                            const digits = dataId.replace(/\\D/g, '');
+                            if (digits.length >= 10 && digits.length <= 15) return digits;
+                        }
+
+                        // Tenta extrair do atributo interno do React
+                        const fiber = Object.keys(row).find(k => k.startsWith('__reactFiber') || k.startsWith('__reactInternalInstance'));
+                        if (fiber) {
+                            try {
+                                let node = row[fiber];
+                                for (let i = 0; i < 15 && node; i++) {
+                                    const props = node.memoizedProps || node.pendingProps || {};
+                                    const id = props?.id || props?.chatId || props?.contact?.id;
+                                    if (id) {
+                                        const ser = typeof id === 'object' ? (id._serialized || id.user || '') : String(id);
+                                        const d = ser.replace(/\\D/g, '');
+                                        if (d.length >= 10 && d.length <= 15) return d;
+                                    }
+                                    node = node.return;
+                                }
+                            } catch(e) {}
+                        }
+                        break;
+                    }
+                } catch(e) {}
+
+                return null;
+            }""", title)
+
+            return phone
+
+        result = self._run_on_browser_thread(_do)
+        return normalize_phone(result) if result else None
 
     def extract_phone_from_open_chat(self) -> Optional[str]:
         self.start()
@@ -2560,52 +2648,69 @@ def enrich_named_contacts_from_sidebar(
             
         attempts += 1
         log.info("Enriquecimento sidebar: tentando capturar contato nomeado '%s'", title)
-        
+
+        resolved_phone = None
+        detail_title = title
+        detail_profile = ""
+
         try:
-            if not wa_web.open_chat_by_sidebar_click(title):
-                skipped_open_failed += 1
-                log.warning("Enriquecimento sidebar: falha ao clicar na sidebar para '%s'", title)
-                continue
-                
-            open_identity = wa_web.get_open_chat_identity()
-            open_title = (open_identity.get("title") or "").strip()
-            
-            if not open_title:
-                skipped_open_failed += 1
-                log.warning("Enriquecimento sidebar: chat não abriu | alvo='%s'", title)
-                continue
-                
-            details = wa_web.get_open_contact_details()
-            resolved_phone = normalize_phone(details.get("profile_phone") or details.get("phone") or "")
-            
-            # === FALLBACK: re-abre painel e tenta varredura ampla via browser thread ===
+            # === FASE 1: Tenta resolver via WA internal store (sem abrir chat) ===
+            try:
+                store_phone = wa_web.resolve_phone_via_wa_store(title)
+                if store_phone:
+                    resolved_phone = store_phone
+                    log.info("Enriquecimento sidebar: telefone via WA Store para '%s' -> %s", title, resolved_phone)
+            except Exception as e:
+                log.debug("WA Store fallback falhou para '%s': %s", title, e)
+
+            # === FASE 2: Se store não resolveu, abre chat + painel de contato ===
             if not resolved_phone:
-                log.info("Telefone não encontrado via get_open_contact_details para '%s'. Tentando fallback amplo...", title)
-                try:
-                    fallback_phone = wa_web.extract_phone_from_open_chat()
-                    if fallback_phone:
-                        resolved_phone = normalize_phone(fallback_phone)
-                        log.info("Telefone capturado via fallback header: %s", resolved_phone)
-                except Exception as e:
-                    log.warning("Falha no fallback de telefone para '%s': %s", title, e)
-            # ===============================================
-            
+                if not wa_web.open_chat_by_sidebar_click(title):
+                    skipped_open_failed += 1
+                    log.warning("Enriquecimento sidebar: falha ao clicar na sidebar para '%s'", title)
+                    continue
+
+                open_identity = wa_web.get_open_chat_identity()
+                open_title = (open_identity.get("title") or "").strip()
+
+                if not open_title:
+                    skipped_open_failed += 1
+                    log.warning("Enriquecimento sidebar: chat não abriu (header vazio) | alvo='%s'", title)
+                    continue
+
+                details = wa_web.get_open_contact_details()
+                detail_title = details.get("title") or title
+                detail_profile = details.get("profile_name") or ""
+                resolved_phone = normalize_phone(details.get("profile_phone") or details.get("phone") or "")
+
+                # Fallback: tenta extrair do header diretamente
+                if not resolved_phone:
+                    log.info("Telefone não encontrado via painel para '%s'. Tentando header...", title)
+                    try:
+                        fallback_phone = wa_web.extract_phone_from_open_chat()
+                        if fallback_phone:
+                            resolved_phone = normalize_phone(fallback_phone)
+                            log.info("Telefone capturado via header: %s", resolved_phone)
+                    except Exception as e:
+                        log.warning("Falha no fallback header para '%s': %s", title, e)
+
             if not resolved_phone:
                 skipped_no_phone += 1
+                log.warning("Enriquecimento sidebar: sem telefone para '%s' após todas as estratégias", title)
                 continue
-                
+
             _upsert_whatsapp_contact_profile(
                 phone=resolved_phone,
-                display_name=details.get("title") or title,
-                profile_name=details.get("profile_name") or "",
+                display_name=detail_title,
+                profile_name=detail_profile,
                 wa_chat_title=title,
                 source="sidebar_enrichment",
             )
-            
+
             state.set_contact_alias(title, resolved_phone)
             log.info("Enriquecimento sidebar: contato nomeado '%s' -> %s", title, resolved_phone)
             enriched += 1
-            
+
         except Exception as e:
             log.exception("Falha no enriquecimento para '%s': %s", title, e)
 
