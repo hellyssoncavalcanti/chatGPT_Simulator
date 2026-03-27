@@ -230,7 +230,8 @@
       console.log([
         'Comandos:',
         '  waMon.snap()                    -> snapshot manual',
-        '  waMon.fullCapture("Nome")       -> *** FLUXO COMPLETO: sidebar→chat→painel→deepScan ***',
+        '  waMon.fullCapture("Nome")       -> *** FLUXO COMPLETO: store→sidebar→chat→painel→deepScan ***',
+        '  waMon.resolveViaStore("Nome")   -> resolve telefone via WA Store/ReactFiber (sem abrir chat)',
         '  waMon.deepPhoneScan()           -> varredura de TODOS os nós com telefone (com path+testid)',
         '  waMon.traceOpen("Nome")         -> tenta abrir chat por título e loga etapas',
         '  waMon.proveCapture("Nome")      -> prova guiada com confirm() para validar abertura/painel/captura',
@@ -390,13 +391,104 @@
       console.log(`[WA-MON] Total phone nodes encontrados: ${results.length}`);
       return results;
     },
+    resolveViaStore(targetTitle) {
+      // Tenta resolver telefone via store interno do WA Web (sem abrir chat)
+      const target = norm(targetTitle);
+      console.log(`[WA-MON] Tentando WA Store para "${target}"...`);
+
+      // Estratégia 1: window.Store.Chat
+      try {
+        const Store = window.Store || window.require?.('WAWebCollections');
+        if (Store?.Chat) {
+          const chats = Store.Chat.getModelsArray?.() || Store.Chat._models || [];
+          for (const chat of chats) {
+            const name = norm(chat.name || chat.formattedTitle || chat.contact?.pushname || '');
+            if (name === target || norm(chat.formattedTitle || '') === target) {
+              const id = chat.id?._serialized || chat.id?.user || '';
+              const digits = id.replace(/\D/g, '');
+              if (digits.length >= 10) {
+                console.log(`[WA-MON] Store.Chat match: "${name}" -> ${digits}`);
+                return { source: 'Store.Chat', phone: digits, chatId: id };
+              }
+            }
+          }
+          console.log(`[WA-MON] Store.Chat: ${chats.length} chats examinados, nenhum match`);
+        } else {
+          console.log('[WA-MON] Store.Chat não disponível');
+        }
+      } catch(e) { console.log('[WA-MON] Store.Chat erro:', e.message); }
+
+      // Estratégia 2: window.Store.Contact
+      try {
+        const Store = window.Store || window.require?.('WAWebCollections');
+        if (Store?.Contact) {
+          const contacts = Store.Contact.getModelsArray?.() || Store.Contact._models || [];
+          for (const c of contacts) {
+            const name = norm(c.pushname || c.name || c.formattedName || '');
+            if (name === target || norm(c.formattedName || '') === target) {
+              const id = c.id?._serialized || c.id?.user || '';
+              const digits = id.replace(/\D/g, '');
+              if (digits.length >= 10) {
+                console.log(`[WA-MON] Store.Contact match: "${name}" -> ${digits}`);
+                return { source: 'Store.Contact', phone: digits, contactId: id };
+              }
+            }
+          }
+          console.log(`[WA-MON] Store.Contact: ${contacts.length} contatos, nenhum match`);
+        } else {
+          console.log('[WA-MON] Store.Contact não disponível');
+        }
+      } catch(e) { console.log('[WA-MON] Store.Contact erro:', e.message); }
+
+      // Estratégia 3: React fiber props na sidebar row
+      try {
+        const rows = document.querySelectorAll('#pane-side div[role="row"]');
+        for (const row of rows) {
+          const span = row.querySelector('span[title]');
+          if (!span) continue;
+          const txt = norm(span.getAttribute('title') || span.textContent || '');
+          if (txt !== target) continue;
+          console.log(`[WA-MON] Row encontrada para "${target}", buscando React fiber...`);
+          const fiberKey = Object.keys(row).find(k => k.startsWith('__reactFiber') || k.startsWith('__reactInternalInstance'));
+          if (fiberKey) {
+            let node = row[fiberKey];
+            for (let i = 0; i < 20 && node; i++) {
+              const props = node.memoizedProps || node.pendingProps || {};
+              const chatId = props?.id || props?.chatId || props?.contact?.id;
+              if (chatId) {
+                const ser = typeof chatId === 'object' ? (chatId._serialized || chatId.user || '') : String(chatId);
+                const d = ser.replace(/\D/g, '');
+                if (d.length >= 10) {
+                  console.log(`[WA-MON] React fiber match (depth=${i}): ${ser} -> ${d}`);
+                  return { source: 'ReactFiber', phone: d, fiberId: ser, depth: i };
+                }
+              }
+              node = node.return;
+            }
+            console.log('[WA-MON] React fiber: nenhum chatId encontrado na chain');
+          } else {
+            console.log('[WA-MON] Nenhuma React fiber key na row');
+          }
+          break;
+        }
+      } catch(e) { console.log('[WA-MON] ReactFiber erro:', e.message); }
+
+      console.warn('[WA-MON] Nenhuma estratégia de store/fiber resolveu o telefone');
+      return { source: 'none', phone: '' };
+    },
     async fullCapture(targetTitle) {
-      // Fluxo completo: clica sidebar → abre chat → abre painel → deep scan
+      // Fluxo completo: store → sidebar click → chat → painel → deep scan
       const target = norm(targetTitle);
       if (!target) { console.warn('[WA-MON] informe título'); return null; }
       console.log(`[WA-MON] === FULL CAPTURE para "${target}" ===`);
 
-      // 1) Clica na sidebar
+      // 0) Tenta via WA Store primeiro (sem abrir nada)
+      const storeResult = api.resolveViaStore(target);
+      if (storeResult.phone) {
+        return storeResult;
+      }
+
+      // 1) Clica na sidebar com eventos completos (mousedown → mouseup → click)
       const rows = Array.from(document.querySelectorAll('#pane-side div[role="row"]'));
       let found = false;
       for (const row of rows) {
@@ -404,31 +496,46 @@
         const txt = norm(span?.getAttribute?.('title') || span?.textContent || '');
         if (txt === target) {
           row.scrollIntoView({ block: 'center' });
+          await new Promise(r => setTimeout(r, 200));
           const cell = row.querySelector('div[role="gridcell"]') || row;
-          cell.click();
+          // Sequência completa de mouse events para React
+          const evOpts = { bubbles: true, cancelable: true, view: window };
+          cell.dispatchEvent(new MouseEvent('mousedown', evOpts));
+          cell.dispatchEvent(new MouseEvent('mouseup', evOpts));
+          cell.dispatchEvent(new MouseEvent('click', evOpts));
           found = true;
-          console.log('[WA-MON] 1/4 Sidebar click OK');
+          console.log('[WA-MON] 1/5 Sidebar click (mousedown+mouseup+click) OK');
           break;
         }
       }
       if (!found) { console.warn('[WA-MON] Título não encontrado na sidebar'); return null; }
 
-      await new Promise(r => setTimeout(r, 1500));
+      await new Promise(r => setTimeout(r, 2000));
       const hdr = pickHeader();
-      console.log(`[WA-MON] 2/4 Header: title="${hdr.title}" phone="${hdr.phone}"`);
+      console.log(`[WA-MON] 2/5 Header: title="${hdr.title}" phone="${hdr.phone}"`);
       if (hdr.phone) {
         console.log(`[WA-MON] Telefone já visível no header: ${hdr.phone}`);
         return { source: 'header', phone: hdr.phone, title: hdr.title };
       }
 
+      if (!hdr.title) {
+        console.warn('[WA-MON] Chat NÃO abriu (header vazio). Clique JS insuficiente — use Playwright.');
+        return { source: 'none', phone: '', reason: 'chat_not_opened' };
+      }
+
       // 3) Abre painel de contato
       const header = document.querySelector('#main header');
-      if (header) header.click();
-      console.log('[WA-MON] 3/4 Abrindo painel de contato...');
-      await new Promise(r => setTimeout(r, 2000));
+      if (header) {
+        const evOpts = { bubbles: true, cancelable: true, view: window };
+        header.dispatchEvent(new MouseEvent('mousedown', evOpts));
+        header.dispatchEvent(new MouseEvent('mouseup', evOpts));
+        header.dispatchEvent(new MouseEvent('click', evOpts));
+      }
+      console.log('[WA-MON] 3/5 Abrindo painel de contato...');
+      await new Promise(r => setTimeout(r, 2500));
 
       const panel = pickPanel();
-      console.log(`[WA-MON] Panel: visible=${panel.panelVisible} root=${panel.rootTag} name=${panel.profileName} phone=${panel.profilePhone}`);
+      console.log(`[WA-MON] 4/5 Panel: visible=${panel.panelVisible} root=${panel.rootTag} name=${panel.profileName} phone=${panel.profilePhone}`);
 
       if (panel.profilePhone) {
         console.log(`[WA-MON] Telefone capturado via painel: ${panel.profilePhone}`);
@@ -436,14 +543,19 @@
         return { source: 'panel', phone: panel.profilePhone, name: panel.profileName, root: panel.rootTag };
       }
 
-      // 4) Deep scan como último recurso
-      console.log('[WA-MON] 4/4 Painel não teve telefone, fazendo deep scan...');
+      // 5) Deep scan como último recurso
+      console.log('[WA-MON] 5/5 Painel não teve telefone, fazendo deep scan...');
       const deep = api.deepPhoneScan();
       document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
 
       if (deep.length > 0) {
-        console.log(`[WA-MON] Deep scan encontrou ${deep.length} nós com telefone. Primeiro: ${deep[0].phone}`);
-        return { source: 'deepScan', phone: deep[0].phone, allPhones: deep };
+        // Filtra telefones que NÃO estão na sidebar (aria != Lista de conversas)
+        const nonSidebar = deep.filter(d => d.ariaLabel !== 'Lista de conversas');
+        if (nonSidebar.length > 0) {
+          console.log(`[WA-MON] Deep scan: ${nonSidebar.length} telefone(s) fora da sidebar. Primeiro: ${nonSidebar[0].phone}`);
+          return { source: 'deepScan', phone: nonSidebar[0].phone, allPhones: nonSidebar };
+        }
+        console.warn(`[WA-MON] Deep scan: ${deep.length} telefones encontrados, mas todos na sidebar`);
       }
 
       console.warn('[WA-MON] Nenhum telefone encontrado por nenhuma estratégia.');
