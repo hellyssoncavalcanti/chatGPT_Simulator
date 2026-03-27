@@ -4203,31 +4203,29 @@ header('Content-Type: application/javascript; charset=utf-8');
             const sqlQueries = extractSQLFromResponse(sourceText);
             if (!sqlQueries || sqlQueries.length === 0) return;
 
-            sourceText = el.closest('.msg-ai')?.innerText || el.textContent || '';
-            if (!sourceText || !/sql_queries/i.test(sourceText)) return;
-
-            // Se já injetou para o mesmo payload nesta bolha, não duplica.
+            // Assinatura simples do payload para evitar duplicidade após reload/sync.
+            const signature = JSON.stringify(sqlQueries).slice(0, 5000);
             if (bubble.dataset.sqlUiSignature === signature && bubble.querySelector('.ow-sql-actions-bar')) {
                 return;
             }
 
-            // Remove barras antigas desta bolha para evitar acúmulo.
-            bubble.querySelectorAll('.ow-sql-actions-bar').forEach((bar) => {
-                const host = bar.parentElement;
-                if (host && host.children.length === 1 && host.classList.contains('ow-sql-wrapper')) {
-                    host.remove();
-                } else {
-                    bar.remove();
-                }
-            });
-
-            // Evita processar containers gigantes (wrappers de página)
-            if (sourceText.length > 5000) return;
-
-            sqlQueries = extractSQLFromResponse(sourceText);
-            if (sqlQueries && sqlQueries.length > 0) {
-                _attachSQLButtons(target, sqlQueries);
+            // Encontrar o melhor alvo visual para anexar a barra.
+            let target = bubble.querySelector('pre');
+            if (!target) {
+                target = bubble.querySelector('code');
             }
+            if (!target) {
+                target = bubble.querySelector('p');
+            }
+            if (!target) {
+                target = bubble.querySelector('.msg-bubble, .msg-content') || bubble;
+            }
+
+            if (!target || target.querySelector('.ow-sql-actions-bar')) return;
+            if ((target.innerText || target.textContent || '').length > 5000) return;
+
+            _attachSQLButtons(target, sqlQueries);
+            bubble.dataset.sqlUiSignature = signature;
         });
     }
 
@@ -7070,8 +7068,39 @@ header('Content-Type: application/javascript; charset=utf-8');
         } catch(e) {
             console.log(`%c${FILE_PREFIX} ℹ️ Ignorado: Texto continha "sql_queries", mas não formava um JSON válido.`, "color: #9e9e9e;");
         }
-        
-        return null; 
+
+        // 3. Fallback resiliente: extrai pares query/reason mesmo com JSON parcial/malformado
+        try {
+            const compact = String(text || '')
+                .replace(/```(?:json)?/gi, '')
+                .replace(/```/g, '')
+                .replace(/\r/g, '');
+            const matches = [...compact.matchAll(/{[\s\S]*?"query"\s*:\s*([\s\S]*?)(?:,\s*"reason"\s*:\s*([\s\S]*?))?\s*}/gi)];
+            if (matches.length > 0) {
+                const decode = (value) => String(value || '')
+                    .replace(/,$/, '')
+                    .trim()
+                    .replace(/^["']|["']$/g, '')
+                    .replace(/\\"/g, '"')
+                    .replace(/\\n/g, '\n')
+                    .replace(/\\t/g, '\t')
+                    .replace(/\\\\/g, '\\')
+                    .trim();
+
+                const parsed = matches
+                    .map(([, rawQuery, rawReason]) => ({
+                        query: decode(rawQuery),
+                        reason: decode(rawReason || 'Consulta solicitada')
+                    }))
+                    .filter(item => item.query);
+                if (parsed.length > 0) {
+                    console.log(`${FILE_PREFIX} 🐬 SQL extraído (Fallback por pares query/reason)`);
+                    return parsed;
+                }
+            }
+        } catch (_) {}
+
+        return null;
     }
     
     // Função auxiliar para encontrar a chave de fechamento correspondente
@@ -7127,10 +7156,9 @@ header('Content-Type: application/javascript; charset=utf-8');
         if (!hasSearchQueries && !hasPesquisaQuery) return null;
 
         if (autoExecMode) {
-            const stripped = text.trim();
-            const isJsonOnly     = /^\{[\s\S]*\}$/.test(stripped);
-            const isMarkdownOnly = /^```(?:json)?\s*\{[\s\S]*\}\s*```$/.test(stripped);
-            if (!isJsonOnly && !isMarkdownOnly) return null;
+            // Antes exigia "JSON puro", o que falhava quando a LLM enviava texto
+            // explicativo antes do bloco. Agora aceitamos resposta mista e
+            // validamos apenas no parser estruturado abaixo.
         }
 
         function sanitize(s) {
@@ -8029,6 +8057,37 @@ header('Content-Type: application/javascript; charset=utf-8');
         if (tWrapEl) tWrapEl.style.display = 'block';
         if (tElInit) tElInit.innerText = 'Enviando pedido...';
         let fullC = partialContent, fullT = '', openedT = true;
+        let streamInThinkTag = false;
+        const splitThinkAndVisible = (inputText) => {
+            let remaining = String(inputText || '');
+            let visible = '';
+            let thinking = '';
+
+            while (remaining.length > 0) {
+                const lower = remaining.toLowerCase();
+                if (!streamInThinkTag) {
+                    const openIdx = lower.indexOf('<think>');
+                    if (openIdx === -1) {
+                        visible += remaining;
+                        break;
+                    }
+                    visible += remaining.slice(0, openIdx);
+                    remaining = remaining.slice(openIdx + 7);
+                    streamInThinkTag = true;
+                } else {
+                    const closeIdx = lower.indexOf('</think>');
+                    if (closeIdx === -1) {
+                        thinking += remaining;
+                        break;
+                    }
+                    thinking += remaining.slice(0, closeIdx);
+                    remaining = remaining.slice(closeIdx + 8);
+                    streamInThinkTag = false;
+                }
+            }
+
+            return { visible, thinking };
+        };
 
         if (partialContent) {
             document.getElementById(ui.mID).innerHTML = formatMarkdown(partialContent) +
@@ -8084,6 +8143,15 @@ header('Content-Type: application/javascript; charset=utf-8');
                             fullT += r;
                             document.getElementById(ui.tID).innerText += r;
                         }
+                    }
+                }
+
+                if (c) {
+                    const split = splitThinkAndVisible(c);
+                    c = split.visible || '';
+                    if (split.thinking && split.thinking.trim()) {
+                        if (!openedT) { document.getElementById(ui.tID).parentElement.style.display = 'block'; openedT = true; }
+                        fullT += split.thinking;
                     }
                 }
 
@@ -8146,9 +8214,17 @@ header('Content-Type: application/javascript; charset=utf-8');
             } else if (tWrapEl) {
                 tWrapEl.style.display = 'none';
             }
+
+            // Se o modelo só mandou <think>/reasoning, não tratar como resposta final ao usuário.
+            if (!fullC.trim() && fullT.trim()) {
+                const warnEl = document.getElementById(ui.mID);
+                if (warnEl) {
+                    warnEl.innerHTML = formatMarkdown('⚠️ O modelo retornou apenas raciocínio interno e não gerou resposta final. Vou tentar novamente se você reenviar.');
+                }
+            }
             
-            //só salva se houver conteúdo real:
-            if (fullC.trim() || fullT.trim()) {
+            // Só salva se houver resposta final visível (não apenas thinking).
+            if (fullC.trim()) {
                 state.messages.push({role: 'assistant', content: fullT ? `<think>${fullT}</think>${fullC}` : fullC});
                 saveLocal();
             }
