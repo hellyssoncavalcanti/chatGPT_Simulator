@@ -4215,6 +4215,9 @@ header('Content-Type: application/javascript; charset=utf-8');
                 target = bubble.querySelector('code');
             }
             if (!target) {
+                target = bubble.querySelector('p');
+            }
+            if (!target) {
                 target = bubble.querySelector('.msg-bubble, .msg-content') || bubble;
             }
 
@@ -7065,8 +7068,39 @@ header('Content-Type: application/javascript; charset=utf-8');
         } catch(e) {
             console.log(`%c${FILE_PREFIX} ℹ️ Ignorado: Texto continha "sql_queries", mas não formava um JSON válido.`, "color: #9e9e9e;");
         }
-        
-        return null; 
+
+        // 3. Fallback resiliente: extrai pares query/reason mesmo com JSON parcial/malformado
+        try {
+            const compact = String(text || '')
+                .replace(/```(?:json)?/gi, '')
+                .replace(/```/g, '')
+                .replace(/\r/g, '');
+            const matches = [...compact.matchAll(/{[\s\S]*?"query"\s*:\s*([\s\S]*?)(?:,\s*"reason"\s*:\s*([\s\S]*?))?\s*}/gi)];
+            if (matches.length > 0) {
+                const decode = (value) => String(value || '')
+                    .replace(/,$/, '')
+                    .trim()
+                    .replace(/^["']|["']$/g, '')
+                    .replace(/\\"/g, '"')
+                    .replace(/\\n/g, '\n')
+                    .replace(/\\t/g, '\t')
+                    .replace(/\\\\/g, '\\')
+                    .trim();
+
+                const parsed = matches
+                    .map(([, rawQuery, rawReason]) => ({
+                        query: decode(rawQuery),
+                        reason: decode(rawReason || 'Consulta solicitada')
+                    }))
+                    .filter(item => item.query);
+                if (parsed.length > 0) {
+                    console.log(`${FILE_PREFIX} 🐬 SQL extraído (Fallback por pares query/reason)`);
+                    return parsed;
+                }
+            }
+        } catch (_) {}
+
+        return null;
     }
     
     // Função auxiliar para encontrar a chave de fechamento correspondente
