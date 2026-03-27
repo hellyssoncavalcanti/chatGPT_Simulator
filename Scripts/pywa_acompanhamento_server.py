@@ -1292,8 +1292,6 @@ class WhatsAppWebClient:
 
         return self._run_on_browser_thread(_do)
 
-    # -- New methods for listening to ANY incoming message ---------------------
-
     def scan_chat_list_rows(self) -> List[Dict[str, Any]]:
         """Scan sidebar and return lightweight chat rows metadata.
         Returns [{title, unread_count, time_text, preview_text}]."""
@@ -1372,154 +1370,226 @@ class WhatsAppWebClient:
             )
 
         return self._run_on_browser_thread(_do)
-
-    def open_chat_by_sidebar_click(self, title: str) -> bool:
-        """Click on a chat in the sidebar by its title. Returns True if opened."""
+def open_chat_by_sidebar_click(self, target_title: str) -> bool:
+        """
+        Busca o contato na sidebar do WhatsApp Web pelo título exato e clica nele.
+        Retorna True se conseguiu clicar, False caso contrário.
+        """
         self.start()
 
         def _do():
-            target_norm = re.sub(r"\s+", " ", (title or "").strip().lower())
-
-            # Garante que nenhum drawer lateral (ex.: "Dados do contato")
-            # esteja bloqueando o fluxo de abertura do chat.
-            try:
-                self._page.keyboard.press("Escape")
-                self._page.wait_for_timeout(150)
-                self._page.keyboard.press("Escape")
-                self._page.wait_for_timeout(150)
-            except Exception:
-                pass
-
-            def _wait_chat_loaded() -> bool:
-                try:
-                    deadline = time.time() + 8.0
-                    while time.time() < deadline:
-                        identity = self._page.evaluate(
-                            """() => {
-                                const header = document.querySelector('#main header');
-                                if (!header) return { title: '' };
-                                const el = header.querySelector('span[title], span[dir=\"auto\"]');
-                                const title = (el?.getAttribute?.('title') || el?.textContent || '').trim();
-                                return { title };
-                            }"""
-                        ) or {}
-                        current_title = re.sub(r"\s+", " ", str(identity.get("title") or "").strip().lower())
-                        if current_title and (current_title == target_norm or target_norm in current_title):
-                            return True
-                        self._page.wait_for_timeout(200)
-                    log.warning("Timeout aguardando chat abrir para título: %s", title)
-                except Exception:
-                    log.warning("Timeout aguardando chat abrir para título: %s", title)
-                try:
-                    header_title = self._page.evaluate(
-                        """() => {
-                            const h = document.querySelector('#main header span[title], #main header span[dir="auto"]');
-                            return h ? (h.getAttribute('title') || h.textContent || '').trim() : '';
-                        }"""
-                    )
-                    log.warning(
-                        "Diagnóstico timeout open_chat_by_sidebar_click | alvo='%s' | header_atual='%s'",
-                        title,
-                        header_title or "(vazio)",
-                    )
-                except Exception:
-                    log.exception("Falha ao coletar diagnóstico de header após timeout para '%s'", title)
+            if not getattr(self, '_page', None):
                 return False
 
-            clicked = False
-            # Estratégia 1: clique JS por varredura da sidebar (rápido).
-            try:
-                clicked = bool(
-                    self._page.evaluate(
-                        """(targetTitle) => {
-                            const root = document.querySelector('#pane-side');
-                            if (!root) return false;
-                            const rows = root.querySelectorAll('div[role="row"]');
-                            for (const row of rows) {
-                                const nameArea = row.querySelector('div._ak8q');
-                                if (!nameArea) continue;
-                                const nameSpan = nameArea.querySelector('span[title]');
-                                if (!nameSpan) continue;
-                                const t = (nameSpan.getAttribute('title') || '').trim();
-                                if (t === targetTitle) {
-                                    row.click();
-                                    return true;
-                                }
-                            }
-                            return false;
-                        }""",
-                        title,
-                    )
-                )
-            except Exception:
-                log.exception("Falha na estratégia JS de abrir chat '%s'", title)
-
-            # Estratégia 2: locator Playwright (mais robusto com virtualização/scroll).
-            if not clicked:
+            title = " ".join(target_title.split())
+            
+            clicked = self._page.evaluate("""(target) => {
+                const norm = (s) => String(s || '').replace(/\\s+/g, ' ').trim();
+                const rows = Array.from(document.querySelectorAll('#pane-side div[role="row"]'));
+                
+                for (const row of rows) {
+                    const span = row.querySelector('div._ak8q span[title], span[title]');
+                    const txt = norm(span?.getAttribute?.('title') || span?.textContent || '');
+                    
+                    if (txt && txt === target) {
+                        row.scrollIntoView({ block: 'center' });
+                        const clickable = row.querySelector('div[role="gridcell"]') || row;
+                        clickable.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+                        clickable.click();
+                        return true;
+                    }
+                }
+                return false;
+            }""", title)
+            
+            if clicked:
                 try:
-                    row = self._page.locator("#pane-side div[role='row']").filter(
-                        has=self._page.locator("span[title]").filter(has_text=title)
-                    ).first
-                    if row.count() > 0:
-                        row.scroll_into_view_if_needed(timeout=3000)
-                        row.click(timeout=5000)
-                        clicked = True
-                except Exception:
-                    log.exception("Falha na estratégia locator para abrir chat '%s'", title)
-
-            if clicked and _wait_chat_loaded():
-                return True
-
-            # Estratégia 3 (fallback): usa caixa de pesquisa da sidebar e Enter.
-            try:
-                search = self._page.locator(
-                    "#side div[contenteditable='true'][role='textbox'], "
-                    "div[aria-label='Pesquisar ou começar uma nova conversa'][contenteditable='true'], "
-                    "div[aria-label='Search or start new chat'][contenteditable='true']"
-                ).first
-                if search.count() > 0:
-                    search.click(timeout=3000)
-                    self._page.keyboard.press("Control+A")
-                    self._page.keyboard.press("Backspace")
-                    self._page.keyboard.type(title, delay=20)
-                    self._page.keyboard.press("Enter")
-                    clicked = _wait_chat_loaded()
-                    log.info(
-                        "Fallback pesquisa sidebar para '%s' | sucesso=%s",
-                        title,
-                        clicked,
-                    )
-            except Exception:
-                log.exception("Falha na estratégia de pesquisa para abrir chat '%s'", title)
-
-            if not clicked:
-                try:
-                    visible_titles = self._page.evaluate(
-                        """() => {
-                            const root = document.querySelector('#pane-side');
-                            if (!root) return [];
-                            const rows = root.querySelectorAll('div[role="row"]');
-                            const out = [];
-                            for (const row of rows) {
-                                const n = row.querySelector('div._ak8q span[title]');
-                                const t = (n?.getAttribute?.('title') || '').trim();
-                                if (!t) continue;
-                                out.push(t);
-                                if (out.length >= 12) break;
-                            }
-                            return out;
-                        }"""
-                    )
-                    log.warning(
-                        "Chat não encontrado para clique na sidebar | alvo='%s' | visíveis=%s",
-                        title,
-                        " | ".join(visible_titles or []),
-                    )
-                except Exception:
-                    log.exception("Falha ao coletar títulos visíveis no diagnóstico de clique '%s'", title)
-            return bool(clicked)
+                    self._page.wait_for_selector('#main header', timeout=3000)
+                    return True
+                except:
+                    return False
+            return False
 
         return self._run_on_browser_thread(_do)
+
+    def extract_phone_from_open_chat(self) -> Optional[str]:
+        """Try to extract the phone number from the currently open chat header."""
+        self.start()
+
+        def _do():
+            if not getattr(self, '_page', None):
+                return None
+
+            return self._page.evaluate(
+                """() => {
+                    const header = document.querySelector('#main header');
+                    if (!header) return null;
+                    const spans = header.querySelectorAll('span[title], span[dir="auto"], span');
+                    for (const span of spans) {
+                        const text = (span.getAttribute('title') || span.textContent || '').trim();
+                        if (!text) continue;
+                        const digits = text.replace(/\\D/g, '');
+                        if (digits.length >= 10 && digits.length <= 15) {
+                            return digits;
+                        }
+                    }
+                    return null;
+                }"""
+            )
+
+        return self._run_on_browser_thread(_do)
+
+def open_chat_by_sidebar_click(self, target_title: str) -> bool:
+        self.start()
+
+        def _do():
+            if not getattr(self, '_page', None):
+                return False
+
+            title = " ".join(target_title.split())
+            
+            clicked = self._page.evaluate("""(target) => {
+                const norm = (s) => String(s || '').replace(/\\s+/g, ' ').trim();
+                const rows = Array.from(document.querySelectorAll('#pane-side div[role="row"]'));
+                
+                for (const row of rows) {
+                    const span = row.querySelector('div._ak8q span[title], span[title]');
+                    const txt = norm(span?.getAttribute?.('title') || span?.textContent || '');
+                    
+                    if (txt && txt === target) {
+                        row.scrollIntoView({ block: 'center' });
+                        const clickable = row.querySelector('div[role="gridcell"]') || row;
+                        clickable.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+                        clickable.click();
+                        return true;
+                    }
+                }
+                return false;
+            }""", title)
+            
+            if clicked:
+                try:
+                    self._page.wait_for_selector('#main header', timeout=3000)
+                    return True
+                except:
+                    return False
+            return False
+
+        return self._run_on_browser_thread(_do)
+
+    def extract_phone_from_open_chat(self) -> Optional[str]:
+        self.start()
+
+        def _do():
+            if not getattr(self, '_page', None):
+                return None
+
+            return self._page.evaluate(
+                """() => {
+                    const header = document.querySelector('#main header');
+                    if (!header) return null;
+                    const spans = header.querySelectorAll('span[title], span[dir="auto"], span');
+                    for (const span of spans) {
+                        const text = (span.getAttribute('title') || span.textContent || '').trim();
+                        if (!text) continue;
+                        const digits = text.replace(/\\D/g, '');
+                        if (digits.length >= 10 && digits.length <= 15) {
+                            return digits;
+                        }
+                    }
+                    return null;
+                }"""
+            )
+
+        return self._run_on_browser_thread(_do)
+
+import re
+
+def extract_phone_from_contact_panel(page) -> str:
+    """
+    Abre o painel 'Dados do contato' clicando no header do chat atual,
+    lê o número de telefone contido nele, e fecha o painel em seguida.
+    """
+    try:
+        # 1. Clica no header para abrir o painel da direita
+        page.locator('#main header').click(timeout=2000)
+        
+        # 2. Aguarda a animação do painel abrir (qualquer div/aside que carregue a info)
+        page.wait_for_timeout(1500)
+        
+        # 3. Extrai o telefone injetando o avaliador no browser
+        phone = page.evaluate("""() => {
+            const norm = (s) => String(s || '').replace(/\\s+/g, ' ').trim();
+            const onlyDigits = (s) => String(s || '').replace(/\\D/g, '');
+            const maybePhone = (s) => {
+                const m = String(s || '').match(/\\+?\\d[\\d\\s()-]{7,}/);
+                if (!m) return '';
+                const d = onlyDigits(m[0]);
+                return d.length >= 10 && d.length <= 15 ? d : '';
+            };
+
+            // Busca nós que contêm texto selecionável, spans ou parágrafos
+            const nodes = document.querySelectorAll('[data-testid="selectable-text"], span[dir="auto"], span, div, p');
+            for (const n of nodes) {
+                // Pega apenas elementos dentro de um container lateral (aside/section)
+                const candidate = n.closest('section, aside, div[role="dialog"], div[role="region"], div[data-testid="contact-info-drawer"]');
+                if (candidate) {
+                    const txt = norm(n.textContent || '');
+                    const p = maybePhone(txt);
+                    if (p) return p;
+                }
+            }
+            return '';
+        }""")
+        
+        # 4. Fecha o painel (ESC) para manter a UI limpa
+        page.keyboard.press("Escape")
+        page.wait_for_timeout(500)
+        
+        return phone or ""
+    except Exception as e:
+        print(f"[WARNING] Erro ao tentar ler painel de contato: {e}")
+        return ""
+
+
+def open_chat_by_sidebar_click(page, target_title: str) -> bool:
+    """
+    Busca o contato na sidebar do WhatsApp Web pelo título exato e clica nele.
+    Retorna True se conseguiu clicar, False caso contrário.
+    """
+    target_title = " ".join(target_title.split())  # normaliza espaços
+    
+    clicked = page.evaluate("""(target) => {
+        const norm = (s) => String(s || '').replace(/\\s+/g, ' ').trim();
+        const rows = Array.from(document.querySelectorAll('#pane-side div[role="row"]'));
+        
+        for (const row of rows) {
+            const span = row.querySelector('div._ak8q span[title], span[title]');
+            const txt = norm(span?.getAttribute?.('title') || span?.textContent || '');
+            
+            if (txt && txt === target) {
+                row.scrollIntoView({ block: 'center' });
+                // Encontra a área clicável exata dentro da linha
+                const clickable = row.querySelector('div[role="gridcell"]') || row;
+                
+                // Dispara mousedown e click nativo para o React entender
+                clickable.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+                clickable.click();
+                return true;
+            }
+        }
+        return false;
+    }""", target_title)
+    
+    if clicked:
+        # Aguarda o header do chat principal renderizar para confirmar abertura
+        try:
+            page.wait_for_selector('#main header', timeout=3000)
+            return True
+        except:
+            return False
+            
+    return False
 
     def extract_phone_from_open_chat(self) -> Optional[str]:
         """Try to extract the phone number from the currently open chat header."""
@@ -1831,123 +1901,48 @@ def _is_named_chat_title(title: str) -> bool:
         return False
     return _phone_from_title(title) is None
 
+def open_chat_by_sidebar_click(self, target_title: str) -> bool:
+        """
+        Busca o contato na sidebar do WhatsApp Web pelo título exato e clica nele.
+        Retorna True se conseguiu clicar, False caso contrário.
+        """
+        if not self.page:
+            return False
 
-def enrich_named_contacts_from_sidebar(
-    chat_rows: List[Dict[str, Any]],
-    *,
-    max_per_cycle: int = 3,
-    max_attempts: int = 3,
-    min_interval_sec: int = 180,
-) -> int:
-    """Opens a few visible named chats to capture phone/profile and cache them.
-
-    This runs even when no follow-up was sent in the current cycle, ensuring we
-    still build contact mappings for chats shown only by display name.
-    """
-    global _LAST_SIDEBAR_ENRICHMENT_TS
-    now_mono = time.monotonic()
-    if now_mono - _LAST_SIDEBAR_ENRICHMENT_TS < float(min_interval_sec):
-        log.info(
-            "Enriquecimento sidebar: pulado por intervalo mínimo | delta=%.1fs < %ss",
-            now_mono - _LAST_SIDEBAR_ENRICHMENT_TS,
-            min_interval_sec,
-        )
-        return 0
-
-    aliases = state.get_contact_aliases()
-    enriched = 0
-    skipped_not_named = 0
-    skipped_alias_exists = 0
-    skipped_open_failed = 0
-    skipped_no_phone = 0
-    attempts = 0
-    log.info(
-        "Enriquecimento sidebar iniciado | chats_visíveis=%s | aliases_cache=%s | max_por_ciclo=%s | max_tentativas=%s",
-        len(chat_rows),
-        len(aliases),
-        max_per_cycle,
-        max_attempts,
-    )
-    for row in chat_rows:
-        if enriched >= max_per_cycle:
-            break
-        if attempts >= max_attempts:
-            break
-        title = (row.get("title") or "").strip()
-        if not _is_named_chat_title(title):
-            skipped_not_named += 1
-            continue
-        title_key = re.sub(r"\s+", " ", title.lower())
-        if aliases.get(title_key):
-            # Already mapped in local cache.
-            skipped_alias_exists += 1
-            continue
-        attempts += 1
-        log.info("Enriquecimento sidebar: tentando capturar contato nomeado '%s'", title)
+        target_title = " ".join(target_title.split())  # normaliza espaços
+        
         try:
-            if not wa_web.open_chat_by_sidebar_click(title):
-                skipped_open_failed += 1
-                continue
-            open_identity = wa_web.get_open_chat_identity()
-            open_title = (open_identity.get("title") or "").strip()
-            if not open_title:
-                skipped_open_failed += 1
-                log.warning(
-                    "Enriquecimento sidebar: chat não abriu após clique | alvo='%s' | identidade=%s",
-                    title,
-                    json.dumps(open_identity, ensure_ascii=False),
-                )
-                continue
-            details = wa_web.get_open_contact_details()
-            resolved_phone = normalize_phone(
-                details.get("profile_phone") or details.get("phone") or ""
-            )
-            if not resolved_phone:
-                skipped_no_phone += 1
-                log.warning(
-                    "Enriquecimento sidebar sem telefone extraído | title='%s' | details=%s",
-                    title,
-                    json.dumps(details, ensure_ascii=False),
-                )
-                continue
-            _upsert_whatsapp_contact_profile(
-                phone=resolved_phone,
-                display_name=details.get("title") or title,
-                profile_name=details.get("profile_name") or "",
-                wa_chat_title=title,
-                source="sidebar_enrichment",
-            )
-            state.set_contact_alias(title, resolved_phone)
-            log.info(
-                "Enriquecimento sidebar: contato nomeado '%s' -> %s",
-                title,
-                resolved_phone,
-            )
-            enriched += 1
-        except Exception:
-            log.exception("Falha no enriquecimento de contato da sidebar para '%s'", title)
-
-    # Só aplica cooldown cheio quando houve enriquecimento real.
-    # Quando tudo falha, mantém retry rápido para facilitar recuperação automática.
-    if enriched > 0:
-        _LAST_SIDEBAR_ENRICHMENT_TS = time.monotonic()
-    else:
-        retry_backoff_sec = min(20, max(5, int(min_interval_sec)))
-        _LAST_SIDEBAR_ENRICHMENT_TS = time.monotonic() - max(0, min_interval_sec - retry_backoff_sec)
-
-    log.info(
-        "Enriquecimento sidebar finalizado | atualizados=%s | skip_not_named=%s | "
-        "skip_alias_exists=%s | skip_open_failed=%s | skip_no_phone=%s | tentativas=%s | prox_tentativa_em~%ss",
-        enriched,
-        skipped_not_named,
-        skipped_alias_exists,
-        skipped_open_failed,
-        skipped_no_phone,
-        attempts,
-        min_interval_sec if enriched > 0 else min(20, max(5, int(min_interval_sec))),
-    )
-    return enriched
-
+            clicked = self.page.evaluate("""(target) => {
+                const norm = (s) => String(s || '').replace(/\\s+/g, ' ').trim();
+                const rows = Array.from(document.querySelectorAll('#pane-side div[role="row"]'));
+                
+                for (const row of rows) {
+                    const span = row.querySelector('div._ak8q span[title], span[title]');
+                    const txt = norm(span?.getAttribute?.('title') || span?.textContent || '');
+                    
+                    if (txt && txt === target) {
+                        row.scrollIntoView({ block: 'center' });
+                        // Encontra a área clicável exata dentro da linha
+                        const clickable = row.querySelector('div[role="gridcell"]') || row;
+                        
+                        // Dispara mousedown e click nativo para o React entender
+                        clickable.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+                        clickable.click();
+                        return true;
+                    }
+                }
+                return false;
+            }""", target_title)
+            
+            if clicked:
+                # Aguarda o header do chat principal renderizar para confirmar abertura
+                self.page.wait_for_selector('#main header', timeout=3000)
+                return True
+                
+        except Exception as e:
+            log.warning(f"Erro ao tentar clicar na sidebar para '{target_title}': {e}")
+            
+        return False
 
 def _log_cycle_summary(cycle_no: int) -> Dict[str, int]:
     """Query DB for an overview of eligible follow-ups and log a summary."""
@@ -2505,6 +2500,140 @@ def _resolve_chat_to_atendimento(
     # 5) Fallback: try matching by name
     result = lookup_atendimento_by_name(title)
     return result
+
+
+
+def enrich_named_contacts_from_sidebar(
+    chat_rows: List[Dict[str, Any]],
+    *,
+    max_per_cycle: int = 3,
+    max_attempts: int = 3,
+    min_interval_sec: int = 180,
+) -> int:
+    """Opens a few visible named chats to capture phone/profile and cache them."""
+    global _LAST_SIDEBAR_ENRICHMENT_TS
+    import time, re, json # garantindo imports caso falte no escopo global
+    
+    now_mono = time.monotonic()
+    if now_mono - _LAST_SIDEBAR_ENRICHMENT_TS < float(min_interval_sec):
+        log.info(
+            "Enriquecimento sidebar: pulado por intervalo mínimo | delta=%.1fs < %ss",
+            now_mono - _LAST_SIDEBAR_ENRICHMENT_TS,
+            min_interval_sec,
+        )
+        return 0
+
+    aliases = state.get_contact_aliases()
+    enriched = 0
+    skipped_not_named = 0
+    skipped_alias_exists = 0
+    skipped_open_failed = 0
+    skipped_no_phone = 0
+    attempts = 0
+    
+    log.info(
+        "Enriquecimento sidebar iniciado | chats_visíveis=%s | aliases_cache=%s | max_por_ciclo=%s | max_tentativas=%s",
+        len(chat_rows), len(aliases), max_per_cycle, max_attempts,
+    )
+    
+    for row in chat_rows:
+        if enriched >= max_per_cycle or attempts >= max_attempts:
+            break
+            
+        title = (row.get("title") or "").strip()
+        if not _is_named_chat_title(title):
+            skipped_not_named += 1
+            continue
+            
+        title_key = re.sub(r"\s+", " ", title.lower())
+        if aliases.get(title_key):
+            skipped_alias_exists += 1
+            continue
+            
+        attempts += 1
+        log.info("Enriquecimento sidebar: tentando capturar contato nomeado '%s'", title)
+        
+        try:
+            # Chama o método que agora existe dentro da classe de wa_web
+            if not wa_web.open_chat_by_sidebar_click(title):
+                skipped_open_failed += 1
+                continue
+                
+            open_identity = wa_web.get_open_chat_identity()
+            open_title = (open_identity.get("title") or "").strip()
+            
+            if not open_title:
+                skipped_open_failed += 1
+                log.warning("Enriquecimento sidebar: chat não abriu | alvo='%s'", title)
+                continue
+                
+            details = wa_web.get_open_contact_details()
+            resolved_phone = normalize_phone(details.get("profile_phone") or details.get("phone") or "")
+            
+            # === NOVO FLUXO DE FALLBACK NO PAINEL LATERAL ===
+            if not resolved_phone and hasattr(wa_web, 'page') and wa_web.page:
+                log.info("Telefone não explícito no header para '%s'. Abrindo painel lateral de contato...", title)
+                try:
+                    wa_web.page.locator('#main header').click(timeout=2000)
+                    wa_web.page.wait_for_timeout(1500)
+                    
+                    panel_phone = wa_web.page.evaluate("""() => {
+                        const norm = (s) => String(s || '').replace(/\\s+/g, ' ').trim();
+                        const onlyDigits = (s) => String(s || '').replace(/\\D/g, '');
+                        const maybePhone = (s) => {
+                            const m = String(s || '').match(/\\+?\\d[\\d\\s()-]{7,}/);
+                            if (!m) return '';
+                            const d = onlyDigits(m[0]);
+                            return d.length >= 10 && d.length <= 15 ? d : '';
+                        };
+                        
+                        const nodes = document.querySelectorAll('[data-testid="selectable-text"], span[dir="auto"], span, div, p');
+                        for (const n of nodes) {
+                            const candidate = n.closest('section, aside, div[role="dialog"], div[role="region"], div[data-testid="contact-info-drawer"]');
+                            if (candidate) {
+                                const p = maybePhone(norm(n.textContent || ''));
+                                if (p) return p;
+                            }
+                        }
+                        return '';
+                    }""")
+                    
+                    wa_web.page.keyboard.press("Escape")
+                    wa_web.page.wait_for_timeout(500)
+                    
+                    if panel_phone:
+                        resolved_phone = normalize_phone(panel_phone)
+                        log.info("Telefone capturado via Painel Lateral: %s", resolved_phone)
+                except Exception as e:
+                    log.warning("Falha ao tentar ler painel de contato para '%s': %s", title, e)
+            # ===============================================
+            
+            if not resolved_phone:
+                skipped_no_phone += 1
+                continue
+                
+            _upsert_whatsapp_contact_profile(
+                phone=resolved_phone,
+                display_name=details.get("title") or title,
+                profile_name=details.get("profile_name") or "",
+                wa_chat_title=title,
+                source="sidebar_enrichment",
+            )
+            
+            state.set_contact_alias(title, resolved_phone)
+            log.info("Enriquecimento sidebar: contato nomeado '%s' -> %s", title, resolved_phone)
+            enriched += 1
+            
+        except Exception as e:
+            log.exception("Falha no enriquecimento para '%s': %s", title, e)
+
+    if enriched > 0:
+        _LAST_SIDEBAR_ENRICHMENT_TS = time.monotonic()
+    else:
+        retry_backoff_sec = min(20, max(5, int(min_interval_sec)))
+        _LAST_SIDEBAR_ENRICHMENT_TS = time.monotonic() - max(0, min_interval_sec - retry_backoff_sec)
+
+    return enriched
 
 
 def process_incoming_replies_once() -> Dict[str, int]:
