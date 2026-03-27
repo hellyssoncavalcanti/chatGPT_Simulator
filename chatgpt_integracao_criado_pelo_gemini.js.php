@@ -4203,31 +4203,26 @@ header('Content-Type: application/javascript; charset=utf-8');
             const sqlQueries = extractSQLFromResponse(sourceText);
             if (!sqlQueries || sqlQueries.length === 0) return;
 
-            sourceText = el.closest('.msg-ai')?.innerText || el.textContent || '';
-            if (!sourceText || !/sql_queries/i.test(sourceText)) return;
-
-            // Se já injetou para o mesmo payload nesta bolha, não duplica.
+            // Assinatura simples do payload para evitar duplicidade após reload/sync.
+            const signature = JSON.stringify(sqlQueries).slice(0, 5000);
             if (bubble.dataset.sqlUiSignature === signature && bubble.querySelector('.ow-sql-actions-bar')) {
                 return;
             }
 
-            // Remove barras antigas desta bolha para evitar acúmulo.
-            bubble.querySelectorAll('.ow-sql-actions-bar').forEach((bar) => {
-                const host = bar.parentElement;
-                if (host && host.children.length === 1 && host.classList.contains('ow-sql-wrapper')) {
-                    host.remove();
-                } else {
-                    bar.remove();
-                }
-            });
-
-            // Evita processar containers gigantes (wrappers de página)
-            if (sourceText.length > 5000) return;
-
-            sqlQueries = extractSQLFromResponse(sourceText);
-            if (sqlQueries && sqlQueries.length > 0) {
-                _attachSQLButtons(target, sqlQueries);
+            // Encontrar o melhor alvo visual para anexar a barra.
+            let target = bubble.querySelector('pre');
+            if (!target) {
+                target = bubble.querySelector('code');
             }
+            if (!target) {
+                target = bubble.querySelector('.msg-bubble, .msg-content') || bubble;
+            }
+
+            if (!target || target.querySelector('.ow-sql-actions-bar')) return;
+            if ((target.innerText || target.textContent || '').length > 5000) return;
+
+            _attachSQLButtons(target, sqlQueries);
+            bubble.dataset.sqlUiSignature = signature;
         });
     }
 
@@ -7127,10 +7122,9 @@ header('Content-Type: application/javascript; charset=utf-8');
         if (!hasSearchQueries && !hasPesquisaQuery) return null;
 
         if (autoExecMode) {
-            const stripped = text.trim();
-            const isJsonOnly     = /^\{[\s\S]*\}$/.test(stripped);
-            const isMarkdownOnly = /^```(?:json)?\s*\{[\s\S]*\}\s*```$/.test(stripped);
-            if (!isJsonOnly && !isMarkdownOnly) return null;
+            // Antes exigia "JSON puro", o que falhava quando a LLM enviava texto
+            // explicativo antes do bloco. Agora aceitamos resposta mista e
+            // validamos apenas no parser estruturado abaixo.
         }
 
         function sanitize(s) {
