@@ -1575,94 +1575,6 @@ class WhatsAppWebClient:
 
         return self._run_on_browser_thread(_do)
 
-import re
-
-def extract_phone_from_contact_panel(page) -> str:
-    """
-    Abre o painel 'Dados do contato' clicando no header do chat atual,
-    lê o número de telefone contido nele, e fecha o painel em seguida.
-    """
-    try:
-        # 1. Clica no header para abrir o painel da direita
-        page.locator('#main header').click(timeout=2000)
-        
-        # 2. Aguarda a animação do painel abrir (qualquer div/aside que carregue a info)
-        page.wait_for_timeout(1500)
-        
-        # 3. Extrai o telefone injetando o avaliador no browser
-        phone = page.evaluate("""() => {
-            const norm = (s) => String(s || '').replace(/\\s+/g, ' ').trim();
-            const onlyDigits = (s) => String(s || '').replace(/\\D/g, '');
-            const maybePhone = (s) => {
-                const m = String(s || '').match(/\\+?\\d[\\d\\s()-]{7,}/);
-                if (!m) return '';
-                const d = onlyDigits(m[0]);
-                return d.length >= 10 && d.length <= 15 ? d : '';
-            };
-
-            // Busca nós que contêm texto selecionável, spans ou parágrafos
-            const nodes = document.querySelectorAll('[data-testid="selectable-text"], span[dir="auto"], span, div, p');
-            for (const n of nodes) {
-                // Pega apenas elementos dentro de um container lateral (aside/section)
-                const candidate = n.closest('section, aside, div[role="dialog"], div[role="region"], div[data-testid="contact-info-drawer"]');
-                if (candidate) {
-                    const txt = norm(n.textContent || '');
-                    const p = maybePhone(txt);
-                    if (p) return p;
-                }
-            }
-            return '';
-        }""")
-        
-        # 4. Fecha o painel (ESC) para manter a UI limpa
-        page.keyboard.press("Escape")
-        page.wait_for_timeout(500)
-        
-        return phone or ""
-    except Exception as e:
-        print(f"[WARNING] Erro ao tentar ler painel de contato: {e}")
-        return ""
-
-
-def open_chat_by_sidebar_click(page, target_title: str) -> bool:
-    """
-    Busca o contato na sidebar do WhatsApp Web pelo título exato e clica nele.
-    Retorna True se conseguiu clicar, False caso contrário.
-    """
-    target_title = " ".join(target_title.split())  # normaliza espaços
-    
-    clicked = page.evaluate("""(target) => {
-        const norm = (s) => String(s || '').replace(/\\s+/g, ' ').trim();
-        const rows = Array.from(document.querySelectorAll('#pane-side div[role="row"]'));
-        
-        for (const row of rows) {
-            const span = row.querySelector('div._ak8q span[title], span[title]');
-            const txt = norm(span?.getAttribute?.('title') || span?.textContent || '');
-            
-            if (txt && txt === target) {
-                row.scrollIntoView({ block: 'center' });
-                // Encontra a área clicável exata dentro da linha
-                const clickable = row.querySelector('div[role="gridcell"]') || row;
-                
-                // Dispara mousedown e click nativo para o React entender
-                clickable.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
-                clickable.click();
-                return true;
-            }
-        }
-        return false;
-    }""", target_title)
-    
-    if clicked:
-        # Aguarda o header do chat principal renderizar para confirmar abertura
-        try:
-            page.wait_for_selector('#main header', timeout=3000)
-            return True
-        except:
-            return False
-            
-    return False
-
     def extract_phone_from_open_chat(self) -> Optional[str]:
         """Try to extract the phone number from the currently open chat header."""
         self.start()
@@ -1827,11 +1739,11 @@ def open_chat_by_sidebar_click(page, target_title: str) -> bool:
                 except Exception:
                     panel_visible = False
 
-            # Pausa extra para o painel carregar seus dados
-            self._page.wait_for_timeout(800)
+            # Pausa extra para o painel carregar seus dados.
+            # O WA pode renderizar o telefone ~1-3s após o painel ficar visível.
+            self._page.wait_for_timeout(500)
 
-            data = self._page.evaluate(
-                """() => {
+            extract_details_js = """() => {
                     const pickPhone = (txt) => {
                         if (!txt) return '';
                         const m = String(txt).match(/\\+?\\d[\\d\\s\\-()]{7,}/);
@@ -1846,6 +1758,13 @@ def open_chat_by_sidebar_click(page, target_title: str) -> bool:
                         if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
                         const rect = el.getBoundingClientRect();
                         return rect.width > 0 && rect.height > 0;
+                    };
+                    const isPanelContainer = (el) => {
+                        if (!el || !isVisible(el)) return false;
+                        const role = (el.getAttribute('role') || '').toLowerCase();
+                        if (role === 'menu' || role === 'menuitem') return false;
+                        const rect = el.getBoundingClientRect();
+                        return rect.width >= 150 && rect.height >= 100;
                     };
                     const out = { profile_name: '', profile_phone: '', _debug: '' };
                     const isNoiseText = (txt) => {
@@ -1864,6 +1783,15 @@ def open_chat_by_sidebar_click(page, target_title: str) -> bool:
                         );
                     };
 
+                    const pickContainerFromNode = (node) => {
+                        if (!node) return null;
+                        let candidate = node.closest('section, aside, div[role="dialog"], div[role="region"], div[class]');
+                        while (candidate && !isPanelContainer(candidate)) {
+                            candidate = candidate.parentElement;
+                        }
+                        return candidate;
+                    };
+
                     // === Estratégia 1: data-testid do painel de contato ===
                     let panelRoot = document.querySelector('[data-testid="contact-info-drawer"]');
 
@@ -1874,6 +1802,9 @@ def open_chat_by_sidebar_click(page, target_title: str) -> bool:
                             || document.querySelector('div[aria-label="Contact info"]')
                             || document.querySelector('aside[aria-label="Dados do contato"]')
                             || document.querySelector('aside[aria-label="Contact info"]');
+                        if (panelRoot && !isPanelContainer(panelRoot)) {
+                            panelRoot = pickContainerFromNode(panelRoot);
+                        }
                     }
 
                     // === Estratégia 3: heading textual ===
@@ -1881,12 +1812,7 @@ def open_chat_by_sidebar_click(page, target_title: str) -> bool:
                         const heading = Array.from(
                             document.querySelectorAll('h1, h2, div[role="heading"], span[dir="auto"], span')
                         ).find((n) => /dados do contato|contact info|informações do contato/i.test((n.textContent || '').trim()));
-                        if (heading) {
-                            const candidate = heading.closest('section, aside, div[role="dialog"], div[role="region"], div[class]');
-                            if (candidate && isVisible(candidate)) {
-                                panelRoot = candidate;
-                            }
-                        }
+                        panelRoot = pickContainerFromNode(heading);
                     }
 
                     // === Estratégia 4: qualquer painel à direita com texto de telefone ===
@@ -1895,11 +1821,8 @@ def open_chat_by_sidebar_click(page, target_title: str) -> bool:
                             document.querySelectorAll('[data-testid="selectable-text"], span[dir="auto"], span')
                         ).filter((n) => !!pickPhone((n.textContent || '').trim()));
                         for (const n of phoneNodes) {
-                            const candidate = n.closest('section, aside, div[role="dialog"], div[role="region"], div[class]');
-                            if (!candidate || !isVisible(candidate)) continue;
-                            const rect = candidate.getBoundingClientRect();
-                            if (rect.width < 150 || rect.height < 100) continue;
-                            // Aceita qualquer posição (removido filtro 0.45)
+                            const candidate = pickContainerFromNode(n);
+                            if (!candidate) continue;
                             panelRoot = candidate;
                             break;
                         }
@@ -1910,6 +1833,7 @@ def open_chat_by_sidebar_click(page, target_title: str) -> bool:
                         return out;
                     }
                     out._debug = 'panelRoot=' + (panelRoot.tagName || '?') +
+                        ' role=' + (panelRoot.getAttribute('role') || '') +
                         ' testid=' + (panelRoot.getAttribute('data-testid') || '') +
                         ' aria=' + (panelRoot.getAttribute('aria-label') || '') +
                         ' size=' + panelRoot.getBoundingClientRect().width + 'x' + panelRoot.getBoundingClientRect().height;
@@ -1992,7 +1916,14 @@ def open_chat_by_sidebar_click(page, target_title: str) -> bool:
 
                     return out;
                 }"""
-            ) or {}
+
+            data = {}
+            for attempt in range(1, 9):
+                data = self._page.evaluate(extract_details_js) or {}
+                if normalize_phone(data.get("profile_phone")):
+                    break
+                if attempt < 8:
+                    self._page.wait_for_timeout(350)
 
             try:
                 self._page.keyboard.press("Escape")
