@@ -5,6 +5,26 @@ Daemon de análise clínica via LLM.
 - Roda na mesma máquina do ChatGPT Simulator (localhost:3003)
 - Acessa o banco EXCLUSIVAMENTE via ?action=apiexec do PHP
 - Auto-instala dependências faltantes no startup
+
+Variáveis de configuração editáveis (seção CONFIGURAÇÃO, ~linha 107):
+  PHP_URL / API_KEY          – endpoint e chave do PHP remoto
+  LLM_URL / LLM_MODEL        – URL e modelo do ChatGPT Simulator local
+  POLL_INTERVAL               – segundos entre ciclos do loop principal
+  MAX_TENTATIVAS              – máximo de retentativas por análise
+  BATCH_SIZE                  – qtd de registros por lote
+  MIN_CHARS                   – tamanho mínimo de texto válido
+  TIMEOUT_PROCESSANDO_MIN     – minutos antes de considerar análise travada
+  PAUSA_MIN / PAUSA_MAX       – intervalo de pausa humana entre análises (seg)
+  FILTRO_HORARIO_UTIL_ATIVO   – True/False: bloqueia o analisador em horário útil
+  HORARIO_UTIL_INICIO/FIM     – faixa de horário útil (seg-sex, formato 24h)
+
+Lógica de ordenação da fila (ORDER BY da query de pendentes unitários):
+  A fila é dividida em duas faixas pelo campo datetime_atendimento_inicio:
+  1. Atendimentos com menos de 30 dias: ASC (mais antigos primeiro) — pacientes
+     recentes cujas dúvidas o usuário pode precisar consultar em breve.
+  2. Atendimentos com 30+ dias: DESC (mais novos primeiro) — prontuários antigos
+     onde a prioridade são os menos defasados.
+  Toda a lógica roda no SQL via CASE WHEN (sem processamento local).
 """
 
 # ─────────────────────────────────────────────────────────────

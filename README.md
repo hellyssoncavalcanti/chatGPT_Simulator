@@ -380,6 +380,37 @@ A pesquisa web é uma feature nativa do simulador.
 - enriquece condutas clínicas com referências extraídas da web;
 - grava/atualiza análises em uma tabela SQL remota via PHP.
 
+### Variáveis de configuração do analisador
+
+As constantes abaixo ficam na seção `CONFIGURAÇÃO` do arquivo (~linha 107) e podem ser ajustadas conforme a necessidade:
+
+| Variável | Padrão | Descrição |
+|---|---|---|
+| `POLL_INTERVAL` | `30` | Segundos entre ciclos do loop principal |
+| `MAX_TENTATIVAS` | `3` | Máximo de retentativas por análise com erro |
+| `BATCH_SIZE` | `10` | Quantidade de registros processados por lote |
+| `MIN_CHARS` | `80` | Tamanho mínimo de texto do prontuário após limpeza HTML |
+| `TIMEOUT_PROCESSANDO_MIN` | `15` | Minutos antes de considerar uma análise travada |
+| `PAUSA_MIN` / `PAUSA_MAX` | `15` / `45` | Intervalo de pausa (seg) entre análises individuais do lote |
+| `FILTRO_HORARIO_UTIL_ATIVO` | `False` | `True` para bloquear o analisador em horário útil (seg-sex) |
+| `HORARIO_UTIL_INICIO` | `7` | Hora de início do bloqueio (07:00, formato 24h) |
+| `HORARIO_UTIL_FIM` | `19` | Hora de fim do bloqueio (19:00, exclusivo) |
+
+### Lógica de ordenação da fila de análises
+
+A query de pendentes unitários divide a fila em duas faixas com base no campo `datetime_atendimento_inicio`:
+
+1. **Atendimentos com menos de 30 dias** — ordenados **ASC** (mais antigos primeiro). São pacientes recentes cujas dúvidas o usuário pode precisar consultar em breve; os mais antigos dentro dessa janela têm maior chance de já terem gerado dúvidas.
+2. **Atendimentos com 30+ dias** — ordenados **DESC** (mais novos primeiro). São prontuários antigos e pouco revisitados; a prioridade são os menos defasados.
+
+Toda a lógica roda no SQL via `CASE WHEN` + `DATE_SUB(NOW(), INTERVAL 30 DAY)`, sem processamento local na máquina do usuário.
+
+### Filtro de horário útil
+
+O analisador compartilha a mesma conta e interface do ChatGPT Plus que o usuário humano. O plano Plus impõe um **limite de mensagens por janela de tempo** (estimado em ~160 mensagens / 3 horas para GPT-5.4 Thinking). Se o analisador consumir esse limite durante o expediente, o usuário ficará impossibilitado de usar o ChatGPT manualmente.
+
+Quando `FILTRO_HORARIO_UTIL_ATIVO = True`, o analisador entra em espera nos dias úteis (seg-sex) entre `HORARIO_UTIL_INICIO` e `HORARIO_UTIL_FIM`, reavaliando a cada 5 minutos. Fora desse horário (noites, madrugadas e fins de semana), roda normalmente.
+
 ### Por que isso importa
 Outra LLM lendo este repositório deve entender que o simulador não é apenas um chat UI: ele é também um **serviço interno** usado por um pipeline clínico automatizado.
 
