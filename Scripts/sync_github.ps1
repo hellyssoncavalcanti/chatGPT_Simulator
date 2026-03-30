@@ -365,10 +365,38 @@ function Invoke-GitHubApi {
         ErrorAction = 'Stop'
     }
     if ($null -ne $Body) {
-        $params.Body = ($Body | ConvertTo-Json -Depth 10)
-        $params.ContentType = 'application/json'
+        # PowerShell 5.1 no Windows pode serializar Body em encoding ANSI/Windows-1252
+        # quando recebe string diretamente; para evitar HTTP 400 em payload com acentos/
+        # emojis, enviamos bytes UTF-8 explicitamente.
+        $jsonBody = ($Body | ConvertTo-Json -Depth 10)
+        $params.Body = [System.Text.Encoding]::UTF8.GetBytes($jsonBody)
+        $params.ContentType = 'application/json; charset=utf-8'
     }
-    return Invoke-RestMethod @params
+
+    try {
+        return Invoke-RestMethod @params
+    } catch {
+        $errorMessage = $_.Exception.Message
+        $responseBody = $null
+
+        try {
+            $response = $_.Exception.Response
+            if ($response -and $response.GetResponseStream) {
+                $stream = $response.GetResponseStream()
+                if ($stream) {
+                    $reader = New-Object System.IO.StreamReader($stream)
+                    $responseBody = $reader.ReadToEnd()
+                    $reader.Dispose()
+                    $stream.Dispose()
+                }
+            }
+        } catch { }
+
+        if (-not [string]::IsNullOrWhiteSpace($responseBody)) {
+            throw ("{0} | Body: {1}" -f $errorMessage, $responseBody)
+        }
+        throw
+    }
 }
 
 function New-PullRequestsForPendingBranches {
