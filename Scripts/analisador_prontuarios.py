@@ -25,7 +25,15 @@ CONFIGURAÇÃO:
     ANALISADOR_HORARIO_UTIL_INICIO/FIM – faixa de bloqueio (seg-sex, 24h)
     ANALISADOR_EMBEDDING_MODEL_NAME    – modelo de embeddings
     ANALISADOR_SEARCH_HABILITADA       – True/False: busca web ativa
+    ANALISADOR_LLM_THROTTLE_MIN/MAX   – seg entre envios ao ChatGPT (anti rate-limit)
+    ANALISADOR_LLM_RATE_LIMIT_RETRY_* – config de retry em rate limit
     (ver config.py para lista completa)
+
+PROTEÇÃO CONTRA RATE LIMIT:
+  Cada POST ao ChatGPT passa por _post_llm() que aplica throttle global
+  (intervalo mínimo entre envios). Se o ChatGPT responder com mensagem
+  de rate limit, _parse_json_llm() levanta ChatGPTRateLimitError, que
+  faz o lote pausar e depois continuar no próximo item.
 
 LÓGICA DE ORDENAÇÃO DA FILA:
   A query de pendentes unitários divide a fila em duas faixas pelo
@@ -168,6 +176,15 @@ SEARCH_MAX_QUERIES   = _cfg("ANALISADOR_SEARCH_MAX_QUERIES",  3)
 SEARCH_TIMEOUT       = _cfg("ANALISADOR_SEARCH_TIMEOUT",      90)
 SEARCH_HABILITADA    = _cfg("ANALISADOR_SEARCH_HABILITADA",   True)
 
+# Throttle entre mensagens ao ChatGPT (evita "excesso de solicitações")
+LLM_THROTTLE_MIN  = _cfg("ANALISADOR_LLM_THROTTLE_MIN", 8)   # segundos mínimos entre envios
+LLM_THROTTLE_MAX  = _cfg("ANALISADOR_LLM_THROTTLE_MAX", 15)  # segundos máximos (aleatoriza)
+
+# Retry com backoff quando ChatGPT retorna limite/erro de rate
+LLM_RATE_LIMIT_RETRY_MAX     = _cfg("ANALISADOR_LLM_RATE_LIMIT_RETRY_MAX",     3)    # tentativas
+LLM_RATE_LIMIT_RETRY_BASE_S  = _cfg("ANALISADOR_LLM_RATE_LIMIT_RETRY_BASE_S",  60)   # espera base (seg)
+LLM_RATE_LIMIT_RETRY_MULT    = _cfg("ANALISADOR_LLM_RATE_LIMIT_RETRY_MULT",    2.0)  # multiplicador exponencial
+
 # Endpoints PHP:
 # - execute_sql: SELECT/SHOW/DESCRIBE (sem rate limiting com api_key valida)
 # - api_exec:    CREATE/ALTER/INSERT/UPDATE/DELETE
@@ -199,6 +216,88 @@ def _headers_llm() -> dict:
         "Authorization": f"Bearer {API_KEY}",
         "X-Request-Source": "analisador_prontuarios.py",
     }
+
+
+# ─────────────────────────────────────────────────────────────
+# THROTTLE + RATE-LIMIT RETRY para chamadas ao ChatGPT
+# ─────────────────────────────────────────────────────────────
+# Garante intervalo mínimo entre envios e detecta resposta de
+# rate limit ("chegou ao limite", "excesso de solicitações") para
+# fazer retry com backoff exponencial.
+
+_ultimo_envio_llm = 0.0   # timestamp do último POST ao LLM_URL
+
+# Padrões de texto que indicam rate limit na resposta do ChatGPT
+_RATE_LIMIT_PATTERNS = [
+    "chegou ao limite",
+    "excesso de solicitações",
+    "tente novamente mais tarde",
+    "rate limit",
+    "too many requests",
+]
+
+def _aguardar_throttle_llm():
+    """Espera o tempo restante do throttle antes de enviar a próxima mensagem ao ChatGPT."""
+    global _ultimo_envio_llm
+    if _ultimo_envio_llm <= 0:
+        return
+    espera_alvo = random.uniform(LLM_THROTTLE_MIN, LLM_THROTTLE_MAX)
+    decorrido = time.time() - _ultimo_envio_llm
+    restante = espera_alvo - decorrido
+    if restante > 0:
+        log.info(f"  ⏱️  Throttle: aguardando {restante:.0f}s antes do próximo envio ao ChatGPT...")
+        time.sleep(restante)
+
+def _registrar_envio_llm():
+    """Marca o timestamp do envio mais recente."""
+    global _ultimo_envio_llm
+    _ultimo_envio_llm = time.time()
+
+def _resposta_eh_rate_limit(texto: str) -> bool:
+    """Detecta se o texto da resposta do ChatGPT indica rate limit."""
+    if not texto:
+        return False
+    texto_lower = texto.lower()
+    return any(p in texto_lower for p in _RATE_LIMIT_PATTERNS)
+
+
+class ChatGPTRateLimitError(RuntimeError):
+    """Levantada quando o ChatGPT retorna uma resposta de rate limit."""
+    pass
+
+
+def _post_llm(payload: dict, timeout: int = 300) -> requests.Response:
+    """
+    Wrapper para requests.post(LLM_URL) com throttle + retry em rate limit.
+    Garante intervalo mínimo entre envios e, se o ChatGPT responder com
+    mensagem de rate limit, faz retry com backoff exponencial.
+    """
+    for tentativa in range(1, LLM_RATE_LIMIT_RETRY_MAX + 1):
+        _aguardar_throttle_llm()
+        _registrar_envio_llm()
+        resp = requests.post(
+            LLM_URL,
+            json=payload,
+            headers=_headers_llm(),
+            stream=True,
+            timeout=timeout,
+        )
+        resp.raise_for_status()
+        return resp
+    # Nunca deve chegar aqui, mas por segurança:
+    raise ChatGPTRateLimitError("Rate limit: todas as tentativas esgotadas.")
+
+
+def _verificar_rate_limit_no_markdown(markdown: str, tentativa_atual: int = 0):
+    """
+    Chamada após receber o markdown completo da LLM.
+    Se detectar rate limit no texto, levanta ChatGPTRateLimitError.
+    """
+    if _resposta_eh_rate_limit(markdown):
+        raise ChatGPTRateLimitError(
+            f"ChatGPT retornou rate limit (detectado no texto da resposta). "
+            f"Prévia: {markdown[:120]}"
+        )
 
 
 def _strip_code_fences(texto: str) -> str:
@@ -303,6 +402,9 @@ def _parse_json_llm(texto: str) -> dict:
     Faz o parse de um objeto JSON retornado pela LLM com pequenas correções
     tolerantes a formatação imperfeita.
     """
+    # Detecta rate limit antes de tentar parse (evita contar como "JSON inválido")
+    _verificar_rate_limit_no_markdown(texto)
+
     candidato = _extrair_bloco_json(texto)
     if not candidato:
         raise ValueError("LLM não retornou bloco JSON.")
@@ -3888,14 +3990,7 @@ def analisar_prontuario(
     if chat_id:
         payload["chatid"] = chat_id
 
-    resp = requests.post(
-        LLM_URL,
-        json=payload,
-        headers=_headers_llm(),
-        stream=True,
-        timeout=300,
-    )
-    resp.raise_for_status()
+    resp = _post_llm(payload)
 
     new_chat_id    = chat_id    # fallback: mantém o anterior se não vier novo
     new_chat_url   = chat_url
@@ -4550,14 +4645,7 @@ def gerar_dados_auxiliares_llm(resultado: dict, chat_url: str = None, chat_id: s
 
     try:
         log.info("  🕸️ Solicitando refinamento de grafo/alertas à LLM na mesma conversa...")
-        resp = requests.post(
-            LLM_URL,
-            json=payload,
-            headers=_headers_llm(),
-            stream=True,
-            timeout=300,
-        )
-        resp.raise_for_status()
+        resp = _post_llm(payload)
 
         markdown = ""
         last_chat_url = chat_url
@@ -4658,14 +4746,7 @@ def gerar_queries_pesquisa_llm(resultado: dict, chat_url: str = None, chat_id: s
         payload["chatid"] = chat_id
 
     try:
-        resp = requests.post(
-            LLM_URL,
-            json=payload,
-            headers=_headers_llm(),
-            stream=True,
-            timeout=300,
-        )
-        resp.raise_for_status()
+        resp = _post_llm(payload)
 
         markdown = ""
         for raw_line in resp.iter_lines():
@@ -4854,14 +4935,7 @@ def enriquecer_com_evidencias(resultado: dict, resultados_web: list,
         payload["chatid"] = chat_id
 
     try:
-        resp = requests.post(
-            LLM_URL,
-            json=payload,
-            headers=_headers_llm(),
-            stream=True,
-            timeout=300,
-        )
-        resp.raise_for_status()
+        resp = _post_llm(payload)
 
         new_chat_id = chat_id
         new_chat_url = chat_url
@@ -5154,6 +5228,20 @@ def processar_lote(pendentes: list):
             except Exception as e:
                 log.warning(f"  ⚠️ Síntese compilada do paciente falhou (não fatal): {e}")
 
+        except ChatGPTRateLimitError as rl:
+            salvar_erro(idat, str(rl))
+            espera = LLM_RATE_LIMIT_RETRY_BASE_S
+            log.warning(
+                f"  🚫 ID={idat} rate limit detectado: {rl}\n"
+                f"     Aguardando {espera}s antes de continuar o lote..."
+            )
+            try:
+                countdown(espera, "cooldown rate limit")
+            except (KeyboardInterrupt, SystemExit):
+                raise
+            except Exception:
+                time.sleep(espera)
+
         except Exception as e:
             salvar_erro(idat, str(e))
             log.error(f"  ❌ ID={idat} erro: {e}")
@@ -5399,6 +5487,18 @@ def main():
                         continue
                     try:
                         atualizar_analise_compilada_paciente(str(id_pac))
+                    except ChatGPTRateLimitError as rl:
+                        espera = LLM_RATE_LIMIT_RETRY_BASE_S
+                        log.warning(
+                            f"  🚫 Síntese compilada do paciente {id_pac} — rate limit: {rl}\n"
+                            f"     Aguardando {espera}s antes de continuar..."
+                        )
+                        try:
+                            countdown(espera, "cooldown rate limit")
+                        except (KeyboardInterrupt, SystemExit):
+                            raise
+                        except Exception:
+                            time.sleep(espera)
                     except Exception as e:
                         log.warning(f"  ⚠️ Síntese compilada do paciente {id_pac} falhou: {e}")
             else:

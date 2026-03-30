@@ -44,6 +44,10 @@
 #   ANALISADOR_SEARCH_MAX_QUERIES     — máx queries por prontuário
 #   ANALISADOR_SEARCH_TIMEOUT         — timeout por busca (seg)
 #   ANALISADOR_SEARCH_HABILITADA      — True/False: busca web ativa
+#   ANALISADOR_LLM_THROTTLE_MIN/MAX  — seg mínimos/máximos entre envios ao ChatGPT
+#   ANALISADOR_LLM_RATE_LIMIT_RETRY_MAX  — tentativas em rate limit
+#   ANALISADOR_LLM_RATE_LIMIT_RETRY_BASE_S — espera base (seg) no rate limit
+#   ANALISADOR_LLM_RATE_LIMIT_RETRY_MULT  — multiplicador exponencial
 # =============================================================================
 # -*- coding: utf-8 -*-
 import os
@@ -120,3 +124,12 @@ ANALISADOR_UPTODATE_SEARCH_URL = "http://127.0.0.1:3003/api/uptodate_search"
 ANALISADOR_SEARCH_MAX_QUERIES  = 3
 ANALISADOR_SEARCH_TIMEOUT      = 90    # seg (browser precisa digitar)
 ANALISADOR_SEARCH_HABILITADA   = True  # False para desabilitar sem remover código
+
+# Throttle entre mensagens ao ChatGPT (evita "excesso de solicitações")
+ANALISADOR_LLM_THROTTLE_MIN         = 8    # seg mínimos entre envios ao ChatGPT
+ANALISADOR_LLM_THROTTLE_MAX         = 15   # seg máximos (aleatoriza entre MIN e MAX)
+
+# Retry com backoff quando ChatGPT retorna rate limit
+ANALISADOR_LLM_RATE_LIMIT_RETRY_MAX     = 3    # tentativas antes de desistir
+ANALISADOR_LLM_RATE_LIMIT_RETRY_BASE_S  = 60   # espera base (seg) no 1.º rate limit
+ANALISADOR_LLM_RATE_LIMIT_RETRY_MULT    = 2.0  # multiplicador exponencial
