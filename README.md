@@ -403,6 +403,10 @@ Todas as constantes configuráveis do analisador estão **centralizadas em `Scri
 | `ANALISADOR_SEARCH_HABILITADA` | `True` | `False` para desabilitar busca web |
 | `ANALISADOR_EMBEDDING_MODEL_NAME` | `all-MiniLM-L6-v2` | Modelo de embeddings |
 | `ANALISADOR_SIMILARIDADE_TOP_K` | `5` | Quantos casos semelhantes retornar |
+| `ANALISADOR_LLM_THROTTLE_MIN` | `8` | Seg mínimos entre envios ao ChatGPT |
+| `ANALISADOR_LLM_THROTTLE_MAX` | `15` | Seg máximos (aleatoriza entre MIN e MAX) |
+| `ANALISADOR_LLM_RATE_LIMIT_RETRY_MAX` | `3` | Tentativas em rate limit antes de desistir |
+| `ANALISADOR_LLM_RATE_LIMIT_RETRY_BASE_S` | `60` | Espera base (seg) no 1.º rate limit |
 
 ### Lógica de ordenação da fila de análises
 
@@ -412,6 +416,14 @@ A query de pendentes unitários divide a fila em duas faixas com base no campo `
 2. **Atendimentos com 30+ dias** — ordenados **DESC** (mais novos primeiro). São prontuários antigos e pouco revisitados; a prioridade são os menos defasados.
 
 Toda a lógica roda no SQL via `CASE WHEN` + `DATE_SUB(NOW(), INTERVAL 30 DAY)`, sem processamento local na máquina do usuário.
+
+### Throttle e proteção contra rate limit
+
+Cada análise envia 2-4 mensagens ao ChatGPT em sequência (análise principal + planejamento de queries + enriquecimento com evidências + refinamento opcional). Para evitar o bloqueio por "excesso de solicitações":
+
+- **Throttle global**: antes de cada envio ao ChatGPT, o sistema aguarda um intervalo aleatório entre `ANALISADOR_LLM_THROTTLE_MIN` e `ANALISADOR_LLM_THROTTLE_MAX` segundos desde o último envio. Isso garante um ritmo "humano" mesmo entre mensagens internas de uma mesma análise.
+- **Detecção de rate limit**: se o ChatGPT responder com texto indicando limite (ex: "Você chegou ao limite", "excesso de solicitações"), o sistema levanta `ChatGPTRateLimitError` e aguarda `ANALISADOR_LLM_RATE_LIMIT_RETRY_BASE_S` segundos antes de continuar o próximo item do lote.
+- **Proteção no parse**: a detecção ocorre dentro de `_parse_json_llm()`, garantindo que rate limits não sejam confundidos com "JSON inválido" nem consumam tentativas do registro.
 
 ### Filtro de horário útil
 
