@@ -121,6 +121,14 @@ BATCH_SIZE     = 10
 
 TIMEOUT_PROCESSANDO_MIN = 15  # minutos antes de considerar travado
 
+# Filtro de horário útil: impede o analisador de rodar durante o expediente
+# para não consumir o limite de mensagens do ChatGPT Plus que o usuário humano
+# precisa usar via interface web.
+# Formato: (hora_inicio, hora_fim) em horário local (24h).
+# O analisador ficará em espera durante esse intervalo nos dias úteis (seg-sex).
+HORARIO_UTIL_INICIO = 7   # 07:00
+HORARIO_UTIL_FIM    = 19  # 19:00 (exclusivo — volta a rodar às 19:00)
+
 # Sentence-Transformers / Embeddings
 EMBEDDING_MODEL_NAME = "all-MiniLM-L6-v2"    # modelo leve, 384 dim
 SIMILARIDADE_TOP_K   = 5                       # quantos casos semelhantes retornar
@@ -1340,7 +1348,7 @@ def buscar_pendentes() -> dict:
                             NULLIF(ca.datetime_consulta_fim, '0000-00-00 00:00:00')
                         ) > la.datetime_analise_concluida)
             )
-        ORDER BY la.datetime_analise_criacao ASC
+        ORDER BY la.datetime_atendimento_inicio ASC
         LIMIT {BATCH_SIZE}
     """, reason="listar_pendentes")
 
@@ -5242,6 +5250,13 @@ def countdown(segundos: int, motivo: str = "próximo ciclo"):
             pass
         raise
 
+def _em_horario_util() -> bool:
+    """Retorna True se estamos em horário útil (seg-sex, HORARIO_UTIL_INICIO até HORARIO_UTIL_FIM)."""
+    from datetime import datetime
+    agora = datetime.now()
+    dia_semana = agora.weekday()  # 0=seg … 6=dom
+    return dia_semana < 5 and HORARIO_UTIL_INICIO <= agora.hour < HORARIO_UTIL_FIM
+
 def main():
     log.info("🩺 Analisador de Prontuários iniciado.")
     log.info(f"   PHP    : {PHP_URL}")
@@ -5289,6 +5304,29 @@ def main():
             if llm_estava_fora:
                 log.info("✅ ChatGPT Simulator reconectado! Retomando análises.")
                 llm_estava_fora = False
+
+            # ── Filtro de horário útil ────────────────────────────────
+            # Evita consumir o limite de mensagens do ChatGPT Plus
+            # durante o expediente, quando o usuário humano pode
+            # precisar da interface.
+            if _em_horario_util():
+                from datetime import datetime
+                prox = datetime.now().replace(hour=HORARIO_UTIL_FIM, minute=0, second=0)
+                restante = int((prox - datetime.now()).total_seconds())
+                restante_min = max(restante, 0) // 60
+                log.info(
+                    f"   🏢 Horário útil ({HORARIO_UTIL_INICIO:02d}:00–{HORARIO_UTIL_FIM:02d}:00). "
+                    f"Analisador em espera (~{restante_min} min restantes). "
+                    f"Motivo: preservar limite de mensagens do ChatGPT Plus para uso humano."
+                )
+                try:
+                    # Reavalia a cada 5 minutos para não bloquear por muito tempo
+                    countdown(min(300, max(restante, POLL_INTERVAL)), "fim do horário útil")
+                except KeyboardInterrupt:
+                    raise
+                except Exception:
+                    time.sleep(min(300, max(restante, POLL_INTERVAL)))
+                continue
 
             # ── Ciclo normal ──────────────────────────────────────────
             resetar_travados()
