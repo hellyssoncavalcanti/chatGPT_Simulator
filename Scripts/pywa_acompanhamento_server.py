@@ -1827,11 +1827,11 @@ def open_chat_by_sidebar_click(page, target_title: str) -> bool:
                 except Exception:
                     panel_visible = False
 
-            # Pausa extra para o painel carregar seus dados
-            self._page.wait_for_timeout(800)
+            # Pausa extra para o painel carregar seus dados.
+            # O WA pode renderizar o telefone ~1-3s após o painel ficar visível.
+            self._page.wait_for_timeout(500)
 
-            data = self._page.evaluate(
-                """() => {
+            extract_details_js = """() => {
                     const pickPhone = (txt) => {
                         if (!txt) return '';
                         const m = String(txt).match(/\\+?\\d[\\d\\s\\-()]{7,}/);
@@ -1846,6 +1846,13 @@ def open_chat_by_sidebar_click(page, target_title: str) -> bool:
                         if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
                         const rect = el.getBoundingClientRect();
                         return rect.width > 0 && rect.height > 0;
+                    };
+                    const isPanelContainer = (el) => {
+                        if (!el || !isVisible(el)) return false;
+                        const role = (el.getAttribute('role') || '').toLowerCase();
+                        if (role === 'menu' || role === 'menuitem') return false;
+                        const rect = el.getBoundingClientRect();
+                        return rect.width >= 150 && rect.height >= 100;
                     };
                     const out = { profile_name: '', profile_phone: '', _debug: '' };
                     const isNoiseText = (txt) => {
@@ -1864,6 +1871,15 @@ def open_chat_by_sidebar_click(page, target_title: str) -> bool:
                         );
                     };
 
+                    const pickContainerFromNode = (node) => {
+                        if (!node) return null;
+                        let candidate = node.closest('section, aside, div[role="dialog"], div[role="region"], div[class]');
+                        while (candidate && !isPanelContainer(candidate)) {
+                            candidate = candidate.parentElement;
+                        }
+                        return candidate;
+                    };
+
                     // === Estratégia 1: data-testid do painel de contato ===
                     let panelRoot = document.querySelector('[data-testid="contact-info-drawer"]');
 
@@ -1874,6 +1890,9 @@ def open_chat_by_sidebar_click(page, target_title: str) -> bool:
                             || document.querySelector('div[aria-label="Contact info"]')
                             || document.querySelector('aside[aria-label="Dados do contato"]')
                             || document.querySelector('aside[aria-label="Contact info"]');
+                        if (panelRoot && !isPanelContainer(panelRoot)) {
+                            panelRoot = pickContainerFromNode(panelRoot);
+                        }
                     }
 
                     // === Estratégia 3: heading textual ===
@@ -1881,12 +1900,7 @@ def open_chat_by_sidebar_click(page, target_title: str) -> bool:
                         const heading = Array.from(
                             document.querySelectorAll('h1, h2, div[role="heading"], span[dir="auto"], span')
                         ).find((n) => /dados do contato|contact info|informações do contato/i.test((n.textContent || '').trim()));
-                        if (heading) {
-                            const candidate = heading.closest('section, aside, div[role="dialog"], div[role="region"], div[class]');
-                            if (candidate && isVisible(candidate)) {
-                                panelRoot = candidate;
-                            }
-                        }
+                        panelRoot = pickContainerFromNode(heading);
                     }
 
                     // === Estratégia 4: qualquer painel à direita com texto de telefone ===
@@ -1895,11 +1909,8 @@ def open_chat_by_sidebar_click(page, target_title: str) -> bool:
                             document.querySelectorAll('[data-testid="selectable-text"], span[dir="auto"], span')
                         ).filter((n) => !!pickPhone((n.textContent || '').trim()));
                         for (const n of phoneNodes) {
-                            const candidate = n.closest('section, aside, div[role="dialog"], div[role="region"], div[class]');
-                            if (!candidate || !isVisible(candidate)) continue;
-                            const rect = candidate.getBoundingClientRect();
-                            if (rect.width < 150 || rect.height < 100) continue;
-                            // Aceita qualquer posição (removido filtro 0.45)
+                            const candidate = pickContainerFromNode(n);
+                            if (!candidate) continue;
                             panelRoot = candidate;
                             break;
                         }
@@ -1910,6 +1921,7 @@ def open_chat_by_sidebar_click(page, target_title: str) -> bool:
                         return out;
                     }
                     out._debug = 'panelRoot=' + (panelRoot.tagName || '?') +
+                        ' role=' + (panelRoot.getAttribute('role') || '') +
                         ' testid=' + (panelRoot.getAttribute('data-testid') || '') +
                         ' aria=' + (panelRoot.getAttribute('aria-label') || '') +
                         ' size=' + panelRoot.getBoundingClientRect().width + 'x' + panelRoot.getBoundingClientRect().height;
@@ -1992,7 +2004,14 @@ def open_chat_by_sidebar_click(page, target_title: str) -> bool:
 
                     return out;
                 }"""
-            ) or {}
+
+            data = {}
+            for attempt in range(1, 9):
+                data = self._page.evaluate(extract_details_js) or {}
+                if normalize_phone(data.get("profile_phone")):
+                    break
+                if attempt < 8:
+                    self._page.wait_for_timeout(350)
 
             try:
                 self._page.keyboard.press("Escape")
