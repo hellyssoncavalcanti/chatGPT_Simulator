@@ -380,6 +380,45 @@ A pesquisa web é uma feature nativa do simulador.
 - enriquece condutas clínicas com referências extraídas da web;
 - grava/atualiza análises em uma tabela SQL remota via PHP.
 
+### Variáveis de configuração do analisador
+
+Todas as constantes configuráveis do analisador estão **centralizadas em `Scripts/config.py`** (prefixo `ANALISADOR_*`). O `analisador_prontuarios.py` importa de lá via `getattr(config, ..., fallback)` — se uma variável for removida por engano do `config.py`, o script continua funcionando com o valor padrão local.
+
+**Para alterar qualquer parâmetro, edite apenas `config.py`.** A tabela abaixo lista as variáveis disponíveis:
+
+| Variável (em config.py) | Padrão | Descrição |
+|---|---|---|
+| `ANALISADOR_PHP_URL` | URL do ConexaoVida | Endpoint PHP remoto |
+| `ANALISADOR_LLM_URL` | `http://127.0.0.1:3003/v1/chat/completions` | URL do Simulator local |
+| `ANALISADOR_LLM_MODEL` | `ChatGPT Simulator` | Nome do modelo LLM |
+| `ANALISADOR_POLL_INTERVAL` | `30` | Segundos entre ciclos do loop principal |
+| `ANALISADOR_MAX_TENTATIVAS` | `3` | Máximo de retentativas por análise com erro |
+| `ANALISADOR_BATCH_SIZE` | `10` | Quantidade de registros processados por lote |
+| `ANALISADOR_MIN_CHARS` | `80` | Tamanho mínimo de texto do prontuário após limpeza HTML |
+| `ANALISADOR_TIMEOUT_PROCESSANDO_MIN` | `15` | Minutos antes de considerar uma análise travada |
+| `ANALISADOR_PAUSA_MIN` / `_MAX` | `15` / `45` | Intervalo de pausa (seg) entre análises individuais |
+| `ANALISADOR_FILTRO_HORARIO_UTIL_ATIVO` | `False` | `True` para bloquear em horário útil (seg-sex) |
+| `ANALISADOR_HORARIO_UTIL_INICIO` | `7` | Hora de início do bloqueio (07:00, formato 24h) |
+| `ANALISADOR_HORARIO_UTIL_FIM` | `19` | Hora de fim do bloqueio (19:00, exclusivo) |
+| `ANALISADOR_SEARCH_HABILITADA` | `True` | `False` para desabilitar busca web |
+| `ANALISADOR_EMBEDDING_MODEL_NAME` | `all-MiniLM-L6-v2` | Modelo de embeddings |
+| `ANALISADOR_SIMILARIDADE_TOP_K` | `5` | Quantos casos semelhantes retornar |
+
+### Lógica de ordenação da fila de análises
+
+A query de pendentes unitários divide a fila em duas faixas com base no campo `datetime_atendimento_inicio`:
+
+1. **Atendimentos com menos de 30 dias** — ordenados **ASC** (mais antigos primeiro). São pacientes recentes cujas dúvidas o usuário pode precisar consultar em breve; os mais antigos dentro dessa janela têm maior chance de já terem gerado dúvidas.
+2. **Atendimentos com 30+ dias** — ordenados **DESC** (mais novos primeiro). São prontuários antigos e pouco revisitados; a prioridade são os menos defasados.
+
+Toda a lógica roda no SQL via `CASE WHEN` + `DATE_SUB(NOW(), INTERVAL 30 DAY)`, sem processamento local na máquina do usuário.
+
+### Filtro de horário útil
+
+O analisador compartilha a mesma conta e interface do ChatGPT Plus que o usuário humano. O plano Plus impõe um **limite de mensagens por janela de tempo** (estimado em ~160 mensagens / 3 horas para GPT-5.4 Thinking). Se o analisador consumir esse limite durante o expediente, o usuário ficará impossibilitado de usar o ChatGPT manualmente.
+
+Quando `FILTRO_HORARIO_UTIL_ATIVO = True`, o analisador entra em espera nos dias úteis (seg-sex) entre `HORARIO_UTIL_INICIO` e `HORARIO_UTIL_FIM`, reavaliando a cada 5 minutos. Fora desse horário (noites, madrugadas e fins de semana), roda normalmente.
+
 ### Por que isso importa
 Outra LLM lendo este repositório deve entender que o simulador não é apenas um chat UI: ele é também um **serviço interno** usado por um pipeline clínico automatizado.
 
@@ -490,8 +529,8 @@ A convenção atual recomendada para qualquer operador humano ou outra LLM é:
 
 Uma LLM que vá trabalhar neste projeto deve prestar atenção especial a estes pontos:
 
-1. **`config.py` contém API key e caminhos absolutos Windows.**  
-   O código assume `C:\chatgpt_simulator` como diretório base.
+1. **`config.py` contém API key, caminhos absolutos Windows e TODAS as variáveis configuráveis do sistema (inclusive do analisador, prefixo `ANALISADOR_*`).**
+   O código assume `C:\chatgpt_simulator` como diretório base. Os demais módulos importam daqui com fallback local.
 
 2. **`chrome_profile/` é altamente stateful.**  
    Ali vivem sessão do navegador, cache e estado do ChatGPT.

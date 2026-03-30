@@ -5,6 +5,36 @@ Daemon de análise clínica via LLM.
 - Roda na mesma máquina do ChatGPT Simulator (localhost:3003)
 - Acessa o banco EXCLUSIVAMENTE via ?action=apiexec do PHP
 - Auto-instala dependências faltantes no startup
+
+CONFIGURAÇÃO:
+  Todas as variáveis configuráveis estão centralizadas em config.py
+  (prefixo ANALISADOR_*). Este script importa de lá via getattr() com
+  fallback local — se algo faltar no config.py, o script continua rodando
+  com os valores padrão definidos aqui.
+
+  Para alterar qualquer parâmetro, edite APENAS o config.py:
+    ANALISADOR_PHP_URL                – endpoint PHP remoto
+    ANALISADOR_LLM_URL / _MODEL       – URL e modelo do Simulator local
+    ANALISADOR_POLL_INTERVAL           – segundos entre ciclos
+    ANALISADOR_MAX_TENTATIVAS          – máx retentativas por análise
+    ANALISADOR_BATCH_SIZE              – registros por lote
+    ANALISADOR_MIN_CHARS               – tamanho mínimo de texto válido
+    ANALISADOR_TIMEOUT_PROCESSANDO_MIN – minutos antes de considerar travado
+    ANALISADOR_PAUSA_MIN / _MAX        – pausa humana entre análises (seg)
+    ANALISADOR_FILTRO_HORARIO_UTIL_ATIVO – True/False: bloqueia em horário útil
+    ANALISADOR_HORARIO_UTIL_INICIO/FIM – faixa de bloqueio (seg-sex, 24h)
+    ANALISADOR_EMBEDDING_MODEL_NAME    – modelo de embeddings
+    ANALISADOR_SEARCH_HABILITADA       – True/False: busca web ativa
+    (ver config.py para lista completa)
+
+LÓGICA DE ORDENAÇÃO DA FILA:
+  A query de pendentes unitários divide a fila em duas faixas pelo
+  campo datetime_atendimento_inicio:
+  1. <30 dias: ASC (mais antigos primeiro) — pacientes recentes cujas
+     dúvidas o usuário pode precisar consultar em breve.
+  2. >=30 dias: DESC (mais novos primeiro) — prontuários antigos onde
+     a prioridade são os menos defasados.
+  Toda a lógica roda no SQL via CASE WHEN (sem processamento local).
 """
 
 # ─────────────────────────────────────────────────────────────
@@ -88,50 +118,55 @@ from html.parser import HTMLParser
 from datetime import datetime
 
 # ─────────────────────────────────────────────────────────────
-# CAPTURA CONFIGURAÇÃO DE DEBUG (que é estabelecida no arquivo "config.py").
+# IMPORTAÇÃO DE CONFIGURAÇÃO A PARTIR DO config.py
 # ─────────────────────────────────────────────────────────────
-# Verifica se config já foi importado; se não, importa
+# Todas as variáveis configuráveis vivem em config.py.
+# Aqui usamos getattr(config, ..., fallback) para que o script
+# continue funcionando mesmo se alguma variável for removida
+# acidentalmente do config.py.
 if 'config' not in sys.modules:
     import config
 
-# Tenta importar DEBUG_LOG do módulo config já carregado
-try:
-    DEBUG_LOG = config.DEBUG_LOG
-except AttributeError:
-    DEBUG_LOG = False  # fallback se a variável não existir no config
-    logging.warning("⚠️ DEBUG_LOG não encontrado no config.py. Usando False como padrão.")
+def _cfg(nome: str, fallback):
+    """Lê uma variável do config.py; retorna fallback se não existir."""
+    return getattr(config, nome, fallback)
 
-
+DEBUG_LOG = _cfg("DEBUG_LOG", False)
 
 # ─────────────────────────────────────────────────────────────
-# CONFIGURAÇÃO
+# CONFIGURAÇÃO (valores vindos de config.py → fallback local)
 # ─────────────────────────────────────────────────────────────
-PHP_URL   = "https://conexaovida.org/scripts/js/chatgpt_integracao_criado_pelo_gemini.js.php"
-API_KEY       = "CVAPI_2b9c80c2abf94a76baf8b3e68d89cb7e"  # ← underscore após CVAPI
+PHP_URL        = _cfg("ANALISADOR_PHP_URL",       "https://conexaovida.org/scripts/js/chatgpt_integracao_criado_pelo_gemini.js.php")
+API_KEY        = _cfg("API_KEY",                   "CVAPI_2b9c80c2abf94a76baf8b3e68d89cb7e")
 
-LLM_URL   = "http://127.0.0.1:3003/v1/chat/completions"
-LLM_MODEL      = "ChatGPT Simulator"
-PROMPT_VERSION = "v16.1"  # v16.1: + busca web + enriquecimento de condutas com evidências
+LLM_URL        = _cfg("ANALISADOR_LLM_URL",       "http://127.0.0.1:3003/v1/chat/completions")
+LLM_MODEL      = _cfg("ANALISADOR_LLM_MODEL",     "ChatGPT Simulator")
+PROMPT_VERSION = _cfg("ANALISADOR_PROMPT_VERSION", "v16.1")
 
-TABELA         = "chatgpt_atendimentos_analise"
-POLL_INTERVAL  = 30
-MAX_TENTATIVAS = 3
-MIN_CHARS      = 80
-BATCH_SIZE     = 10
+TABELA         = _cfg("ANALISADOR_TABELA",         "chatgpt_atendimentos_analise")
+POLL_INTERVAL  = _cfg("ANALISADOR_POLL_INTERVAL",  30)
+MAX_TENTATIVAS = _cfg("ANALISADOR_MAX_TENTATIVAS", 3)
+MIN_CHARS      = _cfg("ANALISADOR_MIN_CHARS",      80)
+BATCH_SIZE     = _cfg("ANALISADOR_BATCH_SIZE",     10)
 
-TIMEOUT_PROCESSANDO_MIN = 15  # minutos antes de considerar travado
+TIMEOUT_PROCESSANDO_MIN = _cfg("ANALISADOR_TIMEOUT_PROCESSANDO_MIN", 15)
+
+# Filtro de horário útil (preserva limite de mensagens do ChatGPT Plus)
+FILTRO_HORARIO_UTIL_ATIVO = _cfg("ANALISADOR_FILTRO_HORARIO_UTIL_ATIVO", False)
+HORARIO_UTIL_INICIO       = _cfg("ANALISADOR_HORARIO_UTIL_INICIO",       7)
+HORARIO_UTIL_FIM          = _cfg("ANALISADOR_HORARIO_UTIL_FIM",          19)
 
 # Sentence-Transformers / Embeddings
-EMBEDDING_MODEL_NAME = "all-MiniLM-L6-v2"    # modelo leve, 384 dim
-SIMILARIDADE_TOP_K   = 5                       # quantos casos semelhantes retornar
-SIMILARIDADE_MIN     = 0.40                    # score mínimo p/ considerar semelhante
+EMBEDDING_MODEL_NAME = _cfg("ANALISADOR_EMBEDDING_MODEL_NAME", "all-MiniLM-L6-v2")
+SIMILARIDADE_TOP_K   = _cfg("ANALISADOR_SIMILARIDADE_TOP_K",   5)
+SIMILARIDADE_MIN     = _cfg("ANALISADOR_SIMILARIDADE_MIN",     0.40)
 
 # Busca Web (enriquecimento de condutas com evidências)
-SEARCH_URL           = "http://127.0.0.1:3003/api/web_search"  # endpoint local do Simulator
-UPTODATE_SEARCH_URL  = "http://127.0.0.1:3003/api/uptodate_search"  # endpoint local do Simulator
-SEARCH_MAX_QUERIES   = 3                       # máximo de queries por prontuário
-SEARCH_TIMEOUT       = 90                      # timeout por chamada (o browser precisa digitar)
-SEARCH_HABILITADA    = True                    # False para desabilitar sem remover código
+SEARCH_URL           = _cfg("ANALISADOR_SEARCH_URL",          "http://127.0.0.1:3003/api/web_search")
+UPTODATE_SEARCH_URL  = _cfg("ANALISADOR_UPTODATE_SEARCH_URL", "http://127.0.0.1:3003/api/uptodate_search")
+SEARCH_MAX_QUERIES   = _cfg("ANALISADOR_SEARCH_MAX_QUERIES",  3)
+SEARCH_TIMEOUT       = _cfg("ANALISADOR_SEARCH_TIMEOUT",      90)
+SEARCH_HABILITADA    = _cfg("ANALISADOR_SEARCH_HABILITADA",   True)
 
 # Endpoints PHP:
 # - execute_sql: SELECT/SHOW/DESCRIBE (sem rate limiting com api_key valida)
@@ -1340,7 +1375,17 @@ def buscar_pendentes() -> dict:
                             NULLIF(ca.datetime_consulta_fim, '0000-00-00 00:00:00')
                         ) > la.datetime_analise_concluida)
             )
-        ORDER BY la.datetime_analise_criacao ASC
+        ORDER BY
+            /* Faixa 1 (prioridade): atendimentos com menos de 30 dias — ASC (mais antigos primeiro,
+               pois são pacientes recentes cujas dúvidas o usuário pode precisar consultar em breve).
+               Faixa 2: atendimentos com 30+ dias — DESC (mais novos primeiro dentro dos antigos,
+               pois os muito antigos dificilmente serão revisitados). */
+            CASE WHEN la.datetime_atendimento_inicio >= DATE_SUB(NOW(), INTERVAL 30 DAY)
+                 THEN 0 ELSE 1 END ASC,
+            CASE WHEN la.datetime_atendimento_inicio >= DATE_SUB(NOW(), INTERVAL 30 DAY)
+                 THEN la.datetime_atendimento_inicio END ASC,
+            CASE WHEN la.datetime_atendimento_inicio < DATE_SUB(NOW(), INTERVAL 30 DAY)
+                 THEN la.datetime_atendimento_inicio END DESC
         LIMIT {BATCH_SIZE}
     """, reason="listar_pendentes")
 
@@ -5013,9 +5058,9 @@ def executar_busca_evidencias(resultado: dict, chat_url: str = None, chat_id: st
 # LOOP PRINCIPAL
 # ─────────────────────────────────────────────────────────────
 
-# Intervalo de pausa entre análises (segundos)
-PAUSA_MIN = 15   # mínimo humano razoável após leitura
-PAUSA_MAX = 45   # máximo antes de parecer inatividade
+# Intervalo de pausa entre análises (segundos) — vindo de config.py com fallback
+PAUSA_MIN = _cfg("ANALISADOR_PAUSA_MIN", 15)
+PAUSA_MAX = _cfg("ANALISADOR_PAUSA_MAX", 45)
 
 def processar_lote(pendentes: list):
     total = len(pendentes)
@@ -5242,6 +5287,13 @@ def countdown(segundos: int, motivo: str = "próximo ciclo"):
             pass
         raise
 
+def _em_horario_util() -> bool:
+    """Retorna True se estamos em horário útil (seg-sex, HORARIO_UTIL_INICIO até HORARIO_UTIL_FIM)."""
+    from datetime import datetime
+    agora = datetime.now()
+    dia_semana = agora.weekday()  # 0=seg … 6=dom
+    return dia_semana < 5 and HORARIO_UTIL_INICIO <= agora.hour < HORARIO_UTIL_FIM
+
 def main():
     log.info("🩺 Analisador de Prontuários iniciado.")
     log.info(f"   PHP    : {PHP_URL}")
@@ -5289,6 +5341,29 @@ def main():
             if llm_estava_fora:
                 log.info("✅ ChatGPT Simulator reconectado! Retomando análises.")
                 llm_estava_fora = False
+
+            # ── Filtro de horário útil ────────────────────────────────
+            # Evita consumir o limite de mensagens do ChatGPT Plus
+            # durante o expediente, quando o usuário humano pode
+            # precisar da interface.
+            if FILTRO_HORARIO_UTIL_ATIVO and _em_horario_util():
+                from datetime import datetime
+                prox = datetime.now().replace(hour=HORARIO_UTIL_FIM, minute=0, second=0)
+                restante = int((prox - datetime.now()).total_seconds())
+                restante_min = max(restante, 0) // 60
+                log.info(
+                    f"   🏢 Horário útil ({HORARIO_UTIL_INICIO:02d}:00–{HORARIO_UTIL_FIM:02d}:00). "
+                    f"Analisador em espera (~{restante_min} min restantes). "
+                    f"Motivo: preservar limite de mensagens do ChatGPT Plus para uso humano."
+                )
+                try:
+                    # Reavalia a cada 5 minutos para não bloquear por muito tempo
+                    countdown(min(300, max(restante, POLL_INTERVAL)), "fim do horário útil")
+                except KeyboardInterrupt:
+                    raise
+                except Exception:
+                    time.sleep(min(300, max(restante, POLL_INTERVAL)))
+                continue
 
             # ── Ciclo normal ──────────────────────────────────────────
             resetar_travados()

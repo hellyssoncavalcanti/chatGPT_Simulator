@@ -1,5 +1,7 @@
 # sync_github.ps1 — arquivo versionado do sync automático do Windows
 # Responsável por: merge opcional do PR mais recente, sync de arquivos e reinício coordenado dos processos locais.
+# Log: cria um único arquivo de log por sessão (sync_github-YYYYMMDD-HHmmss.log) e
+#       reutiliza-o em todos os ciclos subsequentes (modo --scheduled), com separador visual entre ciclos.
 [CmdletBinding()]
 param(
     [Parameter(ValueFromRemainingArguments = $true)]
@@ -18,6 +20,8 @@ $script:UpdatedFiles = New-Object System.Collections.Generic.List[string]
 $script:AddedFiles = New-Object System.Collections.Generic.List[string]
 $script:ProtectedFiles = New-Object System.Collections.Generic.List[string]
 $script:LogFile = $null
+$script:SessionLogFile = $null
+$script:CycleCount = 0
 $script:RepoMirror = $null
 $script:GitExe = $null
 $script:Config = [ordered]@{}
@@ -114,7 +118,13 @@ function Initialize-Logging {
     if (-not (Test-Path $logDir)) {
         New-Item -ItemType Directory -Path $logDir -Force | Out-Null
     }
-    $script:LogFile = Join-Path $logDir ("sync_github-{0}.log" -f (Get-Date -Format 'yyyyMMdd-HHmmss'))
+    # Reutiliza o log da primeira execução da sessão (mesmo comportamento dos
+    # outros sistemas). Apenas o primeiro ciclo cria o arquivo; os demais
+    # continuam escrevendo no mesmo log.
+    if (-not $script:SessionLogFile) {
+        $script:SessionLogFile = Join-Path $logDir ("sync_github-{0}.log" -f (Get-Date -Format 'yyyyMMdd-HHmmss'))
+    }
+    $script:LogFile = $script:SessionLogFile
     Write-Info "Log em $($script:LogFile)"
 }
 
@@ -1117,7 +1127,8 @@ function Reset-CycleState {
     $script:AddedFiles = New-Object System.Collections.Generic.List[string]
     $script:ProtectedFiles = New-Object System.Collections.Generic.List[string]
     $script:RepoMirror = $null
-    $script:LogFile = $null
+    # Nota: $script:LogFile NÃO é resetado — o log da sessão é reutilizado
+    # entre ciclos (assim como os outros sistemas do projeto).
     $script:CanWriteRepo = $true
 }
 
@@ -1126,6 +1137,16 @@ function Run-SyncCycle {
     Import-Settings
     Assert-Configuration
     Initialize-Logging
+
+    # Separador visual entre ciclos no mesmo log (a partir do 2.º ciclo)
+    if ($script:CycleCount -gt 0) {
+        Write-Log ""
+        Write-Log ("=" * 60)
+        Write-Log "[CICLO] Novo ciclo iniciado em $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
+        Write-Log ("=" * 60)
+    }
+    $script:CycleCount++
+
     Acquire-Lock
     try {
         $script:GitExe = Get-GitExe
