@@ -126,6 +126,7 @@ TIMEOUT_PROCESSANDO_MIN = 15  # minutos antes de considerar travado
 # precisa usar via interface web.
 # Formato: (hora_inicio, hora_fim) em horário local (24h).
 # O analisador ficará em espera durante esse intervalo nos dias úteis (seg-sex).
+FILTRO_HORARIO_UTIL_ATIVO = False  # ← True para ativar o bloqueio em horário útil
 HORARIO_UTIL_INICIO = 7   # 07:00
 HORARIO_UTIL_FIM    = 19  # 19:00 (exclusivo — volta a rodar às 19:00)
 
@@ -1348,7 +1349,17 @@ def buscar_pendentes() -> dict:
                             NULLIF(ca.datetime_consulta_fim, '0000-00-00 00:00:00')
                         ) > la.datetime_analise_concluida)
             )
-        ORDER BY la.datetime_atendimento_inicio ASC
+        ORDER BY
+            /* Faixa 1 (prioridade): atendimentos com menos de 30 dias — ASC (mais antigos primeiro,
+               pois são pacientes recentes cujas dúvidas o usuário pode precisar consultar em breve).
+               Faixa 2: atendimentos com 30+ dias — DESC (mais novos primeiro dentro dos antigos,
+               pois os muito antigos dificilmente serão revisitados). */
+            CASE WHEN la.datetime_atendimento_inicio >= DATE_SUB(NOW(), INTERVAL 30 DAY)
+                 THEN 0 ELSE 1 END ASC,
+            CASE WHEN la.datetime_atendimento_inicio >= DATE_SUB(NOW(), INTERVAL 30 DAY)
+                 THEN la.datetime_atendimento_inicio END ASC,
+            CASE WHEN la.datetime_atendimento_inicio < DATE_SUB(NOW(), INTERVAL 30 DAY)
+                 THEN la.datetime_atendimento_inicio END DESC
         LIMIT {BATCH_SIZE}
     """, reason="listar_pendentes")
 
@@ -5309,7 +5320,7 @@ def main():
             # Evita consumir o limite de mensagens do ChatGPT Plus
             # durante o expediente, quando o usuário humano pode
             # precisar da interface.
-            if _em_horario_util():
+            if FILTRO_HORARIO_UTIL_ATIVO and _em_horario_util():
                 from datetime import datetime
                 prox = datetime.now().replace(hour=HORARIO_UTIL_FIM, minute=0, second=0)
                 restante = int((prox - datetime.now()).total_seconds())
