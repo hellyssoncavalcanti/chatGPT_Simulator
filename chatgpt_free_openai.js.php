@@ -11,37 +11,14 @@ $isDirectFileUrl = ($phpSelf === $currentFileName);
 $isScriptFetch = $requestedAsJs || ($secFetchDest === 'script');
 $shouldRenderDirectPage = $isDirectFileUrl && !$isScriptFetch;
 
-function include_first_existing(array $paths): void {
-    foreach ($paths as $p) {
-        if (is_file($p)) {
-            @include_once($p);
-            return;
-        }
-    }
-}
-
 if ($shouldRenderDirectPage) {
-    header('Content-Type: text/html; charset=UTF-8');
+    header("Content-Type: text/html; charset=UTF-8", true);
     date_default_timezone_set('America/Recife');
-
-    include_first_existing([
-        'config/config.php',
-        '../config/config.php',
-        '../../config/config.php',
-        '../../../config/config.php',
-    ]);
-    include_first_existing([
-        'scripts/login.php',
-        '../scripts/login.php',
-        '../../scripts/login.php',
-        '../../../scripts/login.php',
-    ]);
-    include_first_existing([
-        'scripts/func.inc.php',
-        '../scripts/func.inc.php',
-        '../../scripts/func.inc.php',
-        '../../../scripts/func.inc.php',
-    ]);
+    //PREVENÇÃO DE CACHE AGRESSIVO (ESPECIALMENTE PARA SAFARI/MOBILE):
+    header("Cache-Control: no-store, no-cache, must-revalidate, max-age=0");header("Cache-Control: post-check=0, pre-check=0", false);header("Pragma: no-cache");header("Expires: Wed, 11 Jan 1984 05:00:00 GMT"); // Uma data no passado, para evitar que os navegadores guardem o arquivo em cache.
+    $filename = 'config/config.php';if(file_exists($filename)){@include_once($filename);}elseif(file_exists("../".$filename)){@include_once("../".$filename);}elseif(file_exists("../../".$filename)){@include_once("../../".$filename);}elseif(file_exists("../../../".$filename)){@include_once("../../../".$filename);} 
+    $filename = 'scripts/login.php';if(file_exists($filename)){@include_once($filename);}elseif(file_exists("../".$filename)){@include_once("../".$filename);}elseif(file_exists("../../".$filename)){@include_once("../../".$filename);}elseif(file_exists("../../../".$filename)){@include_once("../../../".$filename);}
+    $filename = 'scripts/func.inc.php';if(file_exists($filename)){@include_once($filename);}elseif(file_exists("../".$filename)){@include_once("../".$filename);}elseif(file_exists("../../".$filename)){@include_once("../../".$filename);}elseif(file_exists("../../../".$filename)){@include_once("../../../".$filename);} 
 
     $authorized = false;
     if (
