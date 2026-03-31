@@ -244,17 +244,23 @@ class StateStore:
             self.state["last_seen_inbound"][phone] = msg_key
         self.save()
 
-    def record_enrichment_failure(self, title_key: str) -> None:
+    def record_enrichment_failure(self, title_key: str, reason: str = "") -> None:
         """Record a failed enrichment attempt for a contact title."""
         with self.lock:
             failures = self.state.setdefault("enrichment_failures", {})
             entry = failures.get(title_key)
             if not entry or not isinstance(entry, dict):
-                entry = {"count": 0, "first_at": utc_now_iso(), "last_at": ""}
+                entry = {"count": 0, "first_at": utc_now_iso(), "last_at": "", "last_reason": ""}
             entry["count"] = entry.get("count", 0) + 1
             entry["last_at"] = utc_now_iso()
+            entry["last_reason"] = reason or entry.get("last_reason", "")
             failures[title_key] = entry
         self.save()
+
+    def get_enrichment_failures(self) -> Dict[str, Dict[str, Any]]:
+        """Return all enrichment failure entries."""
+        with self.lock:
+            return dict(self.state.get("enrichment_failures", {}))
 
     def should_skip_enrichment(self, title_key: str, max_failures: int = 3, cooldown_hours: int = 24) -> bool:
         """True if this contact has failed enrichment too many times recently."""
@@ -2579,11 +2585,104 @@ def _resolve_chat_to_atendimento(
 
 
 
+def _enrich_single_contact(title: str) -> Tuple[Optional[str], str, str, str]:
+    """Try to enrich a single named contact. Returns (phone, detail_title, detail_profile, failure_reason).
+
+    Logs each browser step for DEBUG comparison with the manual route:
+      manual: sidebar click → header renders → click header → panel opens → phone appears
+    """
+    detail_title = title
+    detail_profile = ""
+
+    # ── ETAPA 1: WA Store (sem abrir chat) ──────────────────────────
+    log.info("  [ETAPA 1/5] resolve_phone_via_wa_store('%s')...", title)
+    try:
+        store_phone = wa_web.resolve_phone_via_wa_store(title)
+        if store_phone:
+            log.info("  [ETAPA 1/5] ✓ WA Store resolveu: %s", store_phone)
+            return store_phone, detail_title, detail_profile, ""
+        log.info("  [ETAPA 1/5] WA Store: nenhum resultado (Store.Chat + Store.Contact + ReactFiber)")
+    except Exception as e:
+        log.info("  [ETAPA 1/5] WA Store: exceção: %s", e)
+
+    # ── ETAPA 2: Clicar no contato na sidebar ───────────────────────
+    log.info("  [ETAPA 2/5] open_chat_by_sidebar_click('%s')...", title)
+    if not wa_web.open_chat_by_sidebar_click(title):
+        reason = "sidebar_click_failed"
+        log.warning("  [ETAPA 2/5] FALHA: clique na sidebar não abriu o chat")
+        return None, detail_title, detail_profile, reason
+
+    # ── ETAPA 3: Verificar header do chat aberto ────────────────────
+    log.info("  [ETAPA 3/5] get_open_chat_identity() — verificando header...")
+    open_identity = wa_web.get_open_chat_identity()
+    open_title = (open_identity.get("title") or "").strip()
+    open_phone = (open_identity.get("phone") or "").strip()
+    log.info(
+        "  [ETAPA 3/5] Header: title='%s' phone='%s'",
+        open_title or "(vazio)", open_phone or "(nenhum)",
+    )
+
+    if not open_title:
+        reason = "header_empty_after_click"
+        log.warning("  [ETAPA 3/5] FALHA: header vazio — chat não abriu")
+        return None, detail_title, detail_profile, reason
+
+    # Se o header já mostra telefone, temos o resultado
+    if open_phone and normalize_phone(open_phone):
+        log.info("  [ETAPA 3/5] ✓ Telefone já visível no header: %s", open_phone)
+        return normalize_phone(open_phone), open_title, detail_profile, ""
+
+    # ── ETAPA 4: Abrir painel "Dados do contato" ────────────────────
+    log.info("  [ETAPA 4/5] get_open_contact_details() — abrindo painel Dados do contato...")
+    details = wa_web.get_open_contact_details()
+    detail_title = details.get("title") or title
+    detail_profile = details.get("profile_name") or ""
+    panel_phone = normalize_phone(details.get("profile_phone") or "")
+    header_phone = normalize_phone(details.get("phone") or "")
+    log.info(
+        "  [ETAPA 4/5] Resultado painel: title='%s' profile_name='%s' "
+        "profile_phone='%s' header_phone='%s'",
+        detail_title, detail_profile,
+        panel_phone or "(nenhum)", header_phone or "(nenhum)",
+    )
+
+    if panel_phone:
+        log.info("  [ETAPA 4/5] ✓ Telefone capturado via painel: %s", panel_phone)
+        return panel_phone, detail_title, detail_profile, ""
+    if header_phone:
+        log.info("  [ETAPA 4/5] ✓ Telefone capturado via header (retorno do painel): %s", header_phone)
+        return header_phone, detail_title, detail_profile, ""
+
+    # ── ETAPA 5: Fallback — extract_phone_from_open_chat ────────────
+    log.info("  [ETAPA 5/5] extract_phone_from_open_chat() — fallback no header direto...")
+    try:
+        fallback_phone = wa_web.extract_phone_from_open_chat()
+        if fallback_phone:
+            norm = normalize_phone(fallback_phone)
+            if norm:
+                log.info("  [ETAPA 5/5] ✓ Telefone capturado via header direto: %s", norm)
+                return norm, detail_title, detail_profile, ""
+        log.info("  [ETAPA 5/5] Header direto: nenhum telefone encontrado")
+    except Exception as e:
+        log.warning("  [ETAPA 5/5] Exceção no fallback header: %s", e)
+
+    reason = (
+        "no_phone_all_strategies|"
+        f"store=fail|sidebar=ok|header='{open_title}'|"
+        f"panel_profile='{detail_profile}'|panel_phone=none|header_phone=none"
+    )
+    log.warning(
+        "  [RESULTADO] Nenhum telefone encontrado para '%s' | motivo: %s",
+        title, reason,
+    )
+    return None, detail_title, detail_profile, reason
+
+
 def enrich_named_contacts_from_sidebar(
     chat_rows: List[Dict[str, Any]],
     *,
     max_per_cycle: int = 3,
-    max_attempts: int = 3,
+    max_attempts: int = 5,
     min_interval_sec: int = 180,
 ) -> int:
     """Opens a few visible named chats to capture phone/profile and cache them."""
@@ -2604,15 +2703,33 @@ def enrich_named_contacts_from_sidebar(
     enriched = 0
     skipped_not_named = 0
     skipped_alias_exists = 0
-    skipped_open_failed = 0
     skipped_no_phone = 0
-    skipped_failed_before = 0
+    skipped_cooldown = 0
     attempts = 0
 
+    # ── Log falhas anteriores para DEBUG ────────────────────────────
+    all_failures = state.get_enrichment_failures()
+    if all_failures:
+        log.info(
+            "Enriquecimento sidebar: %s contatos com falha(s) anterior(es):",
+            len(all_failures),
+        )
+        for fk, fv in sorted(all_failures.items(), key=lambda x: x[1].get("count", 0), reverse=True):
+            in_cooldown = state.should_skip_enrichment(fk, max_failures=5, cooldown_hours=24)
+            log.info(
+                "  falha: '%s' | tentativas=%s | última=%s | motivo='%s' | cooldown=%s",
+                fk,
+                fv.get("count", 0),
+                fv.get("last_at", "?"),
+                fv.get("last_reason", "(sem motivo)"),
+                "SIM" if in_cooldown else "não",
+            )
+
     # Filtra e prioriza candidatos: contatos que correspondem a contextos
-    # monitorados (pacientes) vêm primeiro, depois os demais.
+    # monitorados (pacientes) vêm primeiro, depois retries de falhas, depois os demais.
     eligible_rows: List[Dict[str, Any]] = []
     monitored_rows: List[Dict[str, Any]] = []
+    retry_rows: List[Dict[str, Any]] = []
     for row in chat_rows:
         title = (row.get("title") or "").strip()
         if not title or not _is_named_chat_title(title):
@@ -2622,23 +2739,29 @@ def enrich_named_contacts_from_sidebar(
         if aliases.get(title_key):
             skipped_alias_exists += 1
             continue
-        if state.should_skip_enrichment(title_key, max_failures=3, cooldown_hours=24):
-            skipped_failed_before += 1
+        # Contato em cooldown (>=5 falhas nas últimas 24h) — pula
+        if state.should_skip_enrichment(title_key, max_failures=5, cooldown_hours=24):
+            skipped_cooldown += 1
             continue
-        # Verifica se o contato corresponde a algum paciente monitorado
+        # Classifica o candidato
+        failure_entry = all_failures.get(title_key)
+        is_retry = failure_entry and failure_entry.get("count", 0) > 0
         if _match_context_for_chat_title(title, contexts, aliases=aliases):
             monitored_rows.append(row)
+        elif is_retry:
+            retry_rows.append(row)
         else:
             eligible_rows.append(row)
-    # Pacientes monitorados primeiro, depois os demais
-    prioritized = monitored_rows + eligible_rows
+    # Prioridade: monitorados > retries (com falha anterior) > novos
+    prioritized = monitored_rows + retry_rows + eligible_rows
 
     log.info(
         "Enriquecimento sidebar iniciado | chats_visíveis=%s | aliases_cache=%s "
-        "| max_por_ciclo=%s | max_tentativas=%s | candidatos=%s (monitorados=%s) "
-        "| skipped_failed_before=%s",
+        "| max_por_ciclo=%s | max_tentativas=%s | candidatos=%s (monitorados=%s, retries=%s, novos=%s) "
+        "| cooldown=%s | not_named=%s | alias_exists=%s",
         len(chat_rows), len(aliases), max_per_cycle, max_attempts,
-        len(prioritized), len(monitored_rows), skipped_failed_before,
+        len(prioritized), len(monitored_rows), len(retry_rows), len(eligible_rows),
+        skipped_cooldown, skipped_not_named, skipped_alias_exists,
     )
 
     for row in prioritized:
@@ -2647,64 +2770,25 @@ def enrich_named_contacts_from_sidebar(
 
         title = (row.get("title") or "").strip()
         title_key = re.sub(r"\s+", " ", title.lower())
+        prev_failure = all_failures.get(title_key)
 
         attempts += 1
-        log.info("Enriquecimento sidebar: tentando capturar contato nomeado '%s'", title)
-
-        resolved_phone = None
-        detail_title = title
-        detail_profile = ""
+        if prev_failure and prev_failure.get("count", 0) > 0:
+            log.info(
+                "Enriquecimento [%s/%s]: RETRY '%s' (falhas=%s, motivo anterior='%s')",
+                attempts, max_attempts, title,
+                prev_failure.get("count", 0),
+                prev_failure.get("last_reason", "?"),
+            )
+        else:
+            log.info("Enriquecimento [%s/%s]: tentando '%s' (primeira vez)", attempts, max_attempts, title)
 
         try:
-            # === FASE 1: Tenta resolver via WA internal store (sem abrir chat) ===
-            try:
-                store_phone = wa_web.resolve_phone_via_wa_store(title)
-                if store_phone:
-                    resolved_phone = store_phone
-                    log.info("Enriquecimento sidebar: telefone via WA Store para '%s' -> %s", title, resolved_phone)
-            except Exception as e:
-                log.debug("WA Store fallback falhou para '%s': %s", title, e)
-
-            # === FASE 2: Se store não resolveu, abre chat + painel de contato ===
-            if not resolved_phone:
-                if not wa_web.open_chat_by_sidebar_click(title):
-                    skipped_open_failed += 1
-                    state.record_enrichment_failure(title_key)
-                    log.warning("Enriquecimento sidebar: falha ao clicar na sidebar para '%s'", title)
-                    continue
-
-                open_identity = wa_web.get_open_chat_identity()
-                open_title = (open_identity.get("title") or "").strip()
-
-                if not open_title:
-                    skipped_open_failed += 1
-                    state.record_enrichment_failure(title_key)
-                    log.warning("Enriquecimento sidebar: chat não abriu (header vazio) | alvo='%s'", title)
-                    continue
-
-                details = wa_web.get_open_contact_details()
-                detail_title = details.get("title") or title
-                detail_profile = details.get("profile_name") or ""
-                resolved_phone = normalize_phone(details.get("profile_phone") or details.get("phone") or "")
-
-                # Fallback: tenta extrair do header diretamente
-                if not resolved_phone:
-                    log.info("Telefone não encontrado via painel para '%s'. Tentando header...", title)
-                    try:
-                        fallback_phone = wa_web.extract_phone_from_open_chat()
-                        if fallback_phone:
-                            resolved_phone = normalize_phone(fallback_phone)
-                            log.info("Telefone capturado via header: %s", resolved_phone)
-                    except Exception as e:
-                        log.warning("Falha no fallback header para '%s': %s", title, e)
+            resolved_phone, detail_title, detail_profile, failure_reason = _enrich_single_contact(title)
 
             if not resolved_phone:
                 skipped_no_phone += 1
-                state.record_enrichment_failure(title_key)
-                log.warning(
-                    "Enriquecimento sidebar: sem telefone para '%s' após todas as estratégias (falha registrada)",
-                    title,
-                )
+                state.record_enrichment_failure(title_key, reason=failure_reason)
                 continue
 
             _upsert_whatsapp_contact_profile(
@@ -2717,18 +2801,18 @@ def enrich_named_contacts_from_sidebar(
 
             state.set_contact_alias(title, resolved_phone)
             state.clear_enrichment_failure(title_key)
-            log.info("Enriquecimento sidebar: contato nomeado '%s' -> %s", title, resolved_phone)
+            log.info("Enriquecimento sidebar: ✓ '%s' -> %s", title, resolved_phone)
             enriched += 1
 
         except Exception as e:
-            state.record_enrichment_failure(title_key)
+            state.record_enrichment_failure(title_key, reason=f"exception:{e}")
             log.exception("Falha no enriquecimento para '%s': %s", title, e)
 
     log.info(
-        "Enriquecimento sidebar concluído | enriched=%s open_failed=%s no_phone=%s "
-        "not_named=%s alias_exists=%s failed_before=%s attempts=%s",
-        enriched, skipped_open_failed, skipped_no_phone,
-        skipped_not_named, skipped_alias_exists, skipped_failed_before, attempts,
+        "Enriquecimento sidebar concluído | enriched=%s no_phone=%s "
+        "not_named=%s alias_exists=%s cooldown=%s attempts=%s",
+        enriched, skipped_no_phone,
+        skipped_not_named, skipped_alias_exists, skipped_cooldown, attempts,
     )
 
     if enriched > 0:
