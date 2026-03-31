@@ -292,6 +292,17 @@ class StateStore:
                 del failures[title_key]
         self.save()
 
+    def reset_all_enrichment_failures(self) -> int:
+        """Reset all enrichment failure counters. Returns number of entries cleared."""
+        with self.lock:
+            failures = self.state.get("enrichment_failures", {})
+            count = len(failures)
+            if count > 0:
+                self.state["enrichment_failures"] = {}
+        if count > 0:
+            self.save()
+        return count
+
 
 state = StateStore(STATE_FILE)
 
@@ -1420,6 +1431,94 @@ class WhatsAppWebClient:
 
         return self._run_on_browser_thread(_do)
 
+    def resolve_phone_from_open_chat_internals(self) -> Optional[str]:
+        """Extract phone from the currently open chat using WA's internal React/Store data.
+
+        This avoids needing to open the contact panel at all — it reads the
+        chat ID (which IS the phone number) from the DOM's React fiber props
+        or from the #main header's data attributes.
+        """
+        self.start()
+
+        def _do():
+            if not getattr(self, '_page', None):
+                return None
+
+            return self._page.evaluate(
+                """() => {
+                    const pickPhone = (s) => {
+                        const d = String(s || '').replace(/\\D/g, '');
+                        return (d.length >= 10 && d.length <= 15) ? d : null;
+                    };
+
+                    // Strategy 1: React Fiber on #main or header — chat ID is the phone
+                    const main = document.querySelector('#main');
+                    if (main) {
+                        const fiberKey = Object.keys(main).find(
+                            k => k.startsWith('__reactFiber') || k.startsWith('__reactInternalInstance')
+                        );
+                        if (fiberKey) {
+                            let node = main[fiberKey];
+                            for (let i = 0; i < 20 && node; i++) {
+                                const props = node.memoizedProps || node.pendingProps || {};
+                                // Common prop names for chat ID
+                                for (const key of ['chatId', 'id', 'jid', 'peer', 'contact']) {
+                                    let val = props[key];
+                                    if (val && typeof val === 'object') {
+                                        val = val._serialized || val.user || val.toString();
+                                    }
+                                    const phone = pickPhone(val);
+                                    if (phone) return phone;
+                                }
+                                // Check nested chat object
+                                if (props.chat) {
+                                    const chatId = props.chat.id;
+                                    if (chatId) {
+                                        const ser = typeof chatId === 'object'
+                                            ? (chatId._serialized || chatId.user || '')
+                                            : String(chatId);
+                                        const phone = pickPhone(ser);
+                                        if (phone) return phone;
+                                    }
+                                }
+                                node = node.return;
+                            }
+                        }
+                    }
+
+                    // Strategy 2: data-id attribute on any ancestor
+                    const header = document.querySelector('#main header');
+                    if (header) {
+                        let el = header;
+                        while (el) {
+                            const dataId = el.getAttribute?.('data-id') || '';
+                            const phone = pickPhone(dataId);
+                            if (phone) return phone;
+                            el = el.parentElement;
+                        }
+                    }
+
+                    // Strategy 3: WA Store — get currently active chat
+                    try {
+                        const Store = window.Store || window.require?.('WAWebCollections');
+                        if (Store) {
+                            // Active chat
+                            const active = Store.Chat?.getActive?.() || Store.Cmd?.activeChat;
+                            if (active) {
+                                const id = active.id?._serialized || active.id?.user || '';
+                                const phone = pickPhone(id);
+                                if (phone) return phone;
+                            }
+                        }
+                    } catch(e) {}
+
+                    return null;
+                }"""
+            )
+
+        result = self._run_on_browser_thread(_do)
+        return normalize_phone(result) if result else None
+
     # open_chat_by_sidebar_click definido abaixo (versão única)
 
     def extract_phone_from_open_chat(self) -> Optional[str]:
@@ -1599,32 +1698,6 @@ class WhatsAppWebClient:
         return normalize_phone(result) if result else None
 
     def extract_phone_from_open_chat(self) -> Optional[str]:
-        self.start()
-
-        def _do():
-            if not getattr(self, '_page', None):
-                return None
-
-            return self._page.evaluate(
-                """() => {
-                    const header = document.querySelector('#main header');
-                    if (!header) return null;
-                    const spans = header.querySelectorAll('span[title], span[dir="auto"], span');
-                    for (const span of spans) {
-                        const text = (span.getAttribute('title') || span.textContent || '').trim();
-                        if (!text) continue;
-                        const digits = text.replace(/\\D/g, '');
-                        if (digits.length >= 10 && digits.length <= 15) {
-                            return digits;
-                        }
-                    }
-                    return null;
-                }"""
-            )
-
-        return self._run_on_browser_thread(_do)
-
-    def extract_phone_from_open_chat(self) -> Optional[str]:
         """Try to extract the phone number from the currently open chat header."""
         self.start()
 
@@ -1768,44 +1841,118 @@ class WhatsAppWebClient:
                 base.get("title", ""), base.get("phone", ""),
             )
 
-            # ── SUB-ETAPA C: Clique para abrir painel ──────────────────
-            # Tenta múltiplas estratégias de clique, como o usuário faria:
-            # 1) Clique no span do título (mais próximo do que o usuário clica)
-            # 2) Clique na imagem/avatar do header
-            # 3) Clique no header inteiro (fallback)
-            click_succeeded = False
-            click_strategy = ""
+            # ── SUB-ETAPA C: Diagnóstico + Clique para abrir painel ──────
+            # Primeiro captura o HTML do header para diagnóstico
+            header_html = ""
+            try:
+                header_html = self._page.evaluate(
+                    """() => {
+                        const h = document.querySelector('#main header');
+                        return h ? h.innerHTML.substring(0, 2000) : '(no header)';
+                    }"""
+                ) or ""
+                log.info(
+                    "get_open_contact_details sub-C: header HTML (primeiros 500 chars): %s",
+                    header_html[:500],
+                )
+            except Exception as e:
+                log.debug("get_open_contact_details: falha ao capturar header HTML: %s", e)
 
-            # Estratégia 1: clicar no span[title] do header (o nome do contato)
-            if not click_succeeded:
-                try:
-                    title_span = self._page.locator("#main header span[title]").first
-                    if title_span.count() > 0:
-                        title_span.click(timeout=2000)
-                        click_succeeded = True
-                        click_strategy = "span[title]"
-                except Exception as e:
-                    log.debug("get_open_contact_details: click span[title] falhou: %s", e)
+            # Usa page.evaluate() para encontrar e clicar no elemento certo
+            # via JS — simula clique real do usuário no header.
+            # Em WhatsApp Web, o header contém uma área clicável (div container
+            # com o nome e avatar) que abre "Dados do contato".
+            click_result = self._page.evaluate(
+                """() => {
+                    const header = document.querySelector('#main header');
+                    if (!header) return { ok: false, strategy: 'no_header' };
 
-            # Estratégia 2: clicar na img/avatar do header
-            if not click_succeeded:
-                try:
-                    avatar = self._page.locator("#main header img, #main header [data-testid='chat-portrait']").first
-                    if avatar.count() > 0:
-                        avatar.click(timeout=2000)
-                        click_succeeded = True
-                        click_strategy = "avatar/img"
-                except Exception as e:
-                    log.debug("get_open_contact_details: click avatar falhou: %s", e)
+                    // Helper: simula clique real (mousedown + mouseup + click)
+                    const realClick = (el) => {
+                        if (!el) return false;
+                        el.scrollIntoView({ block: 'center' });
+                        const rect = el.getBoundingClientRect();
+                        const x = rect.left + rect.width / 2;
+                        const y = rect.top + rect.height / 2;
+                        const opts = { bubbles: true, cancelable: true, clientX: x, clientY: y };
+                        el.dispatchEvent(new MouseEvent('mousedown', opts));
+                        el.dispatchEvent(new MouseEvent('mouseup', opts));
+                        el.dispatchEvent(new MouseEvent('click', opts));
+                        return true;
+                    };
 
-            # Estratégia 3: clicar no header inteiro
+                    // Strategy 1: clickable container div wrapping name/subtitle
+                    // In WA Web the header has: [avatar section] [name section with cursor:pointer]
+                    // The name section's parent div is the click target
+                    const nameSpan = header.querySelector('span[title]');
+                    if (nameSpan) {
+                        // Walk up to find the nearest clickable container
+                        let target = nameSpan.parentElement;
+                        for (let i = 0; i < 5 && target && target !== header; i++) {
+                            const style = window.getComputedStyle(target);
+                            if (style.cursor === 'pointer') {
+                                if (realClick(target))
+                                    return { ok: true, strategy: 'name_container_pointer', tag: target.tagName };
+                            }
+                            target = target.parentElement;
+                        }
+                        // Fallback: click the span's grandparent (common WA pattern)
+                        const gp = nameSpan.parentElement?.parentElement;
+                        if (gp && gp !== header) {
+                            if (realClick(gp))
+                                return { ok: true, strategy: 'name_grandparent', tag: gp.tagName };
+                        }
+                    }
+
+                    // Strategy 2: any element with role=button in header
+                    const btn = header.querySelector('[role="button"]');
+                    if (btn) {
+                        if (realClick(btn))
+                            return { ok: true, strategy: 'role_button', tag: btn.tagName };
+                    }
+
+                    // Strategy 3: click the avatar/img
+                    const avatar = header.querySelector('img, [data-testid="chat-portrait"], [data-testid="default-user"]');
+                    if (avatar) {
+                        if (realClick(avatar))
+                            return { ok: true, strategy: 'avatar', tag: avatar.tagName };
+                    }
+
+                    // Strategy 4: find any div with cursor:pointer in header
+                    const allDivs = header.querySelectorAll('div, section');
+                    for (const d of allDivs) {
+                        const style = window.getComputedStyle(d);
+                        if (style.cursor === 'pointer') {
+                            if (realClick(d))
+                                return { ok: true, strategy: 'cursor_pointer_div', tag: d.tagName };
+                        }
+                    }
+
+                    // Strategy 5: brute force — click the first large child div
+                    const children = header.querySelectorAll(':scope > div');
+                    for (const ch of children) {
+                        const rect = ch.getBoundingClientRect();
+                        if (rect.width > 100 && rect.height > 30) {
+                            if (realClick(ch))
+                                return { ok: true, strategy: 'first_large_child', tag: ch.tagName };
+                        }
+                    }
+
+                    return { ok: false, strategy: 'all_failed' };
+                }"""
+            ) or {}
+
+            click_succeeded = bool(click_result.get("ok"))
+            click_strategy = click_result.get("strategy", "unknown")
+
+            # Se o JS click não abriu o painel, tenta Playwright .click() como fallback
             if not click_succeeded:
                 try:
                     header.click(timeout=3000)
                     click_succeeded = True
-                    click_strategy = "header"
+                    click_strategy = "playwright_header_fallback"
                 except Exception as e:
-                    log.warning("get_open_contact_details: click header falhou: %s", e)
+                    log.warning("get_open_contact_details: Playwright header click falhou: %s", e)
 
             log.info(
                 "get_open_contact_details sub-C: click_succeeded=%s strategy='%s'",
@@ -2710,6 +2857,17 @@ def _enrich_single_contact(title: str) -> Tuple[Optional[str], str, str, str]:
         log.info("  [ETAPA 3/5] ✓ Telefone já visível no header: %s", open_phone)
         return normalize_phone(open_phone), open_title, detail_profile, ""
 
+    # ── ETAPA 3.5: React internals do chat aberto ──────────────────
+    log.info("  [ETAPA 3.5] resolve_phone_from_open_chat_internals() — tentando React/Store...")
+    try:
+        react_phone = wa_web.resolve_phone_from_open_chat_internals()
+        if react_phone:
+            log.info("  [ETAPA 3.5] ✓ Telefone via React internals: %s", react_phone)
+            return react_phone, open_title, detail_profile, ""
+        log.info("  [ETAPA 3.5] React internals: nenhum telefone encontrado")
+    except Exception as e:
+        log.info("  [ETAPA 3.5] React internals: exceção: %s", e)
+
     # ── ETAPA 4: Abrir painel "Dados do contato" ────────────────────
     log.info("  [ETAPA 4/5] get_open_contact_details() — abrindo painel Dados do contato...")
     details = wa_web.get_open_contact_details()
@@ -2832,6 +2990,30 @@ def enrich_named_contacts_from_sidebar(
             eligible_rows.append(row)
     # Prioridade: monitorados > retries (com falha anterior) > novos
     prioritized = monitored_rows + retry_rows + eligible_rows
+
+    # Se todos os candidatos estão em cooldown e não há nenhum novo, reseta os
+    # contadores de falha para permitir retries com a lógica atualizada.
+    if len(prioritized) == 0 and skipped_cooldown > 0:
+        cleared = state.reset_all_enrichment_failures()
+        log.info(
+            "Enriquecimento sidebar: TODOS os %s candidatos em cooldown — "
+            "resetando %s contadores de falha para permitir retry com lógica atualizada",
+            skipped_cooldown, cleared,
+        )
+        # Re-scan after reset
+        skipped_cooldown = 0
+        for row in chat_rows:
+            title = (row.get("title") or "").strip()
+            if not title or not _is_named_chat_title(title):
+                continue
+            title_key = re.sub(r"\s+", " ", title.lower())
+            if aliases.get(title_key):
+                continue
+            if _match_context_for_chat_title(title, contexts, aliases=aliases):
+                monitored_rows.append(row)
+            else:
+                retry_rows.append(row)
+        prioritized = monitored_rows + retry_rows + eligible_rows
 
     log.info(
         "Enriquecimento sidebar iniciado | chats_visíveis=%s | aliases_cache=%s "
