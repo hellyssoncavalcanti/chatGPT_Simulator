@@ -177,12 +177,12 @@ SEARCH_TIMEOUT       = _cfg("ANALISADOR_SEARCH_TIMEOUT",      90)
 SEARCH_HABILITADA    = _cfg("ANALISADOR_SEARCH_HABILITADA",   True)
 
 # Throttle entre mensagens ao ChatGPT (evita "excesso de solicitações")
-LLM_THROTTLE_MIN  = _cfg("ANALISADOR_LLM_THROTTLE_MIN", 8)   # segundos mínimos entre envios
-LLM_THROTTLE_MAX  = _cfg("ANALISADOR_LLM_THROTTLE_MAX", 15)  # segundos máximos (aleatoriza)
+LLM_THROTTLE_MIN  = _cfg("ANALISADOR_LLM_THROTTLE_MIN", 12)  # segundos mínimos entre envios
+LLM_THROTTLE_MAX  = _cfg("ANALISADOR_LLM_THROTTLE_MAX", 20)  # segundos máximos (aleatoriza)
 
 # Retry com backoff quando ChatGPT retorna limite/erro de rate
 LLM_RATE_LIMIT_RETRY_MAX     = _cfg("ANALISADOR_LLM_RATE_LIMIT_RETRY_MAX",     3)    # tentativas
-LLM_RATE_LIMIT_RETRY_BASE_S  = _cfg("ANALISADOR_LLM_RATE_LIMIT_RETRY_BASE_S",  60)   # espera base (seg)
+LLM_RATE_LIMIT_RETRY_BASE_S  = _cfg("ANALISADOR_LLM_RATE_LIMIT_RETRY_BASE_S",  90)   # espera base (seg)
 LLM_RATE_LIMIT_RETRY_MULT    = _cfg("ANALISADOR_LLM_RATE_LIMIT_RETRY_MULT",    2.0)  # multiplicador exponencial
 
 # Endpoints PHP:
@@ -5133,8 +5133,8 @@ def executar_busca_evidencias(resultado: dict, chat_url: str = None, chat_id: st
 # ─────────────────────────────────────────────────────────────
 
 # Intervalo de pausa entre análises (segundos) — vindo de config.py com fallback
-PAUSA_MIN = _cfg("ANALISADOR_PAUSA_MIN", 15)
-PAUSA_MAX = _cfg("ANALISADOR_PAUSA_MAX", 45)
+PAUSA_MIN = _cfg("ANALISADOR_PAUSA_MIN", 25)
+PAUSA_MAX = _cfg("ANALISADOR_PAUSA_MAX", 60)
 
 def processar_lote(pendentes: list):
     total = len(pendentes)
