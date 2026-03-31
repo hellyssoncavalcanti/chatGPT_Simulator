@@ -246,6 +246,11 @@ if ($gemini_should_render_direct_page) {
       <div class="head">ChatGPT Integração (modo página)</div>
       <div class="body">
         <?php if ($gemini_authorized): ?>
+          <div id="chatgpt-integracao-page-root"></div>
+          <script>
+            window.__CHATGPT_INTEGRACAO_MODE = 'page';
+            window.__CHATGPT_INTEGRACAO_CONTAINER = '#chatgpt-integracao-page-root';
+          </script>
           <script src="<?php echo $gemini_self_js_url; ?>"></script>
         <?php else: ?>
           <div class="denied">Você não possui permissão para abrir este handler diretamente.</div>
@@ -3164,6 +3169,8 @@ header('Content-Type: application/javascript; charset=utf-8');
     const USER_SEP = "### PERGUNTA ###"; 
     
     const PREFIX = 'chatgpt_integracao_';
+    const RENDER_MODE = window.__CHATGPT_INTEGRACAO_MODE === 'page' ? 'page' : 'toast';
+    const PAGE_CONTAINER_SELECTOR = window.__CHATGPT_INTEGRACAO_CONTAINER || '#chatgpt-integracao-page-root';
     const KEY_MODEL = PREFIX + 'selected_model';
     const KEY_MODEL_MANUAL = PREFIX + 'selected_model_manual';
     const KEY_STREAM = PREFIX + 'stream_enabled';
@@ -3296,7 +3303,7 @@ header('Content-Type: application/javascript; charset=utf-8');
     // [FIX 8.1] PREFIXO UNIFICADO PARA MICROFONE (CONFORME SOLICITADO)
     const MIC_PREFIX = `🎤 ${FILE_PREFIX} [MICROFONE]`;
 
-    const css = `
+    let css = `
         div.qtip { z-index: 2147483647 !important; }
         #ow-widget { position: fixed; bottom: 2.5vh; right: 1.2vw; z-index: 99999; font-family: -apple-system, sans-serif; }
         #ow-toggle-btn { width: 60px; height: 60px; background: #212121; border-radius: 50%; color: #fff; border:none; cursor:pointer; font-size:24px; box-shadow:0 4px 15px rgba(0,0,0,0.3); transition: transform 0.2s; }
@@ -3725,6 +3732,15 @@ header('Content-Type: application/javascript; charset=utf-8');
             .msg { font-size: 13px; padding: 8px 10px; }
         }
     `;
+    if (RENDER_MODE === 'page') {
+        css += `
+        #ow-widget { position: relative !important; bottom: auto !important; right: auto !important; width: 100%; height: 100%; }
+        #ow-toggle-btn { display: none !important; }
+        #ow-window { position: relative !important; display: flex !important; width: 100% !important; height: 100% !important; max-height: none !important; bottom: auto !important; right: auto !important; border-radius: 0 !important; box-shadow: none !important; border: 0 !important; }
+        #ow-window.maximized { width: 100% !important; height: 100% !important; bottom: auto !important; right: auto !important; }
+        #ow-backdrop { display: none !important; }
+        `;
+    }
     const stTag = document.createElement("style"); stTag.innerHTML = css; document.head.appendChild(stTag);
 
     const widget = document.createElement('div');
@@ -8526,8 +8542,21 @@ header('Content-Type: application/javascript; charset=utf-8');
 
 
     document.addEventListener('DOMContentLoaded', (event) => {
-        document.body.appendChild(widget); // Append to the body
-        console.log(`%c🔧 ${FILE_PREFIX} Widget de IA incorporado ao body após o DOMContentLoaded.`, "color: #2196f3; font-weight: bold;");
+        const hostContainer = (RENDER_MODE === 'page')
+            ? (document.querySelector(PAGE_CONTAINER_SELECTOR) || document.body)
+            : document.body;
+        hostContainer.appendChild(widget);
+        if (RENDER_MODE === 'page') {
+            const pageWindow = document.getElementById('ow-window');
+            const pageToggleBtn = document.getElementById('ow-toggle-btn');
+            const pageCloseBtn = document.getElementById('ow-btn-close');
+            const pageBackdrop = document.getElementById('ow-backdrop');
+            if (pageWindow) pageWindow.style.display = 'flex';
+            if (pageToggleBtn) pageToggleBtn.style.display = 'none';
+            if (pageCloseBtn) pageCloseBtn.style.display = 'none';
+            if (pageBackdrop) pageBackdrop.classList.remove('active');
+        }
+        console.log(`%c🔧 ${FILE_PREFIX} Widget de IA incorporado ao ${RENDER_MODE === 'page' ? 'container da página' : 'body'} após o DOMContentLoaded.`, "color: #2196f3; font-weight: bold;");
         if (typeof scheduleSqlLogCleanup === 'function') scheduleSqlLogCleanup();
         
         window.switchSidebarView = function(viewName) {
@@ -8575,9 +8604,15 @@ header('Content-Type: application/javascript; charset=utf-8');
         document.getElementById('ow-send').onclick = send;
         document.getElementById('sb-btn-install').onclick = () => installModel(0); 
         document.getElementById('ow-menu-toggle').onclick = () => document.getElementById('ow-sidebar').classList.add('open');
-        document.getElementById('ow-toggle-btn').onclick = () => { const w = document.getElementById('ow-window'); w.style.display = w.style.display !== 'flex' ? 'flex' : 'none'; if(w.style.display=='flex') setTimeout(()=>scroll(true),100); };
+        document.getElementById('ow-toggle-btn').onclick = () => {
+            if (RENDER_MODE === 'page') return;
+            const w = document.getElementById('ow-window');
+            w.style.display = w.style.display !== 'flex' ? 'flex' : 'none';
+            if(w.style.display=='flex') setTimeout(()=>scroll(true),100);
+        };
         
         function toggleMaximize() {
+            if (RENDER_MODE === 'page') return;
             const win = document.getElementById('ow-window');
             const back = document.getElementById('ow-backdrop');
             win.classList.toggle('maximized');
@@ -8667,7 +8702,10 @@ header('Content-Type: application/javascript; charset=utf-8');
                 }
             } 
         };
-        document.getElementById('ow-btn-close').onclick = () => document.getElementById('ow-window').style.display = 'none';
+        document.getElementById('ow-btn-close').onclick = () => {
+            if (RENDER_MODE === 'page') return;
+            document.getElementById('ow-window').style.display = 'none';
+        };
         // Enter: pula linha | Ctrl+Enter ou Shift+Enter: envia mensagem
         document.getElementById('ow-input').addEventListener('keydown', (e) => {
             if (e.key === 'Enter') {
