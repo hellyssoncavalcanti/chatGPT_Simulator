@@ -5064,7 +5064,7 @@ header('Content-Type: application/javascript; charset=utf-8');
                         FROM chatgpt_atendimentos_analise
                         WHERE id_paciente = ${idPaciente}
                           AND id_atendimento IS NULL
-                          AND id_criador IS NULL
+                          AND id_criador = 'analise_compilada_paciente'
                         ORDER BY
                             CASE
                                 WHEN status = 'processando' THEN 0
@@ -5083,8 +5083,11 @@ header('Content-Type: application/javascript; charset=utf-8');
 
             const data = await res.json();
             if (!data?.success || !data.data?.length) {
-                clearPendingAnaliseNotice('paciente_compilado');
-                console.log('%cℹ️  Nenhuma síntese compilada do paciente encontrada.', 'color: #9e9e9e');
+                console.log('%cℹ️  Nenhuma síntese compilada do paciente encontrada — exibindo fila com previsão.', 'color: #ff9800');
+                const pseudoRow = { status: 'pendente', id: null };
+                pseudoRow.queueInfo = await fetchAnaliseQueueEstimate(pseudoRow);
+                setPendingAnaliseNotice('paciente_compilado', 'pendente', pseudoRow);
+                notifyAnalisePreviaPendente('pendente', 'síntese do paciente');
                 console.groupEnd();
                 return;
             }
