@@ -189,6 +189,8 @@ $actions_without_login_bootstrap = [
 ];
 $is_direct_script_request = ($current_action === '' && basename($_SERVER['PHP_SELF'] ?? '') === $currentFileName);
 $should_bootstrap_context = ($is_iframe || ($current_action !== '' && !in_array($current_action, $actions_without_login_bootstrap, true)));
+$gemini_direct_requested_as_js = (($_GET['as'] ?? '') === 'js');
+$gemini_should_render_direct_page = ($is_direct_script_request && !$gemini_direct_requested_as_js);
 
 if($should_bootstrap_context)
 {
@@ -207,6 +209,54 @@ if($should_bootstrap_context)
   if(isset($row_login_atual['id']) && verifica_permissao($mysqli, $row_login_atual['id'], 'chatgpt_system_prompt', 'editar')) {
       $user_can_edit_system = true;
   }
+}
+
+if ($gemini_should_render_direct_page) {
+    header("Content-Type: text/html; charset=UTF-8", true);
+    $gemini_authorized = false;
+    if (
+        isset($row_login_atual['id']) &&
+        function_exists('verifica_permissao') &&
+        isset($mysqli)
+    ) {
+        $gemini_authorized = verifica_permissao($mysqli, $row_login_atual['id'], 'chatgpt_system_prompt', 'editar') ? true : false;
+    }
+
+    $gemini_self_path = $_SERVER['PHP_SELF'] ?? $currentFileName;
+    $gemini_self_js_url = htmlspecialchars($gemini_self_path . '?as=js', ENT_QUOTES, 'UTF-8');
+    ?>
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>ChatGPT Integração (modo página)</title>
+  <style>
+    body{margin:0;background:#f2f4f8;font-family:Arial,sans-serif}
+    .wrap{max-width:1280px;margin:18px auto;padding:0 14px}
+    .card{background:#fff;border:1px solid #e6e9ef;border-radius:12px;box-shadow:0 8px 30px rgba(0,0,0,.06)}
+    .head{padding:14px 16px;border-bottom:1px solid #eceff5;font-weight:700}
+    .body{padding:0;min-height:78vh}
+    .denied{margin:16px;color:#a40000;background:#fff1f1;border:1px solid #ffd0d0;padding:12px;border-radius:8px}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="card">
+      <div class="head">ChatGPT Integração (modo página)</div>
+      <div class="body">
+        <?php if ($gemini_authorized): ?>
+          <script src="<?php echo $gemini_self_js_url; ?>"></script>
+        <?php else: ?>
+          <div class="denied">Você não possui permissão para abrir este handler diretamente.</div>
+        <?php endif; ?>
+      </div>
+    </div>
+  </div>
+</body>
+</html>
+    <?php
+    exit;
 }
 
 
