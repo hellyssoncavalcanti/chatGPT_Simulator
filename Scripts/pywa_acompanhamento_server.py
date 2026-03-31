@@ -1716,24 +1716,33 @@ class WhatsAppWebClient:
     def get_open_contact_details(self) -> Dict[str, str]:
         """Open contact details panel and extract visible profile information.
 
+        Simulates the manual user route:
+          1. Escape (close any existing panel)
+          2. Read header identity
+          3. Click on the header name/avatar to open "Dados do contato"
+          4. Wait for panel to fully render (including phone)
+          5. Extract profile_name + profile_phone
+          6. Escape (close panel)
+
         Returns:
           {title, phone, profile_name, profile_phone}
         """
         self.start()
 
         def _do():
-            # Fecha possível painel já aberto e volta ao chat.
+            # ── SUB-ETAPA A: Fecha possível painel já aberto ────────────
             try:
                 self._page.keyboard.press("Escape")
-                self._page.wait_for_timeout(150)
+                self._page.wait_for_timeout(200)
             except Exception:
                 pass
 
             header = self._page.locator("#main header").first
             if header.count() == 0:
+                log.info("get_open_contact_details: #main header não encontrado")
                 return {"title": "", "phone": "", "profile_name": "", "profile_phone": ""}
 
-            # Captura identidade visível no header ANTES de abrir o painel.
+            # ── SUB-ETAPA B: Captura identidade do header ───────────────
             base = self._page.evaluate(
                 """() => {
                     const pickPhone = (txt) => {
@@ -1754,21 +1763,66 @@ class WhatsAppWebClient:
                     return { title, phone };
                 }"""
             ) or {}
+            log.info(
+                "get_open_contact_details sub-B: header title='%s' phone='%s'",
+                base.get("title", ""), base.get("phone", ""),
+            )
 
-            try:
-                header.click(timeout=3000)
-            except Exception:
+            # ── SUB-ETAPA C: Clique para abrir painel ──────────────────
+            # Tenta múltiplas estratégias de clique, como o usuário faria:
+            # 1) Clique no span do título (mais próximo do que o usuário clica)
+            # 2) Clique na imagem/avatar do header
+            # 3) Clique no header inteiro (fallback)
+            click_succeeded = False
+            click_strategy = ""
+
+            # Estratégia 1: clicar no span[title] do header (o nome do contato)
+            if not click_succeeded:
+                try:
+                    title_span = self._page.locator("#main header span[title]").first
+                    if title_span.count() > 0:
+                        title_span.click(timeout=2000)
+                        click_succeeded = True
+                        click_strategy = "span[title]"
+                except Exception as e:
+                    log.debug("get_open_contact_details: click span[title] falhou: %s", e)
+
+            # Estratégia 2: clicar na img/avatar do header
+            if not click_succeeded:
+                try:
+                    avatar = self._page.locator("#main header img, #main header [data-testid='chat-portrait']").first
+                    if avatar.count() > 0:
+                        avatar.click(timeout=2000)
+                        click_succeeded = True
+                        click_strategy = "avatar/img"
+                except Exception as e:
+                    log.debug("get_open_contact_details: click avatar falhou: %s", e)
+
+            # Estratégia 3: clicar no header inteiro
+            if not click_succeeded:
+                try:
+                    header.click(timeout=3000)
+                    click_succeeded = True
+                    click_strategy = "header"
+                except Exception as e:
+                    log.warning("get_open_contact_details: click header falhou: %s", e)
+
+            log.info(
+                "get_open_contact_details sub-C: click_succeeded=%s strategy='%s'",
+                click_succeeded, click_strategy,
+            )
+
+            if not click_succeeded:
+                log.warning("get_open_contact_details: TODAS as estratégias de clique falharam")
                 return {
                     "title": str(base.get("title") or "").strip(),
                     "phone": str(base.get("phone") or "").strip(),
                     "profile_name": "",
                     "profile_phone": "",
+                    "_click_failed": True,
                 }
 
-            # Aguarda o painel abrir — tenta múltiplos seletores.
-            # IMPORTANTE: Exclui role=menuitem pois o WA renderiza primeiro um
-            # botão com aria-label="Dados do contato" e role=menuitem ANTES do
-            # painel real aparecer. Detectar esse botão causa falso positivo.
+            # ── SUB-ETAPA D: Aguarda o painel abrir ─────────────────────
             panel_visible = False
             panel_selectors = [
                 '[data-testid="contact-info-drawer"]',
@@ -1779,24 +1833,39 @@ class WhatsAppWebClient:
             ]
             for sel in panel_selectors:
                 try:
-                    self._page.wait_for_selector(sel, timeout=2500)
+                    self._page.wait_for_selector(sel, timeout=3000)
                     panel_visible = True
+                    log.info("get_open_contact_details sub-D: painel detectado via '%s'", sel)
                     break
                 except Exception:
                     continue
+
             if not panel_visible:
+                # Fallback: texto "Dados do contato" visível em qualquer lugar
                 try:
-                    self._page.wait_for_selector("text=/Dados do contato|Contact info|Informações do contato/i", timeout=3000)
+                    self._page.wait_for_selector(
+                        "text=/Dados do contato|Contact info|Informações do contato/i",
+                        timeout=3000,
+                    )
                     panel_visible = True
+                    log.info("get_open_contact_details sub-D: painel detectado via texto")
                 except Exception:
                     panel_visible = False
 
-            # Pausa extra para o painel carregar seus dados.
-            # O WA pode renderizar o telefone ~1-6s após o painel ficar visível
-            # (observado em logs do console: ~1.3s entre panel=Y e pPhone aparecer,
-            # mas ~6s entre o clique no header e o telefone renderizar).
-            self._page.wait_for_timeout(1500)
+            if not panel_visible:
+                # Último recurso: espera fixa para dar tempo ao painel renderizar
+                # (para contas comerciais o painel pode abrir sem os seletores padrão)
+                log.warning(
+                    "get_open_contact_details sub-D: painel NÃO detectado por seletores. "
+                    "Aguardando 3s como fallback..."
+                )
+                self._page.wait_for_timeout(3000)
+            else:
+                # Pausa extra para o painel carregar o telefone.
+                # Observado no console: ~1-6s entre clique e phone renderizar.
+                self._page.wait_for_timeout(2000)
 
+            # ── SUB-ETAPA E: Extrai dados do painel com retries ─────────
             extract_details_js = """() => {
                     const pickPhone = (txt) => {
                         if (!txt) return '';
@@ -1974,12 +2043,20 @@ class WhatsAppWebClient:
             data = {}
             for attempt in range(1, 13):
                 data = self._page.evaluate(extract_details_js) or {}
-                if normalize_phone(data.get("profile_phone")):
+                _debug_attempt = str(data.get("_debug") or "")
+                found_phone = normalize_phone(data.get("profile_phone"))
+                if attempt == 1 or found_phone:
+                    log.info(
+                        "get_open_contact_details sub-E: tentativa %s/12 | phone='%s' name='%s' debug='%s'",
+                        attempt, found_phone or "(nenhum)",
+                        data.get("profile_name", ""), _debug_attempt[:120],
+                    )
+                if found_phone:
                     break
                 if attempt < 12:
-                    # Espera progressiva: 500ms nas 4 primeiras, 750ms nas seguintes
                     self._page.wait_for_timeout(500 if attempt <= 4 else 750)
 
+            # ── SUB-ETAPA F: Fecha painel ───────────────────────────────
             try:
                 self._page.keyboard.press("Escape")
                 self._page.wait_for_timeout(150)
@@ -2001,9 +2078,10 @@ class WhatsAppWebClient:
                     json.dumps(result, ensure_ascii=False),
                 )
             log.info(
-                "get_open_contact_details resultado | title='%s' phone='%s' profile_phone='%s' panel_visible=%s debug=%s",
+                "get_open_contact_details resultado | title='%s' phone='%s' profile_phone='%s' "
+                "panel_visible=%s click='%s' debug=%s",
                 result.get("title", ""), result.get("phone", ""),
-                result.get("profile_phone", ""), panel_visible, _debug,
+                result.get("profile_phone", ""), panel_visible, click_strategy, _debug[:100],
             )
             return result
 
