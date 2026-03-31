@@ -160,9 +160,11 @@ function Import-Settings {
         whatsappServerBat   = '2. Start_Whatsapp_Server.bat'
         whatsappWindowTitle = 'WhatsApp Follow-up Server (Web)'
         remotePhpSaveUrl    = if ($env:CHATGPT_SIMULATOR_REMOTE_PHP_SAVE_URL) { $env:CHATGPT_SIMULATOR_REMOTE_PHP_SAVE_URL } else { 'https://conexaovida.org/editar_php.php?action=save_file_remote' }
-        remotePhpApiKey     = if ($env:CHATGPT_SIMULATOR_REMOTE_PHP_API_KEY) { $env:CHATGPT_SIMULATOR_REMOTE_PHP_API_KEY } else { 'CVAPI_2b9c80c2abf94a76baf8b3e68d89cb7e' }
-        remotePhpLocalFile  = if ($env:CHATGPT_SIMULATOR_REMOTE_PHP_LOCAL_FILE) { $env:CHATGPT_SIMULATOR_REMOTE_PHP_LOCAL_FILE } else { 'chatgpt_integracao_criado_pelo_gemini.js.php' }
-        remotePhpTargetPath = if ($env:CHATGPT_SIMULATOR_REMOTE_PHP_TARGET_PATH) { $env:CHATGPT_SIMULATOR_REMOTE_PHP_TARGET_PATH } else { 'scripts/js/chatgpt_integracao_criado_pelo_gemini.js.php' }
+        remotePhpApiKey      = if ($env:CHATGPT_SIMULATOR_REMOTE_PHP_API_KEY) { $env:CHATGPT_SIMULATOR_REMOTE_PHP_API_KEY } else { 'CVAPI_2b9c80c2abf94a76baf8b3e68d89cb7e' }
+        remotePhpLocalFile   = if ($env:CHATGPT_SIMULATOR_REMOTE_PHP_LOCAL_FILE) { $env:CHATGPT_SIMULATOR_REMOTE_PHP_LOCAL_FILE } else { 'chatgpt_integracao_criado_pelo_gemini.js.php' }
+        remotePhpTargetPath  = if ($env:CHATGPT_SIMULATOR_REMOTE_PHP_TARGET_PATH) { $env:CHATGPT_SIMULATOR_REMOTE_PHP_TARGET_PATH } else { 'scripts/js/chatgpt_integracao_criado_pelo_gemini.js.php' }
+        remotePhpLocalFile2  = if ($env:CHATGPT_SIMULATOR_REMOTE_PHP_LOCAL_FILE_2) { $env:CHATGPT_SIMULATOR_REMOTE_PHP_LOCAL_FILE_2 } else { 'chatgpt_free_openai.js.php' }
+        remotePhpTargetPath2 = if ($env:CHATGPT_SIMULATOR_REMOTE_PHP_TARGET_PATH_2) { $env:CHATGPT_SIMULATOR_REMOTE_PHP_TARGET_PATH_2 } else { 'scripts/js/chatgpt_free_openai.js.php' }
     }
 
     if (Test-Path $settingsPath) {
@@ -813,125 +815,148 @@ function Sync-FilesFromMirror {
 function Sync-RemotePhpIfNeeded {
     Write-Section 'SINCRONIZANDO PHP REMOTO'
 
-    $localPhpRelative = Normalize-RelativePath $script:Config.remotePhpLocalFile
-    if ([string]::IsNullOrWhiteSpace($localPhpRelative)) {
-        Write-Info 'Arquivo PHP remoto nao configurado; etapa ignorada.'
+    $remotePhpMappings = @()
+    if (-not [string]::IsNullOrWhiteSpace($script:Config.remotePhpLocalFile) -and -not [string]::IsNullOrWhiteSpace($script:Config.remotePhpTargetPath)) {
+        $remotePhpMappings += [ordered]@{
+            localFile = $script:Config.remotePhpLocalFile
+            targetPath = $script:Config.remotePhpTargetPath
+        }
+    }
+    if (-not [string]::IsNullOrWhiteSpace($script:Config.remotePhpLocalFile2) -and -not [string]::IsNullOrWhiteSpace($script:Config.remotePhpTargetPath2)) {
+        $remotePhpMappings += [ordered]@{
+            localFile = $script:Config.remotePhpLocalFile2
+            targetPath = $script:Config.remotePhpTargetPath2
+        }
+    }
+
+    if ($remotePhpMappings.Count -eq 0) {
+        Write-Info 'Arquivos PHP remotos nao configurados; etapa ignorada.'
         return
     }
 
     $changedFiles = @($script:AddedFiles) + @($script:UpdatedFiles) | ForEach-Object { Normalize-RelativePath $_ }
-    $phpChanged = $changedFiles -contains $localPhpRelative
-    if (-not $phpChanged) {
-        Write-Info "Arquivo PHP monitorado nao foi alterado neste ciclo: $($script:Config.remotePhpLocalFile)"
-        return
-    }
-
     if ([string]::IsNullOrWhiteSpace($script:Config.remotePhpSaveUrl) -or [string]::IsNullOrWhiteSpace($script:Config.remotePhpApiKey)) {
         throw 'Alteracao de PHP detectada, mas remotePhpSaveUrl/remotePhpApiKey nao foram configurados.'
     }
 
-    $localPhpPath = Join-Path $script:Config.localDir $script:Config.remotePhpLocalFile
-    if (-not (Test-Path $localPhpPath -PathType Leaf)) {
-        throw "Arquivo PHP alterado nao encontrado localmente para sync remoto: $localPhpPath"
-    }
-
-    # 1. Leitura PURA usando o núcleo do .NET (Ignora todos os metadados do PowerShell)
-    $conteudo = [System.IO.File]::ReadAllText($localPhpPath, [System.Text.Encoding]::UTF8)
-
-    # 2. Construção do pacote APENAS com o que o PHP precisa
-    $payloadString = @{
-        api_key  = $script:Config.remotePhpApiKey
-        filepath = $script:Config.remotePhpTargetPath
-        conteudo = $conteudo
-    } | ConvertTo-Json -Depth 6 -Compress
-
-    $targetUrl = $script:Config.remotePhpSaveUrl
-    try {
-        $uriObj = [System.Uri]$targetUrl
-        if ([string]::IsNullOrWhiteSpace($uriObj.Query)) {
-            $targetUrl = "$($uriObj.AbsoluteUri)?filepath=$([System.Uri]::EscapeDataString($script:Config.remotePhpTargetPath))"
-        } else {
-            $targetUrl = "$($uriObj.AbsoluteUri)&filepath=$([System.Uri]::EscapeDataString($script:Config.remotePhpTargetPath))"
-        }
-    } catch { }
-
-    Write-Info "Atualizando arquivo PHP no servidor remoto: $($script:Config.remotePhpTargetPath)"
-    Write-Info "URL completa do endpoint remoto: $targetUrl"
-    Write-Info ("Arquivo local origem: {0} ({1} bytes)" -f $localPhpPath, ([System.Text.Encoding]::UTF8.GetByteCount($conteudo)))
-    Write-Info "Iniciando requisicao de atualizacao remota (timeout: 60s)..."
-
-    $curlHeaders = @(
-        "-H ""Content-Type: application/json; charset=utf-8""",
-        "-H ""Accept: application/json"""
-    ) -join ' '
-    $payloadTempFile = Join-Path $script:Config.tempDir ("remote_php_payload_{0}.json" -f (Get-Date -Format 'yyyyMMdd_HHmmss_fff'))
-    try { Set-Content -Path $payloadTempFile -Value $payloadString -Encoding UTF8 -NoNewline } catch { }
-    $curlCommand = ('curl -X POST "{0}" {1} --data-binary "@{2}"' -f $targetUrl, $curlHeaders, $payloadTempFile)
-
-    # --- A MÁGICA ACONTECE AQUI ---
-    # Convertemos a string JSON diretamente em bytes UTF-8 estritos
-    # Isto impede o PowerShell de corromper os acentos durante o envio!
-    $payloadBytes = [System.Text.Encoding]::UTF8.GetBytes($payloadString)
-
-try {
-        $responseRaw = Invoke-WebRequest `
-            -Method Post `
-            -Uri $script:Config.remotePhpSaveUrl `
-            -ContentType 'application/json; charset=utf-8' `
-            -Body $payloadBytes `
-            -UseBasicParsing `
-            -TimeoutSec 60
-
-        $statusCode = [int]$responseRaw.StatusCode
-        $responseBody = ($responseRaw.Content | Out-String).Trim()
-        Write-Info "Resposta HTTP remota: $statusCode"
-        Write-Info "Resposta completa do servidor remoto: $responseBody"
-
-        if ($statusCode -ge 200 -and $statusCode -lt 300 -and ($responseBody -match '"status"\s*:\s*"ok"' -or $responseBody -match '"success"\s*:\s*true')) {
-            Write-Ok "PHP remoto atualizado com sucesso: $($script:Config.remotePhpTargetPath)"
-            return
+    $sentAnyFile = $false
+    foreach ($mapping in $remotePhpMappings) {
+        $localPhpRelative = Normalize-RelativePath $mapping.localFile
+        $targetPhpPath = [string]$mapping.targetPath
+        $phpChanged = $changedFiles -contains $localPhpRelative
+        if (-not $phpChanged) {
+            Write-Info "Arquivo PHP monitorado nao foi alterado neste ciclo: $($mapping.localFile)"
+            continue
         }
 
-        throw "Servidor remoto nao confirmou sucesso ao salvar PHP. HTTP=$statusCode; body=$responseBody"
-    } catch {
-        $statusCode = $null
-        $errorBody = $null
-        $errorRaw = $null
-        if ($_.Exception.Response) {
-            try { $statusCode = [int]$_.Exception.Response.StatusCode } catch { }
-            try {
-                $stream = $_.Exception.Response.GetResponseStream()
-                if ($stream) {
-                    $reader = New-Object System.IO.StreamReader($stream)
-                    $errorBody = $reader.ReadToEnd()
-                    $reader.Dispose()
-                    $stream.Dispose()
-                }
-            } catch { }
+        $localPhpPath = Join-Path $script:Config.localDir $mapping.localFile
+        if (-not (Test-Path $localPhpPath -PathType Leaf)) {
+            throw "Arquivo PHP alterado nao encontrado localmente para sync remoto: $localPhpPath"
         }
+
+        # 1. Leitura PURA usando o núcleo do .NET (Ignora todos os metadados do PowerShell)
+        $conteudo = [System.IO.File]::ReadAllText($localPhpPath, [System.Text.Encoding]::UTF8)
+
+        # 2. Construção do pacote APENAS com o que o PHP precisa
+        $payloadString = @{
+            api_key  = $script:Config.remotePhpApiKey
+            filepath = $targetPhpPath
+            conteudo = $conteudo
+        } | ConvertTo-Json -Depth 6 -Compress
+
+        $targetUrl = $script:Config.remotePhpSaveUrl
         try {
-            if ($_.ErrorDetails -and $_.ErrorDetails.Message) {
-                $errorRaw = [string]$_.ErrorDetails.Message
+            $uriObj = [System.Uri]$targetUrl
+            if ([string]::IsNullOrWhiteSpace($uriObj.Query)) {
+                $targetUrl = "$($uriObj.AbsoluteUri)?filepath=$([System.Uri]::EscapeDataString($targetPhpPath))"
+            } else {
+                $targetUrl = "$($uriObj.AbsoluteUri)&filepath=$([System.Uri]::EscapeDataString($targetPhpPath))"
             }
         } catch { }
 
-        if (-not [string]::IsNullOrWhiteSpace($statusCode)) {
-            Write-Fail "Falha HTTP ao atualizar PHP remoto. Status: $statusCode"
-        } else {
-            Write-Fail "Falha ao atualizar PHP remoto (sem status HTTP)."
-        }
-        Write-Fail "CURL completo para reproduzir a chamada remota:"
-        Write-Fail $curlCommand
-        if (Test-Path $payloadTempFile) {
-            Write-Fail "POST completo salvo em arquivo temporario: $payloadTempFile"
-        }
-        if (-not [string]::IsNullOrWhiteSpace($errorBody)) {
-            Write-Fail "Resposta completa de erro do servidor remoto: $errorBody"
-        } elseif (-not [string]::IsNullOrWhiteSpace($errorRaw)) {
-            Write-Fail "Resposta RAW de erro do servidor remoto: $errorRaw"
-        }
+        Write-Info "Atualizando arquivo PHP no servidor remoto: $targetPhpPath"
+        Write-Info "URL completa do endpoint remoto: $targetUrl"
+        Write-Info ("Arquivo local origem: {0} ({1} bytes)" -f $localPhpPath, ([System.Text.Encoding]::UTF8.GetByteCount($conteudo)))
+        Write-Info "Iniciando requisicao de atualizacao remota (timeout: 60s)..."
 
-        throw $_
+        $curlHeaders = @(
+            "-H ""Content-Type: application/json; charset=utf-8""",
+            "-H ""Accept: application/json"""
+        ) -join ' '
+        $payloadTempFile = Join-Path $script:Config.tempDir ("remote_php_payload_{0}.json" -f (Get-Date -Format 'yyyyMMdd_HHmmss_fff'))
+        try { Set-Content -Path $payloadTempFile -Value $payloadString -Encoding UTF8 -NoNewline } catch { }
+        $curlCommand = ('curl -X POST "{0}" {1} --data-binary "@{2}"' -f $targetUrl, $curlHeaders, $payloadTempFile)
+
+        # --- A MÁGICA ACONTECE AQUI ---
+        # Convertemos a string JSON diretamente em bytes UTF-8 estritos
+        # Isto impede o PowerShell de corromper os acentos durante o envio!
+        $payloadBytes = [System.Text.Encoding]::UTF8.GetBytes($payloadString)
+
+        try {
+            $responseRaw = Invoke-WebRequest `
+                -Method Post `
+                -Uri $script:Config.remotePhpSaveUrl `
+                -ContentType 'application/json; charset=utf-8' `
+                -Body $payloadBytes `
+                -UseBasicParsing `
+                -TimeoutSec 60
+
+            $statusCode = [int]$responseRaw.StatusCode
+            $responseBody = ($responseRaw.Content | Out-String).Trim()
+            Write-Info "Resposta HTTP remota: $statusCode"
+            Write-Info "Resposta completa do servidor remoto: $responseBody"
+
+            if ($statusCode -ge 200 -and $statusCode -lt 300 -and ($responseBody -match '"status"\s*:\s*"ok"' -or $responseBody -match '"success"\s*:\s*true')) {
+                Write-Ok "PHP remoto atualizado com sucesso: $targetPhpPath"
+                $sentAnyFile = $true
+                continue
+            }
+
+            throw "Servidor remoto nao confirmou sucesso ao salvar PHP. HTTP=$statusCode; body=$responseBody"
+        } catch {
+            $statusCode = $null
+            $errorBody = $null
+            $errorRaw = $null
+            if ($_.Exception.Response) {
+                try { $statusCode = [int]$_.Exception.Response.StatusCode } catch { }
+                try {
+                    $stream = $_.Exception.Response.GetResponseStream()
+                    if ($stream) {
+                        $reader = New-Object System.IO.StreamReader($stream)
+                        $errorBody = $reader.ReadToEnd()
+                        $reader.Dispose()
+                        $stream.Dispose()
+                    }
+                } catch { }
+            }
+            try {
+                if ($_.ErrorDetails -and $_.ErrorDetails.Message) {
+                    $errorRaw = [string]$_.ErrorDetails.Message
+                }
+            } catch { }
+
+            if (-not [string]::IsNullOrWhiteSpace($statusCode)) {
+                Write-Fail "Falha HTTP ao atualizar PHP remoto. Status: $statusCode"
+            } else {
+                Write-Fail "Falha ao atualizar PHP remoto (sem status HTTP)."
+            }
+            Write-Fail "CURL completo para reproduzir a chamada remota:"
+            Write-Fail $curlCommand
+            if (Test-Path $payloadTempFile) {
+                Write-Fail "POST completo salvo em arquivo temporario: $payloadTempFile"
+            }
+            if (-not [string]::IsNullOrWhiteSpace($errorBody)) {
+                Write-Fail "Resposta completa de erro do servidor remoto: $errorBody"
+            } elseif (-not [string]::IsNullOrWhiteSpace($errorRaw)) {
+                Write-Fail "Resposta RAW de erro do servidor remoto: $errorRaw"
+            }
+
+            throw $_
+        }
+    }
+
+    if (-not $sentAnyFile) {
+        Write-Info 'Nenhum arquivo PHP monitorado foi alterado neste ciclo.'
     }
 }
 
