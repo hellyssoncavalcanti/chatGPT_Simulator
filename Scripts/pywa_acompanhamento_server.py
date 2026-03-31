@@ -1716,18 +1716,21 @@ class WhatsAppWebClient:
                     "profile_phone": "",
                 }
 
-            # Aguarda o painel abrir — tenta múltiplos seletores
+            # Aguarda o painel abrir — tenta múltiplos seletores.
+            # IMPORTANTE: Exclui role=menuitem pois o WA renderiza primeiro um
+            # botão com aria-label="Dados do contato" e role=menuitem ANTES do
+            # painel real aparecer. Detectar esse botão causa falso positivo.
             panel_visible = False
             panel_selectors = [
                 '[data-testid="contact-info-drawer"]',
-                'div[aria-label="Dados do contato"]',
-                'div[aria-label="Contact info"]',
+                'div[aria-label="Dados do contato"]:not([role="menuitem"])',
+                'div[aria-label="Contact info"]:not([role="menuitem"])',
                 'aside[aria-label="Dados do contato"]',
                 'aside[aria-label="Contact info"]',
             ]
             for sel in panel_selectors:
                 try:
-                    self._page.wait_for_selector(sel, timeout=2000)
+                    self._page.wait_for_selector(sel, timeout=2500)
                     panel_visible = True
                     break
                 except Exception:
@@ -1740,8 +1743,10 @@ class WhatsAppWebClient:
                     panel_visible = False
 
             # Pausa extra para o painel carregar seus dados.
-            # O WA pode renderizar o telefone ~1-3s após o painel ficar visível.
-            self._page.wait_for_timeout(500)
+            # O WA pode renderizar o telefone ~1-6s após o painel ficar visível
+            # (observado em logs do console: ~1.3s entre panel=Y e pPhone aparecer,
+            # mas ~6s entre o clique no header e o telefone renderizar).
+            self._page.wait_for_timeout(1500)
 
             extract_details_js = """() => {
                     const pickPhone = (txt) => {
@@ -1795,11 +1800,11 @@ class WhatsAppWebClient:
                     // === Estratégia 1: data-testid do painel de contato ===
                     let panelRoot = document.querySelector('[data-testid="contact-info-drawer"]');
 
-                    // === Estratégia 2: aria-label ===
+                    // === Estratégia 2: aria-label (exclui role=menuitem — é botão, não painel) ===
                     if (!panelRoot) {
                         panelRoot =
-                            document.querySelector('div[aria-label="Dados do contato"]')
-                            || document.querySelector('div[aria-label="Contact info"]')
+                            document.querySelector('div[aria-label="Dados do contato"]:not([role="menuitem"])')
+                            || document.querySelector('div[aria-label="Contact info"]:not([role="menuitem"])')
                             || document.querySelector('aside[aria-label="Dados do contato"]')
                             || document.querySelector('aside[aria-label="Contact info"]');
                         if (panelRoot && !isPanelContainer(panelRoot)) {
@@ -1918,12 +1923,13 @@ class WhatsAppWebClient:
                 }"""
 
             data = {}
-            for attempt in range(1, 9):
+            for attempt in range(1, 13):
                 data = self._page.evaluate(extract_details_js) or {}
                 if normalize_phone(data.get("profile_phone")):
                     break
-                if attempt < 8:
-                    self._page.wait_for_timeout(350)
+                if attempt < 12:
+                    # Espera progressiva: 500ms nas 4 primeiras, 750ms nas seguintes
+                    self._page.wait_for_timeout(500 if attempt <= 4 else 750)
 
             try:
                 self._page.keyboard.press("Escape")
