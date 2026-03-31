@@ -161,6 +161,7 @@ class StateStore:
             "contact_aliases": {},
             "forwarded_messages": {},
             "last_seen_inbound": {},
+            "enrichment_failures": {},
             "updated_at": utc_now_iso(),
         }
 
@@ -241,6 +242,48 @@ class StateStore:
     def set_last_seen_inbound(self, phone: str, msg_key: str) -> None:
         with self.lock:
             self.state["last_seen_inbound"][phone] = msg_key
+        self.save()
+
+    def record_enrichment_failure(self, title_key: str) -> None:
+        """Record a failed enrichment attempt for a contact title."""
+        with self.lock:
+            failures = self.state.setdefault("enrichment_failures", {})
+            entry = failures.get(title_key)
+            if not entry or not isinstance(entry, dict):
+                entry = {"count": 0, "first_at": utc_now_iso(), "last_at": ""}
+            entry["count"] = entry.get("count", 0) + 1
+            entry["last_at"] = utc_now_iso()
+            failures[title_key] = entry
+        self.save()
+
+    def should_skip_enrichment(self, title_key: str, max_failures: int = 3, cooldown_hours: int = 24) -> bool:
+        """True if this contact has failed enrichment too many times recently."""
+        with self.lock:
+            entry = self.state.get("enrichment_failures", {}).get(title_key)
+            if not entry or not isinstance(entry, dict):
+                return False
+            count = entry.get("count", 0)
+            if count < max_failures:
+                return False
+            # After max_failures, skip for cooldown_hours
+            last_at = entry.get("last_at", "")
+            if last_at:
+                try:
+                    last_dt = datetime.fromisoformat(last_at)
+                    if datetime.now(timezone.utc) - last_dt < timedelta(hours=cooldown_hours):
+                        return True
+                except (ValueError, TypeError):
+                    pass
+            # Cooldown expired — reset counter
+            entry["count"] = 0
+            return False
+
+    def clear_enrichment_failure(self, title_key: str) -> None:
+        """Clear failure count when enrichment succeeds."""
+        with self.lock:
+            failures = self.state.get("enrichment_failures", {})
+            if title_key in failures:
+                del failures[title_key]
         self.save()
 
 
@@ -2546,7 +2589,7 @@ def enrich_named_contacts_from_sidebar(
     """Opens a few visible named chats to capture phone/profile and cache them."""
     global _LAST_SIDEBAR_ENRICHMENT_TS
     import time, re, json # garantindo imports caso falte no escopo global
-    
+
     now_mono = time.monotonic()
     if now_mono - _LAST_SIDEBAR_ENRICHMENT_TS < float(min_interval_sec):
         log.info(
@@ -2557,32 +2600,54 @@ def enrich_named_contacts_from_sidebar(
         return 0
 
     aliases = state.get_contact_aliases()
+    contexts = state.all_phone_contexts()
     enriched = 0
     skipped_not_named = 0
     skipped_alias_exists = 0
     skipped_open_failed = 0
     skipped_no_phone = 0
+    skipped_failed_before = 0
     attempts = 0
-    
-    log.info(
-        "Enriquecimento sidebar iniciado | chats_visíveis=%s | aliases_cache=%s | max_por_ciclo=%s | max_tentativas=%s",
-        len(chat_rows), len(aliases), max_per_cycle, max_attempts,
-    )
-    
+
+    # Filtra e prioriza candidatos: contatos que correspondem a contextos
+    # monitorados (pacientes) vêm primeiro, depois os demais.
+    eligible_rows: List[Dict[str, Any]] = []
+    monitored_rows: List[Dict[str, Any]] = []
     for row in chat_rows:
-        if enriched >= max_per_cycle or attempts >= max_attempts:
-            break
-            
         title = (row.get("title") or "").strip()
-        if not _is_named_chat_title(title):
+        if not title or not _is_named_chat_title(title):
             skipped_not_named += 1
             continue
-            
         title_key = re.sub(r"\s+", " ", title.lower())
         if aliases.get(title_key):
             skipped_alias_exists += 1
             continue
-            
+        if state.should_skip_enrichment(title_key, max_failures=3, cooldown_hours=24):
+            skipped_failed_before += 1
+            continue
+        # Verifica se o contato corresponde a algum paciente monitorado
+        if _match_context_for_chat_title(title, contexts, aliases=aliases):
+            monitored_rows.append(row)
+        else:
+            eligible_rows.append(row)
+    # Pacientes monitorados primeiro, depois os demais
+    prioritized = monitored_rows + eligible_rows
+
+    log.info(
+        "Enriquecimento sidebar iniciado | chats_visíveis=%s | aliases_cache=%s "
+        "| max_por_ciclo=%s | max_tentativas=%s | candidatos=%s (monitorados=%s) "
+        "| skipped_failed_before=%s",
+        len(chat_rows), len(aliases), max_per_cycle, max_attempts,
+        len(prioritized), len(monitored_rows), skipped_failed_before,
+    )
+
+    for row in prioritized:
+        if enriched >= max_per_cycle or attempts >= max_attempts:
+            break
+
+        title = (row.get("title") or "").strip()
+        title_key = re.sub(r"\s+", " ", title.lower())
+
         attempts += 1
         log.info("Enriquecimento sidebar: tentando capturar contato nomeado '%s'", title)
 
@@ -2604,6 +2669,7 @@ def enrich_named_contacts_from_sidebar(
             if not resolved_phone:
                 if not wa_web.open_chat_by_sidebar_click(title):
                     skipped_open_failed += 1
+                    state.record_enrichment_failure(title_key)
                     log.warning("Enriquecimento sidebar: falha ao clicar na sidebar para '%s'", title)
                     continue
 
@@ -2612,6 +2678,7 @@ def enrich_named_contacts_from_sidebar(
 
                 if not open_title:
                     skipped_open_failed += 1
+                    state.record_enrichment_failure(title_key)
                     log.warning("Enriquecimento sidebar: chat não abriu (header vazio) | alvo='%s'", title)
                     continue
 
@@ -2633,7 +2700,11 @@ def enrich_named_contacts_from_sidebar(
 
             if not resolved_phone:
                 skipped_no_phone += 1
-                log.warning("Enriquecimento sidebar: sem telefone para '%s' após todas as estratégias", title)
+                state.record_enrichment_failure(title_key)
+                log.warning(
+                    "Enriquecimento sidebar: sem telefone para '%s' após todas as estratégias (falha registrada)",
+                    title,
+                )
                 continue
 
             _upsert_whatsapp_contact_profile(
@@ -2645,17 +2716,19 @@ def enrich_named_contacts_from_sidebar(
             )
 
             state.set_contact_alias(title, resolved_phone)
+            state.clear_enrichment_failure(title_key)
             log.info("Enriquecimento sidebar: contato nomeado '%s' -> %s", title, resolved_phone)
             enriched += 1
 
         except Exception as e:
+            state.record_enrichment_failure(title_key)
             log.exception("Falha no enriquecimento para '%s': %s", title, e)
 
     log.info(
         "Enriquecimento sidebar concluído | enriched=%s open_failed=%s no_phone=%s "
-        "not_named=%s alias_exists=%s attempts=%s",
+        "not_named=%s alias_exists=%s failed_before=%s attempts=%s",
         enriched, skipped_open_failed, skipped_no_phone,
-        skipped_not_named, skipped_alias_exists, attempts,
+        skipped_not_named, skipped_alias_exists, skipped_failed_before, attempts,
     )
 
     if enriched > 0:
