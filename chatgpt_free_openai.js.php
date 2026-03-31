@@ -24,6 +24,22 @@ function chatgpt_free_bootstrap_context_if_needed() {
     $filename = 'config/config.php';if(file_exists($filename)){@include_once($filename);}elseif(file_exists("../".$filename)){@include_once("../".$filename);}elseif(file_exists("../../".$filename)){@include_once("../../".$filename);}elseif(file_exists("../../../".$filename)){@include_once("../../../".$filename);}
     $filename = 'scripts/login.php';if(file_exists($filename)){@include_once($filename);}elseif(file_exists("../".$filename)){@include_once("../".$filename);}elseif(file_exists("../../".$filename)){@include_once("../../".$filename);}elseif(file_exists("../../../".$filename)){@include_once("../../../".$filename);}
     $filename = 'scripts/func.inc.php';if(file_exists($filename)){@include_once($filename);}elseif(file_exists("../".$filename)){@include_once("../".$filename);}elseif(file_exists("../../".$filename)){@include_once("../../".$filename);}elseif(file_exists("../../../".$filename)){@include_once("../../../".$filename);}
+
+    // IMPORTANTE: includes dentro de função carregam variáveis em escopo local.
+    // Repassa para $GLOBALS para manter compatibilidade com o comportamento anterior.
+    foreach ([
+        'mysqli',
+        'row_login_atual',
+        'config',
+        'hostname_conexao',
+        'database_conexao',
+        'username_conexao',
+        'password_conexao'
+    ] as $globalKey) {
+        if (isset($$globalKey)) {
+            $GLOBALS[$globalKey] = $$globalKey;
+        }
+    }
 }
 
 function chatgpt_free_get_mysql_connection_local() {
