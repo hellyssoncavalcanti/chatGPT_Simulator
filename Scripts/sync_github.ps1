@@ -769,8 +769,6 @@ function Sync-FilesFromMirror {
     }
 
     if ($added -gt 0 -or $updated -gt 0) {
-        # Captura o caminho relativo exato do nosso arquivo PHP
-        $localPhpRelative = Normalize-RelativePath $script:Config.remotePhpLocalFile
         $pywaRelative = Normalize-RelativePath $script:Config.pywaPattern
         $readmeRelative = Normalize-RelativePath 'README.md'
         $syncPythonRelative = Normalize-RelativePath 'Scripts\sync_github.py'
@@ -789,7 +787,7 @@ function Sync-FilesFromMirror {
             Write-Info 'Apenas arquivos ignorados para reinicio (README.md e/ou Scripts\sync_github.py) foram alterados neste ciclo. Nenhum reinicio sera executado.' -Color Yellow
         }
 
-        $onlyPhp = ($changedUnique.Count -gt 0) -and ($changedUnique | Where-Object { $_ -ne $localPhpRelative }).Count -eq 0
+        $onlyPhp = ($changedUnique.Count -gt 0) -and (($changedUnique | Where-Object { -not $_.EndsWith('.php') }).Count -eq 0)
         $onlyPywa = ($changedUnique.Count -eq 1) -and ($changedUnique[0] -eq $pywaRelative)
 
         if ($changedUnique.Count -eq 0) {
@@ -798,7 +796,7 @@ function Sync-FilesFromMirror {
         } elseif ($onlyPhp) {
             $script:RestartRequested = $false
             $script:RestartScope = 'none'
-            Write-Info "Atualizacao exclusiva do PHP detectada. O reinicio dos processos locais (BATs) sera ignorado." -Color Yellow
+            Write-Info "Atualizacao exclusiva de arquivos .php detectada. O reinicio dos processos locais (BATs) sera ignorado." -Color Yellow
         } elseif ($onlyPywa) {
             $script:RestartRequested = $true
             $script:RestartScope = 'pywa_only'
