@@ -228,22 +228,39 @@ header('Content-Type: application/javascript; charset=utf-8');
   if (window.__chatgptFreeOpenAIToastLoaded) return;
   window.__chatgptFreeOpenAIToastLoaded = true;
 
+  var FILE_PREFIX = '[<?php echo $_SERVER['PHP_SELF']; ?>]';
+  var PREFIX = 'chatgpt_free_openai_';
   var PUTER_SDK_URL = 'https://js.puter.com/v2/';
   var MAX_HISTORY = 12;
-  var PREFIX = 'chatgpt_free_openai_';
   var KEY_MODEL = PREFIX + 'selected_model';
   var KEY_MODEL_MANUAL = PREFIX + 'selected_model_manual';
   var RENDER_MODE = window.__CHATGPT_FREE_OPENAI_MODE === 'page' ? 'page' : 'toast';
 
+  function log() { console.log.apply(console, ['%c' + FILE_PREFIX + ' [LOG]', 'color:#1976d2;font-weight:bold'].concat([].slice.call(arguments))); }
+  function warn() { console.warn.apply(console, ['%c' + FILE_PREFIX + ' [WARN]', 'color:#f57c00;font-weight:bold'].concat([].slice.call(arguments))); }
+  function error() { console.error.apply(console, ['%c' + FILE_PREFIX + ' [ERROR]', 'color:#d32f2f;font-weight:bold'].concat([].slice.call(arguments))); }
+  function normalizeError(err) {
+    if (!err) return 'erro desconhecido';
+    if (typeof err === 'string') return err;
+    if (err.message) return err.message;
+    try { return JSON.stringify(err); } catch (_) { return String(err); }
+  }
+
+  window.addEventListener('error', function (ev) { error('window.onerror', ev && ev.message ? ev.message : ev); });
+  window.addEventListener('unhandledrejection', function (ev) { error('unhandledrejection', ev && ev.reason ? ev.reason : ev); });
+
   function loadPuterSdk() {
+    log('loadPuterSdk:start');
     return new Promise(function (resolve, reject) {
       if (window.puter && window.puter.ai && typeof window.puter.ai.chat === 'function') {
+        log('loadPuterSdk:already_loaded');
         resolve(window.puter);
         return;
       }
 
       var existing = document.querySelector('script[data-puter-sdk="1"]');
       if (existing) {
+        log('loadPuterSdk:script_already_exists_waiting_load');
         existing.addEventListener('load', function () { resolve(window.puter); }, { once: true });
         existing.addEventListener('error', function () { reject(new Error('Falha ao carregar Puter SDK')); }, { once: true });
         return;
@@ -260,6 +277,7 @@ header('Content-Type: application/javascript; charset=utf-8');
       };
       script.onerror = function () { reject(new Error('Falha ao carregar Puter SDK')); };
       document.head.appendChild(script);
+      log('loadPuterSdk:script_injected', PUTER_SDK_URL);
     });
   }
 
@@ -457,6 +475,7 @@ header('Content-Type: application/javascript; charset=utf-8');
 
   async function fetchAvailableModels(puter) {
     var candidates = [];
+    log('fetchAvailableModels:start');
     try {
       if (puter && puter.ai) {
         if (typeof puter.ai.models === 'function') candidates = parseModelCandidates(await puter.ai.models());
@@ -464,7 +483,7 @@ header('Content-Type: application/javascript; charset=utf-8');
         if (!candidates.length && Array.isArray(puter.ai.models)) candidates = parseModelCandidates(puter.ai.models);
       }
     } catch (err) {
-      console.warn('[chatgpt_free_openai] Falha ao listar modelos automaticamente:', err);
+      warn('fetchAvailableModels:error', err);
     }
 
     if (!candidates.length) {
@@ -476,6 +495,7 @@ header('Content-Type: application/javascript; charset=utf-8');
       ];
     }
 
+    log('fetchAvailableModels:done', candidates.map(function (m) { return m.name; }));
     return candidates;
   }
 
@@ -512,6 +532,7 @@ header('Content-Type: application/javascript; charset=utf-8');
   }
 
   function init() {
+    log('init:start', { mode: RENDER_MODE, href: window.location.href });
     var ui = createUI();
     var open = false;
     var loading = false;
@@ -519,6 +540,7 @@ header('Content-Type: application/javascript; charset=utf-8');
       { role: 'system', content: 'Você é um assistente útil. Responda em português do Brasil de forma objetiva.' }
     ];
     var context = getContextFromUrl();
+    log('context:url', context);
 
     function serializePersistableHistory() {
       return history.filter(function (m) { return m && m.role !== 'system' && typeof m.content === 'string' && m.content.trim() !== ''; });
@@ -526,6 +548,8 @@ header('Content-Type: application/javascript; charset=utf-8');
 
     async function persistHistory() {
       try {
+        var snapshot = serializePersistableHistory();
+        log('persistHistory:start', { count: snapshot.length, context: context });
         await fetch(window.location.pathname + '?action=save_chat_history', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -536,11 +560,12 @@ header('Content-Type: application/javascript; charset=utf-8');
             id_paciente: context.id_paciente,
             id_atendimento: context.id_atendimento,
             id_receita: context.id_receita,
-            messages: serializePersistableHistory()
+            messages: snapshot
           })
         });
+        log('persistHistory:ok');
       } catch (err) {
-        console.warn('[chatgpt_free_openai] Falha ao salvar histórico:', err);
+        warn('persistHistory:error', err);
       }
     }
 
@@ -559,6 +584,7 @@ header('Content-Type: application/javascript; charset=utf-8');
         });
         var payload = await response.json();
         var loaded = payload && Array.isArray(payload.messages) ? payload.messages : [];
+        log('loadHistory:ok', { count: loaded.length, payload: payload });
         loaded.forEach(function (m) {
           if (!m || (m.role !== 'user' && m.role !== 'assistant')) return;
           var text = typeof m.content === 'string' ? m.content : '';
@@ -568,7 +594,7 @@ header('Content-Type: application/javascript; charset=utf-8');
         });
         return loaded.length > 0;
       } catch (err) {
-        console.warn('[chatgpt_free_openai] Falha ao recuperar histórico:', err);
+        warn('loadHistory:error', err);
         return false;
       }
     }
@@ -590,11 +616,13 @@ header('Content-Type: application/javascript; charset=utf-8');
           return;
         }
         var active = applyModelSelect(ui.model, models);
+        log('model:active', active);
         if (active) addMessage(ui.body, 'Modelo ativo: ' + active, 'assistant');
       })
-      .catch(function (error) {
+      .catch(function (err) {
         ui.model.innerHTML = '<option value="">Erro ao carregar modelos</option>';
-        addMessage(ui.body, 'Não foi possível listar modelos: ' + (error && error.message ? error.message : 'erro desconhecido'), 'assistant');
+        addMessage(ui.body, 'Não foi possível listar modelos: ' + normalizeError(err), 'assistant');
+        error('model:load_error', err);
       });
 
     async function sendMessage() {
@@ -603,6 +631,7 @@ header('Content-Type: application/javascript; charset=utf-8');
 
       loading = true;
       ui.send.disabled = true;
+      log('send:start', { prompt: prompt, historyLen: history.length });
       addMessage(ui.body, prompt, 'user');
       history.push({ role: 'user', content: prompt });
       if (history.length > MAX_HISTORY) history = [history[0]].concat(history.slice(history.length - (MAX_HISTORY - 1)));
@@ -612,16 +641,20 @@ header('Content-Type: application/javascript; charset=utf-8');
       try {
         var puter = await loadPuterSdk();
         var model = ui.model.value || localStorage.getItem(KEY_MODEL) || 'gpt-5';
+        log('send:calling_puter_ai_chat', { model: model, historyLen: history.length });
         var result = await puter.ai.chat(history, { model: model });
+        log('send:raw_result', result);
         var answer = normalizeAssistantText(result);
         history.push({ role: 'assistant', content: answer });
         addMessage(ui.body, answer, 'assistant');
         persistHistory();
-      } catch (error) {
-        addMessage(ui.body, 'Erro ao consultar o chat: ' + (error && error.message ? error.message : 'erro desconhecido'), 'assistant');
+      } catch (err) {
+        error('send:error', err);
+        addMessage(ui.body, 'Erro ao consultar o chat: ' + normalizeError(err), 'assistant');
       } finally {
         loading = false;
         ui.send.disabled = false;
+        log('send:finish');
       }
     }
 
