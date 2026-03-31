@@ -190,7 +190,12 @@ $actions_without_login_bootstrap = [
 $is_direct_script_request = ($current_action === '' && basename($_SERVER['PHP_SELF'] ?? '') === $currentFileName);
 $should_bootstrap_context = ($is_iframe || ($current_action !== '' && !in_array($current_action, $actions_without_login_bootstrap, true)));
 $gemini_direct_requested_as_js = (($_GET['as'] ?? '') === 'js');
-$gemini_should_render_direct_page = ($is_direct_script_request && !$gemini_direct_requested_as_js);
+$gemini_sec_fetch_dest = strtolower($_SERVER['HTTP_SEC_FETCH_DEST'] ?? '');
+$gemini_http_accept = strtolower($_SERVER['HTTP_ACCEPT'] ?? '');
+$gemini_accepts_js = (strpos($gemini_http_accept, 'javascript') !== false);
+$gemini_accepts_html = (strpos($gemini_http_accept, 'text/html') !== false);
+$gemini_is_script_fetch = $gemini_direct_requested_as_js || ($gemini_sec_fetch_dest === 'script') || ($gemini_accepts_js && !$gemini_accepts_html);
+$gemini_should_render_direct_page = ($is_direct_script_request && !$gemini_is_script_fetch);
 
 if($should_bootstrap_context)
 {
