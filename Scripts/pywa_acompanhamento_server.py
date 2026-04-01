@@ -770,18 +770,65 @@ def preload_sent_messages_for_analises(id_analises: List[Any]) -> Dict[int, set]
 
 
 def send_to_chatgpt(url_chatgpt: str, text: str, id_paciente: Any, id_atendimento: Any) -> Dict[str, Any]:
+    """Send message to ChatGPT simulator and stream status updates to CMD."""
     headers = {"Authorization": f"Bearer {SIMULATOR_API_KEY}"}
     payload = {
         "model": "ChatGPT Simulator",
         "message": text,
         "url": url_chatgpt,
-        "stream": False,
+        "stream": True,
         "id_paciente": id_paciente,
         "id_atendimento": id_atendimento,
     }
-    r = requests.post(SIMULATOR_URL, headers=headers, json=payload, timeout=600)
+    log.info(
+        "  [ChatGPT Simulator] Enviando ao simulator | url=%s | paciente=%s",
+        build_preview_with_ellipsis(url_chatgpt, 60), id_paciente,
+    )
+    r = requests.post(SIMULATOR_URL, headers=headers, json=payload, timeout=600, stream=True)
     r.raise_for_status()
-    return r.json()
+
+    # Processa stream SSE — acumula a resposta final enquanto exibe status no CMD
+    full_html = ""
+    last_status = ""
+    for raw_line in r.iter_lines(decode_unicode=True):
+        if not raw_line:
+            continue
+        line = raw_line.strip()
+        if line == "data: [DONE]":
+            break
+        if not line.startswith("data: "):
+            continue
+        json_str = line[len("data: "):]
+        try:
+            chunk = json.loads(json_str)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        # Status updates (navigating, typing, waiting, etc.)
+        status = chunk.get("status") or ""
+        if status and status != last_status:
+            log.info("  [ChatGPT Simulator] Status: %s", status)
+            last_status = status
+        # Content delta (the actual response text)
+        choices = chunk.get("choices") or []
+        for choice in choices:
+            delta = choice.get("delta") or {}
+            content = delta.get("content") or ""
+            if content:
+                full_html += content
+
+    # Fallback: se não recebeu stream, tenta ler JSON normal da resposta
+    if not full_html:
+        try:
+            body = r.json() if hasattr(r, "_content") else {}
+            full_html = (body.get("html") or "").strip()
+        except Exception:
+            pass
+
+    log.info(
+        "  [ChatGPT Simulator] Resposta recebida (%s chars): %s",
+        len(full_html), build_preview_with_ellipsis(full_html, 150),
+    )
+    return {"html": full_html}
 
 
 def normalize_phone(raw: Any) -> Optional[str]:
@@ -3169,6 +3216,14 @@ def enrich_named_contacts_from_sidebar(
                 if failure_reason == "official_wa_account_no_dados_contato":
                     state.mark_official_wa_account(title_key)
                     state.clear_enrichment_failure(title_key)
+                    # Salva no DB como contato sem telefone
+                    _upsert_whatsapp_contact_profile(
+                        phone=None,
+                        display_name=title,
+                        profile_name="",
+                        wa_chat_title=title,
+                        source="official_wa_no_phone",
+                    )
                     elog.info(
                         "  Marcado como conta oficial WhatsApp (ignorado permanentemente): '%s'",
                         title,
@@ -3176,6 +3231,23 @@ def enrich_named_contacts_from_sidebar(
                 else:
                     skipped_no_phone += 1
                     state.record_enrichment_failure(title_key, reason=failure_reason)
+                    # Após 3+ falhas sem telefone, marcar como conta sem número e ignorar
+                    fail_entry = state.get_enrichment_failures().get(title_key) or {}
+                    if fail_entry.get("count", 0) >= 3:
+                        state.mark_official_wa_account(title_key)
+                        state.clear_enrichment_failure(title_key)
+                        _upsert_whatsapp_contact_profile(
+                            phone=None,
+                            display_name=title,
+                            profile_name="",
+                            wa_chat_title=title,
+                            source="no_phone_after_retries",
+                        )
+                        elog.info(
+                            "  Conta sem telefone após %s tentativas — "
+                            "salvo no DB e ignorado permanentemente: '%s'",
+                            fail_entry.get("count", 0), title,
+                        )
                 continue
 
             _upsert_whatsapp_contact_profile(
@@ -3331,28 +3403,6 @@ def process_incoming_replies_once() -> Dict[str, int]:
             if phone:
                 state.set_contact_alias(title, phone)
 
-            # Atualiza snapshot do contato da sidebar/painel de dados do contato.
-            try:
-                details = wa_web.get_open_contact_details()
-                resolved_phone = (
-                    details.get("profile_phone")
-                    or details.get("phone")
-                    or phone
-                    or chat.get("phone_key")
-                )
-                _upsert_whatsapp_contact_profile(
-                    phone=resolved_phone,
-                    display_name=details.get("title") or title,
-                    profile_name=details.get("profile_name") or "",
-                    wa_chat_title=title,
-                    id_paciente=atendimento.get("id_paciente"),
-                    id_atendimento=atendimento.get("id_atendimento"),
-                    source="monitor_incoming",
-                )
-                if resolved_phone and title:
-                    state.set_contact_alias(title, resolved_phone)
-            except Exception:
-                log.exception("Falha ao atualizar snapshot de contato para chat '%s'", title)
             chat_url = atendimento["chat_url"]
             id_atendimento = atendimento.get("id_atendimento")
             id_paciente = atendimento.get("id_paciente")
@@ -3367,7 +3417,7 @@ def process_incoming_replies_once() -> Dict[str, int]:
                 build_preview_with_ellipsis(chat_url, 60),
             )
 
-            # 5) Read inbound messages from the open chat
+            # 5) Read inbound messages BEFORE any disruptive action (menu, panel, etc.)
             inbound_msgs = wa_web.read_all_inbound_from_open_chat()
             if not inbound_msgs:
                 skipped += 1
@@ -3434,6 +3484,20 @@ def process_incoming_replies_once() -> Dict[str, int]:
             )
             state.set_last_seen_inbound(phone_key, msg_key)
             processed += 1
+
+            # 9) Atualiza snapshot do contato no DB (pós-processamento, não bloqueia fluxo)
+            try:
+                _upsert_whatsapp_contact_profile(
+                    phone=phone,
+                    display_name=title,
+                    profile_name="",
+                    wa_chat_title=title,
+                    id_paciente=id_paciente,
+                    id_atendimento=id_atendimento,
+                    source="monitor_incoming",
+                )
+            except Exception:
+                log.exception("Falha ao atualizar snapshot de contato para chat '%s'", title)
 
         except Exception:
             log.exception("Falha ao processar resposta do chat '%s'", title)
