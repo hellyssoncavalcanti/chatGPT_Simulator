@@ -417,20 +417,37 @@ header('Content-Type: application/javascript; charset=utf-8');
   }
 
   function normalizeAssistantText(result) {
+    function extractTextFromContentArray(contentArray) {
+      if (!Array.isArray(contentArray)) return '';
+      return contentArray.map(function (item) {
+        if (!item) return '';
+        if (typeof item === 'string') return item;
+        if (typeof item.text === 'string') return item.text;
+        if (item.text && typeof item.text.value === 'string') return item.text.value;
+        if (item.type === 'text' && typeof item.value === 'string') return item.value;
+        return '';
+      }).filter(Boolean).join('\n');
+    }
+
     if (typeof result === 'string') return result;
     if (!result) return 'Sem resposta.';
     if (typeof result.message === 'string') return result.message;
+    if (result.message && typeof result.message === 'object') {
+      if (typeof result.message.content === 'string') return result.message.content;
+      var fromMessageContent = extractTextFromContentArray(result.message.content);
+      if (fromMessageContent) return fromMessageContent;
+    }
     if (typeof result.text === 'string') return result.text;
     if (Array.isArray(result.choices) && result.choices[0] && result.choices[0].message && typeof result.choices[0].message.content === 'string') {
       return result.choices[0].message.content;
     }
     if (Array.isArray(result.content)) {
-      return result.content.map(function (item) {
-        if (!item) return '';
-        if (typeof item === 'string') return item;
-        if (item.text) return typeof item.text === 'string' ? item.text : (item.text.value || '');
-        return '';
-      }).filter(Boolean).join('\n');
+      var fromRootContent = extractTextFromContentArray(result.content);
+      if (fromRootContent) return fromRootContent;
+    }
+    if (typeof result.toString === 'function') {
+      var maybeString = String(result.toString());
+      if (maybeString && maybeString !== '[object Object]') return maybeString;
     }
     return JSON.stringify(result, null, 2);
   }
