@@ -286,6 +286,49 @@ header('Content-Type: application/javascript; charset=utf-8');
     return opts;
   }
 
+  function normalizeWebSearchItems(raw) {
+    if (!raw) return [];
+    if (Array.isArray(raw)) return raw;
+    if (Array.isArray(raw.results)) return raw.results;
+    if (Array.isArray(raw.items)) return raw.items;
+    if (Array.isArray(raw.data)) return raw.data;
+    return [];
+  }
+
+  async function buildWebSearchContext(query, puter) {
+    var q = String(query || '').trim();
+    if (!q) return '';
+    try {
+      if (puter && puter.ai && typeof puter.ai.webSearch === 'function') {
+        var ws = await puter.ai.webSearch(q);
+        var items = normalizeWebSearchItems(ws).slice(0, 5);
+        if (items.length) {
+          return items.map(function (it, idx) {
+            var title = it.title || it.name || ('Resultado ' + (idx + 1));
+            var url = it.url || it.link || '';
+            var snippet = it.snippet || it.description || it.text || '';
+            return '- ' + title + (url ? ' (' + url + ')' : '') + (snippet ? ' :: ' + snippet : '');
+          }).join('\n');
+        }
+      }
+      if (puter && puter.ai && typeof puter.ai.search === 'function') {
+        var s = await puter.ai.search(q);
+        var items2 = normalizeWebSearchItems(s).slice(0, 5);
+        if (items2.length) {
+          return items2.map(function (it, idx) {
+            var title = it.title || it.name || ('Resultado ' + (idx + 1));
+            var url = it.url || it.link || '';
+            var snippet = it.snippet || it.description || it.text || '';
+            return '- ' + title + (url ? ' (' + url + ')' : '') + (snippet ? ' :: ' + snippet : '');
+          }).join('\n');
+        }
+      }
+    } catch (err) {
+      warn('web_search:tool_call_fail', normalizeError(err));
+    }
+    return '';
+  }
+
   window.addEventListener('error', function (ev) { error('window.onerror', ev && ev.message ? ev.message : ev); });
   window.addEventListener('unhandledrejection', function (ev) { error('unhandledrejection', ev && ev.reason ? ev.reason : ev); });
 
@@ -957,12 +1000,22 @@ header('Content-Type: application/javascript; charset=utf-8');
         var puter = await loadPuterSdk();
         var model = ui.model.value || localStorage.getItem(KEY_MODEL) || 'gpt-5';
         var wantsWebSearch = shouldUseWebSearch(prompt);
+        var promptForModel = prompt;
+        if (wantsWebSearch) {
+          var webContext = await buildWebSearchContext(prompt, puter);
+          if (webContext) {
+            promptForModel = prompt + '\n\n[RESULTADOS_DE_BUSCA_WEB]\n' + webContext + '\n\nUse os resultados acima para responder objetivamente e cite URLs quando houver.';
+            log('web_search:context_injected');
+          } else {
+            warn('web_search:no_context_from_tool');
+          }
+        }
         var requestHistory = history.slice();
         var attachmentPayload = pendingAttachments.slice();
         if (attachmentPayload.length) {
           requestHistory[requestHistory.length - 1] = {
             role: 'user',
-            content: [{ type: 'text', text: prompt }].concat(
+            content: [{ type: 'text', text: promptForModel }].concat(
               attachmentPayload.map(function (att) {
                 var isImage = !!(att.type && att.type.indexOf('image/') === 0);
                 if (isImage) {
@@ -982,6 +1035,9 @@ header('Content-Type: application/javascript; charset=utf-8');
               })
             )
           };
+        }
+        if (!attachmentPayload.length) {
+          requestHistory[requestHistory.length - 1] = { role: 'user', content: promptForModel };
         }
 
         log('send:calling_puter_ai_chat', { model: model, historyLen: requestHistory.length, attachmentCount: attachmentPayload.length, wantsWebSearch: wantsWebSearch });
