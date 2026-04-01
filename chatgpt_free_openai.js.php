@@ -250,6 +250,7 @@ header('Content-Type: application/javascript; charset=utf-8');
   var MAX_HISTORY = 12;
   var KEY_MODEL = PREFIX + 'selected_model';
   var KEY_MODEL_MANUAL = PREFIX + 'selected_model_manual';
+  var KEY_WORKING_MODELS_CACHE = PREFIX + 'working_models_cache_v1';
   var RENDER_MODE = window.__CHATGPT_FREE_OPENAI_MODE === 'page' ? 'page' : 'toast';
 
   function log() { console.log.apply(console, ['%c' + FILE_PREFIX + ' [LOG]', 'color:#1976d2;font-weight:bold'].concat([].slice.call(arguments))); }
@@ -341,7 +342,7 @@ header('Content-Type: application/javascript; charset=utf-8');
       '.cfo-toast{position:fixed;right:18px;bottom:86px;width:360px;max-width:calc(100vw - 24px);height:500px;',
       'background:#fff;border-radius:12px;box-shadow:0 10px 40px rgba(0,0,0,.25);display:none;flex-direction:column;',
       'overflow:hidden;z-index:99999;border:1px solid #e7e7e7;font-family:Arial,sans-serif}',
-      '.cfo-page{width:100%;min-height:70vh;background:#fff;border-radius:12px;box-shadow:0 8px 28px rgba(0,0,0,.08);display:flex;flex-direction:column;',
+      '.cfo-page{width:100%;height:70vh;max-height:70vh;background:#fff;border-radius:12px;box-shadow:0 8px 28px rgba(0,0,0,.08);display:flex;flex-direction:column;',
       'overflow:hidden;border:1px solid #e7e7e7;font-family:Arial,sans-serif}',
       '.cfo-header{background:#0b57d0;color:#fff;padding:10px 12px;font-weight:700;font-size:14px}',
       '.cfo-model-wrap{padding:8px 10px;border-bottom:1px solid #ebedf0;background:#f7f9ff}',
@@ -354,7 +355,8 @@ header('Content-Type: application/javascript; charset=utf-8');
       '.cfo-footer{display:flex;gap:8px;padding:10px;border-top:1px solid #eee;background:#fff}',
       '.cfo-input{flex:1;min-height:38px;max-height:90px;padding:8px;border:1px solid #d9d9d9;border-radius:8px;resize:vertical;font-size:13px}',
       '.cfo-send{border:none;border-radius:8px;background:#0b57d0;color:#fff;padding:0 12px;cursor:pointer;font-weight:600}',
-      '.cfo-send[disabled]{opacity:.6;cursor:not-allowed}'
+      '.cfo-send[disabled]{opacity:.6;cursor:not-allowed}',
+      '@media (max-width:768px){.cfo-page{height:78vh;max-height:78vh}}'
     ].join('');
     document.head.appendChild(style);
 
@@ -515,6 +517,77 @@ header('Content-Type: application/javascript; charset=utf-8');
     return candidates;
   }
 
+  function getWorkingModelsFromCache(models) {
+    try {
+      var raw = localStorage.getItem(KEY_WORKING_MODELS_CACHE);
+      if (!raw) return null;
+      var parsed = JSON.parse(raw);
+      if (!parsed || !Array.isArray(parsed.models) || !parsed.ts) return null;
+      if ((Date.now() - parsed.ts) > (6 * 60 * 60 * 1000)) return null;
+      var allowed = {};
+      parsed.models.forEach(function (m) { allowed[m] = true; });
+      return models.filter(function (m) { return allowed[m.name]; });
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function saveWorkingModelsCache(models) {
+    try {
+      localStorage.setItem(KEY_WORKING_MODELS_CACHE, JSON.stringify({
+        ts: Date.now(),
+        models: models.map(function (m) { return m.name; })
+      }));
+    } catch (_) {}
+  }
+
+  function withTimeout(promise, ms) {
+    return Promise.race([
+      promise,
+      new Promise(function (_, reject) {
+        setTimeout(function () { reject(new Error('timeout ' + ms + 'ms')); }, ms);
+      })
+    ]);
+  }
+
+  async function filterWorkingModels(puter, models) {
+    if (!models || !models.length) return [];
+    var fromCache = getWorkingModelsFromCache(models);
+    if (fromCache && fromCache.length) {
+      log('filterWorkingModels:cache_hit', fromCache.map(function (m) { return m.name; }));
+      return fromCache;
+    }
+
+    var prioritized = models.slice().sort(function (a, b) {
+      return scoreModelFreshness(b.name) - scoreModelFreshness(a.name);
+    }).slice(0, 10);
+    var working = [];
+    log('filterWorkingModels:start', prioritized.map(function (m) { return m.name; }));
+
+    for (var i = 0; i < prioritized.length; i += 1) {
+      var m = prioritized[i];
+      try {
+        var probeResult = await withTimeout(
+          puter.ai.chat([{ role: 'user', content: 'Responda apenas: OK' }], { model: m.name }),
+          15000
+        );
+        var probeText = normalizeAssistantText(probeResult);
+        if (probeText && String(probeText).trim() !== '') {
+          working.push(m);
+          log('filterWorkingModels:ok', m.name);
+        } else {
+          warn('filterWorkingModels:empty_response', m.name);
+        }
+      } catch (err) {
+        warn('filterWorkingModels:fail', m.name, normalizeError(err));
+      }
+    }
+
+    if (working.length) saveWorkingModelsCache(working);
+    log('filterWorkingModels:done', working.map(function (m) { return m.name; }));
+    return working;
+  }
+
   function saveSelectedModel(value, isManual) {
     localStorage.setItem(KEY_MODEL, value || '');
     localStorage.setItem(KEY_MODEL_MANUAL, isManual ? '1' : '0');
@@ -625,10 +698,15 @@ header('Content-Type: application/javascript; charset=utf-8');
     if (ui.fab) ui.fab.addEventListener('click', toggleToast);
 
     loadPuterSdk()
-      .then(function (puter) { return fetchAvailableModels(puter); })
+      .then(function (puter) {
+        return fetchAvailableModels(puter).then(function (models) {
+          return filterWorkingModels(puter, models);
+        });
+      })
       .then(function (models) {
         if (!models.length) {
-          ui.model.innerHTML = '<option value="">Sem modelos</option>';
+          ui.model.innerHTML = '<option value="">Sem modelos funcionais</option>';
+          addMessage(ui.body, 'Nenhum modelo funcional disponível no momento.', 'assistant');
           return;
         }
         var active = applyModelSelect(ui.model, models);
