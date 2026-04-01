@@ -305,6 +305,74 @@ header('Content-Type: application/javascript; charset=utf-8');
     return [];
   }
 
+  async function fetchJsonWithTimeout(url, ms) {
+    var ctrl = (typeof AbortController !== 'undefined') ? new AbortController() : null;
+    var timer = null;
+    try {
+      if (ctrl) timer = setTimeout(function () { ctrl.abort(); }, ms || 6000);
+      var res = await fetch(url, {
+        method: 'GET',
+        credentials: 'omit',
+        signal: ctrl ? ctrl.signal : undefined
+      });
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      return await res.json();
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+
+  function formatSearchItems(items) {
+    return (items || []).slice(0, 5).map(function (it, idx) {
+      var title = it.title || it.name || ('Resultado ' + (idx + 1));
+      var url = it.url || it.link || '';
+      var snippet = it.snippet || it.description || it.text || '';
+      return '- ' + title + (url ? ' (' + url + ')' : '') + (snippet ? ' :: ' + snippet : '');
+    }).join('\n');
+  }
+
+  async function buildFallbackWebContext(query) {
+    var q = String(query || '').trim();
+    if (!q) return '';
+    var collected = [];
+
+    try {
+      var ddgUrl = 'https://api.duckduckgo.com/?q=' + encodeURIComponent(q) + '&format=json&no_html=1&skip_disambig=1';
+      var ddg = await fetchJsonWithTimeout(ddgUrl, 7000);
+      if (ddg && ddg.AbstractText) {
+        collected.push({
+          title: ddg.Heading || q,
+          url: ddg.AbstractURL || '',
+          snippet: ddg.AbstractText
+        });
+      }
+      var topics = (ddg && Array.isArray(ddg.RelatedTopics)) ? ddg.RelatedTopics : [];
+      topics.slice(0, 4).forEach(function (topic) {
+        if (topic && topic.Text) {
+          collected.push({
+            title: topic.FirstURL ? topic.FirstURL.split('/').pop().replace(/_/g, ' ') : 'Relacionado',
+            url: topic.FirstURL || '',
+            snippet: topic.Text
+          });
+        } else if (topic && Array.isArray(topic.Topics)) {
+          topic.Topics.slice(0, 2).forEach(function (nested) {
+            if (!nested || !nested.Text) return;
+            collected.push({
+              title: nested.FirstURL ? nested.FirstURL.split('/').pop().replace(/_/g, ' ') : 'Relacionado',
+              url: nested.FirstURL || '',
+              snippet: nested.Text
+            });
+          });
+        }
+      });
+    } catch (err) {
+      warn('web_search:fallback_ddg_fail', normalizeError(err));
+    }
+
+    if (!collected.length) return '';
+    return formatSearchItems(collected);
+  }
+
   async function buildWebSearchContext(query, puter) {
     var q = String(query || '').trim();
     if (!q) return '';
@@ -312,31 +380,17 @@ header('Content-Type: application/javascript; charset=utf-8');
       if (puter && puter.ai && typeof puter.ai.webSearch === 'function') {
         var ws = await puter.ai.webSearch(q);
         var items = normalizeWebSearchItems(ws).slice(0, 5);
-        if (items.length) {
-          return items.map(function (it, idx) {
-            var title = it.title || it.name || ('Resultado ' + (idx + 1));
-            var url = it.url || it.link || '';
-            var snippet = it.snippet || it.description || it.text || '';
-            return '- ' + title + (url ? ' (' + url + ')' : '') + (snippet ? ' :: ' + snippet : '');
-          }).join('\n');
-        }
+        if (items.length) return formatSearchItems(items);
       }
       if (puter && puter.ai && typeof puter.ai.search === 'function') {
         var s = await puter.ai.search(q);
         var items2 = normalizeWebSearchItems(s).slice(0, 5);
-        if (items2.length) {
-          return items2.map(function (it, idx) {
-            var title = it.title || it.name || ('Resultado ' + (idx + 1));
-            var url = it.url || it.link || '';
-            var snippet = it.snippet || it.description || it.text || '';
-            return '- ' + title + (url ? ' (' + url + ')' : '') + (snippet ? ' :: ' + snippet : '');
-          }).join('\n');
-        }
+        if (items2.length) return formatSearchItems(items2);
       }
     } catch (err) {
       warn('web_search:tool_call_fail', normalizeError(err));
     }
-    return '';
+    return await buildFallbackWebContext(q);
   }
 
   window.addEventListener('error', function (ev) { error('window.onerror', ev && ev.message ? ev.message : ev); });
