@@ -8373,25 +8373,7 @@ header('Content-Type: application/javascript; charset=utf-8');
         return _pendingAttachments.map(a => ({ name: a.name, data: a.dataUrl }));
     }
 
-    // Ctrl+V no textarea: intercepta imagens/arquivos colados
-    document.addEventListener('DOMContentLoaded', () => {
-        const inp = document.getElementById('ow-input');
-        if (!inp) return;
-        inp.addEventListener('paste', async (e) => {
-            const items = e.clipboardData?.items;
-            if (!items) return;
-            for (const item of items) {
-                if (item.kind === 'file') {
-                    e.preventDefault();
-                    const file = item.getAsFile();
-                    if (file) await _addAttachment(file);
-                }
-            }
-        });
-    });
-
-    // Botão de clipe + input de arquivo
-    document.addEventListener('DOMContentLoaded', () => {
+    function _bindAttachmentControls() {
         const attachBtn = document.getElementById('ow-attach-btn');
         const fileInput = document.getElementById('ow-file-input');
         if (attachBtn && fileInput) {
@@ -8403,7 +8385,7 @@ header('Content-Type: application/javascript; charset=utf-8');
                 fileInput.value = '';
             };
         }
-    });
+    }
 
     async function send() {
         // Remove card de análise prévia ao iniciar conversa
@@ -8562,6 +8544,7 @@ header('Content-Type: application/javascript; charset=utf-8');
             if (pageBackdrop) pageBackdrop.classList.remove('active');
         }
         console.log(`%c🔧 ${FILE_PREFIX} Widget de IA incorporado ao ${RENDER_MODE === 'page' ? 'container da página' : 'body'} após o DOMContentLoaded.`, "color: #2196f3; font-weight: bold;");
+        _bindAttachmentControls();
         if (typeof scheduleSqlLogCleanup === 'function') scheduleSqlLogCleanup();
         
         window.switchSidebarView = function(viewName) {
@@ -8711,10 +8694,10 @@ header('Content-Type: application/javascript; charset=utf-8');
             if (RENDER_MODE === 'page') return;
             document.getElementById('ow-window').style.display = 'none';
         };
-        // Enter: pula linha | Ctrl+Enter ou Shift+Enter: envia mensagem
+        // Enter: pula linha | Ctrl+Enter: envia mensagem | Shift+Enter: apenas nova linha
         document.getElementById('ow-input').addEventListener('keydown', (e) => {
             if (e.key === 'Enter') {
-                if (e.ctrlKey || e.shiftKey) {
+                if (e.ctrlKey) {
                     e.preventDefault();
                     send();
                 }
@@ -8724,32 +8707,44 @@ header('Content-Type: application/javascript; charset=utf-8');
         // Intercepta o Ctrl+V (ou Colar) no campo de input
         const inputEl = document.getElementById('ow-input');
         if (inputEl) {
-            inputEl.addEventListener('paste', function(e) {
-                e.preventDefault();
+            inputEl.addEventListener('paste', async function(e) {
+                const items = e.clipboardData?.items || [];
+                const pastedFiles = [];
+                for (const item of items) {
+                    if (item.kind === 'file') {
+                        const file = item.getAsFile();
+                        if (file) pastedFiles.push(file);
+                    }
+                }
+
+                if (pastedFiles.length > 0) {
+                    e.preventDefault();
+                    for (const file of pastedFiles) {
+                        await _addAttachment(file);
+                    }
+                    console.log(`%c📎 [PASTE] ${pastedFiles.length} arquivo(s) anexado(s) via clipboard.`, "color: #1a73e8; font-weight: bold;");
+                    return;
+                }
 
                 let pastedText = (e.clipboardData || window.clipboardData).getData('text');
+                if (!pastedText) return;
+                e.preventDefault();
 
-                if (pastedText) {
-                    // ✅ Remove marcadores caso o usuário cole uma mensagem já encapsulada
-                    pastedText = pastedText
-                        .replaceAll('[INICIO_TEXTO_COLADO]', '')
-                        .replaceAll('[FIM_TEXTO_COLADO]', '')
-                        .trim();
+                // ✅ Remove marcadores caso o usuário cole uma mensagem já encapsulada
+                pastedText = pastedText
+                    .replaceAll('[INICIO_TEXTO_COLADO]', '')
+                    .replaceAll('[FIM_TEXTO_COLADO]', '')
+                    .trim();
 
-                    const encapsulatedText = `\n[INICIO_TEXTO_COLADO]\n${pastedText}\n[FIM_TEXTO_COLADO]\n`;
-
-                    const startPos = this.selectionStart;
-                    const endPos   = this.selectionEnd;
-
-                    this.value = this.value.substring(0, startPos) +
-                                 encapsulatedText +
-                                 this.value.substring(endPos, this.value.length);
-
-                    this.selectionStart = this.selectionEnd = startPos + encapsulatedText.length;
-                    this.scrollTop = this.scrollHeight;
-
-                    console.log(`%c📋 [CTRL+V] Texto encapsulado com sucesso (${pastedText.length} chars)`, "color: #9c27b0; font-weight: bold;");
-                }
+                const encapsulatedText = `\n[INICIO_TEXTO_COLADO]\n${pastedText}\n[FIM_TEXTO_COLADO]\n`;
+                const startPos = this.selectionStart;
+                const endPos   = this.selectionEnd;
+                this.value = this.value.substring(0, startPos) +
+                             encapsulatedText +
+                             this.value.substring(endPos, this.value.length);
+                this.selectionStart = this.selectionEnd = startPos + encapsulatedText.length;
+                this.scrollTop = this.scrollHeight;
+                console.log(`%c📋 [CTRL+V] Texto encapsulado com sucesso (${pastedText.length} chars)`, "color: #9c27b0; font-weight: bold;");
             });
         }
 
