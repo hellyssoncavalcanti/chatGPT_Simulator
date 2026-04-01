@@ -417,20 +417,37 @@ header('Content-Type: application/javascript; charset=utf-8');
   }
 
   function normalizeAssistantText(result) {
+    function extractTextFromContentArray(contentArray) {
+      if (!Array.isArray(contentArray)) return '';
+      return contentArray.map(function (item) {
+        if (!item) return '';
+        if (typeof item === 'string') return item;
+        if (typeof item.text === 'string') return item.text;
+        if (item.text && typeof item.text.value === 'string') return item.text.value;
+        if (item.type === 'text' && typeof item.value === 'string') return item.value;
+        return '';
+      }).filter(Boolean).join('\n');
+    }
+
     if (typeof result === 'string') return result;
     if (!result) return 'Sem resposta.';
     if (typeof result.message === 'string') return result.message;
+    if (result.message && typeof result.message === 'object') {
+      if (typeof result.message.content === 'string') return result.message.content;
+      var fromMessageContent = extractTextFromContentArray(result.message.content);
+      if (fromMessageContent) return fromMessageContent;
+    }
     if (typeof result.text === 'string') return result.text;
     if (Array.isArray(result.choices) && result.choices[0] && result.choices[0].message && typeof result.choices[0].message.content === 'string') {
       return result.choices[0].message.content;
     }
     if (Array.isArray(result.content)) {
-      return result.content.map(function (item) {
-        if (!item) return '';
-        if (typeof item === 'string') return item;
-        if (item.text) return typeof item.text === 'string' ? item.text : (item.text.value || '');
-        return '';
-      }).filter(Boolean).join('\n');
+      var fromRootContent = extractTextFromContentArray(result.content);
+      if (fromRootContent) return fromRootContent;
+    }
+    if (typeof result.toString === 'function') {
+      var maybeString = String(result.toString());
+      if (maybeString && maybeString !== '[object Object]') return maybeString;
     }
     return JSON.stringify(result, null, 2);
   }
@@ -550,11 +567,12 @@ header('Content-Type: application/javascript; charset=utf-8');
     ]);
   }
 
-  async function filterWorkingModels(puter, models) {
+  async function filterWorkingModels(puter, models, onProgress) {
     if (!models || !models.length) return [];
     var fromCache = getWorkingModelsFromCache(models);
     if (fromCache && fromCache.length) {
       log('filterWorkingModels:cache_hit', fromCache.map(function (m) { return m.name; }));
+      if (typeof onProgress === 'function') onProgress(fromCache.slice(), true);
       return fromCache;
     }
 
@@ -575,6 +593,7 @@ header('Content-Type: application/javascript; charset=utf-8');
         if (probeText && String(probeText).trim() !== '') {
           working.push(m);
           log('filterWorkingModels:ok', m.name);
+          if (typeof onProgress === 'function') onProgress(working.slice(), false, m);
         } else {
           warn('filterWorkingModels:empty_response', m.name);
         }
@@ -620,6 +639,36 @@ header('Content-Type: application/javascript; charset=utf-8');
     return savedModel;
   }
 
+  function renderModelSelectIncremental(selectEl, models, preferredModelName) {
+    selectEl.innerHTML = '';
+    var currentValue = selectEl.value || '';
+    var savedValue = localStorage.getItem(KEY_MODEL) || '';
+    var preferred = preferredModelName || savedValue || '';
+    var selected = '';
+
+    if (models.some(function (m) { return m.name === currentValue; })) selected = currentValue;
+    else if (preferred && models.some(function (m) { return m.name === preferred; })) selected = preferred;
+    else if (models.length) selected = models[0].name;
+
+    models.forEach(function (m) {
+      var opt = document.createElement('option');
+      opt.value = m.name;
+      opt.textContent = m.displayName || m.name;
+      if (m.name === selected) opt.selected = true;
+      selectEl.appendChild(opt);
+    });
+
+    if (!selectEl.dataset.cfoBound) {
+      selectEl.onchange = function () {
+        saveSelectedModel(selectEl.value || '', true);
+      };
+      selectEl.dataset.cfoBound = '1';
+    }
+
+    if (selected && selectEl.value !== selected) selectEl.value = selected;
+    return selected;
+  }
+
   function init() {
     log('init:start', { mode: RENDER_MODE, href: window.location.href });
     var ui = createUI();
@@ -629,6 +678,7 @@ header('Content-Type: application/javascript; charset=utf-8');
       { role: 'system', content: 'Você é um assistente útil. Responda em português do Brasil de forma objetiva.' }
     ];
     var context = getContextFromUrl();
+    var preferredSavedModel = localStorage.getItem(KEY_MODEL) || '';
     log('context:url', context);
 
     function serializePersistableHistory() {
@@ -697,10 +747,17 @@ header('Content-Type: application/javascript; charset=utf-8');
 
     if (ui.fab) ui.fab.addEventListener('click', toggleToast);
 
+    ui.model.innerHTML = '<option value="">Validando modelos funcionais...</option>';
     loadPuterSdk()
       .then(function (puter) {
         return fetchAvailableModels(puter).then(function (models) {
-          return filterWorkingModels(puter, models);
+          return filterWorkingModels(puter, models, function (partialWorking) {
+            if (!partialWorking || !partialWorking.length) return;
+            var partialActive = renderModelSelectIncremental(ui.model, partialWorking, preferredSavedModel);
+            if (preferredSavedModel && partialActive === preferredSavedModel) {
+              log('model:preferred_saved_available', preferredSavedModel);
+            }
+          });
         });
       })
       .then(function (models) {
