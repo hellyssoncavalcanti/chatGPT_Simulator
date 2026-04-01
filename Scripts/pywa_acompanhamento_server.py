@@ -1302,9 +1302,9 @@ class WhatsAppWebClient:
                         // NOT in the message preview area (div._ak8j / div._ak8k)
                         const nameArea = row.querySelector('div._ak8q');
                         if (!nameArea) continue;
-                        const nameSpan = nameArea.querySelector('span[title]');
+                        const nameSpan = nameArea.querySelector('span[title]') || nameArea.querySelector('span[dir="auto"]');
                         if (!nameSpan) continue;
-                        const name = (nameSpan.getAttribute('title') || '').trim();
+                        const name = (nameSpan.getAttribute('title') || nameSpan.textContent || '').trim();
                         if (!name) continue;
                         if (out.includes(name)) continue;
                         out.push(name);
@@ -1478,9 +1478,9 @@ class WhatsAppWebClient:
 
                         const nameArea = row.querySelector('div._ak8q');
                         if (!nameArea) continue;
-                        const nameSpan = nameArea.querySelector('span[title]');
+                        const nameSpan = nameArea.querySelector('span[title]') || nameArea.querySelector('span[dir="auto"]');
                         if (!nameSpan) continue;
-                        const title = (nameSpan.getAttribute('title') || '').trim();
+                        const title = (nameSpan.getAttribute('title') || nameSpan.textContent || '').trim();
                         if (!title) continue;
 
                         let timeText = '';
@@ -1650,7 +1650,8 @@ class WhatsAppWebClient:
                 const norm = (s) => String(s || '').replace(/\\s+/g, ' ').trim();
                 const rows = document.querySelectorAll('#pane-side div[role="row"]');
                 for (const row of rows) {
-                    const span = row.querySelector('span[title]');
+                    const nameArea = row.querySelector('div._ak8q');
+                    const span = nameArea ? (nameArea.querySelector('span[title]') || nameArea.querySelector('span[dir="auto"]')) : (row.querySelector('span[title]') || row.querySelector('span[dir="auto"]'));
                     if (!span) continue;
                     const txt = norm(span.getAttribute('title') || span.textContent || '');
                     if (txt === target) {
@@ -1677,7 +1678,7 @@ class WhatsAppWebClient:
             # 3) Aguarda o header do chat renderizar — retry com espera para conexão lenta
             for wait_attempt in range(3):
                 try:
-                    self._page.wait_for_selector('#main header span[title]', timeout=3000)
+                    self._page.wait_for_selector('#main header span[dir="auto"], #main header span[title]', timeout=3000)
                     self._page.wait_for_timeout(500)
                     return True
                 except Exception:
@@ -1754,7 +1755,8 @@ class WhatsAppWebClient:
                 try {
                     const rows = document.querySelectorAll('#pane-side div[role="row"]');
                     for (const row of rows) {
-                        const span = row.querySelector('span[title]');
+                        const nameArea = row.querySelector('div._ak8q');
+                        const span = nameArea ? (nameArea.querySelector('span[title]') || nameArea.querySelector('span[dir="auto"]')) : (row.querySelector('span[title]') || row.querySelector('span[dir="auto"]'));
                         if (!span) continue;
                         const txt = norm(span.getAttribute('title') || span.textContent || '');
                         if (txt !== target) continue;
@@ -1857,12 +1859,8 @@ class WhatsAppWebClient:
                     if (!header) return { title: '', phone: '' };
 
                     let title = '';
-                    const titleEl = header.querySelector('span[title]');
-                    if (titleEl) title = (titleEl.getAttribute('title') || '').trim();
-                    if (!title) {
-                        const auto = header.querySelector('span[dir="auto"]');
-                        if (auto) title = (auto.textContent || '').trim();
-                    }
+                    const titleEl = header.querySelector('span[dir="auto"]') || header.querySelector('span[title]');
+                    if (titleEl) title = (titleEl.getAttribute('title') || titleEl.textContent || '').trim();
 
                     let phone = '';
                     const spans = header.querySelectorAll('span[title], span[dir="auto"], span');
