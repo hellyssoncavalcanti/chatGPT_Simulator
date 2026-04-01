@@ -170,6 +170,7 @@ class StateStore:
             "forwarded_messages": {},
             "last_seen_inbound": {},
             "enrichment_failures": {},
+            "official_wa_accounts": [],
             "updated_at": utc_now_iso(),
         }
 
@@ -310,6 +311,24 @@ class StateStore:
         if count > 0:
             self.save()
         return count
+
+    def mark_official_wa_account(self, title_key: str) -> None:
+        """Mark a contact as an official WhatsApp account (no phone number)."""
+        with self.lock:
+            accounts = self.state.setdefault("official_wa_accounts", [])
+            if title_key not in accounts:
+                accounts.append(title_key)
+        self.save()
+
+    def is_official_wa_account(self, title_key: str) -> bool:
+        """Check if a contact is marked as official WhatsApp account."""
+        with self.lock:
+            return title_key in self.state.get("official_wa_accounts", [])
+
+    def get_official_wa_accounts(self) -> List[str]:
+        """Return list of official WhatsApp account title keys."""
+        with self.lock:
+            return list(self.state.get("official_wa_accounts", []))
 
 
 state = StateStore(STATE_FILE)
@@ -1850,12 +1869,7 @@ class WhatsAppWebClient:
                 base.get("title", ""), base.get("phone", ""),
             )
 
-            # ── SUB-ETAPA C: Pausa para usuário ver o chat aberto ─────
-            elog.info("  PAUSA 5s — chat aberto, preparando para clicar 'Mais opções'...")
-            self._page.wait_for_timeout(5000)
-
             # ── SUB-ETAPA C: Clique em "Mais opções" (three-dots menu) ─
-            # O botão tem aria-label="Mais opções" e data-tab="6"
             menu_opened = False
             try:
                 mais_opcoes = self._page.locator(
@@ -1917,10 +1931,6 @@ class WhatsAppWebClient:
                     "_click_failed": True,
                 }
 
-            # ── Pausa para usuário ver o menu aberto ───────────────────
-            elog.info("  PAUSA 5s — menu 'Mais opções' aberto, preparando para clicar 'Dados do contato'...")
-            self._page.wait_for_timeout(5000)
-
             # ── SUB-ETAPA D: Clique em "Dados do contato" (menu item) ──
             panel_clicked = False
             try:
@@ -1972,23 +1982,23 @@ class WhatsAppWebClient:
                     elog.warning("  sub-D: JS click 'Dados do contato' falhou: %s", e)
 
             if not panel_clicked:
+                # Menu não tem "Dados do contato" — é conta oficial do WhatsApp
                 try:
                     self._page.keyboard.press("Escape")
                     self._page.wait_for_timeout(200)
                 except Exception:
                     pass
-                elog.warning("  FALHA ao clicar 'Dados do contato' no menu")
+                elog.warning(
+                    "  Menu não contém 'Dados do contato' — provável conta oficial WhatsApp (sem número)"
+                )
                 return {
                     "title": str(base.get("title") or "").strip(),
                     "phone": str(base.get("phone") or "").strip(),
                     "profile_name": "",
                     "profile_phone": "",
                     "_click_failed": True,
+                    "_no_dados_contato": True,
                 }
-
-            # ── Pausa para usuário ver o painel de dados do contato ─────
-            elog.info("  PAUSA 5s — painel 'Dados do contato' clicado, aguardando section renderizar...")
-            self._page.wait_for_timeout(5000)
 
             # ── SUB-ETAPA E: Aguarda seção de dados do contato carregar ─
             panel_visible = False
@@ -2008,12 +2018,12 @@ class WhatsAppWebClient:
 
             if not panel_visible:
                 elog.warning(
-                    "  sub-E: painel não detectado por seletores. Aguardando 5s como fallback..."
+                    "  sub-E: painel não detectado por seletores. Aguardando 4s como fallback..."
                 )
-                self._page.wait_for_timeout(5000)
+                self._page.wait_for_timeout(4000)
             else:
-                elog.info("  PAUSA 5s — painel visível, aguardando telefone renderizar...")
-                self._page.wait_for_timeout(5000)
+                # Pausa para o telefone renderizar (~1-6s observado manualmente)
+                self._page.wait_for_timeout(3000)
 
             # ── SUB-ETAPA F: Extrai dados da section com retries ────────
             extract_details_js = """() => {
@@ -2771,8 +2781,6 @@ def _enrich_single_contact(title: str) -> Tuple[Optional[str], str, str, str]:
     detail_title = title
     detail_profile = ""
 
-    import time as _time
-
     # ── ETAPA 1: WA Store (sem abrir chat) ──────────────────────────
     elog.info("  [ETAPA 1/5] resolve_phone_via_wa_store('%s')...", title)
     try:
@@ -2785,8 +2793,6 @@ def _enrich_single_contact(title: str) -> Tuple[Optional[str], str, str, str]:
         elog.info("  [ETAPA 1/5] WA Store: exceção: %s", e)
 
     # ── ETAPA 2: Clicar no contato na sidebar ───────────────────────
-    elog.info("  [ETAPA 2/5] PAUSA 5s antes de clicar na sidebar...")
-    _time.sleep(5)
     elog.info("  [ETAPA 2/5] open_chat_by_sidebar_click('%s')...", title)
     if not wa_web.open_chat_by_sidebar_click(title):
         reason = "sidebar_click_failed"
@@ -2794,8 +2800,6 @@ def _enrich_single_contact(title: str) -> Tuple[Optional[str], str, str, str]:
         return None, detail_title, detail_profile, reason
 
     # ── ETAPA 3: Verificar header do chat aberto ────────────────────
-    elog.info("  [ETAPA 3/5] PAUSA 5s para verificar header do chat aberto...")
-    _time.sleep(5)
     elog.info("  [ETAPA 3/5] get_open_chat_identity() — verificando header...")
     open_identity = wa_web.get_open_chat_identity()
     open_title = (open_identity.get("title") or "").strip()
@@ -2833,6 +2837,15 @@ def _enrich_single_contact(title: str) -> Tuple[Optional[str], str, str, str]:
     detail_profile = details.get("profile_name") or ""
     panel_phone = normalize_phone(details.get("profile_phone") or "")
     header_phone = normalize_phone(details.get("phone") or "")
+
+    # Se o menu não contém "Dados do contato", é conta oficial do WhatsApp
+    if details.get("_no_dados_contato"):
+        reason = "official_wa_account_no_dados_contato"
+        elog.info(
+            "  [ETAPA 4/5] Conta oficial do WhatsApp detectada (sem 'Dados do contato' no menu) — ignorando permanentemente"
+        )
+        return None, detail_title, detail_profile, reason
+
     elog.info(
         "  [ETAPA 4/5] Resultado painel: title='%s' profile_name='%s' "
         "profile_phone='%s' header_phone='%s'",
@@ -2889,52 +2902,34 @@ def enrich_named_contacts_from_sidebar(
 
     aliases = state.get_contact_aliases()
     contexts = state.all_phone_contexts()
+    official_accounts = state.get_official_wa_accounts()
     enriched = 0
     skipped_not_named = 0
     skipped_alias_exists = 0
     skipped_no_phone = 0
     skipped_cooldown = 0
+    skipped_official = 0
     attempts = 0
 
-    # ── Lista de contatos JÁ associados (nome → telefone) ──────────
-    if aliases:
-        elog.info("=== Contatos JÁ associados (nome → telefone): %s total ===", len(aliases))
-        for alias_name, alias_phone in sorted(aliases.items()):
-            elog.info("  ✓ '%s' → %s", alias_name, alias_phone)
-    else:
-        elog.info("=== Nenhum contato associado ainda ===")
-
-    # ── Log falhas anteriores para DEBUG ────────────────────────────
+    # ── Filtra e classifica candidatos ──────────────────────────────
     all_failures = state.get_enrichment_failures()
-    if all_failures:
-        elog.info(
-            "=== Contatos com falha(s) anterior(es): %s ===",
-            len(all_failures),
-        )
-        for fk, fv in sorted(all_failures.items(), key=lambda x: x[1].get("count", 0), reverse=True):
-            in_cooldown = state.should_skip_enrichment(fk, max_failures=5, cooldown_hours=24)
-            elog.info(
-                "  ✗ '%s' | tentativas=%s | última=%s | motivo='%s' | cooldown=%s",
-                fk,
-                fv.get("count", 0),
-                fv.get("last_at", "?"),
-                fv.get("last_reason", "(sem motivo)"),
-                "SIM" if in_cooldown else "não",
-            )
-
-    # Filtra e prioriza candidatos: contatos que correspondem a contextos
-    # monitorados (pacientes) vêm primeiro, depois retries de falhas, depois os demais.
     eligible_rows: List[Dict[str, Any]] = []
     monitored_rows: List[Dict[str, Any]] = []
     retry_rows: List[Dict[str, Any]] = []
+    total_named = 0
     for row in chat_rows:
         title = (row.get("title") or "").strip()
         if not title or not _is_named_chat_title(title):
             skipped_not_named += 1
             continue
+        total_named += 1
         title_key = re.sub(r"\s+", " ", title.lower())
         if aliases.get(title_key):
             skipped_alias_exists += 1
+            continue
+        # Conta oficial do WhatsApp — ignorar permanentemente
+        if state.is_official_wa_account(title_key):
+            skipped_official += 1
             continue
         # Contato em cooldown (>=5 falhas nas últimas 24h) — pula
         if state.should_skip_enrichment(title_key, max_failures=5, cooldown_hours=24):
@@ -2951,6 +2946,45 @@ def enrich_named_contacts_from_sidebar(
             eligible_rows.append(row)
     # Prioridade: monitorados > retries (com falha anterior) > novos
     prioritized = monitored_rows + retry_rows + eligible_rows
+
+    # ── Log inteligente: resumo ou detalhado ────────────────────────
+    has_pending_real = len(prioritized) > 0
+    total_accounted = skipped_alias_exists + skipped_official + skipped_not_named
+    if not has_pending_real:
+        # Todos os contatos nomeados estão resolvidos — log resumido
+        if skipped_official > 0:
+            elog.info(
+                "=== Contatos JÁ associados (nome → telefone): %s de %s listados "
+                "| %s são contas oficiais do WhatsApp (sem número) ===",
+                skipped_alias_exists, total_named, skipped_official,
+            )
+        else:
+            elog.info(
+                "=== Contatos JÁ associados (nome → telefone): %s de %s listados ===",
+                skipped_alias_exists, total_named,
+            )
+    else:
+        # Há contatos pendentes — log detalhado
+        elog.info(
+            "=== Contatos JÁ associados (nome → telefone): %s de %s listados "
+            "| oficiais_whatsapp=%s | pendentes=%s ===",
+            skipped_alias_exists, total_named, skipped_official, len(prioritized),
+        )
+        if aliases:
+            for alias_name, alias_phone in sorted(aliases.items()):
+                elog.info("  ✓ '%s' → %s", alias_name, alias_phone)
+        if official_accounts:
+            elog.info("  Contas oficiais WhatsApp (sem número): %s", ", ".join(official_accounts))
+        if all_failures:
+            for fk, fv in sorted(all_failures.items(), key=lambda x: x[1].get("count", 0), reverse=True):
+                if state.is_official_wa_account(fk):
+                    continue
+                in_cooldown = state.should_skip_enrichment(fk, max_failures=5, cooldown_hours=24)
+                elog.info(
+                    "  ✗ '%s' | tentativas=%s | motivo='%s' | cooldown=%s",
+                    fk, fv.get("count", 0), fv.get("last_reason", "?"),
+                    "SIM" if in_cooldown else "não",
+                )
 
     # Se todos os candidatos estão em cooldown e não há nenhum novo, reseta os
     # contadores de falha para permitir retries com a lógica atualizada.
@@ -2976,14 +3010,11 @@ def enrich_named_contacts_from_sidebar(
                 retry_rows.append(row)
         prioritized = monitored_rows + retry_rows + eligible_rows
 
-    elog.info(
-        "=== Iniciando enriquecimento | chats_visíveis=%s | aliases_cache=%s "
-        "| max_por_ciclo=%s | max_tentativas=%s | candidatos=%s (monitorados=%s, retries=%s, novos=%s) "
-        "| cooldown=%s | not_named=%s | alias_exists=%s ===",
-        len(chat_rows), len(aliases), max_per_cycle, max_attempts,
-        len(prioritized), len(monitored_rows), len(retry_rows), len(eligible_rows),
-        skipped_cooldown, skipped_not_named, skipped_alias_exists,
-    )
+    if has_pending_real:
+        elog.info(
+            "=== Iniciando enriquecimento | candidatos=%s (monitorados=%s, retries=%s, novos=%s) ===",
+            len(prioritized), len(monitored_rows), len(retry_rows), len(eligible_rows),
+        )
 
     # Log dos candidatos que serão tentados neste ciclo
     if prioritized:
@@ -3020,8 +3051,17 @@ def enrich_named_contacts_from_sidebar(
             resolved_phone, detail_title, detail_profile, failure_reason = _enrich_single_contact(title)
 
             if not resolved_phone:
-                skipped_no_phone += 1
-                state.record_enrichment_failure(title_key, reason=failure_reason)
+                # Detecta conta oficial do WhatsApp — marcar permanentemente
+                if failure_reason == "official_wa_account_no_dados_contato":
+                    state.mark_official_wa_account(title_key)
+                    state.clear_enrichment_failure(title_key)
+                    elog.info(
+                        "  Marcado como conta oficial WhatsApp (ignorado permanentemente): '%s'",
+                        title,
+                    )
+                else:
+                    skipped_no_phone += 1
+                    state.record_enrichment_failure(title_key, reason=failure_reason)
                 continue
 
             _upsert_whatsapp_contact_profile(
@@ -3043,9 +3083,9 @@ def enrich_named_contacts_from_sidebar(
 
     elog.info(
         "=== Enriquecimento concluído | enriched=%s no_phone=%s "
-        "not_named=%s alias_exists=%s cooldown=%s attempts=%s ===",
+        "not_named=%s alias_exists=%s official_wa=%s cooldown=%s attempts=%s ===",
         enriched, skipped_no_phone,
-        skipped_not_named, skipped_alias_exists, skipped_cooldown, attempts,
+        skipped_not_named, skipped_alias_exists, skipped_official, skipped_cooldown, attempts,
     )
 
     if enriched > 0:
