@@ -8846,6 +8846,25 @@ header('Content-Type: application/javascript; charset=utf-8');
                 console.log(`%c📋 [CTRL+V] Texto encapsulado com sucesso (${pastedText.length} chars)`, "color: #9c27b0; font-weight: bold;");
             });
         }
+        const dropTargets = [document.getElementById('ow-window'), inputEl].filter(Boolean);
+        const preventDropDefault = (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+        };
+        dropTargets.forEach((target) => {
+            target.addEventListener('dragenter', preventDropDefault);
+            target.addEventListener('dragover', preventDropDefault);
+            target.addEventListener('dragleave', preventDropDefault);
+            target.addEventListener('drop', async (e) => {
+                preventDropDefault(e);
+                const files = e.dataTransfer?.files ? Array.from(e.dataTransfer.files) : [];
+                if (!files.length) return;
+                for (const file of files) {
+                    await _addAttachment(file);
+                }
+                console.log(`%c📎 [DRAG&DROP] ${files.length} arquivo(s) anexado(s).`, "color: #1a73e8; font-weight: bold;");
+            });
+        });
 
 
         ['sb-btn-close-main', 'sb-btn-close-install', 'sb-btn-close-prompts'].forEach(id => {

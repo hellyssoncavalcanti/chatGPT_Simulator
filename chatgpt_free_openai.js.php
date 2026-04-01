@@ -1546,6 +1546,22 @@ header('Content-Type: application/javascript; charset=utf-8');
         appendFiles(files);
       }
     });
+    ['dragenter', 'dragover'].forEach(function (evtName) {
+      ui.toast.addEventListener(evtName, function (ev) {
+        ev.preventDefault();
+      });
+    });
+    ['dragleave', 'drop'].forEach(function (evtName) {
+      ui.toast.addEventListener(evtName, function (ev) {
+        ev.preventDefault();
+      });
+    });
+    ui.toast.addEventListener('drop', function (ev) {
+      var files = (ev.dataTransfer && ev.dataTransfer.files) ? ev.dataTransfer.files : [];
+      if (files && files.length) {
+        appendFiles(files);
+      }
+    });
 
     loadHistory().then(function (hasHistory) {
       if (!hasHistory) {
