@@ -652,9 +652,9 @@ header('Content-Type: application/javascript; charset=utf-8');
       'box-shadow:0 6px 24px rgba(0,0,0,.25)}',
       '.cfo-toast{position:fixed;right:18px;bottom:86px;width:360px;max-width:calc(100vw - 24px);height:500px;',
       'background:#fff;border-radius:12px;box-shadow:0 10px 40px rgba(0,0,0,.25);display:none;flex-direction:column;',
-      'overflow:hidden;z-index:99999;border:1px solid #e7e7e7;font-family:Arial,sans-serif}',
+      'overflow:hidden;z-index:99999;border:1px solid #e7e7e7;font-family:Arial,sans-serif;position:relative}',
       '.cfo-page{width:100%;height:70vh;max-height:70vh;background:#fff;border-radius:12px;box-shadow:0 8px 28px rgba(0,0,0,.08);display:flex;flex-direction:column;',
-      'overflow:hidden;border:1px solid #e7e7e7;font-family:Arial,sans-serif}',
+      'overflow:hidden;border:1px solid #e7e7e7;font-family:Arial,sans-serif;position:relative}',
       '.cfo-header{background:#0b57d0;color:#fff;padding:10px 12px;font-weight:700;font-size:14px;display:flex;align-items:center;gap:8px}',
       '#ow-menu-toggle{cursor:pointer;font-size:20px;background:none;border:none;color:#fff;line-height:1;padding:0;margin:0 6px 0 0}',
       '.cfo-model-wrap{padding:8px 10px;border-bottom:1px solid #ebedf0;background:#f7f9ff}',
@@ -674,12 +674,16 @@ header('Content-Type: application/javascript; charset=utf-8');
       '.cfo-attach-preview.has-items{display:flex}',
       '.cfo-chip{display:inline-flex;align-items:center;gap:6px;border:1px solid #cdd5ea;background:#eef3ff;color:#1a3b77;border-radius:14px;padding:3px 8px;font-size:11px}',
       '.cfo-chip-x{cursor:pointer;font-weight:700}',
-      '#ow-sidebar{position:absolute;top:0;left:0;width:0;height:100%;background:#fff;z-index:40;transition:width .25s;overflow:hidden;border-right:1px solid #e9edf3}',
-      '#ow-sidebar.open{width:86%}',
-      '.ow-side-wrap{padding:12px}',
-      '.ow-side-title{font-weight:700;margin-bottom:8px}',
-      '.ow-side-close{float:right;border:none;background:none;font-size:18px;cursor:pointer}',
-      '.ow-side-ta{width:100%;height:56vh;font-family:monospace;font-size:12px}',
+      '#ow-sidebar{position:absolute;top:0;left:0;width:0;height:100%;background:#fff;z-index:40;transition:width .25s;overflow:hidden;border-right:1px solid #e9edf3;box-shadow:2px 0 6px rgba(0,0,0,.08)}',
+      '#ow-sidebar.open{width:90%}',
+      '.sb-view{display:none;height:100%}',
+      '.sb-view.active{display:block}',
+      '.sb-content{padding:12px;height:100%;overflow:auto}',
+      '.sb-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;font-weight:700}',
+      '.sb-close-btn{border:none;background:none;font-size:18px;cursor:pointer}',
+      '.sb-menu-item{padding:12px;border:1px solid #eef1f6;border-radius:8px;margin-bottom:8px;cursor:pointer;background:#fff}',
+      '.sb-menu-item:hover{background:#f7f9ff}',
+      '.ow-side-ta{width:100%;height:50vh;font-family:monospace;font-size:12px}',
       '.ow-side-actions{margin-top:8px;display:flex;gap:8px}',
       '@media (max-width:768px){.cfo-page{height:78vh;max-height:78vh}}'
     ].join('');
@@ -709,9 +713,12 @@ header('Content-Type: application/javascript; charset=utf-8');
     panel.style.display = defaultDisplay;
     panel.innerHTML = [
       '<div id="ow-sidebar">',
-      '  <div class="ow-side-wrap">',
-      '    <button type="button" class="ow-side-close" id="ow-sidebar-close">×</button>',
-      '    <div class="ow-side-title">Prompt do sistema</div>',
+      '  <div id="sb-view-menu" class="sb-view active sb-content">',
+      '    <div class="sb-head"><span>Menu IA</span><button type="button" class="sb-close-btn" id="ow-sidebar-close">×</button></div>',
+      '    <div class="sb-menu-item" id="sb-open-prompts">✏️ Personalizar IA</div>',
+      '  </div>',
+      '  <div id="sb-view-prompts" class="sb-view sb-content">',
+      '    <div class="sb-head"><span>Prompt do sistema</span><button type="button" class="sb-close-btn" id="sb-back-menu">←</button></div>',
       '    <textarea id="cfo-system-prompt" class="ow-side-ta"></textarea>',
       '    <div class="ow-side-actions">',
       '      <button type="button" id="cfo-save-system-prompt">Salvar Prompt</button>',
@@ -749,6 +756,10 @@ header('Content-Type: application/javascript; charset=utf-8');
       menuToggle: panel.querySelector('#ow-menu-toggle'),
       sidebar: panel.querySelector('#ow-sidebar'),
       sidebarClose: panel.querySelector('#ow-sidebar-close'),
+      sidebarMenuView: panel.querySelector('#sb-view-menu'),
+      sidebarPromptView: panel.querySelector('#sb-view-prompts'),
+      sidebarOpenPrompts: panel.querySelector('#sb-open-prompts'),
+      sidebarBackMenu: panel.querySelector('#sb-back-menu'),
       promptEl: panel.querySelector('#cfo-system-prompt'),
       promptSaveBtn: panel.querySelector('#cfo-save-system-prompt'),
       promptResetBtn: panel.querySelector('#cfo-reset-system-prompt')
@@ -1148,10 +1159,28 @@ header('Content-Type: application/javascript; charset=utf-8');
     });
 
     if (ui.menuToggle && ui.sidebar) {
-      ui.menuToggle.onclick = function () { ui.sidebar.classList.add('open'); };
+      ui.menuToggle.onclick = function () {
+        if (ui.sidebarMenuView && ui.sidebarPromptView) {
+          ui.sidebarMenuView.classList.add('active');
+          ui.sidebarPromptView.classList.remove('active');
+        }
+        ui.sidebar.classList.add('open');
+      };
     }
     if (ui.sidebarClose && ui.sidebar) {
       ui.sidebarClose.onclick = function () { ui.sidebar.classList.remove('open'); };
+    }
+    if (ui.sidebarOpenPrompts && ui.sidebarMenuView && ui.sidebarPromptView) {
+      ui.sidebarOpenPrompts.onclick = function () {
+        ui.sidebarMenuView.classList.remove('active');
+        ui.sidebarPromptView.classList.add('active');
+      };
+    }
+    if (ui.sidebarBackMenu && ui.sidebarMenuView && ui.sidebarPromptView) {
+      ui.sidebarBackMenu.onclick = function () {
+        ui.sidebarPromptView.classList.remove('active');
+        ui.sidebarMenuView.classList.add('active');
+      };
     }
 
     function serializePersistableHistory() {
