@@ -263,6 +263,24 @@ header('Content-Type: application/javascript; charset=utf-8');
     try { return JSON.stringify(err); } catch (_) { return String(err); }
   }
 
+  function shouldUseWebSearch(prompt) {
+    var p = String(prompt || '').toLowerCase();
+    if (!p) return false;
+    return /(pesquise|buscar|busque|internet|web|wikipedia|google|not[ií]cia|atualizado|site:|fonte|fontes)/.test(p);
+  }
+
+  function buildChatOptions(model, enableWebSearch) {
+    var opts = { model: model };
+    if (enableWebSearch) {
+      // Mantém múltiplas chaves por compatibilidade com variações de SDK.
+      opts.web_search = true;
+      opts.search = true;
+      opts.enable_search = true;
+      opts.tools = [{ type: 'web_search' }];
+    }
+    return opts;
+  }
+
   window.addEventListener('error', function (ev) { error('window.onerror', ev && ev.message ? ev.message : ev); });
   window.addEventListener('unhandledrejection', function (ev) { error('unhandledrejection', ev && ev.reason ? ev.reason : ev); });
 
@@ -920,6 +938,7 @@ header('Content-Type: application/javascript; charset=utf-8');
       try {
         var puter = await loadPuterSdk();
         var model = ui.model.value || localStorage.getItem(KEY_MODEL) || 'gpt-5';
+        var wantsWebSearch = shouldUseWebSearch(prompt);
         var requestHistory = history.slice();
         var attachmentPayload = pendingAttachments.slice();
         if (attachmentPayload.length) {
@@ -938,16 +957,22 @@ header('Content-Type: application/javascript; charset=utf-8');
           };
         }
 
-        log('send:calling_puter_ai_chat', { model: model, historyLen: requestHistory.length, attachmentCount: attachmentPayload.length });
+        log('send:calling_puter_ai_chat', { model: model, historyLen: requestHistory.length, attachmentCount: attachmentPayload.length, wantsWebSearch: wantsWebSearch });
         var result;
         try {
-          result = await puter.ai.chat(requestHistory, { model: model });
+          result = await puter.ai.chat(requestHistory, buildChatOptions(model, wantsWebSearch));
           if (attachmentPayload.length) attachmentsSupported = true;
+          if (wantsWebSearch) log('web_search:enabled_for_request');
         } catch (firstErr) {
           if (attachmentPayload.length) {
             warn('send:attachments_primary_mode_fail', normalizeError(firstErr));
-            result = await puter.ai.chat(history, { model: model, files: attachmentPayload });
+            var fallbackOpts = buildChatOptions(model, wantsWebSearch);
+            fallbackOpts.files = attachmentPayload;
+            result = await puter.ai.chat(history, fallbackOpts);
             attachmentsSupported = true;
+          } else if (wantsWebSearch) {
+            warn('web_search:primary_mode_fail_retrying_basic', normalizeError(firstErr));
+            result = await puter.ai.chat(requestHistory, buildChatOptions(model, false));
           } else {
             throw firstErr;
           }
