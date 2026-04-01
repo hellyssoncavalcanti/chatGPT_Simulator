@@ -360,16 +360,6 @@ if ($shouldRenderDirectPage) {
             window.__CHATGPT_FREE_OPENAI_CONTAINER = '#chatgpt-free-openai-page-root';
             window.__CHATGPT_FREE_OPENAI_CAN_EDIT_PROMPT = <?php echo $authorized ? 'true' : 'false'; ?>;
           </script>
-          <?php if ($authorized): ?>
-          <div class="prompt-box">
-            <strong>Prompt do sistema (Puter Free OpenAI)</strong>
-            <textarea id="cfo-system-prompt"></textarea>
-            <div class="prompt-actions">
-              <button type="button" id="cfo-save-system-prompt">Salvar Prompt</button>
-              <button type="button" id="cfo-reset-system-prompt">Restaurar Padrão</button>
-            </div>
-          </div>
-          <?php endif; ?>
           <script src="<?php echo $selfJsUrl; ?>"></script>
         <?php else: ?>
           <div class="denied">Você não possui permissão para abrir este handler diretamente.</div>
