@@ -4731,6 +4731,61 @@ header('Content-Type: application/javascript; charset=utf-8');
         return mins ? `${hours}h ${mins}min` : `${hours}h`;
     }
 
+    function extractRateLimitSeconds(payload) {
+        const candidates = [];
+        const pushIfNum = (v) => {
+            const n = Number(v);
+            if (Number.isFinite(n) && n > 0) candidates.push(Math.round(n));
+        };
+
+        if (payload && typeof payload === 'object') {
+            pushIfNum(payload.retry_after);
+            pushIfNum(payload.retry_after_seconds);
+            pushIfNum(payload.cooldown);
+            pushIfNum(payload.cooldown_seconds);
+            pushIfNum(payload.wait_seconds);
+            pushIfNum(payload.seconds);
+            const nested = payload.error && typeof payload.error === 'object' ? payload.error : null;
+            if (nested) {
+                pushIfNum(nested.retry_after);
+                pushIfNum(nested.retry_after_seconds);
+                pushIfNum(nested.cooldown);
+                pushIfNum(nested.cooldown_seconds);
+                pushIfNum(nested.wait_seconds);
+            }
+        }
+
+        const txt = (typeof payload === 'string' ? payload : JSON.stringify(payload || '')).toLowerCase();
+        const secMatch = txt.match(/(\d+)\s*(s|seg|secs|seconds)\b/);
+        if (secMatch) pushIfNum(secMatch[1]);
+        const minMatch = txt.match(/(\d+)\s*(min|minuto|minutos|minutes)\b/);
+        if (minMatch) pushIfNum(Number(minMatch[1]) * 60);
+
+        if (!candidates.length && /alguns minutos|few minutes|rate[- ]?limit|solicita[cç][õo]es r[aá]pido/.test(txt)) {
+            candidates.push(240);
+        }
+
+        return candidates.length ? Math.max(...candidates) : 0;
+    }
+
+    function parseRateLimitInfo(payload) {
+        const rawText = typeof payload === 'string' ? payload : JSON.stringify(payload || '');
+        const lowered = rawText.toLowerCase();
+        const looksLikeRateLimit = /rate[- ]?limit|too many requests|excesso de solicita[cç][õo]es|solicita[cç][õo]es r[aá]pido/.test(lowered);
+        if (!looksLikeRateLimit) return null;
+        const seconds = extractRateLimitSeconds(payload) || 240;
+        return { seconds, message: rawText };
+    }
+
+    async function waitRateLimitCountdown(seconds, onTick) {
+        let remaining = Math.max(1, Math.round(Number(seconds) || 0));
+        while (remaining > 0) {
+            if (typeof onTick === 'function') onTick(remaining);
+            await new Promise(r => setTimeout(r, 1000));
+            remaining -= 1;
+        }
+    }
+
     async function fetchAnaliseQueueEstimate(row) {
         const analiseId = Number(row?.id || 0);
         const createdAt = String(row?.datetime_analise_criacao || '').trim();
@@ -6749,6 +6804,7 @@ header('Content-Type: application/javascript; charset=utf-8');
             const decoder = new TextDecoder("utf-8");
             let buffer = ''; let fullText = '';
             let streamChunkIdx = 0;
+            let rateLimitInfo = null;
             
             let isT = false; 
 
@@ -6870,7 +6926,12 @@ header('Content-Type: application/javascript; charset=utf-8');
                     
                             // Intercetar e exibir erros da LLM
                             if (jsonObj.type === 'error' && jsonObj.content) {
-                                const errorText = `❌ **Erro do Servidor/LLM:**\n\`\`\`\n${jsonObj.content}\n\`\`\``;
+                                const readableError = (typeof jsonObj.content === 'string')
+                                    ? jsonObj.content
+                                    : JSON.stringify(jsonObj.content, null, 2);
+                                const parsedRateLimit = parseRateLimitInfo(jsonObj.content);
+                                if (parsedRateLimit) rateLimitInfo = parsedRateLimit;
+                                const errorText = `❌ **Erro do Servidor/LLM:**\n\`\`\`\n${readableError}\n\`\`\``;
                                 console.error(`%c❌ ERRO DA LLM INTERCETADO:`, "color: #f44336; font-weight: bold;", jsonObj.content);
                                 fullText = errorText;
                                 jsonObj.type = 'markdown';
@@ -6893,6 +6954,17 @@ header('Content-Type: application/javascript; charset=utf-8');
             console.groupEnd(); 
             console.log(`%c${FILE_PREFIX} 🤖 FINAL RESPONSE:`, "color: #2e7d32; font-weight: bold;", fullText); 
             console.groupEnd(); 
+
+            if (rateLimitInfo && retryCount < MAX_RETRIES) {
+                console.warn(`${FILE_PREFIX} ⛔ Rate-limit detectado. Aguardando ${rateLimitInfo.seconds}s para retry automático.`);
+                const waitSeconds = Math.max(1, Number(rateLimitInfo.seconds) || 240);
+                onChunk({ type: 'status', content: `⛔ Limite de solicitações atingido. Aguardando ${waitSeconds}s para tentar novamente...` });
+                await waitRateLimitCountdown(waitSeconds, (remaining) => {
+                    onChunk({ type: 'status', content: `⏳ Tentando novamente em ${remaining}s...` });
+                });
+                onChunk({ type: 'status', content: '🔄 Reiniciando envio após cooldown de rate-limit...' });
+                return await apiCallStream(endpoint, method, data, onChunk, signal, retryCount + 1);
+            }
             
             
             // -----------------------------------------------------
