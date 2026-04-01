@@ -77,6 +77,24 @@ def emit_event(q, type_, content):
         payload = json.dumps({"type": type_, "content": content}, separators=(',', ':'))
         q.put(payload + "\n")
 
+async def close_ephemeral_pages(context, baseline_pages, q=None, keep_pages=None):
+    """
+    Fecha abas criadas durante uma tarefa (popups/abas órfãs), preservando
+    apenas as abas de baseline e as explicitamente mantidas em keep_pages.
+    """
+    try:
+        baseline_ids = {id(p) for p in (baseline_pages or [])}
+        keep_ids = {id(p) for p in (keep_pages or []) if p is not None}
+        for p in list(getattr(context, "pages", []) or []):
+            if id(p) in baseline_ids or id(p) in keep_ids:
+                continue
+            try:
+                await p.close()
+            except Exception as e:
+                emit_log(q, f"⚠️ Falha ao fechar aba efêmera: {e}")
+    except Exception as e:
+        emit_log(q, f"⚠️ Limpeza de abas efêmeras falhou: {e}")
+
 async def _get_window_state(page):
     try:
         session = await page.context.new_cdp_session(page)
@@ -1834,6 +1852,7 @@ async def handle_search_task(context, task):
     async with tab_semaphore:
         q    = task.get('stream_queue')
         query = (task.get('query') or '').strip()
+        baseline_pages = list(getattr(context, "pages", []) or [])
         page = None
         try:
             if not query:
@@ -2018,6 +2037,7 @@ async def handle_search_task(context, task):
                     await page.close()
                 except:
                     pass
+            await close_ephemeral_pages(context, baseline_pages, q=q)
             if q:
                 q.put(None)
 
@@ -2030,6 +2050,7 @@ async def handle_uptodate_search_task(context, task):
     async with tab_semaphore:
         q = task.get('stream_queue')
         query = (task.get('query') or '').strip()
+        baseline_pages = list(getattr(context, "pages", []) or [])
         page = None
         try:
             if not query:
@@ -2171,6 +2192,7 @@ async def handle_uptodate_search_task(context, task):
                     await page.close()
                 except Exception:
                     pass
+            await close_ephemeral_pages(context, baseline_pages, q=q)
             if q:
                 q.put(None)
 
@@ -2394,6 +2416,33 @@ async def handle_chat_task_inner(task, page, q, stop_event: asyncio.Event, activ
             break
 
         loop_count += 1
+
+        rate_limit_state = await page.evaluate("""() => {
+            const bodyText = (document.body?.innerText || '').replace(/\\s+/g, ' ').trim();
+            const candidates = Array.from(document.querySelectorAll('div,section,article,[role="dialog"],main'));
+            const hit = candidates.find(el => {
+                const txt = (el.innerText || '').trim().toLowerCase();
+                if (!txt || txt.length < 10) return false;
+                const hasPt = txt.includes('excesso de solicita') && txt.includes('aguarde alguns minutos');
+                const hasEn = txt.includes('too many requests') || txt.includes('rate limit');
+                return hasPt || hasEn;
+            });
+            if (!hit) {
+                return { detected: false, message: '' };
+            }
+            const msg = (hit.innerText || bodyText || '').trim().slice(0, 1200);
+            return { detected: true, message: msg };
+        }""")
+
+        if rate_limit_state.get("detected"):
+            rate_limit_msg = (rate_limit_state.get("message") or "Excesso de solicitações").strip()
+            emit_log(q, f"⛔ Rate-limit detectado no ChatGPT: {rate_limit_msg[:220]}")
+            emit_event(q, "error", {
+                "code": "rate_limit",
+                "message": rate_limit_msg,
+                "retry_after_seconds": 240
+            })
+            break
 
         chat_error_state = await page.evaluate("""() => {
             const retryBtn = document.querySelector('button[data-testid="regenerate-thread-error-button"]');
