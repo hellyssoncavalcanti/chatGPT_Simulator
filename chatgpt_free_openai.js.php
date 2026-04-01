@@ -5,20 +5,200 @@ error_reporting(0);
 $currentFileName = basename(__FILE__);
 $phpSelf = basename($_SERVER['PHP_SELF'] ?? '');
 $secFetchDest = strtolower($_SERVER['HTTP_SEC_FETCH_DEST'] ?? '');
+$httpAccept = strtolower($_SERVER['HTTP_ACCEPT'] ?? '');
 $requestedAsJs = (($_GET['as'] ?? '') === 'js');
+$acceptsJs = (strpos($httpAccept, 'javascript') !== false);
+$acceptsHtml = (strpos($httpAccept, 'text/html') !== false);
 
 $isDirectFileUrl = ($phpSelf === $currentFileName);
-$isScriptFetch = $requestedAsJs || ($secFetchDest === 'script');
+$isScriptFetch = $requestedAsJs || ($secFetchDest === 'script') || ($acceptsJs && !$acceptsHtml);
 $shouldRenderDirectPage = $isDirectFileUrl && !$isScriptFetch;
+$action = $_GET['action'] ?? '';
+
+function chatgpt_free_bootstrap_context_if_needed() {
+    static $bootstrapped = false;
+    if ($bootstrapped) return;
+    $bootstrapped = true;
+
+    date_default_timezone_set('America/Recife');
+    $filename = 'config/config.php';if(file_exists($filename)){@include_once($filename);}elseif(file_exists("../".$filename)){@include_once("../".$filename);}elseif(file_exists("../../".$filename)){@include_once("../../".$filename);}elseif(file_exists("../../../".$filename)){@include_once("../../../".$filename);}
+    $filename = 'scripts/login.php';if(file_exists($filename)){@include_once($filename);}elseif(file_exists("../".$filename)){@include_once("../".$filename);}elseif(file_exists("../../".$filename)){@include_once("../../".$filename);}elseif(file_exists("../../../".$filename)){@include_once("../../../".$filename);}
+    $filename = 'scripts/func.inc.php';if(file_exists($filename)){@include_once($filename);}elseif(file_exists("../".$filename)){@include_once("../".$filename);}elseif(file_exists("../../".$filename)){@include_once("../../".$filename);}elseif(file_exists("../../../".$filename)){@include_once("../../../".$filename);}
+
+    // IMPORTANTE: includes dentro de função carregam variáveis em escopo local.
+    // Repassa para $GLOBALS para manter compatibilidade com o comportamento anterior.
+    foreach ([
+        'mysqli',
+        'row_login_atual',
+        'config',
+        'hostname_conexao',
+        'database_conexao',
+        'username_conexao',
+        'password_conexao'
+    ] as $globalKey) {
+        if (isset($$globalKey)) {
+            $GLOBALS[$globalKey] = $$globalKey;
+        }
+    }
+}
+
+function chatgpt_free_get_mysql_connection_local() {
+    global $mysqli, $config, $hostname_conexao, $database_conexao, $username_conexao, $password_conexao;
+    if (isset($mysqli) && $mysqli instanceof mysqli && @$mysqli->ping()) {
+        @$mysqli->set_charset("utf8mb4");
+        return $mysqli;
+    }
+    $host = $config["mysql_host"] ?? $hostname_conexao ?? null;
+    $user = $config["mysql_login"] ?? $username_conexao ?? null;
+    $pass = $config["mysql_password"] ?? $password_conexao ?? null;
+    $db   = $config["mysql_db"] ?? $database_conexao ?? null;
+    $port = $config["mysql_port"] ?? 3306;
+    if (!$host) return null;
+    $con = new mysqli($host, $user, $pass, $db, $port);
+    if ($con->connect_error) return null;
+    @$con->set_charset("utf8mb4");
+    return $con;
+}
+
+function chatgpt_free_parse_context($data) {
+    $id_criador = isset($data['id_criador']) && is_numeric($data['id_criador']) ? intval($data['id_criador']) : (isset($_GET['id_criador']) && is_numeric($_GET['id_criador']) ? intval($_GET['id_criador']) : null);
+    $id_paciente = isset($data['id_paciente']) && is_numeric($data['id_paciente']) ? intval($data['id_paciente']) : (isset($_GET['id_paciente']) && is_numeric($_GET['id_paciente']) ? intval($_GET['id_paciente']) : null);
+    $id_atendimento = isset($data['id_atendimento']) && is_numeric($data['id_atendimento']) ? intval($data['id_atendimento']) : (isset($_GET['id_atendimento']) && is_numeric($_GET['id_atendimento']) ? intval($_GET['id_atendimento']) : null);
+    $id_receita = isset($data['id_receita']) && is_numeric($data['id_receita']) ? intval($data['id_receita']) : (isset($_GET['id_receita']) && is_numeric($_GET['id_receita']) ? intval($_GET['id_receita']) : null);
+
+    return [
+      'id_criador' => $id_criador,
+      'id_paciente' => $id_paciente,
+      'id_atendimento' => $id_atendimento,
+      'id_receita' => $id_receita
+    ];
+}
+
+if ($action === 'save_chat_history' || $action === 'get_chat_history') {
+    while (ob_get_level()) ob_end_clean();
+    header('Content-Type: application/json; charset=utf-8');
+    chatgpt_free_bootstrap_context_if_needed();
+    @session_start();
+
+    $inputJSON = file_get_contents('php://input');
+    $data = is_string($inputJSON) && $inputJSON !== '' ? json_decode($inputJSON, true) : [];
+    if (!is_array($data)) $data = [];
+
+    global $row_login_atual;
+    $id_criador_logado = isset($row_login_atual['id']) && is_numeric($row_login_atual['id'])
+      ? intval($row_login_atual['id'])
+      : (isset($_SESSION['id']) && is_numeric($_SESSION['id']) ? intval($_SESSION['id']) : null);
+    if (!$id_criador_logado) {
+        http_response_code(401);
+        echo json_encode(['success' => false, 'error' => 'Utilizador não autenticado.']);
+        exit;
+    }
+
+    $ctx = chatgpt_free_parse_context($data);
+    if (!$ctx['id_criador']) $ctx['id_criador'] = $id_criador_logado;
+
+    $db = chatgpt_free_get_mysql_connection_local();
+    if (!$db) {
+        echo json_encode(['success' => false, 'error' => 'Falha na conexão com banco de dados']);
+        exit;
+    }
+
+    @$db->query("ALTER TABLE chatgpt_chats ADD COLUMN chat_mode VARCHAR(120) NOT NULL DEFAULT 'assistant'");
+    @$db->query("ALTER TABLE chatgpt_chats ADD COLUMN mensagens LONGTEXT NULL");
+    $model_used = isset($data['model']) ? preg_replace('/\s+/', ' ', trim((string)$data['model'])) : '';
+    $legacy_chat_mode = 'free_openai';
+    $chat_mode_value = ($model_used !== '') ? $model_used : $legacy_chat_mode;
+    $chat_mode_esc = $db->real_escape_string($chat_mode_value);
+    $legacy_chat_mode_esc = $db->real_escape_string($legacy_chat_mode);
+
+    if ($ctx['id_atendimento']) {
+        $where_base = "id_atendimento = " . intval($ctx['id_atendimento']);
+    } elseif ($ctx['id_receita']) {
+        $where_base = "id_receita = " . intval($ctx['id_receita']) . " AND id_atendimento IS NULL";
+    } elseif ($ctx['id_paciente']) {
+        $where_base = "id_paciente = " . intval($ctx['id_paciente']) . " AND id_atendimento IS NULL AND id_receita IS NULL";
+    } else {
+        $where_base = "id_criador = " . intval($ctx['id_criador']) . " AND id_atendimento IS NULL AND id_receita IS NULL AND id_paciente IS NULL";
+    }
+    $where = "$where_base AND chat_mode = '$chat_mode_esc'";
+
+    if ($action === 'get_chat_history') {
+        $legacy_mode_condition = "(chat_mode = '$legacy_chat_mode_esc' OR chat_mode IS NULL OR chat_mode = '')";
+        $sql = "SELECT mensagens FROM chatgpt_chats WHERE $where ORDER BY datetime_atualizacao DESC, id DESC LIMIT 1";
+        $result = $db->query($sql);
+        if ((!$result || $result->num_rows === 0) && $chat_mode_value !== $legacy_chat_mode) {
+            $sql = "SELECT mensagens FROM chatgpt_chats WHERE $where_base AND $legacy_mode_condition ORDER BY datetime_atualizacao DESC, id DESC LIMIT 1";
+            $result = $db->query($sql);
+        }
+        if ((!$result || $result->num_rows === 0) && $chat_mode_value === $legacy_chat_mode) {
+            $sql = "SELECT mensagens FROM chatgpt_chats WHERE $where_base ORDER BY datetime_atualizacao DESC, id DESC LIMIT 1";
+            $result = $db->query($sql);
+        }
+        if ($result && $result->num_rows > 0) {
+            $row = $result->fetch_assoc();
+            $messages = [];
+            if (!empty($row['mensagens'])) {
+                $decoded = json_decode($row['mensagens'], true);
+                if (is_array($decoded)) $messages = $decoded;
+            }
+            echo json_encode(['success' => true, 'messages' => $messages]);
+        } else {
+            echo json_encode(['success' => true, 'messages' => []]);
+        }
+        exit;
+    }
+
+    $messages = isset($data['messages']) && is_array($data['messages']) ? $data['messages'] : [];
+    $messages_esc = $db->real_escape_string(json_encode($messages, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES));
+    $url_atual_esc = $db->real_escape_string($data['url_atual'] ?? ($_SERVER['HTTP_REFERER'] ?? ''));
+    $titulo_esc = $db->real_escape_string('ConexaoVida IA - Free OpenAI');
+    $id_chatgpt_label = 'Chat via Puter (free OpenAI)';
+    $id_chatgpt_esc = $db->real_escape_string($id_chatgpt_label);
+    $url_chatgpt_esc = $db->real_escape_string('');
+    $sql_paciente = $ctx['id_paciente'] ? intval($ctx['id_paciente']) : "NULL";
+    $sql_atendimento = $ctx['id_atendimento'] ? intval($ctx['id_atendimento']) : "NULL";
+    $sql_receita = $ctx['id_receita'] ? intval($ctx['id_receita']) : "NULL";
+    $id_criador = intval($ctx['id_criador']);
+
+    $check = $db->query("SELECT id FROM chatgpt_chats WHERE $where LIMIT 1");
+    if ($check && $check->num_rows > 0) {
+        $row = $check->fetch_assoc();
+        $id = intval($row['id']);
+        $update_sql = "UPDATE chatgpt_chats SET
+            mensagens = '$messages_esc',
+            url_atual = '$url_atual_esc',
+            titulo = '$titulo_esc',
+            id_chatgpt = '$id_chatgpt_esc',
+            url_chatgpt = '$url_chatgpt_esc',
+            id_criador = $id_criador,
+            id_paciente = $sql_paciente,
+            id_atendimento = $sql_atendimento,
+            id_receita = $sql_receita,
+            chat_mode = '$chat_mode_esc'
+            WHERE id = $id";
+        $ok = $db->query($update_sql);
+    } else {
+        $insert_sql = "INSERT INTO chatgpt_chats
+            (id_criador, id_paciente, id_atendimento, id_receita, url_atual, titulo, id_chatgpt, url_chatgpt, chat_mode, mensagens)
+            VALUES
+            ($id_criador, $sql_paciente, $sql_atendimento, $sql_receita, '$url_atual_esc', '$titulo_esc', '$id_chatgpt_esc', '$url_chatgpt_esc', '$chat_mode_esc', '$messages_esc')";
+        $ok = $db->query($insert_sql);
+    }
+
+    if (!$ok) {
+        echo json_encode(['success' => false, 'error' => $db->error]);
+    } else {
+        echo json_encode(['success' => true, 'saved_messages' => count($messages)]);
+    }
+    exit;
+}
 
 if ($shouldRenderDirectPage) {
     header("Content-Type: text/html; charset=UTF-8", true);
     date_default_timezone_set('America/Recife');
     //PREVENÇÃO DE CACHE AGRESSIVO (ESPECIALMENTE PARA SAFARI/MOBILE):
     header("Cache-Control: no-store, no-cache, must-revalidate, max-age=0");header("Cache-Control: post-check=0, pre-check=0", false);header("Pragma: no-cache");header("Expires: Wed, 11 Jan 1984 05:00:00 GMT"); // Uma data no passado, para evitar que os navegadores guardem o arquivo em cache.
-    $filename = 'config/config.php';if(file_exists($filename)){@include_once($filename);}elseif(file_exists("../".$filename)){@include_once("../".$filename);}elseif(file_exists("../../".$filename)){@include_once("../../".$filename);}elseif(file_exists("../../../".$filename)){@include_once("../../../".$filename);} 
-    $filename = 'scripts/login.php';if(file_exists($filename)){@include_once($filename);}elseif(file_exists("../".$filename)){@include_once("../".$filename);}elseif(file_exists("../../".$filename)){@include_once("../../".$filename);}elseif(file_exists("../../../".$filename)){@include_once("../../../".$filename);}
-    $filename = 'scripts/func.inc.php';if(file_exists($filename)){@include_once($filename);}elseif(file_exists("../".$filename)){@include_once("../".$filename);}elseif(file_exists("../../".$filename)){@include_once("../../".$filename);}elseif(file_exists("../../../".$filename)){@include_once("../../../".$filename);} 
+    chatgpt_free_bootstrap_context_if_needed();
 
     $authorized = false;
     if (
@@ -79,22 +259,155 @@ header('Content-Type: application/javascript; charset=utf-8');
   if (window.__chatgptFreeOpenAIToastLoaded) return;
   window.__chatgptFreeOpenAIToastLoaded = true;
 
+  var FILE_PREFIX = '[<?php echo $_SERVER['PHP_SELF']; ?>]';
+  var PREFIX = 'chatgpt_free_openai_';
   var PUTER_SDK_URL = 'https://js.puter.com/v2/';
   var MAX_HISTORY = 12;
-  var PREFIX = 'chatgpt_free_openai_';
   var KEY_MODEL = PREFIX + 'selected_model';
   var KEY_MODEL_MANUAL = PREFIX + 'selected_model_manual';
+  var KEY_WORKING_MODELS_CACHE = PREFIX + 'working_models_cache_v1';
   var RENDER_MODE = window.__CHATGPT_FREE_OPENAI_MODE === 'page' ? 'page' : 'toast';
 
+  function log() { console.log.apply(console, ['%c' + FILE_PREFIX + ' [LOG]', 'color:#1976d2;font-weight:bold'].concat([].slice.call(arguments))); }
+  function warn() { console.warn.apply(console, ['%c' + FILE_PREFIX + ' [WARN]', 'color:#f57c00;font-weight:bold'].concat([].slice.call(arguments))); }
+  function error() { console.error.apply(console, ['%c' + FILE_PREFIX + ' [ERROR]', 'color:#d32f2f;font-weight:bold'].concat([].slice.call(arguments))); }
+  function normalizeError(err) {
+    if (!err) return 'erro desconhecido';
+    if (typeof err === 'string') return err;
+    if (err.message) return err.message;
+    try { return JSON.stringify(err); } catch (_) { return String(err); }
+  }
+
+  function shouldUseWebSearch(prompt) {
+    var p = String(prompt || '').toLowerCase();
+    if (!p) return false;
+    return /(pesquise|buscar|busque|internet|web|wikipedia|google|not[ií]cia|atualizado|site:|fonte|fontes)/.test(p);
+  }
+
+  function buildChatOptions(model, enableWebSearch) {
+    var opts = { model: model };
+    if (enableWebSearch) {
+      // Mantém múltiplas chaves por compatibilidade com variações de SDK.
+      opts.web_search = true;
+      opts.search = true;
+      opts.enable_search = true;
+      opts.tools = [{ type: 'web_search' }];
+    }
+    return opts;
+  }
+
+  function normalizeWebSearchItems(raw) {
+    if (!raw) return [];
+    if (Array.isArray(raw)) return raw;
+    if (Array.isArray(raw.results)) return raw.results;
+    if (Array.isArray(raw.items)) return raw.items;
+    if (Array.isArray(raw.data)) return raw.data;
+    return [];
+  }
+
+  async function fetchJsonWithTimeout(url, ms) {
+    var ctrl = (typeof AbortController !== 'undefined') ? new AbortController() : null;
+    var timer = null;
+    try {
+      if (ctrl) timer = setTimeout(function () { ctrl.abort(); }, ms || 6000);
+      var res = await fetch(url, {
+        method: 'GET',
+        credentials: 'omit',
+        signal: ctrl ? ctrl.signal : undefined
+      });
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      return await res.json();
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+
+  function formatSearchItems(items) {
+    return (items || []).slice(0, 5).map(function (it, idx) {
+      var title = it.title || it.name || ('Resultado ' + (idx + 1));
+      var url = it.url || it.link || '';
+      var snippet = it.snippet || it.description || it.text || '';
+      return '- ' + title + (url ? ' (' + url + ')' : '') + (snippet ? ' :: ' + snippet : '');
+    }).join('\n');
+  }
+
+  async function buildFallbackWebContext(query) {
+    var q = String(query || '').trim();
+    if (!q) return '';
+    var collected = [];
+
+    try {
+      var ddgUrl = 'https://api.duckduckgo.com/?q=' + encodeURIComponent(q) + '&format=json&no_html=1&skip_disambig=1';
+      var ddg = await fetchJsonWithTimeout(ddgUrl, 7000);
+      if (ddg && ddg.AbstractText) {
+        collected.push({
+          title: ddg.Heading || q,
+          url: ddg.AbstractURL || '',
+          snippet: ddg.AbstractText
+        });
+      }
+      var topics = (ddg && Array.isArray(ddg.RelatedTopics)) ? ddg.RelatedTopics : [];
+      topics.slice(0, 4).forEach(function (topic) {
+        if (topic && topic.Text) {
+          collected.push({
+            title: topic.FirstURL ? topic.FirstURL.split('/').pop().replace(/_/g, ' ') : 'Relacionado',
+            url: topic.FirstURL || '',
+            snippet: topic.Text
+          });
+        } else if (topic && Array.isArray(topic.Topics)) {
+          topic.Topics.slice(0, 2).forEach(function (nested) {
+            if (!nested || !nested.Text) return;
+            collected.push({
+              title: nested.FirstURL ? nested.FirstURL.split('/').pop().replace(/_/g, ' ') : 'Relacionado',
+              url: nested.FirstURL || '',
+              snippet: nested.Text
+            });
+          });
+        }
+      });
+    } catch (err) {
+      warn('web_search:fallback_ddg_fail', normalizeError(err));
+    }
+
+    if (!collected.length) return '';
+    return formatSearchItems(collected);
+  }
+
+  async function buildWebSearchContext(query, puter) {
+    var q = String(query || '').trim();
+    if (!q) return '';
+    try {
+      if (puter && puter.ai && typeof puter.ai.webSearch === 'function') {
+        var ws = await puter.ai.webSearch(q);
+        var items = normalizeWebSearchItems(ws).slice(0, 5);
+        if (items.length) return formatSearchItems(items);
+      }
+      if (puter && puter.ai && typeof puter.ai.search === 'function') {
+        var s = await puter.ai.search(q);
+        var items2 = normalizeWebSearchItems(s).slice(0, 5);
+        if (items2.length) return formatSearchItems(items2);
+      }
+    } catch (err) {
+      warn('web_search:tool_call_fail', normalizeError(err));
+    }
+    return await buildFallbackWebContext(q);
+  }
+
+  window.addEventListener('error', function (ev) { error('window.onerror', ev && ev.message ? ev.message : ev); });
+  window.addEventListener('unhandledrejection', function (ev) { error('unhandledrejection', ev && ev.reason ? ev.reason : ev); });
+
   function loadPuterSdk() {
+    log('loadPuterSdk:start');
     return new Promise(function (resolve, reject) {
       if (window.puter && window.puter.ai && typeof window.puter.ai.chat === 'function') {
+        log('loadPuterSdk:already_loaded');
         resolve(window.puter);
         return;
       }
 
       var existing = document.querySelector('script[data-puter-sdk="1"]');
       if (existing) {
+        log('loadPuterSdk:script_already_exists_waiting_load');
         existing.addEventListener('load', function () { resolve(window.puter); }, { once: true });
         existing.addEventListener('error', function () { reject(new Error('Falha ao carregar Puter SDK')); }, { once: true });
         return;
@@ -111,7 +424,43 @@ header('Content-Type: application/javascript; charset=utf-8');
       };
       script.onerror = function () { reject(new Error('Falha ao carregar Puter SDK')); };
       document.head.appendChild(script);
+      log('loadPuterSdk:script_injected', PUTER_SDK_URL);
     });
+  }
+
+  function getContextFromUrl() {
+    var p = new URLSearchParams(window.location.search || '');
+    function readInt(name) {
+      var v = p.get(name);
+      return v && /^\d+$/.test(v) ? parseInt(v, 10) : null;
+    }
+    return {
+      id_criador: readInt('id_criador'),
+      id_paciente: readInt('id_paciente'),
+      id_atendimento: readInt('id_atendimento'),
+      id_receita: readInt('id_receita')
+    };
+  }
+
+  function escapeHtml(str) {
+    return String(str || '')
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;');
+  }
+
+  function renderMarkdown(text) {
+    if (window.marked && typeof window.marked.parse === 'function') {
+      return window.marked.parse(String(text || ''));
+    }
+    var html = escapeHtml(text || '');
+    html = html.replace(/```([\s\S]*?)```/g, '<pre><code>$1</code></pre>');
+    html = html.replace(/`([^`]+)`/g, '<code>$1</code>');
+    html = html.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+    html = html.replace(/\*([^*\n]+)\*/g, '<em>$1</em>');
+    html = html.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
+    html = html.replace(/\n/g, '<br>');
+    return html;
   }
 
   function createUI() {
@@ -123,7 +472,7 @@ header('Content-Type: application/javascript; charset=utf-8');
       '.cfo-toast{position:fixed;right:18px;bottom:86px;width:360px;max-width:calc(100vw - 24px);height:500px;',
       'background:#fff;border-radius:12px;box-shadow:0 10px 40px rgba(0,0,0,.25);display:none;flex-direction:column;',
       'overflow:hidden;z-index:99999;border:1px solid #e7e7e7;font-family:Arial,sans-serif}',
-      '.cfo-page{width:100%;min-height:70vh;background:#fff;border-radius:12px;box-shadow:0 8px 28px rgba(0,0,0,.08);display:flex;flex-direction:column;',
+      '.cfo-page{width:100%;height:70vh;max-height:70vh;background:#fff;border-radius:12px;box-shadow:0 8px 28px rgba(0,0,0,.08);display:flex;flex-direction:column;',
       'overflow:hidden;border:1px solid #e7e7e7;font-family:Arial,sans-serif}',
       '.cfo-header{background:#0b57d0;color:#fff;padding:10px 12px;font-weight:700;font-size:14px}',
       '.cfo-model-wrap{padding:8px 10px;border-bottom:1px solid #ebedf0;background:#f7f9ff}',
@@ -131,12 +480,19 @@ header('Content-Type: application/javascript; charset=utf-8');
       '.cfo-model-select{width:100%;padding:7px;border:1px solid #ccd4e2;border-radius:8px;background:#fff;font-size:12px}',
       '.cfo-body{flex:1;overflow:auto;padding:10px;background:#f8f9fb}',
       '.cfo-msg{max-width:88%;padding:8px 10px;margin:0 0 8px;border-radius:10px;white-space:pre-wrap;line-height:1.35;font-size:13px}',
+      '.cfo-msg-head{font-size:10px;font-weight:600;opacity:.65;margin:0 0 5px 0;text-transform:uppercase;letter-spacing:.03em}',
       '.cfo-user{margin-left:auto;background:#dbe9ff;color:#11326f}',
       '.cfo-assistant{background:#fff;color:#222;border:1px solid #ebebeb}',
       '.cfo-footer{display:flex;gap:8px;padding:10px;border-top:1px solid #eee;background:#fff}',
+      '.cfo-attach-btn{width:40px;height:40px;border:1px solid #d3d7e3;border-radius:8px;background:#f4f7ff;cursor:pointer;font-size:18px;line-height:1}',
       '.cfo-input{flex:1;min-height:38px;max-height:90px;padding:8px;border:1px solid #d9d9d9;border-radius:8px;resize:vertical;font-size:13px}',
       '.cfo-send{border:none;border-radius:8px;background:#0b57d0;color:#fff;padding:0 12px;cursor:pointer;font-weight:600}',
-      '.cfo-send[disabled]{opacity:.6;cursor:not-allowed}'
+      '.cfo-send[disabled]{opacity:.6;cursor:not-allowed}',
+      '.cfo-attach-preview{display:none;flex-wrap:wrap;gap:6px;padding:6px 10px 0;background:#fff}',
+      '.cfo-attach-preview.has-items{display:flex}',
+      '.cfo-chip{display:inline-flex;align-items:center;gap:6px;border:1px solid #cdd5ea;background:#eef3ff;color:#1a3b77;border-radius:14px;padding:3px 8px;font-size:11px}',
+      '.cfo-chip-x{cursor:pointer;font-weight:700}',
+      '@media (max-width:768px){.cfo-page{height:78vh;max-height:78vh}}'
     ].join('');
     document.head.appendChild(style);
 
@@ -169,7 +525,10 @@ header('Content-Type: application/javascript; charset=utf-8');
       '  <select class="cfo-model-select" id="cfo-model"><option value="">Buscando modelos...</option></select>',
       '</div>',
       '<div class="cfo-body" id="cfo-body"></div>',
+      '<div class="cfo-attach-preview" id="cfo-attach-preview"></div>',
       '<div class="cfo-footer">',
+      '  <input type="file" id="cfo-file-input" multiple style="display:none" accept="image/*,.pdf,.doc,.docx,.xls,.xlsx,.csv,.txt,.json,.xml">',
+      '  <button class="cfo-attach-btn" id="cfo-attach-btn" type="button" title="Anexar arquivos">📎</button>',
       '  <textarea class="cfo-input" id="cfo-input" placeholder="Digite sua pergunta..."></textarea>',
       '  <button class="cfo-send" id="cfo-send" type="button">Enviar</button>',
       '</div>'
@@ -181,29 +540,115 @@ header('Content-Type: application/javascript; charset=utf-8');
       fab: fab,
       toast: panel,
       body: panel.querySelector('#cfo-body'),
+      attachPreview: panel.querySelector('#cfo-attach-preview'),
+      attachBtn: panel.querySelector('#cfo-attach-btn'),
+      fileInput: panel.querySelector('#cfo-file-input'),
       input: panel.querySelector('#cfo-input'),
       send: panel.querySelector('#cfo-send'),
       model: panel.querySelector('#cfo-model')
     };
   }
 
-  function addMessage(container, text, role) {
+  function addMessage(container, text, role, metaLabel) {
     var el = document.createElement('div');
     el.className = 'cfo-msg ' + (role === 'user' ? 'cfo-user' : 'cfo-assistant');
-    el.textContent = text;
+    if (role === 'assistant') {
+      if (metaLabel) {
+        var head = document.createElement('div');
+        head.className = 'cfo-msg-head';
+        head.textContent = metaLabel;
+        el.appendChild(head);
+      }
+      var body = document.createElement('div');
+      body.innerHTML = renderMarkdown(text);
+      el.appendChild(body);
+    } else {
+      el.textContent = text;
+    }
     container.appendChild(el);
     container.scrollTop = container.scrollHeight;
   }
 
-  function normalizeAssistantText(result) {
-    if (typeof result === 'string') return result;
-    if (!result) return 'Sem resposta.';
-    if (typeof result.message === 'string') return result.message;
-    if (typeof result.text === 'string') return result.text;
-    if (Array.isArray(result.choices) && result.choices[0] && result.choices[0].message && typeof result.choices[0].message.content === 'string') {
-      return result.choices[0].message.content;
+  function tryParseJsonString(raw) {
+    if (typeof raw !== 'string') return null;
+    var t = raw.trim();
+    if (!t) return null;
+    if (!((t[0] === '{' && t[t.length - 1] === '}') || (t[0] === '[' && t[t.length - 1] === ']'))) return null;
+    try { return JSON.parse(t); } catch (_) { return null; }
+  }
+
+  function extractTextFromContentArray(contentArray) {
+    if (!Array.isArray(contentArray)) return '';
+    return contentArray.map(function (item) {
+      if (!item) return '';
+      if (typeof item === 'string') return item;
+      if (typeof item.text === 'string') return item.text;
+      if (item.text && typeof item.text.value === 'string') return item.text.value;
+      if (item.type === 'text' && typeof item.value === 'string') return item.value;
+      if (item.type === 'output_text' && typeof item.text === 'string') return item.text;
+      return '';
+    }).filter(Boolean).join('\n');
+  }
+
+  function extractAssistantText(payload) {
+    if (!payload) return '';
+    if (typeof payload === 'string') return payload;
+    if (Array.isArray(payload)) {
+      return payload.map(function (part) { return extractAssistantText(part); }).filter(Boolean).join('\n');
     }
-    return JSON.stringify(result, null, 2);
+    if (typeof payload !== 'object') return '';
+
+    if (typeof payload.text === 'string') return payload.text;
+    if (typeof payload.output_text === 'string') return payload.output_text;
+    if (typeof payload.answer === 'string') return payload.answer;
+    if (typeof payload.response === 'string') return payload.response;
+    if (typeof payload.message === 'string') return payload.message;
+
+    if (payload.message && typeof payload.message === 'object') {
+      if (typeof payload.message.content === 'string') return payload.message.content;
+      var fromMessageContent = extractTextFromContentArray(payload.message.content);
+      if (fromMessageContent) return fromMessageContent;
+      var nestedMessage = extractAssistantText(payload.message);
+      if (nestedMessage) return nestedMessage;
+    }
+
+    if (Array.isArray(payload.content)) {
+      var fromContentArray = extractTextFromContentArray(payload.content);
+      if (fromContentArray) return fromContentArray;
+    }
+    if (Array.isArray(payload.choices) && payload.choices[0]) {
+      var fromChoice = extractAssistantText(payload.choices[0].message || payload.choices[0].delta || payload.choices[0]);
+      if (fromChoice) return fromChoice;
+    }
+    return '';
+  }
+
+  function normalizeAssistantText(result) {
+    if (!result) return 'Sem resposta.';
+
+    if (typeof result === 'string') {
+      var parsed = tryParseJsonString(result);
+      if (parsed) {
+        var parsedText = extractAssistantText(parsed);
+        if (parsedText) return parsedText;
+      }
+      return result;
+    }
+
+    var extracted = extractAssistantText(result);
+    if (extracted) return extracted;
+
+    if (typeof result.toString === 'function') {
+      var maybeString = String(result.toString());
+      var parsedMaybe = tryParseJsonString(maybeString);
+      if (parsedMaybe) {
+        var parsedMaybeText = extractAssistantText(parsedMaybe);
+        if (parsedMaybeText) return parsedMaybeText;
+      }
+      if (maybeString && maybeString !== '[object Object]') return maybeString;
+    }
+
+    return 'Sem conteúdo textual na resposta da LLM.';
   }
 
   function parseModelCandidates(raw) {
@@ -264,6 +709,7 @@ header('Content-Type: application/javascript; charset=utf-8');
 
   async function fetchAvailableModels(puter) {
     var candidates = [];
+    log('fetchAvailableModels:start');
     try {
       if (puter && puter.ai) {
         if (typeof puter.ai.models === 'function') candidates = parseModelCandidates(await puter.ai.models());
@@ -271,7 +717,7 @@ header('Content-Type: application/javascript; charset=utf-8');
         if (!candidates.length && Array.isArray(puter.ai.models)) candidates = parseModelCandidates(puter.ai.models);
       }
     } catch (err) {
-      console.warn('[chatgpt_free_openai] Falha ao listar modelos automaticamente:', err);
+      warn('fetchAvailableModels:error', err);
     }
 
     if (!candidates.length) {
@@ -283,7 +729,101 @@ header('Content-Type: application/javascript; charset=utf-8');
       ];
     }
 
+    log('fetchAvailableModels:done', candidates.map(function (m) { return m.name; }));
     return candidates;
+  }
+
+  function getWorkingModelsFromCache(models) {
+    try {
+      var raw = localStorage.getItem(KEY_WORKING_MODELS_CACHE);
+      if (!raw) return null;
+      var parsed = JSON.parse(raw);
+      if (!parsed || !Array.isArray(parsed.models) || !parsed.ts) return null;
+      if ((Date.now() - parsed.ts) > (6 * 60 * 60 * 1000)) return null;
+      var allowed = {};
+      parsed.models.forEach(function (m) { allowed[m] = true; });
+      return {
+        ts: parsed.ts,
+        models: models.filter(function (m) { return allowed[m.name]; })
+      };
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function saveWorkingModelsCache(models) {
+    try {
+      localStorage.setItem(KEY_WORKING_MODELS_CACHE, JSON.stringify({
+        ts: Date.now(),
+        models: models.map(function (m) { return m.name; })
+      }));
+    } catch (_) {}
+  }
+
+  function withTimeout(promise, ms) {
+    return Promise.race([
+      promise,
+      new Promise(function (_, reject) {
+        setTimeout(function () { reject(new Error('timeout ' + ms + 'ms')); }, ms);
+      })
+    ]);
+  }
+
+  async function probeModelWithRetry(puter, modelName, attempts) {
+    var lastErr = null;
+    for (var i = 0; i < attempts; i += 1) {
+      try {
+        var probeResult = await withTimeout(
+          puter.ai.chat([{ role: 'user', content: 'Responda apenas: OK' }], { model: modelName }),
+          15000
+        );
+        var probeText = normalizeAssistantText(probeResult);
+        if (probeText && String(probeText).trim() !== '') return true;
+      } catch (err) {
+        lastErr = err;
+      }
+    }
+    if (lastErr) throw lastErr;
+    throw new Error('modelo sem resposta útil');
+  }
+
+  async function filterWorkingModels(puter, models, onProgress) {
+    if (!models || !models.length) return [];
+    var fromCache = getWorkingModelsFromCache(models);
+    var workingMap = {};
+    var working = [];
+    if (fromCache && fromCache.models.length) {
+      fromCache.models.forEach(function (m) {
+        workingMap[m.name] = m;
+      });
+      working = Object.keys(workingMap).map(function (k) { return workingMap[k]; });
+      log('filterWorkingModels:cache_hit', working.map(function (m) { return m.name; }));
+      if (typeof onProgress === 'function') onProgress(working.slice(), true);
+    }
+
+    var prioritized = models.slice().sort(function (a, b) {
+      return scoreModelFreshness(b.name) - scoreModelFreshness(a.name);
+    }).slice(0, 16);
+    log('filterWorkingModels:start', prioritized.map(function (m) { return m.name; }));
+
+    for (var i = 0; i < prioritized.length; i += 1) {
+      var m = prioritized[i];
+      if (workingMap[m.name]) continue;
+      try {
+        await probeModelWithRetry(puter, m.name, 2);
+        workingMap[m.name] = m;
+        working = Object.keys(workingMap).map(function (k) { return workingMap[k]; });
+        log('filterWorkingModels:ok', m.name);
+        if (typeof onProgress === 'function') onProgress(working.slice(), false, m);
+      } catch (err) {
+        warn('filterWorkingModels:fail', m.name, normalizeError(err));
+      }
+    }
+
+    working = models.filter(function (m) { return !!workingMap[m.name]; });
+    if (working.length) saveWorkingModelsCache(working);
+    log('filterWorkingModels:done', working.map(function (m) { return m.name; }));
+    return working;
   }
 
   function saveSelectedModel(value, isManual) {
@@ -318,13 +858,158 @@ header('Content-Type: application/javascript; charset=utf-8');
     return savedModel;
   }
 
+  function renderModelSelectIncremental(selectEl, models, preferredModelName) {
+    selectEl.innerHTML = '';
+    var currentValue = selectEl.value || '';
+    var savedValue = localStorage.getItem(KEY_MODEL) || '';
+    var preferred = preferredModelName || savedValue || '';
+    var selected = '';
+
+    if (models.some(function (m) { return m.name === currentValue; })) selected = currentValue;
+    else if (preferred && models.some(function (m) { return m.name === preferred; })) selected = preferred;
+    else if (models.length) selected = models[0].name;
+
+    models.forEach(function (m) {
+      var opt = document.createElement('option');
+      opt.value = m.name;
+      opt.textContent = m.displayName || m.name;
+      if (m.name === selected) opt.selected = true;
+      selectEl.appendChild(opt);
+    });
+
+    if (!selectEl.dataset.cfoBound) {
+      selectEl.onchange = function () {
+        saveSelectedModel(selectEl.value || '', true);
+      };
+      selectEl.dataset.cfoBound = '1';
+    }
+
+    if (selected && selectEl.value !== selected) selectEl.value = selected;
+    return selected;
+  }
+
   function init() {
+    log('init:start', { mode: RENDER_MODE, href: window.location.href });
     var ui = createUI();
     var open = false;
     var loading = false;
     var history = [
       { role: 'system', content: 'Você é um assistente útil. Responda em português do Brasil de forma objetiva.' }
     ];
+    var pendingAttachments = [];
+    var attachmentsSupported = null;
+    var context = getContextFromUrl();
+    var preferredSavedModel = localStorage.getItem(KEY_MODEL) || '';
+    log('context:url', context);
+
+    function serializePersistableHistory() {
+      return history.filter(function (m) { return m && m.role !== 'system' && typeof m.content === 'string' && m.content.trim() !== ''; });
+    }
+
+    function renderAttachments() {
+      ui.attachPreview.innerHTML = '';
+      if (!pendingAttachments.length) {
+        ui.attachPreview.classList.remove('has-items');
+        return;
+      }
+      ui.attachPreview.classList.add('has-items');
+      pendingAttachments.forEach(function (att, idx) {
+        var chip = document.createElement('div');
+        chip.className = 'cfo-chip';
+        chip.innerHTML = '<span>' + att.name + '</span><span class="cfo-chip-x" data-idx="' + idx + '">×</span>';
+        ui.attachPreview.appendChild(chip);
+      });
+    }
+
+    function fileToDataUrl(file) {
+      return new Promise(function (resolve, reject) {
+        var reader = new FileReader();
+        reader.onload = function () { resolve(String(reader.result || '')); };
+        reader.onerror = reject;
+        reader.readAsDataURL(file);
+      });
+    }
+
+    async function appendFiles(fileList) {
+      var files = Array.prototype.slice.call(fileList || []);
+      for (var i = 0; i < files.length; i += 1) {
+        var file = files[i];
+        try {
+          var dataUrl = await fileToDataUrl(file);
+          pendingAttachments.push({
+            name: file.name || ('arquivo_' + (pendingAttachments.length + 1)),
+            type: file.type || 'application/octet-stream',
+            size: file.size || 0,
+            dataUrl: dataUrl,
+            file: file
+          });
+          log('attachment:add', { name: file.name, type: file.type, size: file.size });
+        } catch (err) {
+          warn('attachment:read_fail', file && file.name, err);
+        }
+      }
+      renderAttachments();
+    }
+
+    async function persistHistory() {
+      try {
+        var snapshot = serializePersistableHistory();
+        log('persistHistory:start', { count: snapshot.length, context: context });
+        await fetch(window.location.pathname + '?action=save_chat_history', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          credentials: 'same-origin',
+            body: JSON.stringify({
+            url_atual: window.location.href,
+            id_criador: context.id_criador,
+            id_paciente: context.id_paciente,
+            id_atendimento: context.id_atendimento,
+            id_receita: context.id_receita,
+            model: ui.model.value || localStorage.getItem(KEY_MODEL) || '',
+            messages: snapshot
+          })
+        });
+        log('persistHistory:ok');
+      } catch (err) {
+        warn('persistHistory:error', err);
+      }
+    }
+
+    async function loadHistory() {
+      try {
+        var response = await fetch(window.location.pathname + '?action=get_chat_history', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          credentials: 'same-origin',
+          body: JSON.stringify({
+            id_criador: context.id_criador,
+            id_paciente: context.id_paciente,
+            id_atendimento: context.id_atendimento,
+            id_receita: context.id_receita,
+            model: ui.model.value || localStorage.getItem(KEY_MODEL) || ''
+          })
+        });
+        var payload = await response.json();
+        var loaded = payload && Array.isArray(payload.messages) ? payload.messages : [];
+        log('loadHistory:ok', { count: loaded.length, payload: payload });
+        loaded.forEach(function (m) {
+          if (!m || (m.role !== 'user' && m.role !== 'assistant')) return;
+          var text = '';
+          if (m.role === 'assistant') {
+            text = normalizeAssistantText(m.content);
+          } else {
+            text = typeof m.content === 'string' ? m.content : '';
+          }
+          if (!text) return;
+          history.push({ role: m.role, content: text });
+          addMessage(ui.body, text, m.role);
+        });
+        return loaded.length > 0;
+      } catch (err) {
+        warn('loadHistory:error', err);
+        return false;
+      }
+    }
 
     function toggleToast() {
       if (RENDER_MODE === 'page') return;
@@ -335,19 +1020,32 @@ header('Content-Type: application/javascript; charset=utf-8');
 
     if (ui.fab) ui.fab.addEventListener('click', toggleToast);
 
+    ui.model.innerHTML = '<option value="">Validando modelos funcionais...</option>';
     loadPuterSdk()
-      .then(function (puter) { return fetchAvailableModels(puter); })
+      .then(function (puter) {
+        return fetchAvailableModels(puter).then(function (models) {
+          return filterWorkingModels(puter, models, function (partialWorking) {
+            if (!partialWorking || !partialWorking.length) return;
+            var partialActive = renderModelSelectIncremental(ui.model, partialWorking, preferredSavedModel);
+            if (preferredSavedModel && partialActive === preferredSavedModel) {
+              log('model:preferred_saved_available', preferredSavedModel);
+            }
+          });
+        });
+      })
       .then(function (models) {
         if (!models.length) {
-          ui.model.innerHTML = '<option value="">Sem modelos</option>';
+          ui.model.innerHTML = '<option value="">Sem modelos funcionais</option>';
+          addMessage(ui.body, 'Nenhum modelo funcional disponível no momento.', 'assistant');
           return;
         }
         var active = applyModelSelect(ui.model, models);
-        if (active) addMessage(ui.body, 'Modelo ativo: ' + active, 'assistant');
+        log('model:active', active);
       })
-      .catch(function (error) {
+      .catch(function (err) {
         ui.model.innerHTML = '<option value="">Erro ao carregar modelos</option>';
-        addMessage(ui.body, 'Não foi possível listar modelos: ' + (error && error.message ? error.message : 'erro desconhecido'), 'assistant');
+        addMessage(ui.body, 'Não foi possível listar modelos: ' + normalizeError(err), 'assistant');
+        error('model:load_error', err);
       });
 
     async function sendMessage() {
@@ -356,35 +1054,142 @@ header('Content-Type: application/javascript; charset=utf-8');
 
       loading = true;
       ui.send.disabled = true;
+      log('send:start', { prompt: prompt, historyLen: history.length, attachments: pendingAttachments.length });
       addMessage(ui.body, prompt, 'user');
       history.push({ role: 'user', content: prompt });
       if (history.length > MAX_HISTORY) history = [history[0]].concat(history.slice(history.length - (MAX_HISTORY - 1)));
       ui.input.value = '';
+      persistHistory();
 
       try {
         var puter = await loadPuterSdk();
         var model = ui.model.value || localStorage.getItem(KEY_MODEL) || 'gpt-5';
-        var result = await puter.ai.chat(history, { model: model });
+        var wantsWebSearch = shouldUseWebSearch(prompt);
+        var promptForModel = prompt;
+        if (wantsWebSearch) {
+          var webContext = await buildWebSearchContext(prompt, puter);
+          if (webContext) {
+            promptForModel = prompt + '\n\n[RESULTADOS_DE_BUSCA_WEB]\n' + webContext + '\n\nUse os resultados acima para responder objetivamente e cite URLs quando houver.';
+            log('web_search:context_injected');
+          } else {
+            warn('web_search:no_context_from_tool');
+          }
+        }
+        var requestHistory = history.slice();
+        var attachmentPayload = pendingAttachments.slice();
+        if (attachmentPayload.length) {
+          requestHistory[requestHistory.length - 1] = {
+            role: 'user',
+            content: [{ type: 'text', text: promptForModel }].concat(
+              attachmentPayload.map(function (att) {
+                var isImage = !!(att.type && att.type.indexOf('image/') === 0);
+                if (isImage) {
+                  return {
+                    type: 'input_image',
+                    image_url: att.dataUrl,
+                    mime_type: att.type,
+                    filename: att.name
+                  };
+                }
+                return {
+                  type: 'input_file',
+                  file_data: att.dataUrl,
+                  mime_type: att.type,
+                  filename: att.name
+                };
+              })
+            )
+          };
+        }
+        if (!attachmentPayload.length) {
+          requestHistory[requestHistory.length - 1] = { role: 'user', content: promptForModel };
+        }
+
+        log('send:calling_puter_ai_chat', { model: model, historyLen: requestHistory.length, attachmentCount: attachmentPayload.length, wantsWebSearch: wantsWebSearch });
+        var result;
+        try {
+          result = await puter.ai.chat(requestHistory, buildChatOptions(model, wantsWebSearch));
+          if (attachmentPayload.length) attachmentsSupported = true;
+          if (wantsWebSearch) log('web_search:enabled_for_request');
+        } catch (firstErr) {
+          if (attachmentPayload.length) {
+            warn('send:attachments_primary_mode_fail', normalizeError(firstErr));
+            var fallbackOpts = buildChatOptions(model, wantsWebSearch);
+            fallbackOpts.files = attachmentPayload.map(function (att) { return att.file; }).filter(Boolean);
+            if (!fallbackOpts.files.length) {
+              throw firstErr;
+            }
+            result = await puter.ai.chat(history, fallbackOpts);
+            attachmentsSupported = true;
+          } else if (wantsWebSearch) {
+            warn('web_search:primary_mode_fail_retrying_basic', normalizeError(firstErr));
+            result = await puter.ai.chat(requestHistory, buildChatOptions(model, false));
+          } else {
+            throw firstErr;
+          }
+        }
+        log('send:raw_result', result);
         var answer = normalizeAssistantText(result);
         history.push({ role: 'assistant', content: answer });
-        addMessage(ui.body, answer, 'assistant');
-      } catch (error) {
-        addMessage(ui.body, 'Erro ao consultar o chat: ' + (error && error.message ? error.message : 'erro desconhecido'), 'assistant');
+        addMessage(ui.body, answer, 'assistant', model ? ('modelo: ' + model) : '');
+        if (attachmentPayload.length) {
+          pendingAttachments = [];
+          renderAttachments();
+          if (attachmentsSupported === true) log('attachments:supported');
+        }
+        persistHistory();
+      } catch (err) {
+        if (pendingAttachments.length) {
+          attachmentsSupported = false;
+          warn('attachments:not_supported_or_failed', normalizeError(err));
+        }
+        error('send:error', err);
+        addMessage(ui.body, 'Erro ao consultar o chat: ' + normalizeError(err), 'assistant');
       } finally {
         loading = false;
         ui.send.disabled = false;
+        log('send:finish');
       }
     }
 
     ui.send.addEventListener('click', sendMessage);
+    ui.attachBtn.addEventListener('click', function () { ui.fileInput.click(); });
+    ui.fileInput.addEventListener('change', function (ev) {
+      appendFiles(ev.target.files);
+      ev.target.value = '';
+    });
+    ui.attachPreview.addEventListener('click', function (ev) {
+      var idx = ev.target && ev.target.dataset ? parseInt(ev.target.dataset.idx, 10) : -1;
+      if (Number.isNaN(idx) || idx < 0) return;
+      pendingAttachments.splice(idx, 1);
+      renderAttachments();
+    });
     ui.input.addEventListener('keydown', function (ev) {
       if (ev.key === 'Enter' && !ev.shiftKey) {
         ev.preventDefault();
         sendMessage();
       }
     });
+    ui.input.addEventListener('paste', function (ev) {
+      var items = (ev.clipboardData && ev.clipboardData.items) ? ev.clipboardData.items : [];
+      var files = [];
+      for (var i = 0; i < items.length; i += 1) {
+        if (items[i].kind === 'file') {
+          var f = items[i].getAsFile();
+          if (f) files.push(f);
+        }
+      }
+      if (files.length) {
+        ev.preventDefault();
+        appendFiles(files);
+      }
+    });
 
-    addMessage(ui.body, 'Olá! Sou um chat em modo ' + (RENDER_MODE === 'page' ? 'página' : 'toast') + ' usando Puter. Como posso ajudar?', 'assistant');
+    loadHistory().then(function (hasHistory) {
+      if (!hasHistory) {
+        addMessage(ui.body, 'Olá! Sou um chat em modo ' + (RENDER_MODE === 'page' ? 'página' : 'toast') + ' usando Puter. Como posso ajudar?', 'assistant');
+      }
+    });
   }
 
   if (document.readyState === 'loading') {
