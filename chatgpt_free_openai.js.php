@@ -14,6 +14,57 @@ $isDirectFileUrl = ($phpSelf === $currentFileName);
 $isScriptFetch = $requestedAsJs || ($secFetchDest === 'script') || ($acceptsJs && !$acceptsHtml);
 $shouldRenderDirectPage = $isDirectFileUrl && !$isScriptFetch;
 $action = $_GET['action'] ?? '';
+$freeOpenAIPromptCreatorPrefix = 'puter_free_openai_';
+$freeOpenAIDefaultPromptCreator = $freeOpenAIPromptCreatorPrefix . 'default';
+$freeOpenAIDefaultSystemPrompt = <<<EOT
+####################################################################
+### ASSISTENTE CLÍNICO (PUTER FREE OPENAI) V1.0                  ###
+####################################################################
+
+IDIOMA
+- Responder sempre em Português do Brasil.
+
+CONTEXTO
+- Sistema clínico de neuropediatria associado ao Dr. Hellysson Cavalcanti.
+- Você pode responder diretamente quando tiver confiança.
+- Quando faltar informação atualizada/externa, solicite pesquisa web no formato exigido.
+- Quando faltar informação estruturada interna do sistema, solicite SQL no formato exigido.
+
+REGRA CRÍTICA
+- Nunca inventar dados clínicos.
+- Nunca preencher lacunas com suposição.
+- Em caso de dúvida clínica relevante, deixar explícita a incerteza.
+
+FORMATO PARA SOLICITAR PESQUISA WEB (MÁX 3)
+{
+  "search_queries": [
+    {
+      "query": "termos objetivos para busca",
+      "reason": "por que a pesquisa é necessária"
+    }
+  ]
+}
+
+FORMATO PARA SOLICITAR SQL (MÁX 3)
+{
+  "sql_queries": [
+    {
+      "query": "SELECT ...",
+      "reason": "por que precisa consultar o banco"
+    }
+  ]
+}
+
+REGRA: NUNCA misturar `search_queries` e `sql_queries` na mesma resposta.
+
+SE JÁ TIVER INFORMAÇÃO SUFICIENTE
+- Responda normalmente em texto claro e objetivo.
+
+SE RECEBER BLOCO [RESULTADOS_DE_BUSCA_WEB]
+- Use somente as fontes fornecidas.
+- Nunca invente URLs, PMIDs, DOIs ou títulos.
+- Cite URLs quando disponíveis.
+EOT;
 
 function chatgpt_free_bootstrap_context_if_needed() {
     static $bootstrapped = false;
@@ -72,6 +123,73 @@ function chatgpt_free_parse_context($data) {
       'id_atendimento' => $id_atendimento,
       'id_receita' => $id_receita
     ];
+}
+
+if ($action === 'get_prompt' || $action === 'save_prompt') {
+    while (ob_get_level()) ob_end_clean();
+    header('Content-Type: application/json; charset=utf-8');
+    chatgpt_free_bootstrap_context_if_needed();
+    @session_start();
+
+    $db = chatgpt_free_get_mysql_connection_local();
+    if (!$db) {
+        echo json_encode(['success' => false, 'error' => 'Falha na conexão com banco de dados']);
+        exit;
+    }
+
+    global $row_login_atual, $freeOpenAIDefaultPromptCreator, $freeOpenAIDefaultSystemPrompt, $freeOpenAIPromptCreatorPrefix;
+    $id_criador_logado = isset($row_login_atual['id']) && is_numeric($row_login_atual['id'])
+      ? intval($row_login_atual['id'])
+      : (isset($_SESSION['id']) && is_numeric($_SESSION['id']) ? intval($_SESSION['id']) : null);
+    if (!$id_criador_logado) {
+        http_response_code(401);
+        echo json_encode(['success' => false, 'error' => 'Utilizador não autenticado.']);
+        exit;
+    }
+
+    $canEditSystemPrompt = function_exists('verifica_permissao')
+      ? (verifica_permissao($db, $id_criador_logado, 'chatgpt_system_prompt', 'editar') ? true : false)
+      : false;
+
+    if ($action === 'get_prompt') {
+        $system_prompt = $freeOpenAIDefaultSystemPrompt;
+        if ($canEditSystemPrompt) {
+            $sql = "SELECT conteudo FROM chatgpt_prompts WHERE tipo='system' AND id_criador LIKE '" . $db->real_escape_string($freeOpenAIPromptCreatorPrefix) . "%' ORDER BY (id_criador='" . $db->real_escape_string($freeOpenAIDefaultPromptCreator) . "') DESC, id DESC LIMIT 1";
+            $r = $db->query($sql);
+            if ($r && ($row = $r->fetch_assoc()) && !empty(trim((string)$row['conteudo']))) {
+                $system_prompt = $row['conteudo'];
+            }
+        }
+        echo json_encode([
+            'success' => true,
+            'system_prompt' => $system_prompt,
+            'can_edit_system_prompt' => $canEditSystemPrompt
+        ]);
+        exit;
+    }
+
+    if (!$canEditSystemPrompt) {
+        http_response_code(403);
+        echo json_encode(['success' => false, 'error' => 'Sem permissão para editar prompt do sistema.']);
+        exit;
+    }
+
+    $inputJSON = file_get_contents('php://input');
+    $data = is_string($inputJSON) && $inputJSON !== '' ? json_decode($inputJSON, true) : [];
+    if (!is_array($data)) $data = [];
+    $tipo = trim((string)($data['tipo'] ?? 'system'));
+    if ($tipo !== 'system') {
+        echo json_encode(['success' => false, 'error' => 'Tipo inválido para este handler.']);
+        exit;
+    }
+    $conteudo = trim((string)($data['conteudo'] ?? ''));
+    if ($conteudo === '') $conteudo = $freeOpenAIDefaultSystemPrompt;
+    $conteudo_esc = $db->real_escape_string($conteudo);
+    $creator_esc = $db->real_escape_string($freeOpenAIDefaultPromptCreator);
+    $db->query("DELETE FROM chatgpt_prompts WHERE tipo='system' AND id_criador='$creator_esc'");
+    $ok = $db->query("INSERT INTO chatgpt_prompts (tipo, id_criador, conteudo) VALUES ('system', '$creator_esc', '$conteudo_esc')");
+    echo json_encode(['success' => $ok ? true : false, 'error' => $ok ? null : $db->error]);
+    exit;
 }
 
 if ($action === 'save_chat_history' || $action === 'get_chat_history') {
@@ -225,6 +343,9 @@ if ($shouldRenderDirectPage) {
     .head{padding:14px 16px;border-bottom:1px solid #eceff5;font-weight:700}
     .body{padding:16px}
     .denied{color:#a40000;background:#fff1f1;border:1px solid #ffd0d0;padding:12px;border-radius:8px}
+    .prompt-box{margin-top:12px;border:1px solid #e5e7eb;border-radius:8px;padding:10px;background:#fafafa}
+    .prompt-box textarea{width:100%;min-height:140px;font-family:monospace;font-size:12px}
+    .prompt-actions{margin-top:8px;display:flex;gap:8px}
   </style>
 </head>
 <body>
@@ -237,7 +358,18 @@ if ($shouldRenderDirectPage) {
           <script>
             window.__CHATGPT_FREE_OPENAI_MODE = 'page';
             window.__CHATGPT_FREE_OPENAI_CONTAINER = '#chatgpt-free-openai-page-root';
+            window.__CHATGPT_FREE_OPENAI_CAN_EDIT_PROMPT = <?php echo $authorized ? 'true' : 'false'; ?>;
           </script>
+          <?php if ($authorized): ?>
+          <div class="prompt-box">
+            <strong>Prompt do sistema (Puter Free OpenAI)</strong>
+            <textarea id="cfo-system-prompt"></textarea>
+            <div class="prompt-actions">
+              <button type="button" id="cfo-save-system-prompt">Salvar Prompt</button>
+              <button type="button" id="cfo-reset-system-prompt">Restaurar Padrão</button>
+            </div>
+          </div>
+          <?php endif; ?>
           <script src="<?php echo $selfJsUrl; ?>"></script>
         <?php else: ?>
           <div class="denied">Você não possui permissão para abrir este handler diretamente.</div>
@@ -267,6 +399,9 @@ header('Content-Type: application/javascript; charset=utf-8');
   var KEY_MODEL_MANUAL = PREFIX + 'selected_model_manual';
   var KEY_WORKING_MODELS_CACHE = PREFIX + 'working_models_cache_v1';
   var RENDER_MODE = window.__CHATGPT_FREE_OPENAI_MODE === 'page' ? 'page' : 'toast';
+  var DEFAULT_SYS_PROMPT = `<?php echo str_replace('`', '\`', $freeOpenAIDefaultSystemPrompt); ?>`;
+  var activeSystemPrompt = DEFAULT_SYS_PROMPT;
+  var canEditSystemPrompt = !!window.__CHATGPT_FREE_OPENAI_CAN_EDIT_PROMPT;
 
   function log() { console.log.apply(console, ['%c' + FILE_PREFIX + ' [LOG]', 'color:#1976d2;font-weight:bold'].concat([].slice.call(arguments))); }
   function warn() { console.warn.apply(console, ['%c' + FILE_PREFIX + ' [WARN]', 'color:#f57c00;font-weight:bold'].concat([].slice.call(arguments))); }
@@ -278,10 +413,38 @@ header('Content-Type: application/javascript; charset=utf-8');
     try { return JSON.stringify(err); } catch (_) { return String(err); }
   }
 
-  function shouldUseWebSearch(prompt) {
-    var p = String(prompt || '').toLowerCase();
-    if (!p) return false;
-    return /(pesquise|buscar|busque|internet|web|wikipedia|google|not[ií]cia|atualizado|site:|fonte|fontes)/.test(p);
+  function extractFirstJsonObject(text) {
+    var s = String(text || '').trim();
+    if (!s) return null;
+    try { return JSON.parse(s); } catch (_) {}
+    var start = s.indexOf('{');
+    var end = s.lastIndexOf('}');
+    if (start >= 0 && end > start) {
+      var maybe = s.slice(start, end + 1);
+      try { return JSON.parse(maybe); } catch (_) {}
+    }
+    return null;
+  }
+
+  async function decideToolUseWithLLM(puter, model, prompt) {
+    var decisionPrompt = [
+      'Avalie a pergunta do usuário e decida se é necessário solicitar pesquisa web externa.',
+      'Responda SOMENTE com JSON válido em UM dos formatos:',
+      '{"search_queries":[{"query":"...","reason":"..."}]}',
+      '{"sql_queries":[{"query":"...","reason":"..."}]}',
+      '{"direct_answer":true}',
+      'Regras: no máximo 3 queries; nunca misture search_queries com sql_queries.'
+    ].join('\n');
+    var messages = [
+      { role: 'system', content: activeSystemPrompt },
+      { role: 'user', content: decisionPrompt + '\n\nPergunta do usuário:\n' + String(prompt || '') }
+    ];
+    var raw = await puter.ai.chat(messages, { model: model });
+    var parsed = extractFirstJsonObject(normalizeAssistantText(raw));
+    if (!parsed || typeof parsed !== 'object') return { direct_answer: true };
+    if (Array.isArray(parsed.search_queries) && parsed.search_queries.length) return { search_queries: parsed.search_queries.slice(0, 3) };
+    if (Array.isArray(parsed.sql_queries) && parsed.sql_queries.length) return { sql_queries: parsed.sql_queries.slice(0, 3) };
+    return { direct_answer: true };
   }
 
   function buildChatOptions(model, enableWebSearch) {
@@ -391,6 +554,24 @@ header('Content-Type: application/javascript; charset=utf-8');
       warn('web_search:tool_call_fail', normalizeError(err));
     }
     return await buildFallbackWebContext(q);
+  }
+
+  async function loadActiveSystemPrompt() {
+    try {
+      var res = await fetch(window.location.pathname + '?action=get_prompt', { credentials: 'same-origin' });
+      var data = await res.json();
+      if (data && data.success && typeof data.system_prompt === 'string' && data.system_prompt.trim() !== '') {
+        activeSystemPrompt = data.system_prompt;
+      } else {
+        activeSystemPrompt = DEFAULT_SYS_PROMPT;
+      }
+      canEditSystemPrompt = !!(data && data.can_edit_system_prompt);
+      return activeSystemPrompt;
+    } catch (err) {
+      warn('prompt:load_fail', normalizeError(err));
+      activeSystemPrompt = DEFAULT_SYS_PROMPT;
+      return activeSystemPrompt;
+    }
   }
 
   window.addEventListener('error', function (ev) { error('window.onerror', ev && ev.message ? ev.message : ev); });
@@ -901,6 +1082,43 @@ header('Content-Type: application/javascript; charset=utf-8');
     var context = getContextFromUrl();
     var preferredSavedModel = localStorage.getItem(KEY_MODEL) || '';
     log('context:url', context);
+    loadActiveSystemPrompt().then(function (promptTxt) {
+      history[0] = { role: 'system', content: promptTxt || DEFAULT_SYS_PROMPT };
+      var promptEl = document.getElementById('cfo-system-prompt');
+      if (promptEl) {
+        promptEl.value = promptTxt || DEFAULT_SYS_PROMPT;
+        promptEl.disabled = !canEditSystemPrompt;
+      }
+      var saveBtn = document.getElementById('cfo-save-system-prompt');
+      if (saveBtn) {
+        saveBtn.disabled = !canEditSystemPrompt;
+        saveBtn.onclick = async function () {
+          try {
+            var val = (promptEl && promptEl.value ? promptEl.value : '').trim() || DEFAULT_SYS_PROMPT;
+            var r = await fetch(window.location.pathname + '?action=save_prompt', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              credentials: 'same-origin',
+              body: JSON.stringify({ tipo: 'system', conteudo: val })
+            });
+            var d = await r.json();
+            if (!d || !d.success) throw new Error((d && d.error) || 'Falha ao salvar prompt');
+            activeSystemPrompt = val;
+            history[0] = { role: 'system', content: activeSystemPrompt };
+            alert('Prompt salvo com sucesso.');
+          } catch (err) {
+            alert('Erro ao salvar prompt: ' + normalizeError(err));
+          }
+        };
+      }
+      var resetBtn = document.getElementById('cfo-reset-system-prompt');
+      if (resetBtn) {
+        resetBtn.disabled = !canEditSystemPrompt;
+        resetBtn.onclick = function () {
+          if (promptEl) promptEl.value = DEFAULT_SYS_PROMPT;
+        };
+      }
+    });
 
     function serializePersistableHistory() {
       return history.filter(function (m) { return m && m.role !== 'system' && typeof m.content === 'string' && m.content.trim() !== ''; });
@@ -1100,16 +1318,27 @@ header('Content-Type: application/javascript; charset=utf-8');
       try {
         puter = await loadPuterSdk();
         var model = ui.model.value || localStorage.getItem(KEY_MODEL) || 'gpt-5';
-        var wantsWebSearch = shouldUseWebSearch(prompt);
+        var wantsWebSearch = false;
         var promptForModel = prompt;
-        if (wantsWebSearch) {
-          var webContext = await buildWebSearchContext(prompt, puter);
-          if (webContext) {
-            promptForModel = prompt + '\n\n[RESULTADOS_DE_BUSCA_WEB]\n' + webContext + '\n\nUse os resultados acima para responder objetivamente e cite URLs quando houver.';
-            log('web_search:context_injected');
+        var toolDecision = await decideToolUseWithLLM(puter, model, prompt);
+        if (toolDecision && Array.isArray(toolDecision.search_queries) && toolDecision.search_queries.length) {
+          wantsWebSearch = true;
+          var snippets = [];
+          for (var qIdx = 0; qIdx < toolDecision.search_queries.length; qIdx += 1) {
+            var sq = toolDecision.search_queries[qIdx];
+            var qText = (sq && sq.query) ? String(sq.query) : '';
+            if (!qText) continue;
+            var webContext = await buildWebSearchContext(qText, puter);
+            if (webContext) snippets.push('QUERY: ' + qText + '\n' + webContext);
+          }
+          if (snippets.length) {
+            promptForModel = prompt + '\n\n[RESULTADOS_DE_BUSCA_WEB]\n' + snippets.join('\n\n') + '\n\nUse os resultados acima para responder objetivamente e cite URLs quando houver.';
+            log('web_search:context_injected_by_llm_decision', toolDecision);
           } else {
             warn('web_search:no_context_from_tool');
           }
+        } else if (toolDecision && Array.isArray(toolDecision.sql_queries) && toolDecision.sql_queries.length) {
+          warn('tool_decision:sql_requested_but_not_implemented', toolDecision.sql_queries);
         }
         var requestHistory = history.slice();
         var attachmentPayload = pendingAttachments.slice();
