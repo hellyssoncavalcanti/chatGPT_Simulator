@@ -1787,15 +1787,16 @@ class WhatsAppWebClient:
         }
 
     def get_open_contact_details(self) -> Dict[str, str]:
-        """Open contact details panel and extract visible profile information.
+        """Open contact details panel via menu and extract profile info.
 
-        Simulates the manual user route:
-          1. Escape (close any existing panel)
-          2. Read header identity
-          3. Click on the header name/avatar to open "Dados do contato"
-          4. Wait for panel to fully render (including phone)
-          5. Extract profile_name + profile_phone
-          6. Escape (close panel)
+        Simulates the exact manual user route:
+          1. Escape (close any existing panel/menu)
+          2. Read header identity (title + phone if visible)
+          3. Click "Mais opções" button (three-dots menu)
+          4. Click "Dados do contato" menu item
+          5. Wait for contact details section to render (including phone)
+          6. Extract profile_name + profile_phone from the section
+          7. Escape (close panel)
 
         Returns:
           {title, phone, profile_name, profile_phone}
@@ -1803,10 +1804,10 @@ class WhatsAppWebClient:
         self.start()
 
         def _do():
-            # ── SUB-ETAPA A: Fecha possível painel já aberto ────────────
+            # ── SUB-ETAPA A: Fecha possível painel/menu já aberto ──────
             try:
                 self._page.keyboard.press("Escape")
-                self._page.wait_for_timeout(200)
+                self._page.wait_for_timeout(300)
             except Exception:
                 pass
 
@@ -1815,7 +1816,7 @@ class WhatsAppWebClient:
                 log.info("get_open_contact_details: #main header não encontrado")
                 return {"title": "", "phone": "", "profile_name": "", "profile_phone": ""}
 
-            # ── SUB-ETAPA B: Captura identidade do header ───────────────
+            # ── SUB-ETAPA B: Captura identidade do header ──────────────
             base = self._page.evaluate(
                 """() => {
                     const pickPhone = (txt) => {
@@ -1828,7 +1829,7 @@ class WhatsAppWebClient:
                     const titleEl = header.querySelector('span[title]') || header.querySelector('span[dir="auto"]');
                     const title = (titleEl?.getAttribute?.('title') || titleEl?.textContent || '').trim();
                     let phone = '';
-                    for (const s of header.querySelectorAll('span[title], span[dir=\"auto\"], span')) {
+                    for (const s of header.querySelectorAll('span[title], span[dir="auto"], span')) {
                         const txt = (s.getAttribute?.('title') || s.textContent || '').trim();
                         const p = pickPhone(txt);
                         if (p.length >= 10) { phone = p; break; }
@@ -1841,126 +1842,64 @@ class WhatsAppWebClient:
                 base.get("title", ""), base.get("phone", ""),
             )
 
-            # ── SUB-ETAPA C: Diagnóstico + Clique para abrir painel ──────
-            # Primeiro captura o HTML do header para diagnóstico
-            header_html = ""
+            # ── SUB-ETAPA C: Clique em "Mais opções" (three-dots menu) ─
+            # O botão tem aria-label="Mais opções" e data-tab="6"
+            menu_opened = False
             try:
-                header_html = self._page.evaluate(
-                    """() => {
-                        const h = document.querySelector('#main header');
-                        return h ? h.innerHTML.substring(0, 2000) : '(no header)';
-                    }"""
-                ) or ""
-                log.info(
-                    "get_open_contact_details sub-C: header HTML (primeiros 500 chars): %s",
-                    header_html[:500],
-                )
+                # Tenta via Playwright locator primeiro
+                mais_opcoes = self._page.locator(
+                    '#main header button[aria-label="Mais opções"], '
+                    '#main button[aria-label="Mais opções"], '
+                    'button[aria-label="More options"]'
+                ).first
+                if mais_opcoes.count() > 0:
+                    mais_opcoes.click(timeout=3000)
+                    self._page.wait_for_timeout(500)
+                    menu_opened = True
+                    log.info("get_open_contact_details sub-C: 'Mais opções' clicado via locator")
             except Exception as e:
-                log.debug("get_open_contact_details: falha ao capturar header HTML: %s", e)
+                log.debug("get_open_contact_details sub-C: locator click falhou: %s", e)
 
-            # Usa page.evaluate() para encontrar e clicar no elemento certo
-            # via JS — simula clique real do usuário no header.
-            # Em WhatsApp Web, o header contém uma área clicável (div container
-            # com o nome e avatar) que abre "Dados do contato".
-            click_result = self._page.evaluate(
-                """() => {
-                    const header = document.querySelector('#main header');
-                    if (!header) return { ok: false, strategy: 'no_header' };
-
-                    // Helper: simula clique real (mousedown + mouseup + click)
-                    const realClick = (el) => {
-                        if (!el) return false;
-                        el.scrollIntoView({ block: 'center' });
-                        const rect = el.getBoundingClientRect();
-                        const x = rect.left + rect.width / 2;
-                        const y = rect.top + rect.height / 2;
-                        const opts = { bubbles: true, cancelable: true, clientX: x, clientY: y };
-                        el.dispatchEvent(new MouseEvent('mousedown', opts));
-                        el.dispatchEvent(new MouseEvent('mouseup', opts));
-                        el.dispatchEvent(new MouseEvent('click', opts));
-                        return true;
-                    };
-
-                    // Strategy 1: clickable container div wrapping name/subtitle
-                    // In WA Web the header has: [avatar section] [name section with cursor:pointer]
-                    // The name section's parent div is the click target
-                    const nameSpan = header.querySelector('span[title]');
-                    if (nameSpan) {
-                        // Walk up to find the nearest clickable container
-                        let target = nameSpan.parentElement;
-                        for (let i = 0; i < 5 && target && target !== header; i++) {
-                            const style = window.getComputedStyle(target);
-                            if (style.cursor === 'pointer') {
-                                if (realClick(target))
-                                    return { ok: true, strategy: 'name_container_pointer', tag: target.tagName };
-                            }
-                            target = target.parentElement;
-                        }
-                        // Fallback: click the span's grandparent (common WA pattern)
-                        const gp = nameSpan.parentElement?.parentElement;
-                        if (gp && gp !== header) {
-                            if (realClick(gp))
-                                return { ok: true, strategy: 'name_grandparent', tag: gp.tagName };
-                        }
-                    }
-
-                    // Strategy 2: any element with role=button in header
-                    const btn = header.querySelector('[role="button"]');
-                    if (btn) {
-                        if (realClick(btn))
-                            return { ok: true, strategy: 'role_button', tag: btn.tagName };
-                    }
-
-                    // Strategy 3: click the avatar/img
-                    const avatar = header.querySelector('img, [data-testid="chat-portrait"], [data-testid="default-user"]');
-                    if (avatar) {
-                        if (realClick(avatar))
-                            return { ok: true, strategy: 'avatar', tag: avatar.tagName };
-                    }
-
-                    // Strategy 4: find any div with cursor:pointer in header
-                    const allDivs = header.querySelectorAll('div, section');
-                    for (const d of allDivs) {
-                        const style = window.getComputedStyle(d);
-                        if (style.cursor === 'pointer') {
-                            if (realClick(d))
-                                return { ok: true, strategy: 'cursor_pointer_div', tag: d.tagName };
-                        }
-                    }
-
-                    // Strategy 5: brute force — click the first large child div
-                    const children = header.querySelectorAll(':scope > div');
-                    for (const ch of children) {
-                        const rect = ch.getBoundingClientRect();
-                        if (rect.width > 100 && rect.height > 30) {
-                            if (realClick(ch))
-                                return { ok: true, strategy: 'first_large_child', tag: ch.tagName };
-                        }
-                    }
-
-                    return { ok: false, strategy: 'all_failed' };
-                }"""
-            ) or {}
-
-            click_succeeded = bool(click_result.get("ok"))
-            click_strategy = click_result.get("strategy", "unknown")
-
-            # Se o JS click não abriu o painel, tenta Playwright .click() como fallback
-            if not click_succeeded:
+            if not menu_opened:
+                # Fallback: JS click no botão
                 try:
-                    header.click(timeout=3000)
-                    click_succeeded = True
-                    click_strategy = "playwright_header_fallback"
+                    js_result = self._page.evaluate(
+                        """() => {
+                            const realClick = (el) => {
+                                if (!el) return false;
+                                el.scrollIntoView({ block: 'center' });
+                                const rect = el.getBoundingClientRect();
+                                const x = rect.left + rect.width / 2;
+                                const y = rect.top + rect.height / 2;
+                                const opts = { bubbles: true, cancelable: true, clientX: x, clientY: y };
+                                el.dispatchEvent(new MouseEvent('mousedown', opts));
+                                el.dispatchEvent(new MouseEvent('mouseup', opts));
+                                el.dispatchEvent(new MouseEvent('click', opts));
+                                return true;
+                            };
+                            // Busca botão "Mais opções" dentro do #main ou header
+                            const btn = document.querySelector('#main button[aria-label="Mais opções"]')
+                                || document.querySelector('button[aria-label="Mais opções"]')
+                                || document.querySelector('#main button[aria-label="More options"]')
+                                || document.querySelector('button[aria-label="More options"]');
+                            if (!btn) return { ok: false, reason: 'button_not_found' };
+                            return { ok: realClick(btn), reason: 'js_click' };
+                        }"""
+                    ) or {}
+                    menu_opened = bool(js_result.get("ok"))
+                    if menu_opened:
+                        self._page.wait_for_timeout(500)
+                        log.info("get_open_contact_details sub-C: 'Mais opções' clicado via JS")
+                    else:
+                        log.warning(
+                            "get_open_contact_details sub-C: botão 'Mais opções' não encontrado: %s",
+                            js_result.get("reason", ""),
+                        )
                 except Exception as e:
-                    log.warning("get_open_contact_details: Playwright header click falhou: %s", e)
+                    log.warning("get_open_contact_details sub-C: JS click falhou: %s", e)
 
-            log.info(
-                "get_open_contact_details sub-C: click_succeeded=%s strategy='%s'",
-                click_succeeded, click_strategy,
-            )
-
-            if not click_succeeded:
-                log.warning("get_open_contact_details: TODAS as estratégias de clique falharam")
+            if not menu_opened:
+                log.warning("get_open_contact_details: FALHA ao abrir menu 'Mais opções'")
                 return {
                     "title": str(base.get("title") or "").strip(),
                     "phone": str(base.get("phone") or "").strip(),
@@ -1969,223 +1908,229 @@ class WhatsAppWebClient:
                     "_click_failed": True,
                 }
 
-            # ── SUB-ETAPA D: Aguarda o painel abrir ─────────────────────
+            # ── SUB-ETAPA D: Clique em "Dados do contato" (menu item) ──
+            panel_clicked = False
+            try:
+                # O menu item tem aria-label="Dados do contato" e role="menuitem"
+                dados_btn = self._page.locator(
+                    'button[aria-label="Dados do contato"], '
+                    'div[aria-label="Dados do contato"][role="menuitem"], '
+                    '[aria-label="Dados do contato"], '
+                    'button[aria-label="Contact info"], '
+                    '[aria-label="Contact info"][role="menuitem"]'
+                ).first
+                if dados_btn.count() > 0:
+                    dados_btn.click(timeout=3000)
+                    panel_clicked = True
+                    log.info("get_open_contact_details sub-D: 'Dados do contato' clicado via locator")
+            except Exception as e:
+                log.debug("get_open_contact_details sub-D: locator click falhou: %s", e)
+
+            if not panel_clicked:
+                # Fallback: JS click
+                try:
+                    js_result = self._page.evaluate(
+                        """() => {
+                            const realClick = (el) => {
+                                if (!el) return false;
+                                el.scrollIntoView({ block: 'center' });
+                                const rect = el.getBoundingClientRect();
+                                const x = rect.left + rect.width / 2;
+                                const y = rect.top + rect.height / 2;
+                                const opts = { bubbles: true, cancelable: true, clientX: x, clientY: y };
+                                el.dispatchEvent(new MouseEvent('mousedown', opts));
+                                el.dispatchEvent(new MouseEvent('mouseup', opts));
+                                el.dispatchEvent(new MouseEvent('click', opts));
+                                return true;
+                            };
+                            const btn = document.querySelector('[aria-label="Dados do contato"]')
+                                || document.querySelector('[aria-label="Contact info"]');
+                            if (!btn) return { ok: false, reason: 'dados_contato_not_found' };
+                            return { ok: realClick(btn), reason: 'js_click' };
+                        }"""
+                    ) or {}
+                    panel_clicked = bool(js_result.get("ok"))
+                    if panel_clicked:
+                        log.info("get_open_contact_details sub-D: 'Dados do contato' clicado via JS")
+                    else:
+                        log.warning(
+                            "get_open_contact_details sub-D: item 'Dados do contato' não encontrado: %s",
+                            js_result.get("reason", ""),
+                        )
+                except Exception as e:
+                    log.warning("get_open_contact_details sub-D: JS click falhou: %s", e)
+
+            if not panel_clicked:
+                # Fecha o menu que ficou aberto
+                try:
+                    self._page.keyboard.press("Escape")
+                    self._page.wait_for_timeout(200)
+                except Exception:
+                    pass
+                log.warning("get_open_contact_details: FALHA ao clicar 'Dados do contato' no menu")
+                return {
+                    "title": str(base.get("title") or "").strip(),
+                    "phone": str(base.get("phone") or "").strip(),
+                    "profile_name": "",
+                    "profile_phone": "",
+                    "_click_failed": True,
+                }
+
+            # ── SUB-ETAPA E: Aguarda seção de dados do contato carregar ─
+            # O painel/section com os dados do contato leva alguns segundos
+            # para renderizar completamente, especialmente o telefone.
             panel_visible = False
             panel_selectors = [
+                'section span[data-testid="selectable-text"]',
                 '[data-testid="contact-info-drawer"]',
-                'div[aria-label="Dados do contato"]:not([role="menuitem"])',
-                'div[aria-label="Contact info"]:not([role="menuitem"])',
-                'aside[aria-label="Dados do contato"]',
-                'aside[aria-label="Contact info"]',
+                'section img[draggable="false"]',
             ]
             for sel in panel_selectors:
                 try:
-                    self._page.wait_for_selector(sel, timeout=3000)
+                    self._page.wait_for_selector(sel, timeout=5000)
                     panel_visible = True
-                    log.info("get_open_contact_details sub-D: painel detectado via '%s'", sel)
+                    log.info("get_open_contact_details sub-E: painel detectado via '%s'", sel)
                     break
                 except Exception:
                     continue
 
             if not panel_visible:
-                # Fallback: texto "Dados do contato" visível em qualquer lugar
-                try:
-                    self._page.wait_for_selector(
-                        "text=/Dados do contato|Contact info|Informações do contato/i",
-                        timeout=3000,
-                    )
-                    panel_visible = True
-                    log.info("get_open_contact_details sub-D: painel detectado via texto")
-                except Exception:
-                    panel_visible = False
-
-            if not panel_visible:
-                # Último recurso: espera fixa para dar tempo ao painel renderizar
-                # (para contas comerciais o painel pode abrir sem os seletores padrão)
                 log.warning(
-                    "get_open_contact_details sub-D: painel NÃO detectado por seletores. "
-                    "Aguardando 3s como fallback..."
+                    "get_open_contact_details sub-E: painel não detectado por seletores. "
+                    "Aguardando 4s como fallback..."
                 )
-                self._page.wait_for_timeout(3000)
+                self._page.wait_for_timeout(4000)
             else:
-                # Pausa extra para o painel carregar o telefone.
-                # Observado no console: ~1-6s entre clique e phone renderizar.
-                self._page.wait_for_timeout(2000)
+                # Pausa extra para o telefone renderizar (~1-6s observado manualmente)
+                self._page.wait_for_timeout(3000)
 
-            # ── SUB-ETAPA E: Extrai dados do painel com retries ─────────
+            # ── SUB-ETAPA F: Extrai dados da section com retries ────────
             extract_details_js = """() => {
-                    const pickPhone = (txt) => {
-                        if (!txt) return '';
-                        const m = String(txt).match(/\\+?\\d[\\d\\s\\-()]{7,}/);
-                        if (!m) return '';
-                        const digits = m[0].replace(/\\D/g, '');
-                        return (digits.length >= 10 && digits.length <= 15) ? digits : '';
-                    };
-                    const isVisible = (el) => {
-                        if (!el) return false;
-                        const style = window.getComputedStyle(el);
-                        if (!style) return false;
-                        if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
-                        const rect = el.getBoundingClientRect();
-                        return rect.width > 0 && rect.height > 0;
-                    };
-                    const isPanelContainer = (el) => {
-                        if (!el || !isVisible(el)) return false;
-                        const role = (el.getAttribute('role') || '').toLowerCase();
-                        if (role === 'menu' || role === 'menuitem') return false;
-                        const rect = el.getBoundingClientRect();
-                        return rect.width >= 150 && rect.height >= 100;
-                    };
-                    const out = { profile_name: '', profile_phone: '', _debug: '' };
-                    const isNoiseText = (txt) => {
-                        const lower = String(txt || '').trim().toLowerCase();
-                        if (!lower) return true;
-                        return (
-                            lower.includes('dados do contato')
-                            || lower.includes('contact info')
-                            || lower.includes('informações do contato')
-                            || lower.includes('mídia')
-                            || lower.includes('media')
-                            || lower.includes('mensagens favoritas')
-                            || lower.includes('silenciar')
-                            || lower.includes('wa-wordmark')
-                            || lower.includes('meta ai')
-                        );
-                    };
+                const pickPhone = (txt) => {
+                    if (!txt) return '';
+                    const m = String(txt).match(/\\+?\\d[\\d\\s\\-()]{7,}/);
+                    if (!m) return '';
+                    const digits = m[0].replace(/\\D/g, '');
+                    return (digits.length >= 10 && digits.length <= 15) ? digits : '';
+                };
+                const isVisible = (el) => {
+                    if (!el) return false;
+                    const style = window.getComputedStyle(el);
+                    if (!style) return false;
+                    if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
+                    const rect = el.getBoundingClientRect();
+                    return rect.width > 0 && rect.height > 0;
+                };
+                const isNoiseText = (txt) => {
+                    const lower = String(txt || '').trim().toLowerCase();
+                    if (!lower) return true;
+                    return (
+                        lower.includes('dados do contato')
+                        || lower.includes('contact info')
+                        || lower.includes('mais opções')
+                        || lower.includes('more options')
+                        || lower.includes('mídia')
+                        || lower.includes('media')
+                        || lower.includes('mensagens favoritas')
+                        || lower.includes('silenciar')
+                        || lower.includes('mensagens temporárias')
+                        || lower.includes('criptografia')
+                        || lower.includes('bloquear')
+                        || lower.includes('denunciar')
+                        || lower.includes('apagar conversa')
+                        || lower.includes('limpar conversa')
+                        || lower.includes('adicionar aos favoritos')
+                        || lower.includes('privacidade')
+                        || lower.includes('pesquisar')
+                        || lower.includes('editar')
+                        || lower.includes('notas')
+                        || lower.includes('desativad')
+                        || lower.includes('fechar conversa')
+                        || lower.includes('selecionar mensagens')
+                        || lower.includes('trancar conversa')
+                        || lower.includes('etiquetar')
+                        || lower.includes('wa-wordmark')
+                        || lower.includes('meta ai')
+                        || lower.includes('mostrar foto')
+                        || lower.includes('adicione notas')
+                    );
+                };
+                const out = { profile_name: '', profile_phone: '', _debug: '' };
 
-                    const pickContainerFromNode = (node) => {
-                        if (!node) return null;
-                        let candidate = node.closest('section, aside, div[role="dialog"], div[role="region"], div[class]');
-                        while (candidate && !isPanelContainer(candidate)) {
-                            candidate = candidate.parentElement;
-                        }
-                        return candidate;
-                    };
-
-                    // === Estratégia 1: data-testid do painel de contato ===
-                    let panelRoot = document.querySelector('[data-testid="contact-info-drawer"]');
-
-                    // === Estratégia 2: aria-label (exclui role=menuitem — é botão, não painel) ===
-                    if (!panelRoot) {
-                        panelRoot =
-                            document.querySelector('div[aria-label="Dados do contato"]:not([role="menuitem"])')
-                            || document.querySelector('div[aria-label="Contact info"]:not([role="menuitem"])')
-                            || document.querySelector('aside[aria-label="Dados do contato"]')
-                            || document.querySelector('aside[aria-label="Contact info"]');
-                        if (panelRoot && !isPanelContainer(panelRoot)) {
-                            panelRoot = pickContainerFromNode(panelRoot);
-                        }
+                // Busca a section do painel de detalhes (lado direito)
+                // A section contém a foto, nome, telefone, mídia, etc.
+                const sections = document.querySelectorAll('section');
+                let panelRoot = null;
+                for (const s of sections) {
+                    if (!isVisible(s)) continue;
+                    const rect = s.getBoundingClientRect();
+                    // A section de contato é grande e fica à direita
+                    if (rect.width >= 200 && rect.height >= 300) {
+                        panelRoot = s;
+                        break;
                     }
+                }
 
-                    // === Estratégia 3: heading textual ===
-                    if (!panelRoot) {
-                        const heading = Array.from(
-                            document.querySelectorAll('h1, h2, div[role="heading"], span[dir="auto"], span')
-                        ).find((n) => /dados do contato|contact info|informações do contato/i.test((n.textContent || '').trim()));
-                        panelRoot = pickContainerFromNode(heading);
-                    }
+                // Fallback: data-testid drawer
+                if (!panelRoot) {
+                    panelRoot = document.querySelector('[data-testid="contact-info-drawer"]');
+                }
 
-                    // === Estratégia 4: qualquer painel à direita com texto de telefone ===
-                    if (!panelRoot) {
-                        const phoneNodes = Array.from(
-                            document.querySelectorAll('[data-testid="selectable-text"], span[dir="auto"], span')
-                        ).filter((n) => !!pickPhone((n.textContent || '').trim()));
-                        for (const n of phoneNodes) {
-                            const candidate = pickContainerFromNode(n);
-                            if (!candidate) continue;
-                            panelRoot = candidate;
-                            break;
-                        }
-                    }
-
-                    if (!panelRoot) {
-                        out._debug = 'panelRoot not found';
-                        return out;
-                    }
-                    out._debug = 'panelRoot=' + (panelRoot.tagName || '?') +
-                        ' role=' + (panelRoot.getAttribute('role') || '') +
-                        ' testid=' + (panelRoot.getAttribute('data-testid') || '') +
-                        ' aria=' + (panelRoot.getAttribute('aria-label') || '') +
-                        ' size=' + panelRoot.getBoundingClientRect().width + 'x' + panelRoot.getBoundingClientRect().height;
-
-                    // --- Nome do perfil ---
-                    const preferredName = Array.from(
-                        panelRoot.querySelectorAll('h1, h2, div[role="heading"], span[dir="auto"], span[title]')
-                    ).find((n) => {
-                        const txt = (n.getAttribute?.('title') || n.textContent || '').trim();
-                        if (!txt) return false;
-                        if (!isVisible(n)) return false;
-                        if (isNoiseText(txt)) return false;
-                        return txt.length >= 3;
-                    });
-                    if (preferredName) out.profile_name = (preferredName.getAttribute?.('title') || preferredName.textContent || '').trim();
-
-                    if (!out.profile_name) {
-                        const candidates = panelRoot.querySelectorAll('span[dir="auto"], div[role="heading"]');
-                        for (const c of candidates) {
-                            const txt = (c.getAttribute?.('title') || c.textContent || '').trim();
-                            if (!txt) continue;
-                            if (!isVisible(c)) continue;
-                            if (isNoiseText(txt)) continue;
-                            out.profile_name = txt;
-                            break;
-                        }
-                    }
-
-                    // --- Telefone: busca em data-testid, cell-frame, selectable-text ---
-                    // Prioridade 1: cell-frame-container (onde WA mostra o telefone)
-                    const cellFrames = panelRoot.querySelectorAll('[data-testid="cell-frame-container"], [data-testid="cell-frame-secondary"]');
-                    for (const cf of cellFrames) {
-                        if (!isVisible(cf)) continue;
-                        const txt = (cf.textContent || '').trim();
-                        const p = pickPhone(txt);
-                        if (p.length >= 10) { out.profile_phone = p; break; }
-                    }
-
-                    // Prioridade 2: selectable-text
-                    if (!out.profile_phone) {
-                        const selectable = panelRoot.querySelectorAll('[data-testid="selectable-text"]');
-                        for (const t of selectable) {
-                            if (!isVisible(t)) continue;
-                            const txt = (t.textContent || '').trim();
-                            if (!txt) continue;
-                            const p = pickPhone(txt);
-                            if (p.length >= 10) { out.profile_phone = p; break; }
-                        }
-                    }
-
-                    // Prioridade 3: varredura ampla de spans
-                    if (!out.profile_phone) {
-                        const texts = panelRoot.querySelectorAll('span, div, p');
-                        for (const t of texts) {
-                            if (!isVisible(t)) continue;
-                            const txt = (t.textContent || '').trim();
-                            if (!txt) continue;
-                            const p = pickPhone(txt);
-                            if (p.length >= 10) { out.profile_phone = p; break; }
-                        }
-                    }
-
-                    // Prioridade 4: busca fora do panelRoot restrito — qualquer
-                    // nó visível na página que contenha telefone e esteja em
-                    // container lateral/drawer
-                    if (!out.profile_phone) {
-                        const allNodes = document.querySelectorAll(
-                            '[data-testid="cell-frame-container"] span, ' +
-                            'aside span[dir="auto"], ' +
-                            'section span[dir="auto"], ' +
-                            '[data-testid="contact-info-drawer"] span'
-                        );
-                        for (const n of allNodes) {
-                            if (!isVisible(n)) continue;
-                            const txt = (n.textContent || '').trim();
-                            const p = pickPhone(txt);
-                            if (p.length >= 10) { out.profile_phone = p; break; }
-                        }
-                    }
-
+                if (!panelRoot) {
+                    out._debug = 'panelRoot(section) not found';
                     return out;
-                }"""
+                }
+                out._debug = 'panelRoot=' + panelRoot.tagName +
+                    ' size=' + panelRoot.getBoundingClientRect().width + 'x' +
+                    panelRoot.getBoundingClientRect().height;
+
+                // --- Nome do perfil ---
+                // No HTML o nome aparece em span[data-testid="selectable-text"]
+                const nameNodes = panelRoot.querySelectorAll(
+                    'span[data-testid="selectable-text"], span[dir="auto"], span[title]'
+                );
+                for (const n of nameNodes) {
+                    if (!isVisible(n)) continue;
+                    const txt = (n.getAttribute?.('title') || n.textContent || '').trim();
+                    if (!txt || txt.length < 2) continue;
+                    if (isNoiseText(txt)) continue;
+                    // Se parece telefone, pular — queremos o nome primeiro
+                    const maybePhone = pickPhone(txt);
+                    if (maybePhone) continue;
+                    out.profile_name = txt;
+                    break;
+                }
+
+                // --- Telefone ---
+                // No HTML o telefone aparece como "+55 81 8148-7277" dentro de spans
+                const allSpans = panelRoot.querySelectorAll(
+                    'span[data-testid="selectable-text"], span[dir="auto"], span, div'
+                );
+                for (const s of allSpans) {
+                    if (!isVisible(s)) continue;
+                    const txt = (s.textContent || '').trim();
+                    if (!txt) continue;
+                    const p = pickPhone(txt);
+                    if (p) {
+                        out.profile_phone = p;
+                        break;
+                    }
+                }
+
+                // Fallback: cell-frame-container
+                if (!out.profile_phone) {
+                    const cells = panelRoot.querySelectorAll(
+                        '[data-testid="cell-frame-container"], [data-testid="cell-frame-secondary"]'
+                    );
+                    for (const c of cells) {
+                        if (!isVisible(c)) continue;
+                        const p = pickPhone((c.textContent || '').trim());
+                        if (p) { out.profile_phone = p; break; }
+                    }
+                }
+
+                return out;
+            }"""
 
             data = {}
             for attempt in range(1, 13):
@@ -2194,7 +2139,7 @@ class WhatsAppWebClient:
                 found_phone = normalize_phone(data.get("profile_phone"))
                 if attempt == 1 or found_phone:
                     log.info(
-                        "get_open_contact_details sub-E: tentativa %s/12 | phone='%s' name='%s' debug='%s'",
+                        "get_open_contact_details sub-F: tentativa %s/12 | phone='%s' name='%s' debug='%s'",
                         attempt, found_phone or "(nenhum)",
                         data.get("profile_name", ""), _debug_attempt[:120],
                     )
@@ -2203,7 +2148,7 @@ class WhatsAppWebClient:
                 if attempt < 12:
                     self._page.wait_for_timeout(500 if attempt <= 4 else 750)
 
-            # ── SUB-ETAPA F: Fecha painel ───────────────────────────────
+            # ── SUB-ETAPA G: Fecha painel ──────────────────────────────
             try:
                 self._page.keyboard.press("Escape")
                 self._page.wait_for_timeout(150)
@@ -2219,16 +2164,12 @@ class WhatsAppWebClient:
             }
             if not result["profile_name"] and result["title"] and _phone_from_title(result["title"]) is None:
                 result["profile_name"] = result["title"]
-            if not panel_visible:
-                log.warning(
-                    "Painel Dados do contato não ficou visível ao extrair detalhes | base=%s",
-                    json.dumps(result, ensure_ascii=False),
-                )
             log.info(
-                "get_open_contact_details resultado | title='%s' phone='%s' profile_phone='%s' "
-                "panel_visible=%s click='%s' debug=%s",
+                "get_open_contact_details resultado | title='%s' phone='%s' profile_name='%s' "
+                "profile_phone='%s' panel_visible=%s debug=%s",
                 result.get("title", ""), result.get("phone", ""),
-                result.get("profile_phone", ""), panel_visible, click_strategy, _debug[:100],
+                result.get("profile_name", ""), result.get("profile_phone", ""),
+                panel_visible, _debug[:100],
             )
             return result
 
