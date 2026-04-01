@@ -196,6 +196,35 @@ def _wait_chat_rate_limit_if_needed(stream_queue=None):
         time.sleep(min(CHAT_RATE_LIMIT_PROGRESS_TICK_SEC, remaining))
 
 
+def _has_active_remote_user_chat():
+    for _chat_id, meta in list(ACTIVE_CHATS.items()):
+        if meta.get('finished'):
+            continue
+        if meta.get('is_analyzer'):
+            continue
+        return True
+    return False
+
+
+def _wait_remote_user_priority_if_needed(is_analyzer: bool, stream_queue=None):
+    """
+    Se a origem for o analisador, aguarda chats remotos em andamento finalizarem.
+    """
+    if not is_analyzer:
+        return
+    while _has_active_remote_user_chat():
+        if stream_queue is not None:
+            stream_queue.put(json.dumps({
+                "type": "status",
+                "content": (
+                    "⏳ Aguardando finalização de pedido remoto prioritário em andamento "
+                    "antes de iniciar a análise automática."
+                ),
+                "phase": "analyzer_waiting_remote_priority",
+            }, ensure_ascii=False))
+        time.sleep(1.0)
+
+
 def _reserve_web_search_slot():
     """
     Reserva a próxima janela permitida para busca web com espaçamento humano.
@@ -1410,19 +1439,35 @@ def chat_completions():
         'status':      'Iniciando...',
         'markdown':    '',
         'finished':    False,
-        'finished_at': None
+        'finished_at': None,
+        'is_analyzer': bool(is_analyzer)
     }
 
-    _wait_chat_rate_limit_if_needed(stream_q if stream else None)
-
-    browser_queue.put({
+    chat_task_payload = {
         'action':           'CHAT',
         'url':              url,
         'chat_id':          chat_id,
         'message':          message,
         'attachment_paths': saved_paths,
         'stream_queue':     stream_q
-    })
+    }
+
+    def _dispatch_chat_task():
+        try:
+            _wait_remote_user_priority_if_needed(is_analyzer, stream_q if stream else None)
+            _wait_chat_rate_limit_if_needed(stream_q if stream else None)
+            browser_queue.put(chat_task_payload)
+        except Exception as dispatch_err:
+            stream_q.put(json.dumps({
+                "type": "error",
+                "content": f"Falha ao enfileirar tarefa no browser: {dispatch_err}"
+            }, ensure_ascii=False))
+            stream_q.put(None)
+
+    if stream:
+        threading.Thread(target=_dispatch_chat_task, daemon=True).start()
+    else:
+        _dispatch_chat_task()
 
     # --- 5. RESPOSTA STREAMING OU BLOCO ---
     if stream:
