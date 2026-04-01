@@ -373,6 +373,7 @@ header('Content-Type: application/javascript; charset=utf-8');
       '.cfo-model-select{width:100%;padding:7px;border:1px solid #ccd4e2;border-radius:8px;background:#fff;font-size:12px}',
       '.cfo-body{flex:1;overflow:auto;padding:10px;background:#f8f9fb}',
       '.cfo-msg{max-width:88%;padding:8px 10px;margin:0 0 8px;border-radius:10px;white-space:pre-wrap;line-height:1.35;font-size:13px}',
+      '.cfo-msg-head{font-size:10px;font-weight:600;opacity:.65;margin:0 0 5px 0;text-transform:uppercase;letter-spacing:.03em}',
       '.cfo-user{margin-left:auto;background:#dbe9ff;color:#11326f}',
       '.cfo-assistant{background:#fff;color:#222;border:1px solid #ebebeb}',
       '.cfo-footer{display:flex;gap:8px;padding:10px;border-top:1px solid #eee;background:#fff}',
@@ -441,11 +442,22 @@ header('Content-Type: application/javascript; charset=utf-8');
     };
   }
 
-  function addMessage(container, text, role) {
+  function addMessage(container, text, role, metaLabel) {
     var el = document.createElement('div');
     el.className = 'cfo-msg ' + (role === 'user' ? 'cfo-user' : 'cfo-assistant');
-    if (role === 'assistant') el.innerHTML = renderMarkdown(text);
-    else el.textContent = text;
+    if (role === 'assistant') {
+      if (metaLabel) {
+        var head = document.createElement('div');
+        head.className = 'cfo-msg-head';
+        head.textContent = metaLabel;
+        el.appendChild(head);
+      }
+      var body = document.createElement('div');
+      body.innerHTML = renderMarkdown(text);
+      el.appendChild(body);
+    } else {
+      el.textContent = text;
+    }
     container.appendChild(el);
     container.scrollTop = container.scrollHeight;
   }
@@ -920,7 +932,6 @@ header('Content-Type: application/javascript; charset=utf-8');
         }
         var active = applyModelSelect(ui.model, models);
         log('model:active', active);
-        if (active) addMessage(ui.body, 'Modelo ativo: ' + active, 'assistant');
       })
       .catch(function (err) {
         ui.model.innerHTML = '<option value="">Erro ao carregar modelos</option>';
@@ -986,7 +997,7 @@ header('Content-Type: application/javascript; charset=utf-8');
         log('send:raw_result', result);
         var answer = normalizeAssistantText(result);
         history.push({ role: 'assistant', content: answer });
-        addMessage(ui.body, answer, 'assistant');
+        addMessage(ui.body, answer, 'assistant', model ? ('modelo: ' + model) : '');
         if (attachmentPayload.length) {
           pendingAttachments = [];
           renderAttachments();
