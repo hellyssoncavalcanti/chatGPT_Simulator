@@ -364,6 +364,9 @@ if ($shouldRenderDirectPage) {
     .head{padding:14px 16px;border-bottom:1px solid #eceff5;font-weight:700}
     .body{padding:16px}
     .denied{color:#a40000;background:#fff1f1;border:1px solid #ffd0d0;padding:12px;border-radius:8px}
+    .prompt-box{margin-top:12px;border:1px solid #e5e7eb;border-radius:8px;padding:10px;background:#fafafa}
+    .prompt-box textarea{width:100%;min-height:140px;font-family:monospace;font-size:12px}
+    .prompt-actions{margin-top:8px;display:flex;gap:8px}
   </style>
 </head>
 <body>

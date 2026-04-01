@@ -141,6 +141,14 @@ if TEST_ONLY_ID_PACIENTE is not None:
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("whatsapp_web_acompanhamento")
 
+# Logger dedicado para enriquecimento — exibe [Associar_nome_contato_ao_numero] no log
+_elog_handler = logging.StreamHandler()
+_elog_handler.setFormatter(logging.Formatter("%(asctime)s [Associar_nome_contato_ao_numero] %(message)s"))
+elog = logging.getLogger("enrich_contact_phone")
+elog.setLevel(logging.INFO)
+elog.addHandler(_elog_handler)
+elog.propagate = False  # não duplicar no root logger
+
 app = Flask(__name__)
 
 
@@ -162,6 +170,7 @@ class StateStore:
             "forwarded_messages": {},
             "last_seen_inbound": {},
             "enrichment_failures": {},
+            "official_wa_accounts": [],
             "updated_at": utc_now_iso(),
         }
 
@@ -292,6 +301,35 @@ class StateStore:
                 del failures[title_key]
         self.save()
 
+    def reset_all_enrichment_failures(self) -> int:
+        """Reset all enrichment failure counters. Returns number of entries cleared."""
+        with self.lock:
+            failures = self.state.get("enrichment_failures", {})
+            count = len(failures)
+            if count > 0:
+                self.state["enrichment_failures"] = {}
+        if count > 0:
+            self.save()
+        return count
+
+    def mark_official_wa_account(self, title_key: str) -> None:
+        """Mark a contact as an official WhatsApp account (no phone number)."""
+        with self.lock:
+            accounts = self.state.setdefault("official_wa_accounts", [])
+            if title_key not in accounts:
+                accounts.append(title_key)
+        self.save()
+
+    def is_official_wa_account(self, title_key: str) -> bool:
+        """Check if a contact is marked as official WhatsApp account."""
+        with self.lock:
+            return title_key in self.state.get("official_wa_accounts", [])
+
+    def get_official_wa_accounts(self) -> List[str]:
+        """Return list of official WhatsApp account title keys."""
+        with self.lock:
+            return list(self.state.get("official_wa_accounts", []))
+
 
 state = StateStore(STATE_FILE)
 
@@ -388,6 +426,62 @@ def _upsert_whatsapp_contact_profile(
             phone,
             display_name,
         )
+
+    # Busca correspondência na tabela membros pelo telefone
+    norm_phone = normalize_phone(phone)
+    if norm_phone and id_paciente_sql == "NULL":
+        matched_ids = _find_membros_by_phone(norm_phone)
+        if matched_ids:
+            # Salva os ids encontrados como id_paciente (lista separada por vírgula)
+            ids_str = ",".join(str(mid) for mid in matched_ids)
+            try:
+                run_sql(
+                    f"UPDATE chatgpt_whatsapp "
+                    f"SET id_paciente = '{_sql_escape(ids_str)}', updated_at = UTC_TIMESTAMP() "
+                    f"WHERE whatsapp_phone = '{_sql_escape(norm_phone)}'"
+                )
+                elog.info(
+                    "Correlação membros encontrada: phone=%s → id_paciente=%s",
+                    norm_phone, ids_str,
+                )
+            except Exception:
+                log.exception("Falha ao atualizar id_paciente para phone=%s", norm_phone)
+
+
+def _find_membros_by_phone(phone: str) -> List[int]:
+    """Search membros table by telefone1/telefone2 matching the given phone.
+
+    membros.telefone format is "(81) 99729-2372". We normalize both sides
+    to digits-only for comparison.
+    """
+    norm = re.sub(r"\D", "", phone)
+    if len(norm) < 10:
+        return []
+    # Try matching the last 10-11 digits (without country code)
+    # to handle both +55 and without
+    suffix = norm[-11:] if len(norm) >= 11 else norm[-10:]
+    try:
+        rows = run_sql(
+            "SELECT id, telefone1, telefone2 FROM membros "
+            "WHERE telefone1 IS NOT NULL AND telefone1 <> '' "
+            "   OR telefone2 IS NOT NULL AND telefone2 <> ''"
+        )
+        matched = []
+        for row in (rows or []):
+            for col in ("telefone1", "telefone2"):
+                val = row.get(col) or ""
+                val_digits = re.sub(r"\D", "", val)
+                if not val_digits or len(val_digits) < 10:
+                    continue
+                val_suffix = val_digits[-11:] if len(val_digits) >= 11 else val_digits[-10:]
+                if val_suffix == suffix:
+                    mid = int(row["id"])
+                    if mid not in matched:
+                        matched.append(mid)
+        return matched
+    except Exception:
+        log.exception("Falha ao buscar membros por telefone=%s", phone)
+        return []
 
 
 def lookup_whatsapp_contact_profile(phone: str) -> Optional[Dict[str, Any]]:
@@ -1420,6 +1514,94 @@ class WhatsAppWebClient:
 
         return self._run_on_browser_thread(_do)
 
+    def resolve_phone_from_open_chat_internals(self) -> Optional[str]:
+        """Extract phone from the currently open chat using WA's internal React/Store data.
+
+        This avoids needing to open the contact panel at all — it reads the
+        chat ID (which IS the phone number) from the DOM's React fiber props
+        or from the #main header's data attributes.
+        """
+        self.start()
+
+        def _do():
+            if not getattr(self, '_page', None):
+                return None
+
+            return self._page.evaluate(
+                """() => {
+                    const pickPhone = (s) => {
+                        const d = String(s || '').replace(/\\D/g, '');
+                        return (d.length >= 10 && d.length <= 15) ? d : null;
+                    };
+
+                    // Strategy 1: React Fiber on #main or header — chat ID is the phone
+                    const main = document.querySelector('#main');
+                    if (main) {
+                        const fiberKey = Object.keys(main).find(
+                            k => k.startsWith('__reactFiber') || k.startsWith('__reactInternalInstance')
+                        );
+                        if (fiberKey) {
+                            let node = main[fiberKey];
+                            for (let i = 0; i < 20 && node; i++) {
+                                const props = node.memoizedProps || node.pendingProps || {};
+                                // Common prop names for chat ID
+                                for (const key of ['chatId', 'id', 'jid', 'peer', 'contact']) {
+                                    let val = props[key];
+                                    if (val && typeof val === 'object') {
+                                        val = val._serialized || val.user || val.toString();
+                                    }
+                                    const phone = pickPhone(val);
+                                    if (phone) return phone;
+                                }
+                                // Check nested chat object
+                                if (props.chat) {
+                                    const chatId = props.chat.id;
+                                    if (chatId) {
+                                        const ser = typeof chatId === 'object'
+                                            ? (chatId._serialized || chatId.user || '')
+                                            : String(chatId);
+                                        const phone = pickPhone(ser);
+                                        if (phone) return phone;
+                                    }
+                                }
+                                node = node.return;
+                            }
+                        }
+                    }
+
+                    // Strategy 2: data-id attribute on any ancestor
+                    const header = document.querySelector('#main header');
+                    if (header) {
+                        let el = header;
+                        while (el) {
+                            const dataId = el.getAttribute?.('data-id') || '';
+                            const phone = pickPhone(dataId);
+                            if (phone) return phone;
+                            el = el.parentElement;
+                        }
+                    }
+
+                    // Strategy 3: WA Store — get currently active chat
+                    try {
+                        const Store = window.Store || window.require?.('WAWebCollections');
+                        if (Store) {
+                            // Active chat
+                            const active = Store.Chat?.getActive?.() || Store.Cmd?.activeChat;
+                            if (active) {
+                                const id = active.id?._serialized || active.id?.user || '';
+                                const phone = pickPhone(id);
+                                if (phone) return phone;
+                            }
+                        }
+                    } catch(e) {}
+
+                    return null;
+                }"""
+            )
+
+        result = self._run_on_browser_thread(_do)
+        return normalize_phone(result) if result else None
+
     # open_chat_by_sidebar_click definido abaixo (versão única)
 
     def extract_phone_from_open_chat(self) -> Optional[str]:
@@ -1481,7 +1663,7 @@ class WhatsAppWebClient:
 
             el = el_handle.as_element() if el_handle else None
             if not el:
-                log.warning("open_chat_by_sidebar_click: título '%s' não encontrado na sidebar", title)
+                elog.warning("open_chat_by_sidebar_click: título '%s' não encontrado na sidebar", title)
                 return False
 
             # 2) Clique real via Playwright ElementHandle (eventos mousedown/mouseup/click reais)
@@ -1489,17 +1671,33 @@ class WhatsAppWebClient:
                 self._page.wait_for_timeout(200)
                 el.click(timeout=5000)
             except Exception as e:
-                log.warning("open_chat_by_sidebar_click: falha no clique para '%s': %s", title, e)
+                elog.warning("open_chat_by_sidebar_click: falha no clique para '%s': %s", title, e)
                 return False
 
-            # 3) Aguarda o header do chat renderizar e confirma que é o chat certo
-            try:
-                self._page.wait_for_selector('#main header span[title]', timeout=5000)
-                self._page.wait_for_timeout(500)
-                return True
-            except Exception:
-                log.warning("open_chat_by_sidebar_click: header não apareceu após clicar '%s'", title)
-                return False
+            # 3) Aguarda o header do chat renderizar — retry com espera para conexão lenta
+            for wait_attempt in range(3):
+                try:
+                    self._page.wait_for_selector('#main header span[title]', timeout=3000)
+                    self._page.wait_for_timeout(500)
+                    return True
+                except Exception:
+                    if wait_attempt < 2:
+                        elog.info(
+                            "open_chat_by_sidebar_click: header ainda não apareceu para '%s', "
+                            "aguardando mais 3s (tentativa %s/3)...",
+                            title, wait_attempt + 1,
+                        )
+                        self._page.wait_for_timeout(3000)
+                    else:
+                        # Última tentativa: tenta seletor alternativo
+                        try:
+                            self._page.wait_for_selector('#main header', timeout=3000)
+                            self._page.wait_for_timeout(500)
+                            return True
+                        except Exception:
+                            pass
+            elog.warning("open_chat_by_sidebar_click: header não apareceu após 3 tentativas para '%s'", title)
+            return False
 
         return self._run_on_browser_thread(_do)
 
@@ -1599,32 +1797,6 @@ class WhatsAppWebClient:
         return normalize_phone(result) if result else None
 
     def extract_phone_from_open_chat(self) -> Optional[str]:
-        self.start()
-
-        def _do():
-            if not getattr(self, '_page', None):
-                return None
-
-            return self._page.evaluate(
-                """() => {
-                    const header = document.querySelector('#main header');
-                    if (!header) return null;
-                    const spans = header.querySelectorAll('span[title], span[dir="auto"], span');
-                    for (const span of spans) {
-                        const text = (span.getAttribute('title') || span.textContent || '').trim();
-                        if (!text) continue;
-                        const digits = text.replace(/\\D/g, '');
-                        if (digits.length >= 10 && digits.length <= 15) {
-                            return digits;
-                        }
-                    }
-                    return null;
-                }"""
-            )
-
-        return self._run_on_browser_thread(_do)
-
-    def extract_phone_from_open_chat(self) -> Optional[str]:
         """Try to extract the phone number from the currently open chat header."""
         self.start()
 
@@ -1714,7 +1886,16 @@ class WhatsAppWebClient:
         }
 
     def get_open_contact_details(self) -> Dict[str, str]:
-        """Open contact details panel and extract visible profile information.
+        """Open contact details panel via menu and extract profile info.
+
+        Simulates the exact manual user route:
+          1. Escape (close any existing panel/menu)
+          2. Read header identity (title + phone if visible)
+          3. Click "Mais opções" button (three-dots menu)
+          4. Click "Dados do contato" menu item
+          5. Wait for contact details section to render (including phone)
+          6. Extract profile_name + profile_phone from the section
+          7. Escape (close panel)
 
         Returns:
           {title, phone, profile_name, profile_phone}
@@ -1722,18 +1903,19 @@ class WhatsAppWebClient:
         self.start()
 
         def _do():
-            # Fecha possível painel já aberto e volta ao chat.
+            # ── SUB-ETAPA A: Fecha possível painel/menu já aberto ──────
             try:
                 self._page.keyboard.press("Escape")
-                self._page.wait_for_timeout(150)
+                self._page.wait_for_timeout(300)
             except Exception:
                 pass
 
             header = self._page.locator("#main header").first
             if header.count() == 0:
+                elog.info("get_open_contact_details: #main header não encontrado")
                 return {"title": "", "phone": "", "profile_name": "", "profile_phone": ""}
 
-            # Captura identidade visível no header ANTES de abrir o painel.
+            # ── SUB-ETAPA B: Captura identidade do header ──────────────
             base = self._page.evaluate(
                 """() => {
                     const pickPhone = (txt) => {
@@ -1746,7 +1928,7 @@ class WhatsAppWebClient:
                     const titleEl = header.querySelector('span[title]') || header.querySelector('span[dir="auto"]');
                     const title = (titleEl?.getAttribute?.('title') || titleEl?.textContent || '').trim();
                     let phone = '';
-                    for (const s of header.querySelectorAll('span[title], span[dir=\"auto\"], span')) {
+                    for (const s of header.querySelectorAll('span[title], span[dir="auto"], span')) {
                         const txt = (s.getAttribute?.('title') || s.textContent || '').trim();
                         const p = pickPhone(txt);
                         if (p.length >= 10) { phone = p; break; }
@@ -1754,232 +1936,312 @@ class WhatsAppWebClient:
                     return { title, phone };
                 }"""
             ) or {}
+            elog.info(
+                "get_open_contact_details sub-B: header title='%s' phone='%s'",
+                base.get("title", ""), base.get("phone", ""),
+            )
 
+            # ── SUB-ETAPA C: Clique em "Mais opções" (three-dots menu) ─
+            menu_opened = False
             try:
-                header.click(timeout=3000)
-            except Exception:
+                mais_opcoes = self._page.locator(
+                    '#main header button[aria-label="Mais opções"], '
+                    '#main button[aria-label="Mais opções"], '
+                    'button[aria-label="More options"]'
+                ).first
+                if mais_opcoes.count() > 0:
+                    mais_opcoes.click(timeout=3000)
+                    self._page.wait_for_timeout(500)
+                    menu_opened = True
+                    elog.info("  sub-C: 'Mais opções' clicado via locator")
+            except Exception as e:
+                elog.debug("  sub-C: locator click falhou: %s", e)
+
+            if not menu_opened:
+                try:
+                    js_result = self._page.evaluate(
+                        """() => {
+                            const realClick = (el) => {
+                                if (!el) return false;
+                                el.scrollIntoView({ block: 'center' });
+                                const rect = el.getBoundingClientRect();
+                                const x = rect.left + rect.width / 2;
+                                const y = rect.top + rect.height / 2;
+                                const opts = { bubbles: true, cancelable: true, clientX: x, clientY: y };
+                                el.dispatchEvent(new MouseEvent('mousedown', opts));
+                                el.dispatchEvent(new MouseEvent('mouseup', opts));
+                                el.dispatchEvent(new MouseEvent('click', opts));
+                                return true;
+                            };
+                            const btn = document.querySelector('#main button[aria-label="Mais opções"]')
+                                || document.querySelector('button[aria-label="Mais opções"]')
+                                || document.querySelector('#main button[aria-label="More options"]')
+                                || document.querySelector('button[aria-label="More options"]');
+                            if (!btn) return { ok: false, reason: 'button_not_found' };
+                            return { ok: realClick(btn), reason: 'js_click' };
+                        }"""
+                    ) or {}
+                    menu_opened = bool(js_result.get("ok"))
+                    if menu_opened:
+                        self._page.wait_for_timeout(500)
+                        elog.info("  sub-C: 'Mais opções' clicado via JS")
+                    else:
+                        elog.warning(
+                            "  sub-C: botão 'Mais opções' não encontrado: %s",
+                            js_result.get("reason", ""),
+                        )
+                except Exception as e:
+                    elog.warning("  sub-C: JS click 'Mais opções' falhou: %s", e)
+
+            if not menu_opened:
+                elog.warning("  FALHA ao abrir menu 'Mais opções'")
                 return {
                     "title": str(base.get("title") or "").strip(),
                     "phone": str(base.get("phone") or "").strip(),
                     "profile_name": "",
                     "profile_phone": "",
+                    "_click_failed": True,
                 }
 
-            # Aguarda o painel abrir — tenta múltiplos seletores.
-            # IMPORTANTE: Exclui role=menuitem pois o WA renderiza primeiro um
-            # botão com aria-label="Dados do contato" e role=menuitem ANTES do
-            # painel real aparecer. Detectar esse botão causa falso positivo.
+            # ── SUB-ETAPA D: Clique em "Dados do contato" (menu item) ──
+            panel_clicked = False
+            try:
+                dados_btn = self._page.locator(
+                    'button[aria-label="Dados do contato"], '
+                    'div[aria-label="Dados do contato"][role="menuitem"], '
+                    '[aria-label="Dados do contato"], '
+                    'button[aria-label="Contact info"], '
+                    '[aria-label="Contact info"][role="menuitem"]'
+                ).first
+                if dados_btn.count() > 0:
+                    dados_btn.click(timeout=3000)
+                    panel_clicked = True
+                    elog.info("  sub-D: 'Dados do contato' clicado via locator")
+            except Exception as e:
+                elog.debug("  sub-D: locator click 'Dados do contato' falhou: %s", e)
+
+            if not panel_clicked:
+                try:
+                    js_result = self._page.evaluate(
+                        """() => {
+                            const realClick = (el) => {
+                                if (!el) return false;
+                                el.scrollIntoView({ block: 'center' });
+                                const rect = el.getBoundingClientRect();
+                                const x = rect.left + rect.width / 2;
+                                const y = rect.top + rect.height / 2;
+                                const opts = { bubbles: true, cancelable: true, clientX: x, clientY: y };
+                                el.dispatchEvent(new MouseEvent('mousedown', opts));
+                                el.dispatchEvent(new MouseEvent('mouseup', opts));
+                                el.dispatchEvent(new MouseEvent('click', opts));
+                                return true;
+                            };
+                            const btn = document.querySelector('[aria-label="Dados do contato"]')
+                                || document.querySelector('[aria-label="Contact info"]');
+                            if (!btn) return { ok: false, reason: 'dados_contato_not_found' };
+                            return { ok: realClick(btn), reason: 'js_click' };
+                        }"""
+                    ) or {}
+                    panel_clicked = bool(js_result.get("ok"))
+                    if panel_clicked:
+                        elog.info("  sub-D: 'Dados do contato' clicado via JS")
+                    else:
+                        elog.warning(
+                            "  sub-D: item 'Dados do contato' não encontrado: %s",
+                            js_result.get("reason", ""),
+                        )
+                except Exception as e:
+                    elog.warning("  sub-D: JS click 'Dados do contato' falhou: %s", e)
+
+            if not panel_clicked:
+                # Menu não tem "Dados do contato" — é conta oficial do WhatsApp
+                try:
+                    self._page.keyboard.press("Escape")
+                    self._page.wait_for_timeout(200)
+                except Exception:
+                    pass
+                elog.warning(
+                    "  Menu não contém 'Dados do contato' — provável conta oficial WhatsApp (sem número)"
+                )
+                return {
+                    "title": str(base.get("title") or "").strip(),
+                    "phone": str(base.get("phone") or "").strip(),
+                    "profile_name": "",
+                    "profile_phone": "",
+                    "_click_failed": True,
+                    "_no_dados_contato": True,
+                }
+
+            # ── SUB-ETAPA E: Aguarda seção de dados do contato carregar ─
             panel_visible = False
             panel_selectors = [
+                'section span[data-testid="selectable-text"]',
                 '[data-testid="contact-info-drawer"]',
-                'div[aria-label="Dados do contato"]:not([role="menuitem"])',
-                'div[aria-label="Contact info"]:not([role="menuitem"])',
-                'aside[aria-label="Dados do contato"]',
-                'aside[aria-label="Contact info"]',
+                'section img[draggable="false"]',
             ]
             for sel in panel_selectors:
                 try:
-                    self._page.wait_for_selector(sel, timeout=2500)
+                    self._page.wait_for_selector(sel, timeout=5000)
                     panel_visible = True
+                    elog.info("  sub-E: painel detectado via '%s'", sel)
                     break
                 except Exception:
                     continue
+
             if not panel_visible:
-                try:
-                    self._page.wait_for_selector("text=/Dados do contato|Contact info|Informações do contato/i", timeout=3000)
-                    panel_visible = True
-                except Exception:
-                    panel_visible = False
+                elog.warning(
+                    "  sub-E: painel não detectado por seletores. Aguardando 4s como fallback..."
+                )
+                self._page.wait_for_timeout(4000)
+            else:
+                # Pausa para o telefone renderizar (~1-6s observado manualmente)
+                self._page.wait_for_timeout(3000)
 
-            # Pausa extra para o painel carregar seus dados.
-            # O WA pode renderizar o telefone ~1-6s após o painel ficar visível
-            # (observado em logs do console: ~1.3s entre panel=Y e pPhone aparecer,
-            # mas ~6s entre o clique no header e o telefone renderizar).
-            self._page.wait_for_timeout(1500)
-
+            # ── SUB-ETAPA F: Extrai dados da section com retries ────────
             extract_details_js = """() => {
-                    const pickPhone = (txt) => {
-                        if (!txt) return '';
-                        const m = String(txt).match(/\\+?\\d[\\d\\s\\-()]{7,}/);
-                        if (!m) return '';
-                        const digits = m[0].replace(/\\D/g, '');
-                        return (digits.length >= 10 && digits.length <= 15) ? digits : '';
-                    };
-                    const isVisible = (el) => {
-                        if (!el) return false;
-                        const style = window.getComputedStyle(el);
-                        if (!style) return false;
-                        if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
-                        const rect = el.getBoundingClientRect();
-                        return rect.width > 0 && rect.height > 0;
-                    };
-                    const isPanelContainer = (el) => {
-                        if (!el || !isVisible(el)) return false;
-                        const role = (el.getAttribute('role') || '').toLowerCase();
-                        if (role === 'menu' || role === 'menuitem') return false;
-                        const rect = el.getBoundingClientRect();
-                        return rect.width >= 150 && rect.height >= 100;
-                    };
-                    const out = { profile_name: '', profile_phone: '', _debug: '' };
-                    const isNoiseText = (txt) => {
-                        const lower = String(txt || '').trim().toLowerCase();
-                        if (!lower) return true;
-                        return (
-                            lower.includes('dados do contato')
-                            || lower.includes('contact info')
-                            || lower.includes('informações do contato')
-                            || lower.includes('mídia')
-                            || lower.includes('media')
-                            || lower.includes('mensagens favoritas')
-                            || lower.includes('silenciar')
-                            || lower.includes('wa-wordmark')
-                            || lower.includes('meta ai')
-                        );
-                    };
+                const pickPhone = (txt) => {
+                    if (!txt) return '';
+                    const m = String(txt).match(/\\+?\\d[\\d\\s\\-()]{7,}/);
+                    if (!m) return '';
+                    const digits = m[0].replace(/\\D/g, '');
+                    return (digits.length >= 10 && digits.length <= 15) ? digits : '';
+                };
+                const isVisible = (el) => {
+                    if (!el) return false;
+                    const style = window.getComputedStyle(el);
+                    if (!style) return false;
+                    if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
+                    const rect = el.getBoundingClientRect();
+                    return rect.width > 0 && rect.height > 0;
+                };
+                const isNoiseText = (txt) => {
+                    const lower = String(txt || '').trim().toLowerCase();
+                    if (!lower) return true;
+                    return (
+                        lower.includes('dados do contato')
+                        || lower.includes('contact info')
+                        || lower.includes('mais opções')
+                        || lower.includes('more options')
+                        || lower.includes('mídia')
+                        || lower.includes('media')
+                        || lower.includes('mensagens favoritas')
+                        || lower.includes('silenciar')
+                        || lower.includes('mensagens temporárias')
+                        || lower.includes('criptografia')
+                        || lower.includes('bloquear')
+                        || lower.includes('denunciar')
+                        || lower.includes('apagar conversa')
+                        || lower.includes('limpar conversa')
+                        || lower.includes('adicionar aos favoritos')
+                        || lower.includes('privacidade')
+                        || lower.includes('pesquisar')
+                        || lower.includes('editar')
+                        || lower.includes('notas')
+                        || lower.includes('desativad')
+                        || lower.includes('fechar conversa')
+                        || lower.includes('selecionar mensagens')
+                        || lower.includes('trancar conversa')
+                        || lower.includes('etiquetar')
+                        || lower.includes('wa-wordmark')
+                        || lower.includes('meta ai')
+                        || lower.includes('mostrar foto')
+                        || lower.includes('adicione notas')
+                    );
+                };
+                const out = { profile_name: '', profile_phone: '', _debug: '' };
 
-                    const pickContainerFromNode = (node) => {
-                        if (!node) return null;
-                        let candidate = node.closest('section, aside, div[role="dialog"], div[role="region"], div[class]');
-                        while (candidate && !isPanelContainer(candidate)) {
-                            candidate = candidate.parentElement;
-                        }
-                        return candidate;
-                    };
-
-                    // === Estratégia 1: data-testid do painel de contato ===
-                    let panelRoot = document.querySelector('[data-testid="contact-info-drawer"]');
-
-                    // === Estratégia 2: aria-label (exclui role=menuitem — é botão, não painel) ===
-                    if (!panelRoot) {
-                        panelRoot =
-                            document.querySelector('div[aria-label="Dados do contato"]:not([role="menuitem"])')
-                            || document.querySelector('div[aria-label="Contact info"]:not([role="menuitem"])')
-                            || document.querySelector('aside[aria-label="Dados do contato"]')
-                            || document.querySelector('aside[aria-label="Contact info"]');
-                        if (panelRoot && !isPanelContainer(panelRoot)) {
-                            panelRoot = pickContainerFromNode(panelRoot);
-                        }
+                // Busca a section do painel de detalhes (lado direito)
+                // A section contém a foto, nome, telefone, mídia, etc.
+                const sections = document.querySelectorAll('section');
+                let panelRoot = null;
+                for (const s of sections) {
+                    if (!isVisible(s)) continue;
+                    const rect = s.getBoundingClientRect();
+                    // A section de contato é grande e fica à direita
+                    if (rect.width >= 200 && rect.height >= 300) {
+                        panelRoot = s;
+                        break;
                     }
+                }
 
-                    // === Estratégia 3: heading textual ===
-                    if (!panelRoot) {
-                        const heading = Array.from(
-                            document.querySelectorAll('h1, h2, div[role="heading"], span[dir="auto"], span')
-                        ).find((n) => /dados do contato|contact info|informações do contato/i.test((n.textContent || '').trim()));
-                        panelRoot = pickContainerFromNode(heading);
-                    }
+                // Fallback: data-testid drawer
+                if (!panelRoot) {
+                    panelRoot = document.querySelector('[data-testid="contact-info-drawer"]');
+                }
 
-                    // === Estratégia 4: qualquer painel à direita com texto de telefone ===
-                    if (!panelRoot) {
-                        const phoneNodes = Array.from(
-                            document.querySelectorAll('[data-testid="selectable-text"], span[dir="auto"], span')
-                        ).filter((n) => !!pickPhone((n.textContent || '').trim()));
-                        for (const n of phoneNodes) {
-                            const candidate = pickContainerFromNode(n);
-                            if (!candidate) continue;
-                            panelRoot = candidate;
-                            break;
-                        }
-                    }
-
-                    if (!panelRoot) {
-                        out._debug = 'panelRoot not found';
-                        return out;
-                    }
-                    out._debug = 'panelRoot=' + (panelRoot.tagName || '?') +
-                        ' role=' + (panelRoot.getAttribute('role') || '') +
-                        ' testid=' + (panelRoot.getAttribute('data-testid') || '') +
-                        ' aria=' + (panelRoot.getAttribute('aria-label') || '') +
-                        ' size=' + panelRoot.getBoundingClientRect().width + 'x' + panelRoot.getBoundingClientRect().height;
-
-                    // --- Nome do perfil ---
-                    const preferredName = Array.from(
-                        panelRoot.querySelectorAll('h1, h2, div[role="heading"], span[dir="auto"], span[title]')
-                    ).find((n) => {
-                        const txt = (n.getAttribute?.('title') || n.textContent || '').trim();
-                        if (!txt) return false;
-                        if (!isVisible(n)) return false;
-                        if (isNoiseText(txt)) return false;
-                        return txt.length >= 3;
-                    });
-                    if (preferredName) out.profile_name = (preferredName.getAttribute?.('title') || preferredName.textContent || '').trim();
-
-                    if (!out.profile_name) {
-                        const candidates = panelRoot.querySelectorAll('span[dir="auto"], div[role="heading"]');
-                        for (const c of candidates) {
-                            const txt = (c.getAttribute?.('title') || c.textContent || '').trim();
-                            if (!txt) continue;
-                            if (!isVisible(c)) continue;
-                            if (isNoiseText(txt)) continue;
-                            out.profile_name = txt;
-                            break;
-                        }
-                    }
-
-                    // --- Telefone: busca em data-testid, cell-frame, selectable-text ---
-                    // Prioridade 1: cell-frame-container (onde WA mostra o telefone)
-                    const cellFrames = panelRoot.querySelectorAll('[data-testid="cell-frame-container"], [data-testid="cell-frame-secondary"]');
-                    for (const cf of cellFrames) {
-                        if (!isVisible(cf)) continue;
-                        const txt = (cf.textContent || '').trim();
-                        const p = pickPhone(txt);
-                        if (p.length >= 10) { out.profile_phone = p; break; }
-                    }
-
-                    // Prioridade 2: selectable-text
-                    if (!out.profile_phone) {
-                        const selectable = panelRoot.querySelectorAll('[data-testid="selectable-text"]');
-                        for (const t of selectable) {
-                            if (!isVisible(t)) continue;
-                            const txt = (t.textContent || '').trim();
-                            if (!txt) continue;
-                            const p = pickPhone(txt);
-                            if (p.length >= 10) { out.profile_phone = p; break; }
-                        }
-                    }
-
-                    // Prioridade 3: varredura ampla de spans
-                    if (!out.profile_phone) {
-                        const texts = panelRoot.querySelectorAll('span, div, p');
-                        for (const t of texts) {
-                            if (!isVisible(t)) continue;
-                            const txt = (t.textContent || '').trim();
-                            if (!txt) continue;
-                            const p = pickPhone(txt);
-                            if (p.length >= 10) { out.profile_phone = p; break; }
-                        }
-                    }
-
-                    // Prioridade 4: busca fora do panelRoot restrito — qualquer
-                    // nó visível na página que contenha telefone e esteja em
-                    // container lateral/drawer
-                    if (!out.profile_phone) {
-                        const allNodes = document.querySelectorAll(
-                            '[data-testid="cell-frame-container"] span, ' +
-                            'aside span[dir="auto"], ' +
-                            'section span[dir="auto"], ' +
-                            '[data-testid="contact-info-drawer"] span'
-                        );
-                        for (const n of allNodes) {
-                            if (!isVisible(n)) continue;
-                            const txt = (n.textContent || '').trim();
-                            const p = pickPhone(txt);
-                            if (p.length >= 10) { out.profile_phone = p; break; }
-                        }
-                    }
-
+                if (!panelRoot) {
+                    out._debug = 'panelRoot(section) not found';
                     return out;
-                }"""
+                }
+                out._debug = 'panelRoot=' + panelRoot.tagName +
+                    ' size=' + panelRoot.getBoundingClientRect().width + 'x' +
+                    panelRoot.getBoundingClientRect().height;
+
+                // --- Nome do perfil ---
+                // No HTML o nome aparece em span[data-testid="selectable-text"]
+                const nameNodes = panelRoot.querySelectorAll(
+                    'span[data-testid="selectable-text"], span[dir="auto"], span[title]'
+                );
+                for (const n of nameNodes) {
+                    if (!isVisible(n)) continue;
+                    const txt = (n.getAttribute?.('title') || n.textContent || '').trim();
+                    if (!txt || txt.length < 2) continue;
+                    if (isNoiseText(txt)) continue;
+                    // Se parece telefone, pular — queremos o nome primeiro
+                    const maybePhone = pickPhone(txt);
+                    if (maybePhone) continue;
+                    out.profile_name = txt;
+                    break;
+                }
+
+                // --- Telefone ---
+                // No HTML o telefone aparece como "+55 81 8148-7277" dentro de spans
+                const allSpans = panelRoot.querySelectorAll(
+                    'span[data-testid="selectable-text"], span[dir="auto"], span, div'
+                );
+                for (const s of allSpans) {
+                    if (!isVisible(s)) continue;
+                    const txt = (s.textContent || '').trim();
+                    if (!txt) continue;
+                    const p = pickPhone(txt);
+                    if (p) {
+                        out.profile_phone = p;
+                        break;
+                    }
+                }
+
+                // Fallback: cell-frame-container
+                if (!out.profile_phone) {
+                    const cells = panelRoot.querySelectorAll(
+                        '[data-testid="cell-frame-container"], [data-testid="cell-frame-secondary"]'
+                    );
+                    for (const c of cells) {
+                        if (!isVisible(c)) continue;
+                        const p = pickPhone((c.textContent || '').trim());
+                        if (p) { out.profile_phone = p; break; }
+                    }
+                }
+
+                return out;
+            }"""
 
             data = {}
             for attempt in range(1, 13):
                 data = self._page.evaluate(extract_details_js) or {}
-                if normalize_phone(data.get("profile_phone")):
+                _debug_attempt = str(data.get("_debug") or "")
+                found_phone = normalize_phone(data.get("profile_phone"))
+                if attempt == 1 or found_phone:
+                    elog.info(
+                        "  sub-F: tentativa %s/12 | phone='%s' name='%s' debug='%s'",
+                        attempt, found_phone or "(nenhum)",
+                        data.get("profile_name", ""), _debug_attempt[:120],
+                    )
+                if found_phone:
                     break
                 if attempt < 12:
-                    # Espera progressiva: 500ms nas 4 primeiras, 750ms nas seguintes
                     self._page.wait_for_timeout(500 if attempt <= 4 else 750)
 
+            # ── SUB-ETAPA G: Fecha painel ──────────────────────────────
             try:
                 self._page.keyboard.press("Escape")
                 self._page.wait_for_timeout(150)
@@ -1995,15 +2257,12 @@ class WhatsAppWebClient:
             }
             if not result["profile_name"] and result["title"] and _phone_from_title(result["title"]) is None:
                 result["profile_name"] = result["title"]
-            if not panel_visible:
-                log.warning(
-                    "Painel Dados do contato não ficou visível ao extrair detalhes | base=%s",
-                    json.dumps(result, ensure_ascii=False),
-                )
-            log.info(
-                "get_open_contact_details resultado | title='%s' phone='%s' profile_phone='%s' panel_visible=%s debug=%s",
+            elog.info(
+                "  RESULTADO: title='%s' phone='%s' profile_name='%s' "
+                "profile_phone='%s' panel_visible=%s debug=%s",
                 result.get("title", ""), result.get("phone", ""),
-                result.get("profile_phone", ""), panel_visible, _debug,
+                result.get("profile_name", ""), result.get("profile_phone", ""),
+                panel_visible, _debug[:100],
             )
             return result
 
@@ -2595,51 +2854,71 @@ def _enrich_single_contact(title: str) -> Tuple[Optional[str], str, str, str]:
     detail_profile = ""
 
     # ── ETAPA 1: WA Store (sem abrir chat) ──────────────────────────
-    log.info("  [ETAPA 1/5] resolve_phone_via_wa_store('%s')...", title)
+    elog.info("  [ETAPA 1/5] resolve_phone_via_wa_store('%s')...", title)
     try:
         store_phone = wa_web.resolve_phone_via_wa_store(title)
         if store_phone:
-            log.info("  [ETAPA 1/5] ✓ WA Store resolveu: %s", store_phone)
+            elog.info("  [ETAPA 1/5] ✓ WA Store resolveu: %s", store_phone)
             return store_phone, detail_title, detail_profile, ""
-        log.info("  [ETAPA 1/5] WA Store: nenhum resultado (Store.Chat + Store.Contact + ReactFiber)")
+        elog.info("  [ETAPA 1/5] WA Store: nenhum resultado")
     except Exception as e:
-        log.info("  [ETAPA 1/5] WA Store: exceção: %s", e)
+        elog.info("  [ETAPA 1/5] WA Store: exceção: %s", e)
 
     # ── ETAPA 2: Clicar no contato na sidebar ───────────────────────
-    log.info("  [ETAPA 2/5] open_chat_by_sidebar_click('%s')...", title)
+    elog.info("  [ETAPA 2/5] open_chat_by_sidebar_click('%s')...", title)
     if not wa_web.open_chat_by_sidebar_click(title):
         reason = "sidebar_click_failed"
-        log.warning("  [ETAPA 2/5] FALHA: clique na sidebar não abriu o chat")
+        elog.warning("  [ETAPA 2/5] FALHA: clique na sidebar não abriu o chat")
         return None, detail_title, detail_profile, reason
 
     # ── ETAPA 3: Verificar header do chat aberto ────────────────────
-    log.info("  [ETAPA 3/5] get_open_chat_identity() — verificando header...")
+    elog.info("  [ETAPA 3/5] get_open_chat_identity() — verificando header...")
     open_identity = wa_web.get_open_chat_identity()
     open_title = (open_identity.get("title") or "").strip()
     open_phone = (open_identity.get("phone") or "").strip()
-    log.info(
+    elog.info(
         "  [ETAPA 3/5] Header: title='%s' phone='%s'",
         open_title or "(vazio)", open_phone or "(nenhum)",
     )
 
     if not open_title:
         reason = "header_empty_after_click"
-        log.warning("  [ETAPA 3/5] FALHA: header vazio — chat não abriu")
+        elog.warning("  [ETAPA 3/5] FALHA: header vazio — chat não abriu")
         return None, detail_title, detail_profile, reason
 
     # Se o header já mostra telefone, temos o resultado
     if open_phone and normalize_phone(open_phone):
-        log.info("  [ETAPA 3/5] ✓ Telefone já visível no header: %s", open_phone)
+        elog.info("  [ETAPA 3/5] ✓ Telefone já visível no header: %s", open_phone)
         return normalize_phone(open_phone), open_title, detail_profile, ""
 
-    # ── ETAPA 4: Abrir painel "Dados do contato" ────────────────────
-    log.info("  [ETAPA 4/5] get_open_contact_details() — abrindo painel Dados do contato...")
+    # ── ETAPA 3.5: React internals do chat aberto ──────────────────
+    elog.info("  [ETAPA 3.5] resolve_phone_from_open_chat_internals() — tentando React/Store...")
+    try:
+        react_phone = wa_web.resolve_phone_from_open_chat_internals()
+        if react_phone:
+            elog.info("  [ETAPA 3.5] ✓ Telefone via React internals: %s", react_phone)
+            return react_phone, open_title, detail_profile, ""
+        elog.info("  [ETAPA 3.5] React internals: nenhum telefone encontrado")
+    except Exception as e:
+        elog.info("  [ETAPA 3.5] React internals: exceção: %s", e)
+
+    # ── ETAPA 4: Abrir painel "Dados do contato" via menu ───────────
+    elog.info("  [ETAPA 4/5] get_open_contact_details() — abrindo via Mais opções → Dados do contato...")
     details = wa_web.get_open_contact_details()
     detail_title = details.get("title") or title
     detail_profile = details.get("profile_name") or ""
     panel_phone = normalize_phone(details.get("profile_phone") or "")
     header_phone = normalize_phone(details.get("phone") or "")
-    log.info(
+
+    # Se o menu não contém "Dados do contato", é conta oficial do WhatsApp
+    if details.get("_no_dados_contato"):
+        reason = "official_wa_account_no_dados_contato"
+        elog.info(
+            "  [ETAPA 4/5] Conta oficial do WhatsApp detectada (sem 'Dados do contato' no menu) — ignorando permanentemente"
+        )
+        return None, detail_title, detail_profile, reason
+
+    elog.info(
         "  [ETAPA 4/5] Resultado painel: title='%s' profile_name='%s' "
         "profile_phone='%s' header_phone='%s'",
         detail_title, detail_profile,
@@ -2647,31 +2926,31 @@ def _enrich_single_contact(title: str) -> Tuple[Optional[str], str, str, str]:
     )
 
     if panel_phone:
-        log.info("  [ETAPA 4/5] ✓ Telefone capturado via painel: %s", panel_phone)
+        elog.info("  [ETAPA 4/5] ✓ Telefone capturado via painel: %s", panel_phone)
         return panel_phone, detail_title, detail_profile, ""
     if header_phone:
-        log.info("  [ETAPA 4/5] ✓ Telefone capturado via header (retorno do painel): %s", header_phone)
+        elog.info("  [ETAPA 4/5] ✓ Telefone capturado via header (retorno do painel): %s", header_phone)
         return header_phone, detail_title, detail_profile, ""
 
     # ── ETAPA 5: Fallback — extract_phone_from_open_chat ────────────
-    log.info("  [ETAPA 5/5] extract_phone_from_open_chat() — fallback no header direto...")
+    elog.info("  [ETAPA 5/5] extract_phone_from_open_chat() — fallback no header direto...")
     try:
         fallback_phone = wa_web.extract_phone_from_open_chat()
         if fallback_phone:
             norm = normalize_phone(fallback_phone)
             if norm:
-                log.info("  [ETAPA 5/5] ✓ Telefone capturado via header direto: %s", norm)
+                elog.info("  [ETAPA 5/5] ✓ Telefone capturado via header direto: %s", norm)
                 return norm, detail_title, detail_profile, ""
-        log.info("  [ETAPA 5/5] Header direto: nenhum telefone encontrado")
+        elog.info("  [ETAPA 5/5] Header direto: nenhum telefone encontrado")
     except Exception as e:
-        log.warning("  [ETAPA 5/5] Exceção no fallback header: %s", e)
+        elog.warning("  [ETAPA 5/5] Exceção no fallback header: %s", e)
 
     reason = (
         "no_phone_all_strategies|"
         f"store=fail|sidebar=ok|header='{open_title}'|"
         f"panel_profile='{detail_profile}'|panel_phone=none|header_phone=none"
     )
-    log.warning(
+    elog.warning(
         "  [RESULTADO] Nenhum telefone encontrado para '%s' | motivo: %s",
         title, reason,
     )
@@ -2691,53 +2970,38 @@ def enrich_named_contacts_from_sidebar(
 
     now_mono = time.monotonic()
     if now_mono - _LAST_SIDEBAR_ENRICHMENT_TS < float(min_interval_sec):
-        log.info(
-            "Enriquecimento sidebar: pulado por intervalo mínimo | delta=%.1fs < %ss",
-            now_mono - _LAST_SIDEBAR_ENRICHMENT_TS,
-            min_interval_sec,
-        )
         return 0
 
     aliases = state.get_contact_aliases()
     contexts = state.all_phone_contexts()
+    official_accounts = state.get_official_wa_accounts()
     enriched = 0
     skipped_not_named = 0
     skipped_alias_exists = 0
     skipped_no_phone = 0
     skipped_cooldown = 0
+    skipped_official = 0
     attempts = 0
 
-    # ── Log falhas anteriores para DEBUG ────────────────────────────
+    # ── Filtra e classifica candidatos ──────────────────────────────
     all_failures = state.get_enrichment_failures()
-    if all_failures:
-        log.info(
-            "Enriquecimento sidebar: %s contatos com falha(s) anterior(es):",
-            len(all_failures),
-        )
-        for fk, fv in sorted(all_failures.items(), key=lambda x: x[1].get("count", 0), reverse=True):
-            in_cooldown = state.should_skip_enrichment(fk, max_failures=5, cooldown_hours=24)
-            log.info(
-                "  falha: '%s' | tentativas=%s | última=%s | motivo='%s' | cooldown=%s",
-                fk,
-                fv.get("count", 0),
-                fv.get("last_at", "?"),
-                fv.get("last_reason", "(sem motivo)"),
-                "SIM" if in_cooldown else "não",
-            )
-
-    # Filtra e prioriza candidatos: contatos que correspondem a contextos
-    # monitorados (pacientes) vêm primeiro, depois retries de falhas, depois os demais.
     eligible_rows: List[Dict[str, Any]] = []
     monitored_rows: List[Dict[str, Any]] = []
     retry_rows: List[Dict[str, Any]] = []
+    total_named = 0
     for row in chat_rows:
         title = (row.get("title") or "").strip()
         if not title or not _is_named_chat_title(title):
             skipped_not_named += 1
             continue
+        total_named += 1
         title_key = re.sub(r"\s+", " ", title.lower())
         if aliases.get(title_key):
             skipped_alias_exists += 1
+            continue
+        # Conta oficial do WhatsApp — ignorar permanentemente
+        if state.is_official_wa_account(title_key):
+            skipped_official += 1
             continue
         # Contato em cooldown (>=5 falhas nas últimas 24h) — pula
         if state.should_skip_enrichment(title_key, max_failures=5, cooldown_hours=24):
@@ -2755,14 +3019,86 @@ def enrich_named_contacts_from_sidebar(
     # Prioridade: monitorados > retries (com falha anterior) > novos
     prioritized = monitored_rows + retry_rows + eligible_rows
 
-    log.info(
-        "Enriquecimento sidebar iniciado | chats_visíveis=%s | aliases_cache=%s "
-        "| max_por_ciclo=%s | max_tentativas=%s | candidatos=%s (monitorados=%s, retries=%s, novos=%s) "
-        "| cooldown=%s | not_named=%s | alias_exists=%s",
-        len(chat_rows), len(aliases), max_per_cycle, max_attempts,
-        len(prioritized), len(monitored_rows), len(retry_rows), len(eligible_rows),
-        skipped_cooldown, skipped_not_named, skipped_alias_exists,
-    )
+    # ── Log inteligente: resumo ou detalhado ────────────────────────
+    has_pending_real = len(prioritized) > 0
+    total_accounted = skipped_alias_exists + skipped_official + skipped_not_named
+    if not has_pending_real:
+        # Todos os contatos nomeados estão resolvidos — log resumido
+        if skipped_official > 0:
+            elog.info(
+                "=== Contatos JÁ associados (nome → telefone): %s de %s listados "
+                "| %s são contas oficiais do WhatsApp (sem número) ===",
+                skipped_alias_exists, total_named, skipped_official,
+            )
+        else:
+            elog.info(
+                "=== Contatos JÁ associados (nome → telefone): %s de %s listados ===",
+                skipped_alias_exists, total_named,
+            )
+    else:
+        # Há contatos pendentes — log detalhado
+        elog.info(
+            "=== Contatos JÁ associados (nome → telefone): %s de %s listados "
+            "| oficiais_whatsapp=%s | pendentes=%s ===",
+            skipped_alias_exists, total_named, skipped_official, len(prioritized),
+        )
+        if aliases:
+            for alias_name, alias_phone in sorted(aliases.items()):
+                elog.info("  ✓ '%s' → %s", alias_name, alias_phone)
+        if official_accounts:
+            elog.info("  Contas oficiais WhatsApp (sem número): %s", ", ".join(official_accounts))
+        if all_failures:
+            for fk, fv in sorted(all_failures.items(), key=lambda x: x[1].get("count", 0), reverse=True):
+                if state.is_official_wa_account(fk):
+                    continue
+                in_cooldown = state.should_skip_enrichment(fk, max_failures=5, cooldown_hours=24)
+                elog.info(
+                    "  ✗ '%s' | tentativas=%s | motivo='%s' | cooldown=%s",
+                    fk, fv.get("count", 0), fv.get("last_reason", "?"),
+                    "SIM" if in_cooldown else "não",
+                )
+
+    # Se todos os candidatos estão em cooldown e não há nenhum novo, reseta os
+    # contadores de falha para permitir retries com a lógica atualizada.
+    if len(prioritized) == 0 and skipped_cooldown > 0:
+        cleared = state.reset_all_enrichment_failures()
+        elog.info(
+            "TODOS os %s candidatos em cooldown — "
+            "resetando %s contadores de falha para permitir retry com lógica atualizada",
+            skipped_cooldown, cleared,
+        )
+        # Re-scan after reset
+        skipped_cooldown = 0
+        for row in chat_rows:
+            title = (row.get("title") or "").strip()
+            if not title or not _is_named_chat_title(title):
+                continue
+            title_key = re.sub(r"\s+", " ", title.lower())
+            if aliases.get(title_key):
+                continue
+            if _match_context_for_chat_title(title, contexts, aliases=aliases):
+                monitored_rows.append(row)
+            else:
+                retry_rows.append(row)
+        prioritized = monitored_rows + retry_rows + eligible_rows
+
+    if has_pending_real:
+        elog.info(
+            "=== Iniciando enriquecimento | candidatos=%s (monitorados=%s, retries=%s, novos=%s) ===",
+            len(prioritized), len(monitored_rows), len(retry_rows), len(eligible_rows),
+        )
+
+    # Log dos candidatos que serão tentados neste ciclo
+    if prioritized:
+        elog.info("=== Candidatos a tentar neste ciclo (%s): ===", len(prioritized))
+        for i, prow in enumerate(prioritized[:max_attempts]):
+            ptitle = (prow.get("title") or "").strip()
+            ptitle_key = re.sub(r"\s+", " ", ptitle.lower())
+            pfail = all_failures.get(ptitle_key)
+            pfail_count = pfail.get("count", 0) if pfail else 0
+            elog.info("  %s. '%s' (falhas anteriores=%s)", i + 1, ptitle, pfail_count)
+    else:
+        elog.info("=== Nenhum candidato para enriquecer neste ciclo ===")
 
     for row in prioritized:
         if enriched >= max_per_cycle or attempts >= max_attempts:
@@ -2774,21 +3110,30 @@ def enrich_named_contacts_from_sidebar(
 
         attempts += 1
         if prev_failure and prev_failure.get("count", 0) > 0:
-            log.info(
-                "Enriquecimento [%s/%s]: RETRY '%s' (falhas=%s, motivo anterior='%s')",
+            elog.info(
+                ">>> [%s/%s] RETRY '%s' (falhas=%s, motivo anterior='%s')",
                 attempts, max_attempts, title,
                 prev_failure.get("count", 0),
                 prev_failure.get("last_reason", "?"),
             )
         else:
-            log.info("Enriquecimento [%s/%s]: tentando '%s' (primeira vez)", attempts, max_attempts, title)
+            elog.info(">>> [%s/%s] tentando '%s' (primeira vez)", attempts, max_attempts, title)
 
         try:
             resolved_phone, detail_title, detail_profile, failure_reason = _enrich_single_contact(title)
 
             if not resolved_phone:
-                skipped_no_phone += 1
-                state.record_enrichment_failure(title_key, reason=failure_reason)
+                # Detecta conta oficial do WhatsApp — marcar permanentemente
+                if failure_reason == "official_wa_account_no_dados_contato":
+                    state.mark_official_wa_account(title_key)
+                    state.clear_enrichment_failure(title_key)
+                    elog.info(
+                        "  Marcado como conta oficial WhatsApp (ignorado permanentemente): '%s'",
+                        title,
+                    )
+                else:
+                    skipped_no_phone += 1
+                    state.record_enrichment_failure(title_key, reason=failure_reason)
                 continue
 
             _upsert_whatsapp_contact_profile(
@@ -2801,18 +3146,18 @@ def enrich_named_contacts_from_sidebar(
 
             state.set_contact_alias(title, resolved_phone)
             state.clear_enrichment_failure(title_key)
-            log.info("Enriquecimento sidebar: ✓ '%s' -> %s", title, resolved_phone)
+            elog.info("✓✓✓ ASSOCIADO: '%s' -> %s", title, resolved_phone)
             enriched += 1
 
         except Exception as e:
             state.record_enrichment_failure(title_key, reason=f"exception:{e}")
-            log.exception("Falha no enriquecimento para '%s': %s", title, e)
+            elog.exception("Falha no enriquecimento para '%s': %s", title, e)
 
-    log.info(
-        "Enriquecimento sidebar concluído | enriched=%s no_phone=%s "
-        "not_named=%s alias_exists=%s cooldown=%s attempts=%s",
+    elog.info(
+        "=== Enriquecimento concluído | enriched=%s no_phone=%s "
+        "not_named=%s alias_exists=%s official_wa=%s cooldown=%s attempts=%s ===",
         enriched, skipped_no_phone,
-        skipped_not_named, skipped_alias_exists, skipped_cooldown, attempts,
+        skipped_not_named, skipped_alias_exists, skipped_official, skipped_cooldown, attempts,
     )
 
     if enriched > 0:
