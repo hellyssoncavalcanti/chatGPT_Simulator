@@ -2792,53 +2792,60 @@ async def browser_loop_async():
         browser = await start_browser()
         file_log("browser.py", "🟢 Async Worker Online. Aguardando tarefas...")
 
-        while True:
-            try:
-                loop = asyncio.get_running_loop()
-                task = await loop.run_in_executor(None, browser_queue.get)
-                
-                if task.get('action') == 'STOP': break
-                await cleanup_known_orphan_tabs(browser)
-                
-                # =======================================================
-                # AUTO-RECOVERY: TESTA SE O BROWSER AINDA ESTÁ VIVO
-                # =======================================================
+        try:
+            while True:
                 try:
-                    # 1. Se o usuário fechou todas as abas, consideramos fechado
-                    if len(browser.pages) == 0:
-                        raise Exception("Sem abas")
+                    loop = asyncio.get_running_loop()
+                    task = await loop.run_in_executor(None, browser_queue.get)
                     
-                    # 2. Faz um "Ping" real no Chromium. Se ele foi fechado no X, isso vai dar erro na hora!
-                    await browser.pages[0].evaluate("1")
+                    if task.get('action') == 'STOP': break
+                    await cleanup_known_orphan_tabs(browser)
                     
-                except Exception:
-                    file_log("browser.py", "⚠️ Navegador fechado ou desconectado detectado! Recriando...")
-                    try: await browser.close()
-                    except: pass
-                    
-                    # Reabre o navegador usando a função interna
-                    browser = await start_browser()
-                    file_log("browser.py", "✅ Navegador reaberto com sucesso!")
-                # =======================================================
+                    # =======================================================
+                    # AUTO-RECOVERY: TESTA SE O BROWSER AINDA ESTÁ VIVO
+                    # =======================================================
+                    try:
+                        # 1. Se o usuário fechou todas as abas, consideramos fechado
+                        if len(browser.pages) == 0:
+                            raise Exception("Sem abas")
+                        
+                        # 2. Faz um "Ping" real no Chromium. Se ele foi fechado no X, isso vai dar erro na hora!
+                        await browser.pages[0].evaluate("1")
+                        
+                    except Exception:
+                        file_log("browser.py", "⚠️ Navegador fechado ou desconectado detectado! Recriando...")
+                        try: await browser.close()
+                        except: pass
+                        
+                        # Reabre o navegador usando a função interna
+                        browser = await start_browser()
+                        file_log("browser.py", "✅ Navegador reaberto com sucesso!")
+                    # =======================================================
 
-                action = task.get('action', 'CHAT')
-                
-                if action in ['GET_MENU', 'EXEC_MENU']:
-                    asyncio.create_task(handle_menu_task(browser, task))
-                elif action == 'SYNC':
-                    asyncio.create_task(handle_sync_task(browser, task))
-                elif action == 'SEARCH':
-                    asyncio.create_task(handle_search_task(browser, task))
-                elif action == 'UPTODATE_SEARCH':
-                    asyncio.create_task(handle_uptodate_search_task(browser, task))
-                elif action == 'DOWNLOAD_FILE':
-                    asyncio.create_task(handle_download_file(browser, task))
-                else:
-                    asyncio.create_task(handle_chat_task(browser, task))
+                    action = task.get('action', 'CHAT')
                     
-            except Exception as e:
-                print(f"Erro no loop principal: {e}")
-                await asyncio.sleep(1)
+                    if action in ['GET_MENU', 'EXEC_MENU']:
+                        asyncio.create_task(handle_menu_task(browser, task))
+                    elif action == 'SYNC':
+                        asyncio.create_task(handle_sync_task(browser, task))
+                    elif action == 'SEARCH':
+                        asyncio.create_task(handle_search_task(browser, task))
+                    elif action == 'UPTODATE_SEARCH':
+                        asyncio.create_task(handle_uptodate_search_task(browser, task))
+                    elif action == 'DOWNLOAD_FILE':
+                        asyncio.create_task(handle_download_file(browser, task))
+                    else:
+                        asyncio.create_task(handle_chat_task(browser, task))
+                        
+                except Exception as e:
+                    print(f"Erro no loop principal: {e}")
+                    await asyncio.sleep(1)
+        finally:
+            try:
+                await browser.close()
+                file_log("browser.py", "🛑 Contexto Chromium encerrado corretamente.")
+            except Exception as close_err:
+                file_log("browser.py", f"⚠️ Falha ao encerrar Chromium com elegância: {close_err}")
 
 def browser_loop():
     # Wrapper para rodar o loop async dentro da Thread do main.py
