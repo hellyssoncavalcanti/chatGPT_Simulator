@@ -1443,17 +1443,31 @@ def chat_completions():
         'is_analyzer': bool(is_analyzer)
     }
 
-    _wait_remote_user_priority_if_needed(is_analyzer, stream_q if stream else None)
-    _wait_chat_rate_limit_if_needed(stream_q if stream else None)
-
-    browser_queue.put({
+    chat_task_payload = {
         'action':           'CHAT',
         'url':              url,
         'chat_id':          chat_id,
         'message':          message,
         'attachment_paths': saved_paths,
         'stream_queue':     stream_q
-    })
+    }
+
+    def _dispatch_chat_task():
+        try:
+            _wait_remote_user_priority_if_needed(is_analyzer, stream_q if stream else None)
+            _wait_chat_rate_limit_if_needed(stream_q if stream else None)
+            browser_queue.put(chat_task_payload)
+        except Exception as dispatch_err:
+            stream_q.put(json.dumps({
+                "type": "error",
+                "content": f"Falha ao enfileirar tarefa no browser: {dispatch_err}"
+            }, ensure_ascii=False))
+            stream_q.put(None)
+
+    if stream:
+        threading.Thread(target=_dispatch_chat_task, daemon=True).start()
+    else:
+        _dispatch_chat_task()
 
     # --- 5. RESPOSTA STREAMING OU BLOCO ---
     if stream:
