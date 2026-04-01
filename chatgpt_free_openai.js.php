@@ -833,7 +833,8 @@ header('Content-Type: application/javascript; charset=utf-8');
             name: file.name || ('arquivo_' + (pendingAttachments.length + 1)),
             type: file.type || 'application/octet-stream',
             size: file.size || 0,
-            dataUrl: dataUrl
+            dataUrl: dataUrl,
+            file: file
           });
           log('attachment:add', { name: file.name, type: file.type, size: file.size });
         } catch (err) {
@@ -963,9 +964,18 @@ header('Content-Type: application/javascript; charset=utf-8');
             role: 'user',
             content: [{ type: 'text', text: prompt }].concat(
               attachmentPayload.map(function (att) {
+                var isImage = !!(att.type && att.type.indexOf('image/') === 0);
+                if (isImage) {
+                  return {
+                    type: 'input_image',
+                    image_url: att.dataUrl,
+                    mime_type: att.type,
+                    filename: att.name
+                  };
+                }
                 return {
-                  type: 'input_image',
-                  image_url: att.dataUrl,
+                  type: 'input_file',
+                  file_data: att.dataUrl,
                   mime_type: att.type,
                   filename: att.name
                 };
@@ -984,7 +994,10 @@ header('Content-Type: application/javascript; charset=utf-8');
           if (attachmentPayload.length) {
             warn('send:attachments_primary_mode_fail', normalizeError(firstErr));
             var fallbackOpts = buildChatOptions(model, wantsWebSearch);
-            fallbackOpts.files = attachmentPayload;
+            fallbackOpts.files = attachmentPayload.map(function (att) { return att.file; }).filter(Boolean);
+            if (!fallbackOpts.files.length) {
+              throw firstErr;
+            }
             result = await puter.ai.chat(history, fallbackOpts);
             attachmentsSupported = true;
           } else if (wantsWebSearch) {
