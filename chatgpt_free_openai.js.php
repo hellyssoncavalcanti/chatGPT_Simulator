@@ -192,7 +192,7 @@ if ($action === 'get_prompt' || $action === 'save_prompt') {
     exit;
 }
 
-if ($action === 'save_chat_history' || $action === 'get_chat_history') {
+if ($action === 'save_chat_history' || $action === 'get_chat_history' || $action === 'delete_chat_history') {
     while (ob_get_level()) ob_end_clean();
     header('Content-Type: application/json; charset=utf-8');
     chatgpt_free_bootstrap_context_if_needed();
@@ -262,6 +262,27 @@ if ($action === 'save_chat_history' || $action === 'get_chat_history') {
             echo json_encode(['success' => true, 'messages' => $messages]);
         } else {
             echo json_encode(['success' => true, 'messages' => []]);
+        }
+        exit;
+    }
+
+    if ($action === 'delete_chat_history') {
+        $deletedRows = 0;
+        $deleteSql = "DELETE FROM chatgpt_chats WHERE $where";
+        $ok = $db->query($deleteSql);
+        if ($ok) $deletedRows += (int)$db->affected_rows;
+
+        if ($chat_mode_value !== $legacy_chat_mode) {
+            $legacy_mode_condition = "(chat_mode = '$legacy_chat_mode_esc' OR chat_mode IS NULL OR chat_mode = '')";
+            $deleteLegacySql = "DELETE FROM chatgpt_chats WHERE $where_base AND $legacy_mode_condition";
+            $okLegacy = $db->query($deleteLegacySql);
+            if ($okLegacy) $deletedRows += (int)$db->affected_rows;
+        }
+
+        if ($deletedRows > 0) {
+            echo json_encode(['success' => true, 'deleted_rows' => $deletedRows]);
+        } else {
+            echo json_encode(['success' => false, 'error' => 'Nenhum histórico correspondente foi excluído.', 'deleted_rows' => 0]);
         }
         exit;
     }
@@ -1173,22 +1194,41 @@ header('Content-Type: application/javascript; charset=utf-8');
     }
 
     async function resetChatContext() {
+      var model = ui.model.value || localStorage.getItem(KEY_MODEL) || '';
+      var response = await fetch(window.location.pathname + '?action=delete_chat_history', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'same-origin',
+        body: JSON.stringify({
+          id_criador: context.id_criador,
+          id_paciente: context.id_paciente,
+          id_atendimento: context.id_atendimento,
+          id_receita: context.id_receita,
+          model: model
+        })
+      });
+      var payload = await response.json();
+      if (!payload || !payload.success || !payload.deleted_rows) {
+        throw new Error((payload && payload.error) || 'Falha ao excluir histórico no banco.');
+      }
       history = [];
       shouldSendSystemPromptOnNextMessage = true;
       pendingAttachments = [];
       renderAttachments();
       ui.body.innerHTML = '';
       ui.input.value = '';
-      await persistHistory();
-      addMessage(ui.body, 'Chat reiniciado. A próxima mensagem iniciará um novo contexto com o prompt do sistema.', 'assistant');
       if (ui.sidebar) ui.sidebar.classList.remove('open');
+      alert('Chat reiniciado com sucesso. Histórico removido do banco de dados.');
     }
 
     if (ui.sidebarResetChat) {
       ui.sidebarResetChat.onclick = function () {
         var ok = window.confirm('Deseja reiniciar o chat e apagar o contexto atual?');
         if (!ok) return;
-        resetChatContext();
+        resetChatContext().catch(function (err) {
+          error('reset_chat:error', err);
+          alert('Não foi possível reiniciar o chat: ' + normalizeError(err));
+        });
       };
     }
 
