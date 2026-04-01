@@ -353,9 +353,14 @@ header('Content-Type: application/javascript; charset=utf-8');
       '.cfo-user{margin-left:auto;background:#dbe9ff;color:#11326f}',
       '.cfo-assistant{background:#fff;color:#222;border:1px solid #ebebeb}',
       '.cfo-footer{display:flex;gap:8px;padding:10px;border-top:1px solid #eee;background:#fff}',
+      '.cfo-attach-btn{width:40px;height:40px;border:1px solid #d3d7e3;border-radius:8px;background:#f4f7ff;cursor:pointer;font-size:18px;line-height:1}',
       '.cfo-input{flex:1;min-height:38px;max-height:90px;padding:8px;border:1px solid #d9d9d9;border-radius:8px;resize:vertical;font-size:13px}',
       '.cfo-send{border:none;border-radius:8px;background:#0b57d0;color:#fff;padding:0 12px;cursor:pointer;font-weight:600}',
       '.cfo-send[disabled]{opacity:.6;cursor:not-allowed}',
+      '.cfo-attach-preview{display:none;flex-wrap:wrap;gap:6px;padding:6px 10px 0;background:#fff}',
+      '.cfo-attach-preview.has-items{display:flex}',
+      '.cfo-chip{display:inline-flex;align-items:center;gap:6px;border:1px solid #cdd5ea;background:#eef3ff;color:#1a3b77;border-radius:14px;padding:3px 8px;font-size:11px}',
+      '.cfo-chip-x{cursor:pointer;font-weight:700}',
       '@media (max-width:768px){.cfo-page{height:78vh;max-height:78vh}}'
     ].join('');
     document.head.appendChild(style);
@@ -389,7 +394,10 @@ header('Content-Type: application/javascript; charset=utf-8');
       '  <select class="cfo-model-select" id="cfo-model"><option value="">Buscando modelos...</option></select>',
       '</div>',
       '<div class="cfo-body" id="cfo-body"></div>',
+      '<div class="cfo-attach-preview" id="cfo-attach-preview"></div>',
       '<div class="cfo-footer">',
+      '  <input type="file" id="cfo-file-input" multiple style="display:none" accept="image/*,.pdf,.doc,.docx,.xls,.xlsx,.csv,.txt,.json,.xml">',
+      '  <button class="cfo-attach-btn" id="cfo-attach-btn" type="button" title="Anexar arquivos">📎</button>',
       '  <textarea class="cfo-input" id="cfo-input" placeholder="Digite sua pergunta..."></textarea>',
       '  <button class="cfo-send" id="cfo-send" type="button">Enviar</button>',
       '</div>'
@@ -401,6 +409,9 @@ header('Content-Type: application/javascript; charset=utf-8');
       fab: fab,
       toast: panel,
       body: panel.querySelector('#cfo-body'),
+      attachPreview: panel.querySelector('#cfo-attach-preview'),
+      attachBtn: panel.querySelector('#cfo-attach-btn'),
+      fileInput: panel.querySelector('#cfo-file-input'),
       input: panel.querySelector('#cfo-input'),
       send: panel.querySelector('#cfo-send'),
       model: panel.querySelector('#cfo-model')
@@ -743,12 +754,58 @@ header('Content-Type: application/javascript; charset=utf-8');
     var history = [
       { role: 'system', content: 'Você é um assistente útil. Responda em português do Brasil de forma objetiva.' }
     ];
+    var pendingAttachments = [];
+    var attachmentsSupported = null;
     var context = getContextFromUrl();
     var preferredSavedModel = localStorage.getItem(KEY_MODEL) || '';
     log('context:url', context);
 
     function serializePersistableHistory() {
       return history.filter(function (m) { return m && m.role !== 'system' && typeof m.content === 'string' && m.content.trim() !== ''; });
+    }
+
+    function renderAttachments() {
+      ui.attachPreview.innerHTML = '';
+      if (!pendingAttachments.length) {
+        ui.attachPreview.classList.remove('has-items');
+        return;
+      }
+      ui.attachPreview.classList.add('has-items');
+      pendingAttachments.forEach(function (att, idx) {
+        var chip = document.createElement('div');
+        chip.className = 'cfo-chip';
+        chip.innerHTML = '<span>' + att.name + '</span><span class="cfo-chip-x" data-idx="' + idx + '">×</span>';
+        ui.attachPreview.appendChild(chip);
+      });
+    }
+
+    function fileToDataUrl(file) {
+      return new Promise(function (resolve, reject) {
+        var reader = new FileReader();
+        reader.onload = function () { resolve(String(reader.result || '')); };
+        reader.onerror = reject;
+        reader.readAsDataURL(file);
+      });
+    }
+
+    async function appendFiles(fileList) {
+      var files = Array.prototype.slice.call(fileList || []);
+      for (var i = 0; i < files.length; i += 1) {
+        var file = files[i];
+        try {
+          var dataUrl = await fileToDataUrl(file);
+          pendingAttachments.push({
+            name: file.name || ('arquivo_' + (pendingAttachments.length + 1)),
+            type: file.type || 'application/octet-stream',
+            size: file.size || 0,
+            dataUrl: dataUrl
+          });
+          log('attachment:add', { name: file.name, type: file.type, size: file.size });
+        } catch (err) {
+          warn('attachment:read_fail', file && file.name, err);
+        }
+      }
+      renderAttachments();
     }
 
     async function persistHistory() {
@@ -853,7 +910,7 @@ header('Content-Type: application/javascript; charset=utf-8');
 
       loading = true;
       ui.send.disabled = true;
-      log('send:start', { prompt: prompt, historyLen: history.length });
+      log('send:start', { prompt: prompt, historyLen: history.length, attachments: pendingAttachments.length });
       addMessage(ui.body, prompt, 'user');
       history.push({ role: 'user', content: prompt });
       if (history.length > MAX_HISTORY) history = [history[0]].concat(history.slice(history.length - (MAX_HISTORY - 1)));
@@ -863,14 +920,53 @@ header('Content-Type: application/javascript; charset=utf-8');
       try {
         var puter = await loadPuterSdk();
         var model = ui.model.value || localStorage.getItem(KEY_MODEL) || 'gpt-5';
-        log('send:calling_puter_ai_chat', { model: model, historyLen: history.length });
-        var result = await puter.ai.chat(history, { model: model });
+        var requestHistory = history.slice();
+        var attachmentPayload = pendingAttachments.slice();
+        if (attachmentPayload.length) {
+          requestHistory[requestHistory.length - 1] = {
+            role: 'user',
+            content: [{ type: 'text', text: prompt }].concat(
+              attachmentPayload.map(function (att) {
+                return {
+                  type: 'input_image',
+                  image_url: att.dataUrl,
+                  mime_type: att.type,
+                  filename: att.name
+                };
+              })
+            )
+          };
+        }
+
+        log('send:calling_puter_ai_chat', { model: model, historyLen: requestHistory.length, attachmentCount: attachmentPayload.length });
+        var result;
+        try {
+          result = await puter.ai.chat(requestHistory, { model: model });
+          if (attachmentPayload.length) attachmentsSupported = true;
+        } catch (firstErr) {
+          if (attachmentPayload.length) {
+            warn('send:attachments_primary_mode_fail', normalizeError(firstErr));
+            result = await puter.ai.chat(history, { model: model, files: attachmentPayload });
+            attachmentsSupported = true;
+          } else {
+            throw firstErr;
+          }
+        }
         log('send:raw_result', result);
         var answer = normalizeAssistantText(result);
         history.push({ role: 'assistant', content: answer });
         addMessage(ui.body, answer, 'assistant');
+        if (attachmentPayload.length) {
+          pendingAttachments = [];
+          renderAttachments();
+          if (attachmentsSupported === true) log('attachments:supported');
+        }
         persistHistory();
       } catch (err) {
+        if (pendingAttachments.length) {
+          attachmentsSupported = false;
+          warn('attachments:not_supported_or_failed', normalizeError(err));
+        }
         error('send:error', err);
         addMessage(ui.body, 'Erro ao consultar o chat: ' + normalizeError(err), 'assistant');
       } finally {
@@ -881,10 +977,35 @@ header('Content-Type: application/javascript; charset=utf-8');
     }
 
     ui.send.addEventListener('click', sendMessage);
+    ui.attachBtn.addEventListener('click', function () { ui.fileInput.click(); });
+    ui.fileInput.addEventListener('change', function (ev) {
+      appendFiles(ev.target.files);
+      ev.target.value = '';
+    });
+    ui.attachPreview.addEventListener('click', function (ev) {
+      var idx = ev.target && ev.target.dataset ? parseInt(ev.target.dataset.idx, 10) : -1;
+      if (Number.isNaN(idx) || idx < 0) return;
+      pendingAttachments.splice(idx, 1);
+      renderAttachments();
+    });
     ui.input.addEventListener('keydown', function (ev) {
       if (ev.key === 'Enter' && !ev.shiftKey) {
         ev.preventDefault();
         sendMessage();
+      }
+    });
+    ui.input.addEventListener('paste', function (ev) {
+      var items = (ev.clipboardData && ev.clipboardData.items) ? ev.clipboardData.items : [];
+      var files = [];
+      for (var i = 0; i < items.length; i += 1) {
+        if (items[i].kind === 'file') {
+          var f = items[i].getAsFile();
+          if (f) files.push(f);
+        }
+      }
+      if (files.length) {
+        ev.preventDefault();
+        appendFiles(files);
       }
     });
 
