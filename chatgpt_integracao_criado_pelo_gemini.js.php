@@ -189,6 +189,13 @@ $actions_without_login_bootstrap = [
 ];
 $is_direct_script_request = ($current_action === '' && basename($_SERVER['PHP_SELF'] ?? '') === $currentFileName);
 $should_bootstrap_context = ($is_iframe || ($current_action !== '' && !in_array($current_action, $actions_without_login_bootstrap, true)));
+$gemini_direct_requested_as_js = (($_GET['as'] ?? '') === 'js');
+$gemini_sec_fetch_dest = strtolower($_SERVER['HTTP_SEC_FETCH_DEST'] ?? '');
+$gemini_http_accept = strtolower($_SERVER['HTTP_ACCEPT'] ?? '');
+$gemini_accepts_js = (strpos($gemini_http_accept, 'javascript') !== false);
+$gemini_accepts_html = (strpos($gemini_http_accept, 'text/html') !== false);
+$gemini_is_script_fetch = $gemini_direct_requested_as_js || ($gemini_sec_fetch_dest === 'script') || ($gemini_accepts_js && !$gemini_accepts_html);
+$gemini_should_render_direct_page = ($is_direct_script_request && !$gemini_is_script_fetch);
 
 if($should_bootstrap_context)
 {
@@ -207,6 +214,59 @@ if($should_bootstrap_context)
   if(isset($row_login_atual['id']) && verifica_permissao($mysqli, $row_login_atual['id'], 'chatgpt_system_prompt', 'editar')) {
       $user_can_edit_system = true;
   }
+}
+
+if ($gemini_should_render_direct_page) {
+    header("Content-Type: text/html; charset=UTF-8", true);
+    $gemini_authorized = false;
+    if (
+        isset($row_login_atual['id']) &&
+        function_exists('verifica_permissao') &&
+        isset($mysqli)
+    ) {
+        $gemini_authorized = verifica_permissao($mysqli, $row_login_atual['id'], 'chatgpt_system_prompt', 'editar') ? true : false;
+    }
+
+    $gemini_self_path = $_SERVER['PHP_SELF'] ?? $currentFileName;
+    $gemini_self_js_url = htmlspecialchars($gemini_self_path . '?as=js', ENT_QUOTES, 'UTF-8');
+    ?>
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>ChatGPT Integração (modo página)</title>
+  <style>
+    body{margin:0;background:#f2f4f8;font-family:Arial,sans-serif}
+    .wrap{max-width:1280px;margin:18px auto;padding:0 14px}
+    .card{background:#fff;border:1px solid #e6e9ef;border-radius:12px;box-shadow:0 8px 30px rgba(0,0,0,.06)}
+    .head{padding:14px 16px;border-bottom:1px solid #eceff5;font-weight:700}
+    .body{padding:0;min-height:78vh}
+    .denied{margin:16px;color:#a40000;background:#fff1f1;border:1px solid #ffd0d0;padding:12px;border-radius:8px}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="card">
+      <div class="head">ChatGPT Integração (modo página)</div>
+      <div class="body">
+        <?php if ($gemini_authorized): ?>
+          <div id="chatgpt-integracao-page-root"></div>
+          <script>
+            window.__CHATGPT_INTEGRACAO_MODE = 'page';
+            window.__CHATGPT_INTEGRACAO_CONTAINER = '#chatgpt-integracao-page-root';
+          </script>
+          <script src="<?php echo $gemini_self_js_url; ?>"></script>
+        <?php else: ?>
+          <div class="denied">Você não possui permissão para abrir este handler diretamente.</div>
+        <?php endif; ?>
+      </div>
+    </div>
+  </div>
+</body>
+</html>
+    <?php
+    exit;
 }
 
 
@@ -3114,6 +3174,8 @@ header('Content-Type: application/javascript; charset=utf-8');
     const USER_SEP = "### PERGUNTA ###"; 
     
     const PREFIX = 'chatgpt_integracao_';
+    const RENDER_MODE = window.__CHATGPT_INTEGRACAO_MODE === 'page' ? 'page' : 'toast';
+    const PAGE_CONTAINER_SELECTOR = window.__CHATGPT_INTEGRACAO_CONTAINER || '#chatgpt-integracao-page-root';
     const KEY_MODEL = PREFIX + 'selected_model';
     const KEY_MODEL_MANUAL = PREFIX + 'selected_model_manual';
     const KEY_STREAM = PREFIX + 'stream_enabled';
@@ -3246,7 +3308,7 @@ header('Content-Type: application/javascript; charset=utf-8');
     // [FIX 8.1] PREFIXO UNIFICADO PARA MICROFONE (CONFORME SOLICITADO)
     const MIC_PREFIX = `🎤 ${FILE_PREFIX} [MICROFONE]`;
 
-    const css = `
+    let css = `
         div.qtip { z-index: 2147483647 !important; }
         #ow-widget { position: fixed; bottom: 2.5vh; right: 1.2vw; z-index: 99999; font-family: -apple-system, sans-serif; }
         #ow-toggle-btn { width: 60px; height: 60px; background: #212121; border-radius: 50%; color: #fff; border:none; cursor:pointer; font-size:24px; box-shadow:0 4px 15px rgba(0,0,0,0.3); transition: transform 0.2s; }
@@ -3675,6 +3737,15 @@ header('Content-Type: application/javascript; charset=utf-8');
             .msg { font-size: 13px; padding: 8px 10px; }
         }
     `;
+    if (RENDER_MODE === 'page') {
+        css += `
+        #ow-widget { position: relative !important; bottom: auto !important; right: auto !important; width: 100%; height: 100%; }
+        #ow-toggle-btn { display: none !important; }
+        #ow-window { position: relative !important; display: flex !important; width: 100% !important; height: 100% !important; max-height: none !important; bottom: auto !important; right: auto !important; border-radius: 0 !important; box-shadow: none !important; border: 0 !important; }
+        #ow-window.maximized { width: 100% !important; height: 100% !important; bottom: auto !important; right: auto !important; }
+        #ow-backdrop { display: none !important; }
+        `;
+    }
     const stTag = document.createElement("style"); stTag.innerHTML = css; document.head.appendChild(stTag);
 
     const widget = document.createElement('div');
@@ -4660,6 +4731,61 @@ header('Content-Type: application/javascript; charset=utf-8');
         return mins ? `${hours}h ${mins}min` : `${hours}h`;
     }
 
+    function extractRateLimitSeconds(payload) {
+        const candidates = [];
+        const pushIfNum = (v) => {
+            const n = Number(v);
+            if (Number.isFinite(n) && n > 0) candidates.push(Math.round(n));
+        };
+
+        if (payload && typeof payload === 'object') {
+            pushIfNum(payload.retry_after);
+            pushIfNum(payload.retry_after_seconds);
+            pushIfNum(payload.cooldown);
+            pushIfNum(payload.cooldown_seconds);
+            pushIfNum(payload.wait_seconds);
+            pushIfNum(payload.seconds);
+            const nested = payload.error && typeof payload.error === 'object' ? payload.error : null;
+            if (nested) {
+                pushIfNum(nested.retry_after);
+                pushIfNum(nested.retry_after_seconds);
+                pushIfNum(nested.cooldown);
+                pushIfNum(nested.cooldown_seconds);
+                pushIfNum(nested.wait_seconds);
+            }
+        }
+
+        const txt = (typeof payload === 'string' ? payload : JSON.stringify(payload || '')).toLowerCase();
+        const secMatch = txt.match(/(\d+)\s*(s|seg|secs|seconds)\b/);
+        if (secMatch) pushIfNum(secMatch[1]);
+        const minMatch = txt.match(/(\d+)\s*(min|minuto|minutos|minutes)\b/);
+        if (minMatch) pushIfNum(Number(minMatch[1]) * 60);
+
+        if (!candidates.length && /alguns minutos|few minutes|rate[- ]?limit|solicita[cç][õo]es r[aá]pido/.test(txt)) {
+            candidates.push(240);
+        }
+
+        return candidates.length ? Math.max(...candidates) : 0;
+    }
+
+    function parseRateLimitInfo(payload) {
+        const rawText = typeof payload === 'string' ? payload : JSON.stringify(payload || '');
+        const lowered = rawText.toLowerCase();
+        const looksLikeRateLimit = /rate[- ]?limit|too many requests|excesso de solicita[cç][õo]es|solicita[cç][õo]es r[aá]pido/.test(lowered);
+        if (!looksLikeRateLimit) return null;
+        const seconds = extractRateLimitSeconds(payload) || 240;
+        return { seconds, message: rawText };
+    }
+
+    async function waitRateLimitCountdown(seconds, onTick) {
+        let remaining = Math.max(1, Math.round(Number(seconds) || 0));
+        while (remaining > 0) {
+            if (typeof onTick === 'function') onTick(remaining);
+            await new Promise(r => setTimeout(r, 1000));
+            remaining -= 1;
+        }
+    }
+
     async function fetchAnaliseQueueEstimate(row) {
         const analiseId = Number(row?.id || 0);
         const createdAt = String(row?.datetime_analise_criacao || '').trim();
@@ -5348,13 +5474,38 @@ header('Content-Type: application/javascript; charset=utf-8');
                 const startTime = Date.now();
 
                 // Faz a requisição ao endpoint PHP (Remote Sync)
-                const res = await fetch("<?php echo $_SERVER['PHP_SELF']; ?>?action=sync_simulator", {
+                const syncUrl = "<?php echo $_SERVER['PHP_SELF']; ?>?action=sync_simulator";
+                const syncPayload = { chat_id: state.currentChatId, url: state.currentChatUrl };
+                console.log(`%c☁️ ${FILE_PREFIX} [SYNC] Request URL: ${syncUrl}`, "color: #1565c0; font-weight: bold;");
+                console.log(`%c☁️ ${FILE_PREFIX} [SYNC] Request Payload:`, "color: #1565c0; font-weight: bold;", syncPayload);
+
+                const res = await fetch(syncUrl, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ chat_id: state.currentChatId, url: state.currentChatUrl })
+                    body: JSON.stringify(syncPayload)
                 });
-                
-                const data = await res.json();
+
+                const rawResponseText = await res.text();
+                let data = null;
+                try {
+                    data = rawResponseText ? JSON.parse(rawResponseText) : null;
+                } catch (parseErr) {
+                    console.groupCollapsed(`%c☁️ ${FILE_PREFIX} [SYNC] ⚠️ Resposta não-JSON`, "color: #ff9800; font-weight: bold; background: #fff3e0; padding: 4px 8px; border-radius: 4px;");
+                    console.warn('HTTP Status:', res.status, res.statusText);
+                    console.warn('Erro ao parsear JSON:', parseErr);
+                    console.log('Conteúdo bruto da resposta:', rawResponseText);
+                    console.groupEnd();
+                    throw new Error('SYNC retornou conteúdo inválido (não JSON).');
+                }
+
+                if (!res.ok) {
+                    console.groupCollapsed(`%c☁️ ${FILE_PREFIX} [SYNC] ⚠️ HTTP não-OK`, "color: #ff9800; font-weight: bold; background: #fff3e0; padding: 4px 8px; border-radius: 4px;");
+                    console.warn('HTTP Status:', res.status, res.statusText);
+                    console.log('Conteúdo bruto da resposta:', rawResponseText);
+                    console.log('JSON parseado:', data);
+                    console.groupEnd();
+                }
+
                 const duration = ((Date.now() - startTime) / 1000).toFixed(1);
                 
                 if (data && data.success && data.chat && Array.isArray(data.chat.messages)) {
@@ -5399,6 +5550,8 @@ header('Content-Type: application/javascript; charset=utf-8');
             } catch (e) {
                 console.groupCollapsed(`%c☁️ ${FILE_PREFIX} [SYNC] ❌ Falha de Conexão`, "color: #f44336; font-weight: bold; background: #ffebee; padding: 4px 8px; border-radius: 4px;");
                 console.error("Motivo:", e);
+                console.log("URL tentada:", "<?php echo $_SERVER['PHP_SELF']; ?>?action=sync_simulator");
+                console.log("Origin atual:", window.location.origin, "| href:", window.location.href);
                 console.groupEnd();
                 if (document.getElementById('ow-sync-indicator')) document.getElementById('ow-sync-indicator').remove();
             }
@@ -6651,6 +6804,7 @@ header('Content-Type: application/javascript; charset=utf-8');
             const decoder = new TextDecoder("utf-8");
             let buffer = ''; let fullText = '';
             let streamChunkIdx = 0;
+            let rateLimitInfo = null;
             
             let isT = false; 
 
@@ -6772,7 +6926,12 @@ header('Content-Type: application/javascript; charset=utf-8');
                     
                             // Intercetar e exibir erros da LLM
                             if (jsonObj.type === 'error' && jsonObj.content) {
-                                const errorText = `❌ **Erro do Servidor/LLM:**\n\`\`\`\n${jsonObj.content}\n\`\`\``;
+                                const readableError = (typeof jsonObj.content === 'string')
+                                    ? jsonObj.content
+                                    : JSON.stringify(jsonObj.content, null, 2);
+                                const parsedRateLimit = parseRateLimitInfo(jsonObj.content);
+                                if (parsedRateLimit) rateLimitInfo = parsedRateLimit;
+                                const errorText = `❌ **Erro do Servidor/LLM:**\n\`\`\`\n${readableError}\n\`\`\``;
                                 console.error(`%c❌ ERRO DA LLM INTERCETADO:`, "color: #f44336; font-weight: bold;", jsonObj.content);
                                 fullText = errorText;
                                 jsonObj.type = 'markdown';
@@ -6795,6 +6954,17 @@ header('Content-Type: application/javascript; charset=utf-8');
             console.groupEnd(); 
             console.log(`%c${FILE_PREFIX} 🤖 FINAL RESPONSE:`, "color: #2e7d32; font-weight: bold;", fullText); 
             console.groupEnd(); 
+
+            if (rateLimitInfo && retryCount < MAX_RETRIES) {
+                console.warn(`${FILE_PREFIX} ⛔ Rate-limit detectado. Aguardando ${rateLimitInfo.seconds}s para retry automático.`);
+                const waitSeconds = Math.max(1, Number(rateLimitInfo.seconds) || 240);
+                onChunk({ type: 'status', content: `⛔ Limite de solicitações atingido. Aguardando ${waitSeconds}s para tentar novamente...` });
+                await waitRateLimitCountdown(waitSeconds, (remaining) => {
+                    onChunk({ type: 'status', content: `⏳ Tentando novamente em ${remaining}s...` });
+                });
+                onChunk({ type: 'status', content: '🔄 Reiniciando envio após cooldown de rate-limit...' });
+                return await apiCallStream(endpoint, method, data, onChunk, signal, retryCount + 1);
+            }
             
             
             // -----------------------------------------------------
@@ -8302,25 +8472,7 @@ header('Content-Type: application/javascript; charset=utf-8');
         return _pendingAttachments.map(a => ({ name: a.name, data: a.dataUrl }));
     }
 
-    // Ctrl+V no textarea: intercepta imagens/arquivos colados
-    document.addEventListener('DOMContentLoaded', () => {
-        const inp = document.getElementById('ow-input');
-        if (!inp) return;
-        inp.addEventListener('paste', async (e) => {
-            const items = e.clipboardData?.items;
-            if (!items) return;
-            for (const item of items) {
-                if (item.kind === 'file') {
-                    e.preventDefault();
-                    const file = item.getAsFile();
-                    if (file) await _addAttachment(file);
-                }
-            }
-        });
-    });
-
-    // Botão de clipe + input de arquivo
-    document.addEventListener('DOMContentLoaded', () => {
+    function _bindAttachmentControls() {
         const attachBtn = document.getElementById('ow-attach-btn');
         const fileInput = document.getElementById('ow-file-input');
         if (attachBtn && fileInput) {
@@ -8332,7 +8484,7 @@ header('Content-Type: application/javascript; charset=utf-8');
                 fileInput.value = '';
             };
         }
-    });
+    }
 
     async function send() {
         // Remove card de análise prévia ao iniciar conversa
@@ -8476,8 +8628,22 @@ header('Content-Type: application/javascript; charset=utf-8');
 
 
     document.addEventListener('DOMContentLoaded', (event) => {
-        document.body.appendChild(widget); // Append to the body
-        console.log(`%c🔧 ${FILE_PREFIX} Widget de IA incorporado ao body após o DOMContentLoaded.`, "color: #2196f3; font-weight: bold;");
+        const hostContainer = (RENDER_MODE === 'page')
+            ? (document.querySelector(PAGE_CONTAINER_SELECTOR) || document.body)
+            : document.body;
+        hostContainer.appendChild(widget);
+        if (RENDER_MODE === 'page') {
+            const pageWindow = document.getElementById('ow-window');
+            const pageToggleBtn = document.getElementById('ow-toggle-btn');
+            const pageCloseBtn = document.getElementById('ow-btn-close');
+            const pageBackdrop = document.getElementById('ow-backdrop');
+            if (pageWindow) pageWindow.style.display = 'flex';
+            if (pageToggleBtn) pageToggleBtn.style.display = 'none';
+            if (pageCloseBtn) pageCloseBtn.style.display = 'none';
+            if (pageBackdrop) pageBackdrop.classList.remove('active');
+        }
+        console.log(`%c🔧 ${FILE_PREFIX} Widget de IA incorporado ao ${RENDER_MODE === 'page' ? 'container da página' : 'body'} após o DOMContentLoaded.`, "color: #2196f3; font-weight: bold;");
+        _bindAttachmentControls();
         if (typeof scheduleSqlLogCleanup === 'function') scheduleSqlLogCleanup();
         
         window.switchSidebarView = function(viewName) {
@@ -8525,9 +8691,15 @@ header('Content-Type: application/javascript; charset=utf-8');
         document.getElementById('ow-send').onclick = send;
         document.getElementById('sb-btn-install').onclick = () => installModel(0); 
         document.getElementById('ow-menu-toggle').onclick = () => document.getElementById('ow-sidebar').classList.add('open');
-        document.getElementById('ow-toggle-btn').onclick = () => { const w = document.getElementById('ow-window'); w.style.display = w.style.display !== 'flex' ? 'flex' : 'none'; if(w.style.display=='flex') setTimeout(()=>scroll(true),100); };
+        document.getElementById('ow-toggle-btn').onclick = () => {
+            if (RENDER_MODE === 'page') return;
+            const w = document.getElementById('ow-window');
+            w.style.display = w.style.display !== 'flex' ? 'flex' : 'none';
+            if(w.style.display=='flex') setTimeout(()=>scroll(true),100);
+        };
         
         function toggleMaximize() {
+            if (RENDER_MODE === 'page') return;
             const win = document.getElementById('ow-window');
             const back = document.getElementById('ow-backdrop');
             win.classList.toggle('maximized');
@@ -8617,11 +8789,14 @@ header('Content-Type: application/javascript; charset=utf-8');
                 }
             } 
         };
-        document.getElementById('ow-btn-close').onclick = () => document.getElementById('ow-window').style.display = 'none';
-        // Enter: pula linha | Ctrl+Enter ou Shift+Enter: envia mensagem
+        document.getElementById('ow-btn-close').onclick = () => {
+            if (RENDER_MODE === 'page') return;
+            document.getElementById('ow-window').style.display = 'none';
+        };
+        // Enter: pula linha | Ctrl+Enter: envia mensagem | Shift+Enter: apenas nova linha
         document.getElementById('ow-input').addEventListener('keydown', (e) => {
             if (e.key === 'Enter') {
-                if (e.ctrlKey || e.shiftKey) {
+                if (e.ctrlKey) {
                     e.preventDefault();
                     send();
                 }
@@ -8631,34 +8806,65 @@ header('Content-Type: application/javascript; charset=utf-8');
         // Intercepta o Ctrl+V (ou Colar) no campo de input
         const inputEl = document.getElementById('ow-input');
         if (inputEl) {
-            inputEl.addEventListener('paste', function(e) {
-                e.preventDefault();
+            inputEl.addEventListener('paste', async function(e) {
+                const items = e.clipboardData?.items || [];
+                const pastedFiles = [];
+                for (const item of items) {
+                    if (item.kind === 'file') {
+                        const file = item.getAsFile();
+                        if (file) pastedFiles.push(file);
+                    }
+                }
+
+                if (pastedFiles.length > 0) {
+                    e.preventDefault();
+                    for (const file of pastedFiles) {
+                        await _addAttachment(file);
+                    }
+                    console.log(`%c📎 [PASTE] ${pastedFiles.length} arquivo(s) anexado(s) via clipboard.`, "color: #1a73e8; font-weight: bold;");
+                    return;
+                }
 
                 let pastedText = (e.clipboardData || window.clipboardData).getData('text');
+                if (!pastedText) return;
+                e.preventDefault();
 
-                if (pastedText) {
-                    // ✅ Remove marcadores caso o usuário cole uma mensagem já encapsulada
-                    pastedText = pastedText
-                        .replaceAll('[INICIO_TEXTO_COLADO]', '')
-                        .replaceAll('[FIM_TEXTO_COLADO]', '')
-                        .trim();
+                // ✅ Remove marcadores caso o usuário cole uma mensagem já encapsulada
+                pastedText = pastedText
+                    .replaceAll('[INICIO_TEXTO_COLADO]', '')
+                    .replaceAll('[FIM_TEXTO_COLADO]', '')
+                    .trim();
 
-                    const encapsulatedText = `\n[INICIO_TEXTO_COLADO]\n${pastedText}\n[FIM_TEXTO_COLADO]\n`;
-
-                    const startPos = this.selectionStart;
-                    const endPos   = this.selectionEnd;
-
-                    this.value = this.value.substring(0, startPos) +
-                                 encapsulatedText +
-                                 this.value.substring(endPos, this.value.length);
-
-                    this.selectionStart = this.selectionEnd = startPos + encapsulatedText.length;
-                    this.scrollTop = this.scrollHeight;
-
-                    console.log(`%c📋 [CTRL+V] Texto encapsulado com sucesso (${pastedText.length} chars)`, "color: #9c27b0; font-weight: bold;");
-                }
+                const encapsulatedText = `\n[INICIO_TEXTO_COLADO]\n${pastedText}\n[FIM_TEXTO_COLADO]\n`;
+                const startPos = this.selectionStart;
+                const endPos   = this.selectionEnd;
+                this.value = this.value.substring(0, startPos) +
+                             encapsulatedText +
+                             this.value.substring(endPos, this.value.length);
+                this.selectionStart = this.selectionEnd = startPos + encapsulatedText.length;
+                this.scrollTop = this.scrollHeight;
+                console.log(`%c📋 [CTRL+V] Texto encapsulado com sucesso (${pastedText.length} chars)`, "color: #9c27b0; font-weight: bold;");
             });
         }
+        const dropTargets = [document.getElementById('ow-window'), inputEl].filter(Boolean);
+        const preventDropDefault = (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+        };
+        dropTargets.forEach((target) => {
+            target.addEventListener('dragenter', preventDropDefault);
+            target.addEventListener('dragover', preventDropDefault);
+            target.addEventListener('dragleave', preventDropDefault);
+            target.addEventListener('drop', async (e) => {
+                preventDropDefault(e);
+                const files = e.dataTransfer?.files ? Array.from(e.dataTransfer.files) : [];
+                if (!files.length) return;
+                for (const file of files) {
+                    await _addAttachment(file);
+                }
+                console.log(`%c📎 [DRAG&DROP] ${files.length} arquivo(s) anexado(s).`, "color: #1a73e8; font-weight: bold;");
+            });
+        });
 
 
         ['sb-btn-close-main', 'sb-btn-close-install', 'sb-btn-close-prompts'].forEach(id => {
