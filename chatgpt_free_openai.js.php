@@ -135,10 +135,15 @@ if ($action === 'save_chat_history' || $action === 'get_chat_history') {
     }
 
     $messages = isset($data['messages']) && is_array($data['messages']) ? $data['messages'] : [];
+    $model_used = isset($data['model']) ? trim((string)$data['model']) : '';
     $messages_esc = $db->real_escape_string(json_encode($messages, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES));
     $url_atual_esc = $db->real_escape_string($data['url_atual'] ?? ($_SERVER['HTTP_REFERER'] ?? ''));
     $titulo_esc = $db->real_escape_string('ConexaoVida IA - Free OpenAI');
-    $id_chatgpt_esc = $db->real_escape_string('free_openai');
+    $id_chatgpt_label = 'Chat via Puter (free OpenAI)';
+    if ($model_used !== '') {
+        $id_chatgpt_label .= ' - ' . preg_replace('/\s+/', ' ', $model_used);
+    }
+    $id_chatgpt_esc = $db->real_escape_string($id_chatgpt_label);
     $url_chatgpt_esc = $db->real_escape_string('');
     $sql_paciente = $ctx['id_paciente'] ? intval($ctx['id_paciente']) : "NULL";
     $sql_atendimento = $ctx['id_atendimento'] ? intval($ctx['id_atendimento']) : "NULL";
@@ -834,12 +839,13 @@ header('Content-Type: application/javascript; charset=utf-8');
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           credentials: 'same-origin',
-          body: JSON.stringify({
+            body: JSON.stringify({
             url_atual: window.location.href,
             id_criador: context.id_criador,
             id_paciente: context.id_paciente,
             id_atendimento: context.id_atendimento,
             id_receita: context.id_receita,
+            model: ui.model.value || localStorage.getItem(KEY_MODEL) || '',
             messages: snapshot
           })
         });
