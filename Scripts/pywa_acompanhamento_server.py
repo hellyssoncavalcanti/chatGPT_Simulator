@@ -24,6 +24,7 @@ import random
 import re
 import threading
 import time
+import unicodedata
 from concurrent.futures import Future
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
@@ -154,6 +155,20 @@ app = Flask(__name__)
 
 def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _normalize_contact_name(name: str) -> str:
+    """Normalize contact name: lowercase, keep only letters/digits/spaces, collapse whitespace.
+
+    Removes emojis, punctuation and symbols while keeping accented chars (á, ç, etc.).
+    """
+    name = (name or "").strip().lower()
+    # Keep only letters (including accented), digits, and spaces
+    cleaned = "".join(
+        c for c in name
+        if unicodedata.category(c)[0] in ("L", "N") or c == " "
+    )
+    return re.sub(r"\s+", " ", cleaned).strip()
 
 
 class StateStore:
@@ -366,16 +381,19 @@ def _upsert_whatsapp_contact_profile(
 ) -> None:
     """Persist WhatsApp contact metadata in chatgpt_whatsapp table."""
     safe_phone = _sql_escape(normalize_phone(phone) or "")
-    safe_display_name = _sql_escape(display_name)
+    # Normalize names: lowercase, no emojis/special chars
+    norm_display = _normalize_contact_name(display_name)
+    norm_chat_title = _normalize_contact_name(wa_chat_title)
+    safe_display_name = _sql_escape(norm_display)
     safe_profile_name = _sql_escape(profile_name)
-    safe_chat_title = _sql_escape(wa_chat_title)
+    safe_chat_title = _sql_escape(norm_chat_title)
     safe_source = _sql_escape(source)
     profile_json = json.dumps(
         {
             "captured_at_utc": utc_now_iso(),
-            "display_name": display_name or "",
+            "display_name": norm_display or "",
             "profile_name": profile_name or "",
-            "wa_chat_title": wa_chat_title or "",
+            "wa_chat_title": norm_chat_title or "",
             "source": source or "",
         },
         ensure_ascii=False,
@@ -507,8 +525,12 @@ def lookup_whatsapp_contact_profile(phone: str) -> Optional[Dict[str, Any]]:
 
 
 def lookup_whatsapp_contact_by_display_name(display_name: str) -> Optional[Dict[str, Any]]:
-    """Find the latest WhatsApp contact profile by saved display name."""
-    norm_name = re.sub(r"\s+", " ", str(display_name or "").strip())
+    """Find the latest WhatsApp contact profile by saved display name.
+
+    Searches using normalized name (lowercase, no special chars) to match
+    how names are stored by _upsert_whatsapp_contact_profile.
+    """
+    norm_name = _normalize_contact_name(display_name)
     if len(norm_name) < 2:
         return None
     safe_name = _sql_escape(norm_name)
@@ -516,7 +538,7 @@ def lookup_whatsapp_contact_by_display_name(display_name: str) -> Optional[Dict[
         "SELECT whatsapp_phone, wa_display_name, wa_profile_name, wa_chat_title, "
         "       id_paciente, id_atendimento, is_named_contact, last_seen_at "
         "FROM chatgpt_whatsapp "
-        f"WHERE wa_display_name = '{safe_name}' "
+        f"WHERE wa_display_name = '{safe_name}' OR wa_chat_title = '{safe_name}' "
         "ORDER BY id DESC LIMIT 1"
     )
     try:
@@ -2757,8 +2779,20 @@ def _resolve_chat_to_atendimento(
     # Try phone extracted from title first
     phone = _phone_from_title(title)
 
+    # 0) Try alias cache: resolve named contact to phone
+    alias_phone = None
+    try:
+        aliases = state.get_contact_aliases()
+        title_key = re.sub(r"\s+", " ", title.strip().lower())
+        alias_phone = normalize_phone(aliases.get(title_key))
+    except Exception:
+        pass
+
     # 1) Fast path: lookup by whatsapp_paciente in chatgpt_chats
-    for candidate_phone in [phone, normalize_phone(phone_hint) if phone_hint else None]:
+    candidate_phones = [phone, normalize_phone(phone_hint) if phone_hint else None]
+    if alias_phone and alias_phone not in candidate_phones:
+        candidate_phones.append(alias_phone)
+    for candidate_phone in candidate_phones:
         if not candidate_phone:
             continue
         wa_chat = lookup_whatsapp_chat(candidate_phone)
@@ -2773,23 +2807,17 @@ def _resolve_chat_to_atendimento(
             }
 
     # 2) Lookup via chatgpt_atendimentos_analise + membros phone columns
-    if phone:
-        result = lookup_atendimento_by_phone(phone)
+    for cp in candidate_phones:
+        if not cp:
+            continue
+        result = lookup_atendimento_by_phone(cp)
         if result:
-            result.setdefault("telefone", phone)
+            result.setdefault("telefone", cp)
             return result
-
-    if phone_hint:
-        norm = normalize_phone(phone_hint)
-        if norm:
-            result = lookup_atendimento_by_phone(norm)
-            if result:
-                result.setdefault("telefone", norm)
-                return result
 
     # 3) Lookup em tabela dedicada de contatos WhatsApp (quando o chat aparece
     # por nome salvo e o telefone não está explícito na lista).
-    for candidate_phone in [phone, normalize_phone(phone_hint) if phone_hint else None]:
+    for candidate_phone in candidate_phones:
         if not candidate_phone:
             continue
         profile = lookup_whatsapp_contact_profile(candidate_phone)
@@ -3056,6 +3084,22 @@ def enrich_named_contacts_from_sidebar(
                     "SIM" if in_cooldown else "não",
                 )
 
+    # Sync: garante que todos os aliases existentes no cache tenham entrada no DB
+    if aliases:
+        for alias_name, alias_phone in aliases.items():
+            try:
+                existing = lookup_whatsapp_contact_by_display_name(alias_name)
+                if not existing:
+                    _upsert_whatsapp_contact_profile(
+                        phone=alias_phone,
+                        display_name=alias_name,
+                        profile_name="",
+                        wa_chat_title=alias_name,
+                        source="alias_cache_sync",
+                    )
+            except Exception:
+                pass
+
     # Se todos os candidatos estão em cooldown e não há nenhum novo, reseta os
     # contadores de falha para permitir retries com a lógica atualizada.
     if len(prioritized) == 0 and skipped_cooldown > 0:
@@ -3267,6 +3311,9 @@ def process_incoming_replies_once() -> Dict[str, int]:
 
             # 3) Try to extract phone from the open chat header
             phone_hint = wa_web.extract_phone_from_open_chat()
+            # Fallback: use alias phone when header doesn't show a phone number
+            if not phone_hint and chat.get("phone_key"):
+                phone_hint = normalize_phone(chat["phone_key"])
 
             # 4) Resolve to an atendimento record (phone or name lookup)
             atendimento = _resolve_chat_to_atendimento(title, phone_hint)
