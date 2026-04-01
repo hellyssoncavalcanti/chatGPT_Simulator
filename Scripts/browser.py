@@ -95,6 +95,37 @@ async def close_ephemeral_pages(context, baseline_pages, q=None, keep_pages=None
     except Exception as e:
         emit_log(q, f"⚠️ Limpeza de abas efêmeras falhou: {e}")
 
+
+def _is_known_orphan_tab_url(url: str) -> bool:
+    if not url:
+        return False
+    u = url.strip().lower()
+    if "residenciapediatrica.com.br/content/pdf/" in u:
+        return True
+    return False
+
+
+async def cleanup_known_orphan_tabs(context, q=None):
+    """
+    Remove abas persistentes/restauradas que não fazem parte do fluxo do worker
+    (ex.: PDF externo que reaparece após restauração de sessão do Chromium).
+    """
+    try:
+        for p in list(getattr(context, "pages", []) or []):
+            url = ""
+            try:
+                url = (p.url or "").strip()
+            except Exception:
+                url = ""
+            if _is_known_orphan_tab_url(url):
+                emit_log(q, f"🧹 Fechando aba órfã conhecida: {url[:120]}")
+                try:
+                    await p.close()
+                except Exception as close_err:
+                    emit_log(q, f"⚠️ Falha ao fechar aba órfã conhecida: {close_err}")
+    except Exception as e:
+        emit_log(q, f"⚠️ Falha na limpeza de abas órfãs conhecidas: {e}")
+
 async def _get_window_state(page):
     try:
         session = await page.context.new_cdp_session(page)
@@ -2754,6 +2785,7 @@ async def browser_loop_async():
                 dp = await b.new_page()
                 await dp.goto("https://chatgpt.com")
             except: pass
+            await cleanup_known_orphan_tabs(b)
             return b
 
         # Inicia pela primeira vez
@@ -2766,6 +2798,7 @@ async def browser_loop_async():
                 task = await loop.run_in_executor(None, browser_queue.get)
                 
                 if task.get('action') == 'STOP': break
+                await cleanup_known_orphan_tabs(browser)
                 
                 # =======================================================
                 # AUTO-RECOVERY: TESTA SE O BROWSER AINDA ESTÁ VIVO
