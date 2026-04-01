@@ -141,6 +141,14 @@ if TEST_ONLY_ID_PACIENTE is not None:
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("whatsapp_web_acompanhamento")
 
+# Logger dedicado para enriquecimento — exibe [Associar_nome_contato_ao_numero] no log
+_elog_handler = logging.StreamHandler()
+_elog_handler.setFormatter(logging.Formatter("%(asctime)s [Associar_nome_contato_ao_numero] %(message)s"))
+elog = logging.getLogger("enrich_contact_phone")
+elog.setLevel(logging.INFO)
+elog.addHandler(_elog_handler)
+elog.propagate = False  # não duplicar no root logger
+
 app = Flask(__name__)
 
 
@@ -1580,7 +1588,7 @@ class WhatsAppWebClient:
 
             el = el_handle.as_element() if el_handle else None
             if not el:
-                log.warning("open_chat_by_sidebar_click: título '%s' não encontrado na sidebar", title)
+                elog.warning("open_chat_by_sidebar_click: título '%s' não encontrado na sidebar", title)
                 return False
 
             # 2) Clique real via Playwright ElementHandle (eventos mousedown/mouseup/click reais)
@@ -1588,7 +1596,7 @@ class WhatsAppWebClient:
                 self._page.wait_for_timeout(200)
                 el.click(timeout=5000)
             except Exception as e:
-                log.warning("open_chat_by_sidebar_click: falha no clique para '%s': %s", title, e)
+                elog.warning("open_chat_by_sidebar_click: falha no clique para '%s': %s", title, e)
                 return False
 
             # 3) Aguarda o header do chat renderizar e confirma que é o chat certo
@@ -1597,7 +1605,7 @@ class WhatsAppWebClient:
                 self._page.wait_for_timeout(500)
                 return True
             except Exception:
-                log.warning("open_chat_by_sidebar_click: header não apareceu após clicar '%s'", title)
+                elog.warning("open_chat_by_sidebar_click: header não apareceu após clicar '%s'", title)
                 return False
 
         return self._run_on_browser_thread(_do)
@@ -1813,7 +1821,7 @@ class WhatsAppWebClient:
 
             header = self._page.locator("#main header").first
             if header.count() == 0:
-                log.info("get_open_contact_details: #main header não encontrado")
+                elog.info("get_open_contact_details: #main header não encontrado")
                 return {"title": "", "phone": "", "profile_name": "", "profile_phone": ""}
 
             # ── SUB-ETAPA B: Captura identidade do header ──────────────
@@ -1837,16 +1845,19 @@ class WhatsAppWebClient:
                     return { title, phone };
                 }"""
             ) or {}
-            log.info(
+            elog.info(
                 "get_open_contact_details sub-B: header title='%s' phone='%s'",
                 base.get("title", ""), base.get("phone", ""),
             )
+
+            # ── SUB-ETAPA C: Pausa para usuário ver o chat aberto ─────
+            elog.info("  PAUSA 5s — chat aberto, preparando para clicar 'Mais opções'...")
+            self._page.wait_for_timeout(5000)
 
             # ── SUB-ETAPA C: Clique em "Mais opções" (three-dots menu) ─
             # O botão tem aria-label="Mais opções" e data-tab="6"
             menu_opened = False
             try:
-                # Tenta via Playwright locator primeiro
                 mais_opcoes = self._page.locator(
                     '#main header button[aria-label="Mais opções"], '
                     '#main button[aria-label="Mais opções"], '
@@ -1856,12 +1867,11 @@ class WhatsAppWebClient:
                     mais_opcoes.click(timeout=3000)
                     self._page.wait_for_timeout(500)
                     menu_opened = True
-                    log.info("get_open_contact_details sub-C: 'Mais opções' clicado via locator")
+                    elog.info("  sub-C: 'Mais opções' clicado via locator")
             except Exception as e:
-                log.debug("get_open_contact_details sub-C: locator click falhou: %s", e)
+                elog.debug("  sub-C: locator click falhou: %s", e)
 
             if not menu_opened:
-                # Fallback: JS click no botão
                 try:
                     js_result = self._page.evaluate(
                         """() => {
@@ -1877,7 +1887,6 @@ class WhatsAppWebClient:
                                 el.dispatchEvent(new MouseEvent('click', opts));
                                 return true;
                             };
-                            // Busca botão "Mais opções" dentro do #main ou header
                             const btn = document.querySelector('#main button[aria-label="Mais opções"]')
                                 || document.querySelector('button[aria-label="Mais opções"]')
                                 || document.querySelector('#main button[aria-label="More options"]')
@@ -1889,17 +1898,17 @@ class WhatsAppWebClient:
                     menu_opened = bool(js_result.get("ok"))
                     if menu_opened:
                         self._page.wait_for_timeout(500)
-                        log.info("get_open_contact_details sub-C: 'Mais opções' clicado via JS")
+                        elog.info("  sub-C: 'Mais opções' clicado via JS")
                     else:
-                        log.warning(
-                            "get_open_contact_details sub-C: botão 'Mais opções' não encontrado: %s",
+                        elog.warning(
+                            "  sub-C: botão 'Mais opções' não encontrado: %s",
                             js_result.get("reason", ""),
                         )
                 except Exception as e:
-                    log.warning("get_open_contact_details sub-C: JS click falhou: %s", e)
+                    elog.warning("  sub-C: JS click 'Mais opções' falhou: %s", e)
 
             if not menu_opened:
-                log.warning("get_open_contact_details: FALHA ao abrir menu 'Mais opções'")
+                elog.warning("  FALHA ao abrir menu 'Mais opções'")
                 return {
                     "title": str(base.get("title") or "").strip(),
                     "phone": str(base.get("phone") or "").strip(),
@@ -1908,10 +1917,13 @@ class WhatsAppWebClient:
                     "_click_failed": True,
                 }
 
+            # ── Pausa para usuário ver o menu aberto ───────────────────
+            elog.info("  PAUSA 5s — menu 'Mais opções' aberto, preparando para clicar 'Dados do contato'...")
+            self._page.wait_for_timeout(5000)
+
             # ── SUB-ETAPA D: Clique em "Dados do contato" (menu item) ──
             panel_clicked = False
             try:
-                # O menu item tem aria-label="Dados do contato" e role="menuitem"
                 dados_btn = self._page.locator(
                     'button[aria-label="Dados do contato"], '
                     'div[aria-label="Dados do contato"][role="menuitem"], '
@@ -1922,12 +1934,11 @@ class WhatsAppWebClient:
                 if dados_btn.count() > 0:
                     dados_btn.click(timeout=3000)
                     panel_clicked = True
-                    log.info("get_open_contact_details sub-D: 'Dados do contato' clicado via locator")
+                    elog.info("  sub-D: 'Dados do contato' clicado via locator")
             except Exception as e:
-                log.debug("get_open_contact_details sub-D: locator click falhou: %s", e)
+                elog.debug("  sub-D: locator click 'Dados do contato' falhou: %s", e)
 
             if not panel_clicked:
-                # Fallback: JS click
                 try:
                     js_result = self._page.evaluate(
                         """() => {
@@ -1951,23 +1962,22 @@ class WhatsAppWebClient:
                     ) or {}
                     panel_clicked = bool(js_result.get("ok"))
                     if panel_clicked:
-                        log.info("get_open_contact_details sub-D: 'Dados do contato' clicado via JS")
+                        elog.info("  sub-D: 'Dados do contato' clicado via JS")
                     else:
-                        log.warning(
-                            "get_open_contact_details sub-D: item 'Dados do contato' não encontrado: %s",
+                        elog.warning(
+                            "  sub-D: item 'Dados do contato' não encontrado: %s",
                             js_result.get("reason", ""),
                         )
                 except Exception as e:
-                    log.warning("get_open_contact_details sub-D: JS click falhou: %s", e)
+                    elog.warning("  sub-D: JS click 'Dados do contato' falhou: %s", e)
 
             if not panel_clicked:
-                # Fecha o menu que ficou aberto
                 try:
                     self._page.keyboard.press("Escape")
                     self._page.wait_for_timeout(200)
                 except Exception:
                     pass
-                log.warning("get_open_contact_details: FALHA ao clicar 'Dados do contato' no menu")
+                elog.warning("  FALHA ao clicar 'Dados do contato' no menu")
                 return {
                     "title": str(base.get("title") or "").strip(),
                     "phone": str(base.get("phone") or "").strip(),
@@ -1976,9 +1986,11 @@ class WhatsAppWebClient:
                     "_click_failed": True,
                 }
 
+            # ── Pausa para usuário ver o painel de dados do contato ─────
+            elog.info("  PAUSA 5s — painel 'Dados do contato' clicado, aguardando section renderizar...")
+            self._page.wait_for_timeout(5000)
+
             # ── SUB-ETAPA E: Aguarda seção de dados do contato carregar ─
-            # O painel/section com os dados do contato leva alguns segundos
-            # para renderizar completamente, especialmente o telefone.
             panel_visible = False
             panel_selectors = [
                 'section span[data-testid="selectable-text"]',
@@ -1989,20 +2001,19 @@ class WhatsAppWebClient:
                 try:
                     self._page.wait_for_selector(sel, timeout=5000)
                     panel_visible = True
-                    log.info("get_open_contact_details sub-E: painel detectado via '%s'", sel)
+                    elog.info("  sub-E: painel detectado via '%s'", sel)
                     break
                 except Exception:
                     continue
 
             if not panel_visible:
-                log.warning(
-                    "get_open_contact_details sub-E: painel não detectado por seletores. "
-                    "Aguardando 4s como fallback..."
+                elog.warning(
+                    "  sub-E: painel não detectado por seletores. Aguardando 5s como fallback..."
                 )
-                self._page.wait_for_timeout(4000)
+                self._page.wait_for_timeout(5000)
             else:
-                # Pausa extra para o telefone renderizar (~1-6s observado manualmente)
-                self._page.wait_for_timeout(3000)
+                elog.info("  PAUSA 5s — painel visível, aguardando telefone renderizar...")
+                self._page.wait_for_timeout(5000)
 
             # ── SUB-ETAPA F: Extrai dados da section com retries ────────
             extract_details_js = """() => {
@@ -2138,8 +2149,8 @@ class WhatsAppWebClient:
                 _debug_attempt = str(data.get("_debug") or "")
                 found_phone = normalize_phone(data.get("profile_phone"))
                 if attempt == 1 or found_phone:
-                    log.info(
-                        "get_open_contact_details sub-F: tentativa %s/12 | phone='%s' name='%s' debug='%s'",
+                    elog.info(
+                        "  sub-F: tentativa %s/12 | phone='%s' name='%s' debug='%s'",
                         attempt, found_phone or "(nenhum)",
                         data.get("profile_name", ""), _debug_attempt[:120],
                     )
@@ -2164,8 +2175,8 @@ class WhatsAppWebClient:
             }
             if not result["profile_name"] and result["title"] and _phone_from_title(result["title"]) is None:
                 result["profile_name"] = result["title"]
-            log.info(
-                "get_open_contact_details resultado | title='%s' phone='%s' profile_name='%s' "
+            elog.info(
+                "  RESULTADO: title='%s' phone='%s' profile_name='%s' "
                 "profile_phone='%s' panel_visible=%s debug=%s",
                 result.get("title", ""), result.get("phone", ""),
                 result.get("profile_name", ""), result.get("profile_phone", ""),
@@ -2760,63 +2771,69 @@ def _enrich_single_contact(title: str) -> Tuple[Optional[str], str, str, str]:
     detail_title = title
     detail_profile = ""
 
+    import time as _time
+
     # ── ETAPA 1: WA Store (sem abrir chat) ──────────────────────────
-    log.info("  [ETAPA 1/5] resolve_phone_via_wa_store('%s')...", title)
+    elog.info("  [ETAPA 1/5] resolve_phone_via_wa_store('%s')...", title)
     try:
         store_phone = wa_web.resolve_phone_via_wa_store(title)
         if store_phone:
-            log.info("  [ETAPA 1/5] ✓ WA Store resolveu: %s", store_phone)
+            elog.info("  [ETAPA 1/5] ✓ WA Store resolveu: %s", store_phone)
             return store_phone, detail_title, detail_profile, ""
-        log.info("  [ETAPA 1/5] WA Store: nenhum resultado (Store.Chat + Store.Contact + ReactFiber)")
+        elog.info("  [ETAPA 1/5] WA Store: nenhum resultado")
     except Exception as e:
-        log.info("  [ETAPA 1/5] WA Store: exceção: %s", e)
+        elog.info("  [ETAPA 1/5] WA Store: exceção: %s", e)
 
     # ── ETAPA 2: Clicar no contato na sidebar ───────────────────────
-    log.info("  [ETAPA 2/5] open_chat_by_sidebar_click('%s')...", title)
+    elog.info("  [ETAPA 2/5] PAUSA 5s antes de clicar na sidebar...")
+    _time.sleep(5)
+    elog.info("  [ETAPA 2/5] open_chat_by_sidebar_click('%s')...", title)
     if not wa_web.open_chat_by_sidebar_click(title):
         reason = "sidebar_click_failed"
-        log.warning("  [ETAPA 2/5] FALHA: clique na sidebar não abriu o chat")
+        elog.warning("  [ETAPA 2/5] FALHA: clique na sidebar não abriu o chat")
         return None, detail_title, detail_profile, reason
 
     # ── ETAPA 3: Verificar header do chat aberto ────────────────────
-    log.info("  [ETAPA 3/5] get_open_chat_identity() — verificando header...")
+    elog.info("  [ETAPA 3/5] PAUSA 5s para verificar header do chat aberto...")
+    _time.sleep(5)
+    elog.info("  [ETAPA 3/5] get_open_chat_identity() — verificando header...")
     open_identity = wa_web.get_open_chat_identity()
     open_title = (open_identity.get("title") or "").strip()
     open_phone = (open_identity.get("phone") or "").strip()
-    log.info(
+    elog.info(
         "  [ETAPA 3/5] Header: title='%s' phone='%s'",
         open_title or "(vazio)", open_phone or "(nenhum)",
     )
 
     if not open_title:
         reason = "header_empty_after_click"
-        log.warning("  [ETAPA 3/5] FALHA: header vazio — chat não abriu")
+        elog.warning("  [ETAPA 3/5] FALHA: header vazio — chat não abriu")
         return None, detail_title, detail_profile, reason
 
     # Se o header já mostra telefone, temos o resultado
     if open_phone and normalize_phone(open_phone):
-        log.info("  [ETAPA 3/5] ✓ Telefone já visível no header: %s", open_phone)
+        elog.info("  [ETAPA 3/5] ✓ Telefone já visível no header: %s", open_phone)
         return normalize_phone(open_phone), open_title, detail_profile, ""
 
     # ── ETAPA 3.5: React internals do chat aberto ──────────────────
-    log.info("  [ETAPA 3.5] resolve_phone_from_open_chat_internals() — tentando React/Store...")
+    elog.info("  [ETAPA 3.5] resolve_phone_from_open_chat_internals() — tentando React/Store...")
     try:
         react_phone = wa_web.resolve_phone_from_open_chat_internals()
         if react_phone:
-            log.info("  [ETAPA 3.5] ✓ Telefone via React internals: %s", react_phone)
+            elog.info("  [ETAPA 3.5] ✓ Telefone via React internals: %s", react_phone)
             return react_phone, open_title, detail_profile, ""
-        log.info("  [ETAPA 3.5] React internals: nenhum telefone encontrado")
+        elog.info("  [ETAPA 3.5] React internals: nenhum telefone encontrado")
     except Exception as e:
-        log.info("  [ETAPA 3.5] React internals: exceção: %s", e)
+        elog.info("  [ETAPA 3.5] React internals: exceção: %s", e)
 
-    # ── ETAPA 4: Abrir painel "Dados do contato" ────────────────────
-    log.info("  [ETAPA 4/5] get_open_contact_details() — abrindo painel Dados do contato...")
+    # ── ETAPA 4: Abrir painel "Dados do contato" via menu ───────────
+    elog.info("  [ETAPA 4/5] get_open_contact_details() — abrindo via Mais opções → Dados do contato...")
     details = wa_web.get_open_contact_details()
     detail_title = details.get("title") or title
     detail_profile = details.get("profile_name") or ""
     panel_phone = normalize_phone(details.get("profile_phone") or "")
     header_phone = normalize_phone(details.get("phone") or "")
-    log.info(
+    elog.info(
         "  [ETAPA 4/5] Resultado painel: title='%s' profile_name='%s' "
         "profile_phone='%s' header_phone='%s'",
         detail_title, detail_profile,
@@ -2824,31 +2841,31 @@ def _enrich_single_contact(title: str) -> Tuple[Optional[str], str, str, str]:
     )
 
     if panel_phone:
-        log.info("  [ETAPA 4/5] ✓ Telefone capturado via painel: %s", panel_phone)
+        elog.info("  [ETAPA 4/5] ✓ Telefone capturado via painel: %s", panel_phone)
         return panel_phone, detail_title, detail_profile, ""
     if header_phone:
-        log.info("  [ETAPA 4/5] ✓ Telefone capturado via header (retorno do painel): %s", header_phone)
+        elog.info("  [ETAPA 4/5] ✓ Telefone capturado via header (retorno do painel): %s", header_phone)
         return header_phone, detail_title, detail_profile, ""
 
     # ── ETAPA 5: Fallback — extract_phone_from_open_chat ────────────
-    log.info("  [ETAPA 5/5] extract_phone_from_open_chat() — fallback no header direto...")
+    elog.info("  [ETAPA 5/5] extract_phone_from_open_chat() — fallback no header direto...")
     try:
         fallback_phone = wa_web.extract_phone_from_open_chat()
         if fallback_phone:
             norm = normalize_phone(fallback_phone)
             if norm:
-                log.info("  [ETAPA 5/5] ✓ Telefone capturado via header direto: %s", norm)
+                elog.info("  [ETAPA 5/5] ✓ Telefone capturado via header direto: %s", norm)
                 return norm, detail_title, detail_profile, ""
-        log.info("  [ETAPA 5/5] Header direto: nenhum telefone encontrado")
+        elog.info("  [ETAPA 5/5] Header direto: nenhum telefone encontrado")
     except Exception as e:
-        log.warning("  [ETAPA 5/5] Exceção no fallback header: %s", e)
+        elog.warning("  [ETAPA 5/5] Exceção no fallback header: %s", e)
 
     reason = (
         "no_phone_all_strategies|"
         f"store=fail|sidebar=ok|header='{open_title}'|"
         f"panel_profile='{detail_profile}'|panel_phone=none|header_phone=none"
     )
-    log.warning(
+    elog.warning(
         "  [RESULTADO] Nenhum telefone encontrado para '%s' | motivo: %s",
         title, reason,
     )
@@ -2868,11 +2885,6 @@ def enrich_named_contacts_from_sidebar(
 
     now_mono = time.monotonic()
     if now_mono - _LAST_SIDEBAR_ENRICHMENT_TS < float(min_interval_sec):
-        log.info(
-            "Enriquecimento sidebar: pulado por intervalo mínimo | delta=%.1fs < %ss",
-            now_mono - _LAST_SIDEBAR_ENRICHMENT_TS,
-            min_interval_sec,
-        )
         return 0
 
     aliases = state.get_contact_aliases()
@@ -2884,17 +2896,25 @@ def enrich_named_contacts_from_sidebar(
     skipped_cooldown = 0
     attempts = 0
 
+    # ── Lista de contatos JÁ associados (nome → telefone) ──────────
+    if aliases:
+        elog.info("=== Contatos JÁ associados (nome → telefone): %s total ===", len(aliases))
+        for alias_name, alias_phone in sorted(aliases.items()):
+            elog.info("  ✓ '%s' → %s", alias_name, alias_phone)
+    else:
+        elog.info("=== Nenhum contato associado ainda ===")
+
     # ── Log falhas anteriores para DEBUG ────────────────────────────
     all_failures = state.get_enrichment_failures()
     if all_failures:
-        log.info(
-            "Enriquecimento sidebar: %s contatos com falha(s) anterior(es):",
+        elog.info(
+            "=== Contatos com falha(s) anterior(es): %s ===",
             len(all_failures),
         )
         for fk, fv in sorted(all_failures.items(), key=lambda x: x[1].get("count", 0), reverse=True):
             in_cooldown = state.should_skip_enrichment(fk, max_failures=5, cooldown_hours=24)
-            log.info(
-                "  falha: '%s' | tentativas=%s | última=%s | motivo='%s' | cooldown=%s",
+            elog.info(
+                "  ✗ '%s' | tentativas=%s | última=%s | motivo='%s' | cooldown=%s",
                 fk,
                 fv.get("count", 0),
                 fv.get("last_at", "?"),
@@ -2936,8 +2956,8 @@ def enrich_named_contacts_from_sidebar(
     # contadores de falha para permitir retries com a lógica atualizada.
     if len(prioritized) == 0 and skipped_cooldown > 0:
         cleared = state.reset_all_enrichment_failures()
-        log.info(
-            "Enriquecimento sidebar: TODOS os %s candidatos em cooldown — "
+        elog.info(
+            "TODOS os %s candidatos em cooldown — "
             "resetando %s contadores de falha para permitir retry com lógica atualizada",
             skipped_cooldown, cleared,
         )
@@ -2956,14 +2976,26 @@ def enrich_named_contacts_from_sidebar(
                 retry_rows.append(row)
         prioritized = monitored_rows + retry_rows + eligible_rows
 
-    log.info(
-        "Enriquecimento sidebar iniciado | chats_visíveis=%s | aliases_cache=%s "
+    elog.info(
+        "=== Iniciando enriquecimento | chats_visíveis=%s | aliases_cache=%s "
         "| max_por_ciclo=%s | max_tentativas=%s | candidatos=%s (monitorados=%s, retries=%s, novos=%s) "
-        "| cooldown=%s | not_named=%s | alias_exists=%s",
+        "| cooldown=%s | not_named=%s | alias_exists=%s ===",
         len(chat_rows), len(aliases), max_per_cycle, max_attempts,
         len(prioritized), len(monitored_rows), len(retry_rows), len(eligible_rows),
         skipped_cooldown, skipped_not_named, skipped_alias_exists,
     )
+
+    # Log dos candidatos que serão tentados neste ciclo
+    if prioritized:
+        elog.info("=== Candidatos a tentar neste ciclo (%s): ===", len(prioritized))
+        for i, prow in enumerate(prioritized[:max_attempts]):
+            ptitle = (prow.get("title") or "").strip()
+            ptitle_key = re.sub(r"\s+", " ", ptitle.lower())
+            pfail = all_failures.get(ptitle_key)
+            pfail_count = pfail.get("count", 0) if pfail else 0
+            elog.info("  %s. '%s' (falhas anteriores=%s)", i + 1, ptitle, pfail_count)
+    else:
+        elog.info("=== Nenhum candidato para enriquecer neste ciclo ===")
 
     for row in prioritized:
         if enriched >= max_per_cycle or attempts >= max_attempts:
@@ -2975,14 +3007,14 @@ def enrich_named_contacts_from_sidebar(
 
         attempts += 1
         if prev_failure and prev_failure.get("count", 0) > 0:
-            log.info(
-                "Enriquecimento [%s/%s]: RETRY '%s' (falhas=%s, motivo anterior='%s')",
+            elog.info(
+                ">>> [%s/%s] RETRY '%s' (falhas=%s, motivo anterior='%s')",
                 attempts, max_attempts, title,
                 prev_failure.get("count", 0),
                 prev_failure.get("last_reason", "?"),
             )
         else:
-            log.info("Enriquecimento [%s/%s]: tentando '%s' (primeira vez)", attempts, max_attempts, title)
+            elog.info(">>> [%s/%s] tentando '%s' (primeira vez)", attempts, max_attempts, title)
 
         try:
             resolved_phone, detail_title, detail_profile, failure_reason = _enrich_single_contact(title)
@@ -3002,16 +3034,16 @@ def enrich_named_contacts_from_sidebar(
 
             state.set_contact_alias(title, resolved_phone)
             state.clear_enrichment_failure(title_key)
-            log.info("Enriquecimento sidebar: ✓ '%s' -> %s", title, resolved_phone)
+            elog.info("✓✓✓ ASSOCIADO: '%s' -> %s", title, resolved_phone)
             enriched += 1
 
         except Exception as e:
             state.record_enrichment_failure(title_key, reason=f"exception:{e}")
-            log.exception("Falha no enriquecimento para '%s': %s", title, e)
+            elog.exception("Falha no enriquecimento para '%s': %s", title, e)
 
-    log.info(
-        "Enriquecimento sidebar concluído | enriched=%s no_phone=%s "
-        "not_named=%s alias_exists=%s cooldown=%s attempts=%s",
+    elog.info(
+        "=== Enriquecimento concluído | enriched=%s no_phone=%s "
+        "not_named=%s alias_exists=%s cooldown=%s attempts=%s ===",
         enriched, skipped_no_phone,
         skipped_not_named, skipped_alias_exists, skipped_cooldown, attempts,
     )
