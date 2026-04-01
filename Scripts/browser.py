@@ -77,6 +77,55 @@ def emit_event(q, type_, content):
         payload = json.dumps({"type": type_, "content": content}, separators=(',', ':'))
         q.put(payload + "\n")
 
+async def close_ephemeral_pages(context, baseline_pages, q=None, keep_pages=None):
+    """
+    Fecha abas criadas durante uma tarefa (popups/abas órfãs), preservando
+    apenas as abas de baseline e as explicitamente mantidas em keep_pages.
+    """
+    try:
+        baseline_ids = {id(p) for p in (baseline_pages or [])}
+        keep_ids = {id(p) for p in (keep_pages or []) if p is not None}
+        for p in list(getattr(context, "pages", []) or []):
+            if id(p) in baseline_ids or id(p) in keep_ids:
+                continue
+            try:
+                await p.close()
+            except Exception as e:
+                emit_log(q, f"⚠️ Falha ao fechar aba efêmera: {e}")
+    except Exception as e:
+        emit_log(q, f"⚠️ Limpeza de abas efêmeras falhou: {e}")
+
+
+def _is_known_orphan_tab_url(url: str) -> bool:
+    if not url:
+        return False
+    u = url.strip().lower()
+    if "residenciapediatrica.com.br/content/pdf/" in u:
+        return True
+    return False
+
+
+async def cleanup_known_orphan_tabs(context, q=None):
+    """
+    Remove abas persistentes/restauradas que não fazem parte do fluxo do worker
+    (ex.: PDF externo que reaparece após restauração de sessão do Chromium).
+    """
+    try:
+        for p in list(getattr(context, "pages", []) or []):
+            url = ""
+            try:
+                url = (p.url or "").strip()
+            except Exception:
+                url = ""
+            if _is_known_orphan_tab_url(url):
+                emit_log(q, f"🧹 Fechando aba órfã conhecida: {url[:120]}")
+                try:
+                    await p.close()
+                except Exception as close_err:
+                    emit_log(q, f"⚠️ Falha ao fechar aba órfã conhecida: {close_err}")
+    except Exception as e:
+        emit_log(q, f"⚠️ Falha na limpeza de abas órfãs conhecidas: {e}")
+
 async def _get_window_state(page):
     try:
         session = await page.context.new_cdp_session(page)
@@ -1834,6 +1883,7 @@ async def handle_search_task(context, task):
     async with tab_semaphore:
         q    = task.get('stream_queue')
         query = (task.get('query') or '').strip()
+        baseline_pages = list(getattr(context, "pages", []) or [])
         page = None
         try:
             if not query:
@@ -2018,6 +2068,7 @@ async def handle_search_task(context, task):
                     await page.close()
                 except:
                     pass
+            await close_ephemeral_pages(context, baseline_pages, q=q)
             if q:
                 q.put(None)
 
@@ -2030,6 +2081,7 @@ async def handle_uptodate_search_task(context, task):
     async with tab_semaphore:
         q = task.get('stream_queue')
         query = (task.get('query') or '').strip()
+        baseline_pages = list(getattr(context, "pages", []) or [])
         page = None
         try:
             if not query:
@@ -2171,6 +2223,7 @@ async def handle_uptodate_search_task(context, task):
                     await page.close()
                 except Exception:
                     pass
+            await close_ephemeral_pages(context, baseline_pages, q=q)
             if q:
                 q.put(None)
 
@@ -2394,6 +2447,33 @@ async def handle_chat_task_inner(task, page, q, stop_event: asyncio.Event, activ
             break
 
         loop_count += 1
+
+        rate_limit_state = await page.evaluate("""() => {
+            const bodyText = (document.body?.innerText || '').replace(/\\s+/g, ' ').trim();
+            const candidates = Array.from(document.querySelectorAll('div,section,article,[role="dialog"],main'));
+            const hit = candidates.find(el => {
+                const txt = (el.innerText || '').trim().toLowerCase();
+                if (!txt || txt.length < 10) return false;
+                const hasPt = txt.includes('excesso de solicita') && txt.includes('aguarde alguns minutos');
+                const hasEn = txt.includes('too many requests') || txt.includes('rate limit');
+                return hasPt || hasEn;
+            });
+            if (!hit) {
+                return { detected: false, message: '' };
+            }
+            const msg = (hit.innerText || bodyText || '').trim().slice(0, 1200);
+            return { detected: true, message: msg };
+        }""")
+
+        if rate_limit_state.get("detected"):
+            rate_limit_msg = (rate_limit_state.get("message") or "Excesso de solicitações").strip()
+            emit_log(q, f"⛔ Rate-limit detectado no ChatGPT: {rate_limit_msg[:220]}")
+            emit_event(q, "error", {
+                "code": "rate_limit",
+                "message": rate_limit_msg,
+                "retry_after_seconds": 240
+            })
+            break
 
         chat_error_state = await page.evaluate("""() => {
             const retryBtn = document.querySelector('button[data-testid="regenerate-thread-error-button"]');
@@ -2705,58 +2785,67 @@ async def browser_loop_async():
                 dp = await b.new_page()
                 await dp.goto("https://chatgpt.com")
             except: pass
+            await cleanup_known_orphan_tabs(b)
             return b
 
         # Inicia pela primeira vez
         browser = await start_browser()
         file_log("browser.py", "🟢 Async Worker Online. Aguardando tarefas...")
 
-        while True:
-            try:
-                loop = asyncio.get_running_loop()
-                task = await loop.run_in_executor(None, browser_queue.get)
-                
-                if task.get('action') == 'STOP': break
-                
-                # =======================================================
-                # AUTO-RECOVERY: TESTA SE O BROWSER AINDA ESTÁ VIVO
-                # =======================================================
+        try:
+            while True:
                 try:
-                    # 1. Se o usuário fechou todas as abas, consideramos fechado
-                    if len(browser.pages) == 0:
-                        raise Exception("Sem abas")
+                    loop = asyncio.get_running_loop()
+                    task = await loop.run_in_executor(None, browser_queue.get)
                     
-                    # 2. Faz um "Ping" real no Chromium. Se ele foi fechado no X, isso vai dar erro na hora!
-                    await browser.pages[0].evaluate("1")
+                    if task.get('action') == 'STOP': break
+                    await cleanup_known_orphan_tabs(browser)
                     
-                except Exception:
-                    file_log("browser.py", "⚠️ Navegador fechado ou desconectado detectado! Recriando...")
-                    try: await browser.close()
-                    except: pass
-                    
-                    # Reabre o navegador usando a função interna
-                    browser = await start_browser()
-                    file_log("browser.py", "✅ Navegador reaberto com sucesso!")
-                # =======================================================
+                    # =======================================================
+                    # AUTO-RECOVERY: TESTA SE O BROWSER AINDA ESTÁ VIVO
+                    # =======================================================
+                    try:
+                        # 1. Se o usuário fechou todas as abas, consideramos fechado
+                        if len(browser.pages) == 0:
+                            raise Exception("Sem abas")
+                        
+                        # 2. Faz um "Ping" real no Chromium. Se ele foi fechado no X, isso vai dar erro na hora!
+                        await browser.pages[0].evaluate("1")
+                        
+                    except Exception:
+                        file_log("browser.py", "⚠️ Navegador fechado ou desconectado detectado! Recriando...")
+                        try: await browser.close()
+                        except: pass
+                        
+                        # Reabre o navegador usando a função interna
+                        browser = await start_browser()
+                        file_log("browser.py", "✅ Navegador reaberto com sucesso!")
+                    # =======================================================
 
-                action = task.get('action', 'CHAT')
-                
-                if action in ['GET_MENU', 'EXEC_MENU']:
-                    asyncio.create_task(handle_menu_task(browser, task))
-                elif action == 'SYNC':
-                    asyncio.create_task(handle_sync_task(browser, task))
-                elif action == 'SEARCH':
-                    asyncio.create_task(handle_search_task(browser, task))
-                elif action == 'UPTODATE_SEARCH':
-                    asyncio.create_task(handle_uptodate_search_task(browser, task))
-                elif action == 'DOWNLOAD_FILE':
-                    asyncio.create_task(handle_download_file(browser, task))
-                else:
-                    asyncio.create_task(handle_chat_task(browser, task))
+                    action = task.get('action', 'CHAT')
                     
-            except Exception as e:
-                print(f"Erro no loop principal: {e}")
-                await asyncio.sleep(1)
+                    if action in ['GET_MENU', 'EXEC_MENU']:
+                        asyncio.create_task(handle_menu_task(browser, task))
+                    elif action == 'SYNC':
+                        asyncio.create_task(handle_sync_task(browser, task))
+                    elif action == 'SEARCH':
+                        asyncio.create_task(handle_search_task(browser, task))
+                    elif action == 'UPTODATE_SEARCH':
+                        asyncio.create_task(handle_uptodate_search_task(browser, task))
+                    elif action == 'DOWNLOAD_FILE':
+                        asyncio.create_task(handle_download_file(browser, task))
+                    else:
+                        asyncio.create_task(handle_chat_task(browser, task))
+                        
+                except Exception as e:
+                    print(f"Erro no loop principal: {e}")
+                    await asyncio.sleep(1)
+        finally:
+            try:
+                await browser.close()
+                file_log("browser.py", "🛑 Contexto Chromium encerrado corretamente.")
+            except Exception as close_err:
+                file_log("browser.py", f"⚠️ Falha ao encerrar Chromium com elegância: {close_err}")
 
 def browser_loop():
     # Wrapper para rodar o loop async dentro da Thread do main.py
