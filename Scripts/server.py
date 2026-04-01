@@ -71,6 +71,10 @@ WEB_SEARCH_PROGRESS_TICK_SEC = 1.0
 _web_search_timing_lock = threading.Lock()
 _web_search_last_started_at = 0.0
 _web_search_last_interval_sec = 0.0
+CHAT_RATE_LIMIT_DEFAULT_COOLDOWN_SEC = 240
+CHAT_RATE_LIMIT_PROGRESS_TICK_SEC = 1.0
+_chat_rate_limit_lock = threading.Lock()
+_chat_rate_limit_until = 0.0
 
 
 def _cleanup_active_chats():
@@ -123,6 +127,102 @@ def _format_wait_seconds(seconds):
     remaining = max(0, int(round(seconds)))
     mins, secs = divmod(remaining, 60)
     return f"{mins:02d}:{secs:02d}"
+
+
+def _extract_rate_limit_details(error_payload):
+    """
+    Identifica sinalização de rate-limit enviada pelo browser.py.
+    Aceita payload string ou dict.
+    """
+    code = ""
+    message = ""
+    retry_after = None
+
+    if isinstance(error_payload, dict):
+        code = str(error_payload.get("code") or "").strip().lower()
+        message = str(error_payload.get("message") or error_payload.get("error") or "").strip()
+        try:
+            retry_after_raw = error_payload.get("retry_after_seconds")
+            if retry_after_raw is not None:
+                retry_after = max(1, int(float(retry_after_raw)))
+        except Exception:
+            retry_after = None
+    else:
+        message = str(error_payload or "").strip()
+
+    lowered = f"{code} {message}".lower()
+    is_rate_limited = (
+        code in {"rate_limit", "too_many_requests"}
+        or "excesso de solicita" in lowered
+        or "too many request" in lowered
+        or "too many requests" in lowered
+    )
+    return is_rate_limited, message, retry_after
+
+
+def _register_chat_rate_limit(retry_after_seconds=None, reason=""):
+    global _chat_rate_limit_until
+    cooldown = retry_after_seconds or CHAT_RATE_LIMIT_DEFAULT_COOLDOWN_SEC
+    cooldown = max(1, int(cooldown))
+    until_ts = time.time() + cooldown
+    with _chat_rate_limit_lock:
+        _chat_rate_limit_until = max(_chat_rate_limit_until, until_ts)
+    if reason:
+        log(f"[CHAT_RATE_LIMIT] cooldown de {cooldown}s registrado. Motivo: {reason}")
+    else:
+        log(f"[CHAT_RATE_LIMIT] cooldown de {cooldown}s registrado.")
+
+
+def _get_chat_rate_limit_remaining_seconds():
+    with _chat_rate_limit_lock:
+        return max(0.0, _chat_rate_limit_until - time.time())
+
+
+def _wait_chat_rate_limit_if_needed(stream_queue=None):
+    while True:
+        remaining = _get_chat_rate_limit_remaining_seconds()
+        if remaining <= 0:
+            return
+        if stream_queue is not None:
+            stream_queue.put(json.dumps({
+                "type": "status",
+                "content": (
+                    "⏳ Aguardando cooldown por excesso de solicitações no ChatGPT. "
+                    f"Nova tentativa em {_format_wait_seconds(remaining)}."
+                ),
+                "phase": "chat_rate_limit_cooldown",
+                "wait_seconds": round(remaining, 1),
+            }, ensure_ascii=False))
+        time.sleep(min(CHAT_RATE_LIMIT_PROGRESS_TICK_SEC, remaining))
+
+
+def _has_active_remote_user_chat():
+    for _chat_id, meta in list(ACTIVE_CHATS.items()):
+        if meta.get('finished'):
+            continue
+        if meta.get('is_analyzer'):
+            continue
+        return True
+    return False
+
+
+def _wait_remote_user_priority_if_needed(is_analyzer: bool, stream_queue=None):
+    """
+    Se a origem for o analisador, aguarda chats remotos em andamento finalizarem.
+    """
+    if not is_analyzer:
+        return
+    while _has_active_remote_user_chat():
+        if stream_queue is not None:
+            stream_queue.put(json.dumps({
+                "type": "status",
+                "content": (
+                    "⏳ Aguardando finalização de pedido remoto prioritário em andamento "
+                    "antes de iniciar a análise automática."
+                ),
+                "phase": "analyzer_waiting_remote_priority",
+            }, ensure_ascii=False))
+        time.sleep(1.0)
 
 
 def _reserve_web_search_slot():
@@ -1339,8 +1439,12 @@ def chat_completions():
         'status':      'Iniciando...',
         'markdown':    '',
         'finished':    False,
-        'finished_at': None
+        'finished_at': None,
+        'is_analyzer': bool(is_analyzer)
     }
+
+    _wait_remote_user_priority_if_needed(is_analyzer, stream_q if stream else None)
+    _wait_chat_rate_limit_if_needed(stream_q if stream else None)
 
     browser_queue.put({
         'action':           'CHAT',
@@ -1408,6 +1512,10 @@ def chat_completions():
                                 storage.save_chat(chat_id, fin.get('title', ''), fin.get('url', '') or url or '', [], origin_url=origin_url)
                             except Exception as e:
                                 log(f"[WARN] Falha ao persistir stream finish: {e}")
+                        elif t == 'error':
+                            is_rate_limited, err_msg, retry_after = _extract_rate_limit_details(msg_obj.get('content'))
+                            if is_rate_limited:
+                                _register_chat_rate_limit(retry_after, reason=err_msg)
                     except Exception:
                         pass
 
@@ -1462,6 +1570,9 @@ def chat_completions():
                     ACTIVE_CHATS[chat_id]['finished']    = True
                     ACTIVE_CHATS[chat_id]['finished_at'] = time.time()
                 elif t == 'error':
+                    is_rate_limited, err_msg, retry_after = _extract_rate_limit_details(msg.get('content'))
+                    if is_rate_limited:
+                        _register_chat_rate_limit(retry_after, reason=err_msg)
                     ACTIVE_CHATS[chat_id]['finished']    = True
                     ACTIVE_CHATS[chat_id]['finished_at'] = time.time()
                     return jsonify({"success": False, "error": msg['content'], "chat_id": chat_id})
