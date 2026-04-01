@@ -2417,6 +2417,33 @@ async def handle_chat_task_inner(task, page, q, stop_event: asyncio.Event, activ
 
         loop_count += 1
 
+        rate_limit_state = await page.evaluate("""() => {
+            const bodyText = (document.body?.innerText || '').replace(/\\s+/g, ' ').trim();
+            const candidates = Array.from(document.querySelectorAll('div,section,article,[role="dialog"],main'));
+            const hit = candidates.find(el => {
+                const txt = (el.innerText || '').trim().toLowerCase();
+                if (!txt || txt.length < 10) return false;
+                const hasPt = txt.includes('excesso de solicita') && txt.includes('aguarde alguns minutos');
+                const hasEn = txt.includes('too many requests') || txt.includes('rate limit');
+                return hasPt || hasEn;
+            });
+            if (!hit) {
+                return { detected: false, message: '' };
+            }
+            const msg = (hit.innerText || bodyText || '').trim().slice(0, 1200);
+            return { detected: true, message: msg };
+        }""")
+
+        if rate_limit_state.get("detected"):
+            rate_limit_msg = (rate_limit_state.get("message") or "Excesso de solicitações").strip()
+            emit_log(q, f"⛔ Rate-limit detectado no ChatGPT: {rate_limit_msg[:220]}")
+            emit_event(q, "error", {
+                "code": "rate_limit",
+                "message": rate_limit_msg,
+                "retry_after_seconds": 240
+            })
+            break
+
         chat_error_state = await page.evaluate("""() => {
             const retryBtn = document.querySelector('button[data-testid="regenerate-thread-error-button"]');
             const errorCard = document.querySelector('[data-message-author-role="assistant"] .text-token-text-error');
