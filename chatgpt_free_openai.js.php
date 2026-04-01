@@ -715,6 +715,7 @@ header('Content-Type: application/javascript; charset=utf-8');
       '<div id="ow-sidebar">',
       '  <div id="sb-view-menu" class="sb-view active sb-content">',
       '    <div class="sb-head"><span>Menu IA</span><button type="button" class="sb-close-btn" id="ow-sidebar-close">×</button></div>',
+      '    <div class="sb-menu-item" id="sb-reset-chat">🧹 Reiniciar chat</div>',
       '    <div class="sb-menu-item" id="sb-open-prompts">✏️ Personalizar IA</div>',
       '  </div>',
       '  <div id="sb-view-prompts" class="sb-view sb-content">',
@@ -758,6 +759,7 @@ header('Content-Type: application/javascript; charset=utf-8');
       sidebarClose: panel.querySelector('#ow-sidebar-close'),
       sidebarMenuView: panel.querySelector('#sb-view-menu'),
       sidebarPromptView: panel.querySelector('#sb-view-prompts'),
+      sidebarResetChat: panel.querySelector('#sb-reset-chat'),
       sidebarOpenPrompts: panel.querySelector('#sb-open-prompts'),
       sidebarBackMenu: panel.querySelector('#sb-back-menu'),
       promptEl: panel.querySelector('#cfo-system-prompt'),
@@ -1110,16 +1112,14 @@ header('Content-Type: application/javascript; charset=utf-8');
     var ui = createUI();
     var open = false;
     var loading = false;
-    var history = [
-      { role: 'system', content: 'Você é um assistente útil. Responda em português do Brasil de forma objetiva.' }
-    ];
+    var history = [];
+    var shouldSendSystemPromptOnNextMessage = true;
     var pendingAttachments = [];
     var attachmentsSupported = null;
     var context = getContextFromUrl();
     var preferredSavedModel = localStorage.getItem(KEY_MODEL) || '';
     log('context:url', context);
     loadActiveSystemPrompt().then(function (promptTxt) {
-      history[0] = { role: 'system', content: promptTxt || DEFAULT_SYS_PROMPT };
       var promptEl = ui.promptEl;
       if (promptEl) {
         promptEl.value = promptTxt || DEFAULT_SYS_PROMPT;
@@ -1140,7 +1140,6 @@ header('Content-Type: application/javascript; charset=utf-8');
             var d = await r.json();
             if (!d || !d.success) throw new Error((d && d.error) || 'Falha ao salvar prompt');
             activeSystemPrompt = val;
-            history[0] = { role: 'system', content: activeSystemPrompt };
             alert('Prompt salvo com sucesso.');
           } catch (err) {
             alert('Erro ao salvar prompt: ' + normalizeError(err));
@@ -1183,8 +1182,28 @@ header('Content-Type: application/javascript; charset=utf-8');
       };
     }
 
+    async function resetChatContext() {
+      history = [];
+      shouldSendSystemPromptOnNextMessage = true;
+      pendingAttachments = [];
+      renderAttachments();
+      ui.body.innerHTML = '';
+      ui.input.value = '';
+      await persistHistory();
+      addMessage(ui.body, 'Chat reiniciado. A próxima mensagem iniciará um novo contexto com o prompt do sistema.', 'assistant');
+      if (ui.sidebar) ui.sidebar.classList.remove('open');
+    }
+
+    if (ui.sidebarResetChat) {
+      ui.sidebarResetChat.onclick = function () {
+        var ok = window.confirm('Deseja reiniciar o chat e apagar o contexto atual?');
+        if (!ok) return;
+        resetChatContext();
+      };
+    }
+
     function serializePersistableHistory() {
-      return history.filter(function (m) { return m && m.role !== 'system' && typeof m.content === 'string' && m.content.trim() !== ''; });
+      return history.filter(function (m) { return m && typeof m.content === 'string' && m.content.trim() !== ''; });
     }
 
     function renderAttachments() {
@@ -1319,6 +1338,7 @@ header('Content-Type: application/javascript; charset=utf-8');
           history.push({ role: m.role, content: text });
           addMessage(ui.body, text, m.role);
         });
+        if (loaded.length) shouldSendSystemPromptOnNextMessage = false;
         return loaded.length > 0;
       } catch (err) {
         warn('loadHistory:error', err);
@@ -1372,7 +1392,7 @@ header('Content-Type: application/javascript; charset=utf-8');
       log('send:start', { prompt: prompt, historyLen: history.length, attachments: pendingAttachments.length });
       addMessage(ui.body, prompt, 'user');
       history.push({ role: 'user', content: prompt });
-      if (history.length > MAX_HISTORY) history = [history[0]].concat(history.slice(history.length - (MAX_HISTORY - 1)));
+      if (history.length > MAX_HISTORY) history = history.slice(history.length - MAX_HISTORY);
       ui.input.value = '';
       persistHistory();
 
@@ -1404,6 +1424,9 @@ header('Content-Type: application/javascript; charset=utf-8');
           warn('tool_decision:sql_requested_but_not_implemented', toolDecision.sql_queries);
         }
         var requestHistory = history.slice();
+        if (shouldSendSystemPromptOnNextMessage) {
+          requestHistory.unshift({ role: 'system', content: activeSystemPrompt || DEFAULT_SYS_PROMPT });
+        }
         var attachmentPayload = pendingAttachments.slice();
         if (attachmentPayload.length) {
           uploadedFiles = await uploadAttachmentsToPuter(puter, attachmentPayload);
@@ -1438,6 +1461,7 @@ header('Content-Type: application/javascript; charset=utf-8');
         log('send:raw_result', result);
         var answer = normalizeAssistantText(result);
         history.push({ role: 'assistant', content: answer });
+        shouldSendSystemPromptOnNextMessage = false;
         addMessage(ui.body, answer, 'assistant', model ? ('modelo: ' + model) : '');
         if (attachmentPayload.length) {
           pendingAttachments = [];
