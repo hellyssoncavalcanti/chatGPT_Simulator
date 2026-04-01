@@ -1287,30 +1287,62 @@ header('Content-Type: application/javascript; charset=utf-8');
       if (!puter || !puter.fs || typeof puter.fs.write !== 'function') {
         throw new Error('Upload de arquivos não suportado pelo Puter neste ambiente.');
       }
+      log('attachments:upload_batch_start', {
+        count: attachmentPayload.length,
+        hasFs: !!(puter && puter.fs),
+        fsKeys: puter && puter.fs ? Object.keys(puter.fs).slice(0, 20) : []
+      });
       for (var i = 0; i < attachmentPayload.length; i += 1) {
         var att = attachmentPayload[i];
         if (!att || !att.file) continue;
         var safeName = String(att.name || ('arquivo_' + (i + 1))).replace(/[^a-zA-Z0-9._-]/g, '_');
         var ts = Date.now();
         var candidatePaths = [
+          '~/' + safeName,
+          '~/Desktop/' + safeName,
+          '~/Documents/' + safeName,
           'conexaovida_tmp_' + ts + '_' + i + '_' + safeName,
           'tmp_conexaovida_' + ts + '_' + i + '_' + safeName,
           safeName
         ];
+        log('attachment:upload_start', {
+          index: i,
+          name: att.name || safeName,
+          originalType: att.type || '',
+          fileType: att.file && att.file.type ? att.file.type : '',
+          size: att.file && att.file.size ? att.file.size : 0,
+          candidatePaths: candidatePaths
+        });
         var written = null;
         var lastErr = null;
         for (var p = 0; p < candidatePaths.length; p += 1) {
           var tempPath = candidatePaths[p];
           try {
             written = await puter.fs.write(tempPath, att.file);
-            log('attachment:uploaded', { name: att.name || safeName, puter_path: tempPath });
+            log('attachment:uploaded', {
+              name: att.name || safeName,
+              attemptPath: tempPath,
+              returnedPath: written && (written.path || written.fullPath || written.abspath) ? (written.path || written.fullPath || written.abspath) : null,
+              writeResult: written
+            });
             break;
           } catch (err) {
             lastErr = err;
-            warn('attachment:upload_try_fail', { path: tempPath, error: normalizeError(err) });
+            warn('attachment:upload_try_fail', {
+              path: tempPath,
+              error: normalizeError(err),
+              rawError: err,
+              stack: err && err.stack ? err.stack : null
+            });
           }
         }
         if (!written) {
+          error('attachment:upload_failed_all_paths', {
+            name: att.name || safeName,
+            candidatePaths: candidatePaths,
+            lastError: normalizeError(lastErr || 'Falha ao enviar anexo para Puter FS.'),
+            rawLastError: lastErr
+          });
           throw new Error(normalizeError(lastErr || 'Falha ao enviar anexo para Puter FS.'));
         }
         uploaded.push({
@@ -1318,6 +1350,7 @@ header('Content-Type: application/javascript; charset=utf-8');
           puter_path: (written && (written.path || written.fullPath || written.abspath)) || candidatePaths[0]
         });
       }
+      log('attachments:upload_batch_done', uploaded);
       return uploaded;
     }
 
@@ -1479,8 +1512,20 @@ header('Content-Type: application/javascript; charset=utf-8');
         }
         var attachmentPayload = pendingAttachments.slice();
         if (attachmentPayload.length) {
+          log('attachments:pre_upload_payload', attachmentPayload.map(function (att, idx) {
+            return {
+              idx: idx,
+              name: att && att.name ? att.name : '',
+              type: att && att.type ? att.type : '',
+              fileType: att && att.file && att.file.type ? att.file.type : '',
+              size: att && att.size ? att.size : (att && att.file && att.file.size ? att.file.size : 0),
+              hasFileObject: !!(att && att.file),
+              hasDataUrl: !!(att && att.dataUrl)
+            };
+          }));
           uploadedFiles = await uploadAttachmentsToPuter(puter, attachmentPayload);
           if (!uploadedFiles.length) throw new Error('Falha ao enviar anexos ao Puter.');
+          log('attachments:uploaded_paths', uploadedFiles);
           requestHistory[requestHistory.length - 1] = {
             role: 'user',
             content: uploadedFiles.map(function (fileMeta) {
