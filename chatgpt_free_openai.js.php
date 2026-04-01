@@ -543,7 +543,10 @@ header('Content-Type: application/javascript; charset=utf-8');
       if ((Date.now() - parsed.ts) > (6 * 60 * 60 * 1000)) return null;
       var allowed = {};
       parsed.models.forEach(function (m) { allowed[m] = true; });
-      return models.filter(function (m) { return allowed[m.name]; });
+      return {
+        ts: parsed.ts,
+        models: models.filter(function (m) { return allowed[m.name]; })
+      };
     } catch (_) {
       return null;
     }
@@ -567,41 +570,58 @@ header('Content-Type: application/javascript; charset=utf-8');
     ]);
   }
 
+  async function probeModelWithRetry(puter, modelName, attempts) {
+    var lastErr = null;
+    for (var i = 0; i < attempts; i += 1) {
+      try {
+        var probeResult = await withTimeout(
+          puter.ai.chat([{ role: 'user', content: 'Responda apenas: OK' }], { model: modelName }),
+          15000
+        );
+        var probeText = normalizeAssistantText(probeResult);
+        if (probeText && String(probeText).trim() !== '') return true;
+      } catch (err) {
+        lastErr = err;
+      }
+    }
+    if (lastErr) throw lastErr;
+    throw new Error('modelo sem resposta útil');
+  }
+
   async function filterWorkingModels(puter, models, onProgress) {
     if (!models || !models.length) return [];
     var fromCache = getWorkingModelsFromCache(models);
-    if (fromCache && fromCache.length) {
-      log('filterWorkingModels:cache_hit', fromCache.map(function (m) { return m.name; }));
-      if (typeof onProgress === 'function') onProgress(fromCache.slice(), true);
-      return fromCache;
+    var workingMap = {};
+    var working = [];
+    if (fromCache && fromCache.models.length) {
+      fromCache.models.forEach(function (m) {
+        workingMap[m.name] = m;
+      });
+      working = Object.keys(workingMap).map(function (k) { return workingMap[k]; });
+      log('filterWorkingModels:cache_hit', working.map(function (m) { return m.name; }));
+      if (typeof onProgress === 'function') onProgress(working.slice(), true);
     }
 
     var prioritized = models.slice().sort(function (a, b) {
       return scoreModelFreshness(b.name) - scoreModelFreshness(a.name);
-    }).slice(0, 10);
-    var working = [];
+    }).slice(0, 16);
     log('filterWorkingModels:start', prioritized.map(function (m) { return m.name; }));
 
     for (var i = 0; i < prioritized.length; i += 1) {
       var m = prioritized[i];
+      if (workingMap[m.name]) continue;
       try {
-        var probeResult = await withTimeout(
-          puter.ai.chat([{ role: 'user', content: 'Responda apenas: OK' }], { model: m.name }),
-          15000
-        );
-        var probeText = normalizeAssistantText(probeResult);
-        if (probeText && String(probeText).trim() !== '') {
-          working.push(m);
-          log('filterWorkingModels:ok', m.name);
-          if (typeof onProgress === 'function') onProgress(working.slice(), false, m);
-        } else {
-          warn('filterWorkingModels:empty_response', m.name);
-        }
+        await probeModelWithRetry(puter, m.name, 2);
+        workingMap[m.name] = m;
+        working = Object.keys(workingMap).map(function (k) { return workingMap[k]; });
+        log('filterWorkingModels:ok', m.name);
+        if (typeof onProgress === 'function') onProgress(working.slice(), false, m);
       } catch (err) {
         warn('filterWorkingModels:fail', m.name, normalizeError(err));
       }
     }
 
+    working = models.filter(function (m) { return !!workingMap[m.name]; });
     if (working.length) saveWorkingModelsCache(working);
     log('filterWorkingModels:done', working.map(function (m) { return m.name; }));
     return working;
