@@ -5419,13 +5419,38 @@ header('Content-Type: application/javascript; charset=utf-8');
                 const startTime = Date.now();
 
                 // Faz a requisição ao endpoint PHP (Remote Sync)
-                const res = await fetch("<?php echo $_SERVER['PHP_SELF']; ?>?action=sync_simulator", {
+                const syncUrl = "<?php echo $_SERVER['PHP_SELF']; ?>?action=sync_simulator";
+                const syncPayload = { chat_id: state.currentChatId, url: state.currentChatUrl };
+                console.log(`%c☁️ ${FILE_PREFIX} [SYNC] Request URL: ${syncUrl}`, "color: #1565c0; font-weight: bold;");
+                console.log(`%c☁️ ${FILE_PREFIX} [SYNC] Request Payload:`, "color: #1565c0; font-weight: bold;", syncPayload);
+
+                const res = await fetch(syncUrl, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ chat_id: state.currentChatId, url: state.currentChatUrl })
+                    body: JSON.stringify(syncPayload)
                 });
-                
-                const data = await res.json();
+
+                const rawResponseText = await res.text();
+                let data = null;
+                try {
+                    data = rawResponseText ? JSON.parse(rawResponseText) : null;
+                } catch (parseErr) {
+                    console.groupCollapsed(`%c☁️ ${FILE_PREFIX} [SYNC] ⚠️ Resposta não-JSON`, "color: #ff9800; font-weight: bold; background: #fff3e0; padding: 4px 8px; border-radius: 4px;");
+                    console.warn('HTTP Status:', res.status, res.statusText);
+                    console.warn('Erro ao parsear JSON:', parseErr);
+                    console.log('Conteúdo bruto da resposta:', rawResponseText);
+                    console.groupEnd();
+                    throw new Error('SYNC retornou conteúdo inválido (não JSON).');
+                }
+
+                if (!res.ok) {
+                    console.groupCollapsed(`%c☁️ ${FILE_PREFIX} [SYNC] ⚠️ HTTP não-OK`, "color: #ff9800; font-weight: bold; background: #fff3e0; padding: 4px 8px; border-radius: 4px;");
+                    console.warn('HTTP Status:', res.status, res.statusText);
+                    console.log('Conteúdo bruto da resposta:', rawResponseText);
+                    console.log('JSON parseado:', data);
+                    console.groupEnd();
+                }
+
                 const duration = ((Date.now() - startTime) / 1000).toFixed(1);
                 
                 if (data && data.success && data.chat && Array.isArray(data.chat.messages)) {
@@ -5470,6 +5495,8 @@ header('Content-Type: application/javascript; charset=utf-8');
             } catch (e) {
                 console.groupCollapsed(`%c☁️ ${FILE_PREFIX} [SYNC] ❌ Falha de Conexão`, "color: #f44336; font-weight: bold; background: #ffebee; padding: 4px 8px; border-radius: 4px;");
                 console.error("Motivo:", e);
+                console.log("URL tentada:", "<?php echo $_SERVER['PHP_SELF']; ?>?action=sync_simulator");
+                console.log("Origin atual:", window.location.origin, "| href:", window.location.href);
                 console.groupEnd();
                 if (document.getElementById('ow-sync-indicator')) document.getElementById('ow-sync-indicator').remove();
             }
