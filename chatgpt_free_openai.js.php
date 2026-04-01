@@ -577,134 +577,6 @@ header('Content-Type: application/javascript; charset=utf-8');
   window.addEventListener('error', function (ev) { error('window.onerror', ev && ev.message ? ev.message : ev); });
   window.addEventListener('unhandledrejection', function (ev) { error('unhandledrejection', ev && ev.reason ? ev.reason : ev); });
 
-  function log() { console.log.apply(console, ['%c' + FILE_PREFIX + ' [LOG]', 'color:#1976d2;font-weight:bold'].concat([].slice.call(arguments))); }
-  function warn() { console.warn.apply(console, ['%c' + FILE_PREFIX + ' [WARN]', 'color:#f57c00;font-weight:bold'].concat([].slice.call(arguments))); }
-  function error() { console.error.apply(console, ['%c' + FILE_PREFIX + ' [ERROR]', 'color:#d32f2f;font-weight:bold'].concat([].slice.call(arguments))); }
-  function normalizeError(err) {
-    if (!err) return 'erro desconhecido';
-    if (typeof err === 'string') return err;
-    if (err.message) return err.message;
-    try { return JSON.stringify(err); } catch (_) { return String(err); }
-  }
-
-  function shouldUseWebSearch(prompt) {
-    var p = String(prompt || '').toLowerCase();
-    if (!p) return false;
-    return /(pesquise|buscar|busque|internet|web|wikipedia|google|not[ií]cia|atualizado|site:|fonte|fontes)/.test(p);
-  }
-
-  function buildChatOptions(model, enableWebSearch) {
-    var opts = { model: model };
-    if (enableWebSearch) {
-      // Mantém múltiplas chaves por compatibilidade com variações de SDK.
-      opts.web_search = true;
-      opts.search = true;
-      opts.enable_search = true;
-      opts.tools = [{ type: 'web_search' }];
-    }
-    return opts;
-  }
-
-  function normalizeWebSearchItems(raw) {
-    if (!raw) return [];
-    if (Array.isArray(raw)) return raw;
-    if (Array.isArray(raw.results)) return raw.results;
-    if (Array.isArray(raw.items)) return raw.items;
-    if (Array.isArray(raw.data)) return raw.data;
-    return [];
-  }
-
-  async function fetchJsonWithTimeout(url, ms) {
-    var ctrl = (typeof AbortController !== 'undefined') ? new AbortController() : null;
-    var timer = null;
-    try {
-      if (ctrl) timer = setTimeout(function () { ctrl.abort(); }, ms || 6000);
-      var res = await fetch(url, {
-        method: 'GET',
-        credentials: 'omit',
-        signal: ctrl ? ctrl.signal : undefined
-      });
-      if (!res.ok) throw new Error('HTTP ' + res.status);
-      return await res.json();
-    } finally {
-      if (timer) clearTimeout(timer);
-    }
-  }
-
-  function formatSearchItems(items) {
-    return (items || []).slice(0, 5).map(function (it, idx) {
-      var title = it.title || it.name || ('Resultado ' + (idx + 1));
-      var url = it.url || it.link || '';
-      var snippet = it.snippet || it.description || it.text || '';
-      return '- ' + title + (url ? ' (' + url + ')' : '') + (snippet ? ' :: ' + snippet : '');
-    }).join('\n');
-  }
-
-  async function buildFallbackWebContext(query) {
-    var q = String(query || '').trim();
-    if (!q) return '';
-    var collected = [];
-
-    try {
-      var ddgUrl = 'https://api.duckduckgo.com/?q=' + encodeURIComponent(q) + '&format=json&no_html=1&skip_disambig=1';
-      var ddg = await fetchJsonWithTimeout(ddgUrl, 7000);
-      if (ddg && ddg.AbstractText) {
-        collected.push({
-          title: ddg.Heading || q,
-          url: ddg.AbstractURL || '',
-          snippet: ddg.AbstractText
-        });
-      }
-      var topics = (ddg && Array.isArray(ddg.RelatedTopics)) ? ddg.RelatedTopics : [];
-      topics.slice(0, 4).forEach(function (topic) {
-        if (topic && topic.Text) {
-          collected.push({
-            title: topic.FirstURL ? topic.FirstURL.split('/').pop().replace(/_/g, ' ') : 'Relacionado',
-            url: topic.FirstURL || '',
-            snippet: topic.Text
-          });
-        } else if (topic && Array.isArray(topic.Topics)) {
-          topic.Topics.slice(0, 2).forEach(function (nested) {
-            if (!nested || !nested.Text) return;
-            collected.push({
-              title: nested.FirstURL ? nested.FirstURL.split('/').pop().replace(/_/g, ' ') : 'Relacionado',
-              url: nested.FirstURL || '',
-              snippet: nested.Text
-            });
-          });
-        }
-      });
-    } catch (err) {
-      warn('web_search:fallback_ddg_fail', normalizeError(err));
-    }
-
-    if (!collected.length) return '';
-    return formatSearchItems(collected);
-  }
-
-  async function buildWebSearchContext(query, puter) {
-    var q = String(query || '').trim();
-    if (!q) return '';
-    try {
-      if (puter && puter.ai && typeof puter.ai.webSearch === 'function') {
-        var ws = await puter.ai.webSearch(q);
-        var items = normalizeWebSearchItems(ws).slice(0, 5);
-        if (items.length) return formatSearchItems(items);
-      }
-      if (puter && puter.ai && typeof puter.ai.search === 'function') {
-        var s = await puter.ai.search(q);
-        var items2 = normalizeWebSearchItems(s).slice(0, 5);
-        if (items2.length) return formatSearchItems(items2);
-      }
-    } catch (err) {
-      warn('web_search:tool_call_fail', normalizeError(err));
-    }
-    return await buildFallbackWebContext(q);
-  }
-
-  window.addEventListener('error', function (ev) { error('window.onerror', ev && ev.message ? ev.message : ev); });
-  window.addEventListener('unhandledrejection', function (ev) { error('unhandledrejection', ev && ev.reason ? ev.reason : ev); });
-
   function loadPuterSdk() {
     log('loadPuterSdk:start');
     return new Promise(function (resolve, reject) {
@@ -783,7 +655,8 @@ header('Content-Type: application/javascript; charset=utf-8');
       'overflow:hidden;z-index:99999;border:1px solid #e7e7e7;font-family:Arial,sans-serif}',
       '.cfo-page{width:100%;height:70vh;max-height:70vh;background:#fff;border-radius:12px;box-shadow:0 8px 28px rgba(0,0,0,.08);display:flex;flex-direction:column;',
       'overflow:hidden;border:1px solid #e7e7e7;font-family:Arial,sans-serif}',
-      '.cfo-header{background:#0b57d0;color:#fff;padding:10px 12px;font-weight:700;font-size:14px}',
+      '.cfo-header{background:#0b57d0;color:#fff;padding:10px 12px;font-weight:700;font-size:14px;display:flex;align-items:center;gap:8px}',
+      '#ow-menu-toggle{cursor:pointer;font-size:20px;background:none;border:none;color:#fff;line-height:1;padding:0;margin:0 6px 0 0}',
       '.cfo-model-wrap{padding:8px 10px;border-bottom:1px solid #ebedf0;background:#f7f9ff}',
       '.cfo-model-label{display:block;font-size:11px;color:#344;margin-bottom:4px}',
       '.cfo-model-select{width:100%;padding:7px;border:1px solid #ccd4e2;border-radius:8px;background:#fff;font-size:12px}',
@@ -801,6 +674,13 @@ header('Content-Type: application/javascript; charset=utf-8');
       '.cfo-attach-preview.has-items{display:flex}',
       '.cfo-chip{display:inline-flex;align-items:center;gap:6px;border:1px solid #cdd5ea;background:#eef3ff;color:#1a3b77;border-radius:14px;padding:3px 8px;font-size:11px}',
       '.cfo-chip-x{cursor:pointer;font-weight:700}',
+      '#ow-sidebar{position:absolute;top:0;left:0;width:0;height:100%;background:#fff;z-index:40;transition:width .25s;overflow:hidden;border-right:1px solid #e9edf3}',
+      '#ow-sidebar.open{width:86%}',
+      '.ow-side-wrap{padding:12px}',
+      '.ow-side-title{font-weight:700;margin-bottom:8px}',
+      '.ow-side-close{float:right;border:none;background:none;font-size:18px;cursor:pointer}',
+      '.ow-side-ta{width:100%;height:56vh;font-family:monospace;font-size:12px}',
+      '.ow-side-actions{margin-top:8px;display:flex;gap:8px}',
       '@media (max-width:768px){.cfo-page{height:78vh;max-height:78vh}}'
     ].join('');
     document.head.appendChild(style);
@@ -828,7 +708,18 @@ header('Content-Type: application/javascript; charset=utf-8');
     panel.className = rootClass;
     panel.style.display = defaultDisplay;
     panel.innerHTML = [
-      '<div class="cfo-header">Chat (Puter/OpenAI)</div>',
+      '<div id="ow-sidebar">',
+      '  <div class="ow-side-wrap">',
+      '    <button type="button" class="ow-side-close" id="ow-sidebar-close">×</button>',
+      '    <div class="ow-side-title">Prompt do sistema</div>',
+      '    <textarea id="cfo-system-prompt" class="ow-side-ta"></textarea>',
+      '    <div class="ow-side-actions">',
+      '      <button type="button" id="cfo-save-system-prompt">Salvar Prompt</button>',
+      '      <button type="button" id="cfo-reset-system-prompt">Restaurar Padrão</button>',
+      '    </div>',
+      '  </div>',
+      '</div>',
+      '<div class="cfo-header"><button id="ow-menu-toggle" type="button">☰</button><span>Chat (Puter/OpenAI)</span></div>',
       '<div class="cfo-model-wrap">',
       '  <label class="cfo-model-label" for="cfo-model">Modelo LLM</label>',
       '  <select class="cfo-model-select" id="cfo-model"><option value="">Buscando modelos...</option></select>',
@@ -854,7 +745,13 @@ header('Content-Type: application/javascript; charset=utf-8');
       fileInput: panel.querySelector('#cfo-file-input'),
       input: panel.querySelector('#cfo-input'),
       send: panel.querySelector('#cfo-send'),
-      model: panel.querySelector('#cfo-model')
+      model: panel.querySelector('#cfo-model'),
+      menuToggle: panel.querySelector('#ow-menu-toggle'),
+      sidebar: panel.querySelector('#ow-sidebar'),
+      sidebarClose: panel.querySelector('#ow-sidebar-close'),
+      promptEl: panel.querySelector('#cfo-system-prompt'),
+      promptSaveBtn: panel.querySelector('#cfo-save-system-prompt'),
+      promptResetBtn: panel.querySelector('#cfo-reset-system-prompt')
     };
   }
 
@@ -1212,12 +1109,12 @@ header('Content-Type: application/javascript; charset=utf-8');
     log('context:url', context);
     loadActiveSystemPrompt().then(function (promptTxt) {
       history[0] = { role: 'system', content: promptTxt || DEFAULT_SYS_PROMPT };
-      var promptEl = document.getElementById('cfo-system-prompt');
+      var promptEl = ui.promptEl;
       if (promptEl) {
         promptEl.value = promptTxt || DEFAULT_SYS_PROMPT;
         promptEl.disabled = !canEditSystemPrompt;
       }
-      var saveBtn = document.getElementById('cfo-save-system-prompt');
+      var saveBtn = ui.promptSaveBtn;
       if (saveBtn) {
         saveBtn.disabled = !canEditSystemPrompt;
         saveBtn.onclick = async function () {
@@ -1239,14 +1136,23 @@ header('Content-Type: application/javascript; charset=utf-8');
           }
         };
       }
-      var resetBtn = document.getElementById('cfo-reset-system-prompt');
+      var resetBtn = ui.promptResetBtn;
       if (resetBtn) {
         resetBtn.disabled = !canEditSystemPrompt;
         resetBtn.onclick = function () {
           if (promptEl) promptEl.value = DEFAULT_SYS_PROMPT;
         };
       }
+      if (ui.menuToggle) ui.menuToggle.style.display = canEditSystemPrompt ? '' : 'none';
+      if (ui.sidebar && !canEditSystemPrompt) ui.sidebar.style.display = 'none';
     });
+
+    if (ui.menuToggle && ui.sidebar) {
+      ui.menuToggle.onclick = function () { ui.sidebar.classList.add('open'); };
+    }
+    if (ui.sidebarClose && ui.sidebar) {
+      ui.sidebarClose.onclick = function () { ui.sidebar.classList.remove('open'); };
+    }
 
     function serializePersistableHistory() {
       return history.filter(function (m) { return m && m.role !== 'system' && typeof m.content === 'string' && m.content.trim() !== ''; });
