@@ -574,10 +574,16 @@ function Merge-AllPullRequests {
     } catch {
         $statusCode = $null
         try { $statusCode = [int]$_.Exception.Response.StatusCode.value__ } catch {}
+        $errorText = [string]$_.Exception.Message
 
         if ($statusCode -in @(401, 403)) {
             $script:CanWriteRepo = $false
             Write-Warn ("Token sem autorizacao para processar PRs (HTTP {0}). O sync dos arquivos continuara." -f $statusCode)
+            return
+        }
+
+        if (($statusCode -ge 500 -and $statusCode -lt 600) -or $errorText -match '\(503\)' -or $errorText -match 'No server is currently available') {
+            Write-Warn 'GitHub indisponivel temporariamente para listar PRs (HTTP 5xx). O sync de arquivos continuara sem etapa de merge neste ciclo.'
             return
         }
 
