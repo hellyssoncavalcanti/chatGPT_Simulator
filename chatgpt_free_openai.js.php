@@ -416,40 +416,86 @@ header('Content-Type: application/javascript; charset=utf-8');
     container.scrollTop = container.scrollHeight;
   }
 
-  function normalizeAssistantText(result) {
-    function extractTextFromContentArray(contentArray) {
-      if (!Array.isArray(contentArray)) return '';
-      return contentArray.map(function (item) {
-        if (!item) return '';
-        if (typeof item === 'string') return item;
-        if (typeof item.text === 'string') return item.text;
-        if (item.text && typeof item.text.value === 'string') return item.text.value;
-        if (item.type === 'text' && typeof item.value === 'string') return item.value;
-        return '';
-      }).filter(Boolean).join('\n');
+  function tryParseJsonString(raw) {
+    if (typeof raw !== 'string') return null;
+    var t = raw.trim();
+    if (!t) return null;
+    if (!((t[0] === '{' && t[t.length - 1] === '}') || (t[0] === '[' && t[t.length - 1] === ']'))) return null;
+    try { return JSON.parse(t); } catch (_) { return null; }
+  }
+
+  function extractTextFromContentArray(contentArray) {
+    if (!Array.isArray(contentArray)) return '';
+    return contentArray.map(function (item) {
+      if (!item) return '';
+      if (typeof item === 'string') return item;
+      if (typeof item.text === 'string') return item.text;
+      if (item.text && typeof item.text.value === 'string') return item.text.value;
+      if (item.type === 'text' && typeof item.value === 'string') return item.value;
+      if (item.type === 'output_text' && typeof item.text === 'string') return item.text;
+      return '';
+    }).filter(Boolean).join('\n');
+  }
+
+  function extractAssistantText(payload) {
+    if (!payload) return '';
+    if (typeof payload === 'string') return payload;
+    if (Array.isArray(payload)) {
+      return payload.map(function (part) { return extractAssistantText(part); }).filter(Boolean).join('\n');
+    }
+    if (typeof payload !== 'object') return '';
+
+    if (typeof payload.text === 'string') return payload.text;
+    if (typeof payload.output_text === 'string') return payload.output_text;
+    if (typeof payload.answer === 'string') return payload.answer;
+    if (typeof payload.response === 'string') return payload.response;
+    if (typeof payload.message === 'string') return payload.message;
+
+    if (payload.message && typeof payload.message === 'object') {
+      if (typeof payload.message.content === 'string') return payload.message.content;
+      var fromMessageContent = extractTextFromContentArray(payload.message.content);
+      if (fromMessageContent) return fromMessageContent;
+      var nestedMessage = extractAssistantText(payload.message);
+      if (nestedMessage) return nestedMessage;
     }
 
-    if (typeof result === 'string') return result;
+    if (Array.isArray(payload.content)) {
+      var fromContentArray = extractTextFromContentArray(payload.content);
+      if (fromContentArray) return fromContentArray;
+    }
+    if (Array.isArray(payload.choices) && payload.choices[0]) {
+      var fromChoice = extractAssistantText(payload.choices[0].message || payload.choices[0].delta || payload.choices[0]);
+      if (fromChoice) return fromChoice;
+    }
+    return '';
+  }
+
+  function normalizeAssistantText(result) {
     if (!result) return 'Sem resposta.';
-    if (typeof result.message === 'string') return result.message;
-    if (result.message && typeof result.message === 'object') {
-      if (typeof result.message.content === 'string') return result.message.content;
-      var fromMessageContent = extractTextFromContentArray(result.message.content);
-      if (fromMessageContent) return fromMessageContent;
+
+    if (typeof result === 'string') {
+      var parsed = tryParseJsonString(result);
+      if (parsed) {
+        var parsedText = extractAssistantText(parsed);
+        if (parsedText) return parsedText;
+      }
+      return result;
     }
-    if (typeof result.text === 'string') return result.text;
-    if (Array.isArray(result.choices) && result.choices[0] && result.choices[0].message && typeof result.choices[0].message.content === 'string') {
-      return result.choices[0].message.content;
-    }
-    if (Array.isArray(result.content)) {
-      var fromRootContent = extractTextFromContentArray(result.content);
-      if (fromRootContent) return fromRootContent;
-    }
+
+    var extracted = extractAssistantText(result);
+    if (extracted) return extracted;
+
     if (typeof result.toString === 'function') {
       var maybeString = String(result.toString());
+      var parsedMaybe = tryParseJsonString(maybeString);
+      if (parsedMaybe) {
+        var parsedMaybeText = extractAssistantText(parsedMaybe);
+        if (parsedMaybeText) return parsedMaybeText;
+      }
       if (maybeString && maybeString !== '[object Object]') return maybeString;
     }
-    return JSON.stringify(result, null, 2);
+
+    return 'Sem conteúdo textual na resposta da LLM.';
   }
 
   function parseModelCandidates(raw) {
@@ -746,7 +792,12 @@ header('Content-Type: application/javascript; charset=utf-8');
         log('loadHistory:ok', { count: loaded.length, payload: payload });
         loaded.forEach(function (m) {
           if (!m || (m.role !== 'user' && m.role !== 'assistant')) return;
-          var text = typeof m.content === 'string' ? m.content : '';
+          var text = '';
+          if (m.role === 'assistant') {
+            text = normalizeAssistantText(m.content);
+          } else {
+            text = typeof m.content === 'string' ? m.content : '';
+          }
           if (!text) return;
           history.push({ role: m.role, content: text });
           addMessage(ui.body, text, m.role);
