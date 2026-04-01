@@ -103,23 +103,37 @@ if ($action === 'save_chat_history' || $action === 'get_chat_history') {
         exit;
     }
 
-    @$db->query("ALTER TABLE chatgpt_chats ADD COLUMN chat_mode VARCHAR(20) NOT NULL DEFAULT 'assistant'");
+    @$db->query("ALTER TABLE chatgpt_chats ADD COLUMN chat_mode VARCHAR(120) NOT NULL DEFAULT 'assistant'");
     @$db->query("ALTER TABLE chatgpt_chats ADD COLUMN mensagens LONGTEXT NULL");
-    $chat_mode_esc = $db->real_escape_string('free_openai');
+    $model_used = isset($data['model']) ? preg_replace('/\s+/', ' ', trim((string)$data['model'])) : '';
+    $legacy_chat_mode = 'free_openai';
+    $chat_mode_value = ($model_used !== '') ? $model_used : $legacy_chat_mode;
+    $chat_mode_esc = $db->real_escape_string($chat_mode_value);
+    $legacy_chat_mode_esc = $db->real_escape_string($legacy_chat_mode);
 
     if ($ctx['id_atendimento']) {
-        $where = "id_atendimento = " . intval($ctx['id_atendimento']) . " AND chat_mode = '$chat_mode_esc'";
+        $where_base = "id_atendimento = " . intval($ctx['id_atendimento']);
     } elseif ($ctx['id_receita']) {
-        $where = "id_receita = " . intval($ctx['id_receita']) . " AND id_atendimento IS NULL AND chat_mode = '$chat_mode_esc'";
+        $where_base = "id_receita = " . intval($ctx['id_receita']) . " AND id_atendimento IS NULL";
     } elseif ($ctx['id_paciente']) {
-        $where = "id_paciente = " . intval($ctx['id_paciente']) . " AND id_atendimento IS NULL AND id_receita IS NULL AND chat_mode = '$chat_mode_esc'";
+        $where_base = "id_paciente = " . intval($ctx['id_paciente']) . " AND id_atendimento IS NULL AND id_receita IS NULL";
     } else {
-        $where = "id_criador = " . intval($ctx['id_criador']) . " AND id_atendimento IS NULL AND id_receita IS NULL AND id_paciente IS NULL AND chat_mode = '$chat_mode_esc'";
+        $where_base = "id_criador = " . intval($ctx['id_criador']) . " AND id_atendimento IS NULL AND id_receita IS NULL AND id_paciente IS NULL";
     }
+    $where = "$where_base AND chat_mode = '$chat_mode_esc'";
 
     if ($action === 'get_chat_history') {
+        $legacy_mode_condition = "(chat_mode = '$legacy_chat_mode_esc' OR chat_mode IS NULL OR chat_mode = '')";
         $sql = "SELECT mensagens FROM chatgpt_chats WHERE $where ORDER BY datetime_atualizacao DESC, id DESC LIMIT 1";
         $result = $db->query($sql);
+        if ((!$result || $result->num_rows === 0) && $chat_mode_value !== $legacy_chat_mode) {
+            $sql = "SELECT mensagens FROM chatgpt_chats WHERE $where_base AND $legacy_mode_condition ORDER BY datetime_atualizacao DESC, id DESC LIMIT 1";
+            $result = $db->query($sql);
+        }
+        if ((!$result || $result->num_rows === 0) && $chat_mode_value === $legacy_chat_mode) {
+            $sql = "SELECT mensagens FROM chatgpt_chats WHERE $where_base ORDER BY datetime_atualizacao DESC, id DESC LIMIT 1";
+            $result = $db->query($sql);
+        }
         if ($result && $result->num_rows > 0) {
             $row = $result->fetch_assoc();
             $messages = [];
@@ -135,14 +149,10 @@ if ($action === 'save_chat_history' || $action === 'get_chat_history') {
     }
 
     $messages = isset($data['messages']) && is_array($data['messages']) ? $data['messages'] : [];
-    $model_used = isset($data['model']) ? trim((string)$data['model']) : '';
     $messages_esc = $db->real_escape_string(json_encode($messages, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES));
     $url_atual_esc = $db->real_escape_string($data['url_atual'] ?? ($_SERVER['HTTP_REFERER'] ?? ''));
     $titulo_esc = $db->real_escape_string('ConexaoVida IA - Free OpenAI');
     $id_chatgpt_label = 'Chat via Puter (free OpenAI)';
-    if ($model_used !== '') {
-        $id_chatgpt_label .= ' - ' . preg_replace('/\s+/', ' ', $model_used);
-    }
     $id_chatgpt_esc = $db->real_escape_string($id_chatgpt_label);
     $url_chatgpt_esc = $db->real_escape_string('');
     $sql_paciente = $ctx['id_paciente'] ? intval($ctx['id_paciente']) : "NULL";
@@ -921,7 +931,8 @@ header('Content-Type: application/javascript; charset=utf-8');
             id_criador: context.id_criador,
             id_paciente: context.id_paciente,
             id_atendimento: context.id_atendimento,
-            id_receita: context.id_receita
+            id_receita: context.id_receita,
+            model: ui.model.value || localStorage.getItem(KEY_MODEL) || ''
           })
         });
         var payload = await response.json();
