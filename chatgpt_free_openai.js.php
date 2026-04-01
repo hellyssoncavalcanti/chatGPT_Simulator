@@ -1291,11 +1291,31 @@ header('Content-Type: application/javascript; charset=utf-8');
         var att = attachmentPayload[i];
         if (!att || !att.file) continue;
         var safeName = String(att.name || ('arquivo_' + (i + 1))).replace(/[^a-zA-Z0-9._-]/g, '_');
-        var tempPath = '~/.conexaovida_tmp_' + Date.now() + '_' + i + '_' + safeName;
-        var written = await puter.fs.write(tempPath, att.file);
+        var ts = Date.now();
+        var candidatePaths = [
+          'conexaovida_tmp_' + ts + '_' + i + '_' + safeName,
+          'tmp_conexaovida_' + ts + '_' + i + '_' + safeName,
+          safeName
+        ];
+        var written = null;
+        var lastErr = null;
+        for (var p = 0; p < candidatePaths.length; p += 1) {
+          var tempPath = candidatePaths[p];
+          try {
+            written = await puter.fs.write(tempPath, att.file);
+            log('attachment:uploaded', { name: att.name || safeName, puter_path: tempPath });
+            break;
+          } catch (err) {
+            lastErr = err;
+            warn('attachment:upload_try_fail', { path: tempPath, error: normalizeError(err) });
+          }
+        }
+        if (!written) {
+          throw new Error(normalizeError(lastErr || 'Falha ao enviar anexo para Puter FS.'));
+        }
         uploaded.push({
           name: att.name || safeName,
-          puter_path: (written && (written.path || written.fullPath || written.abspath)) || tempPath
+          puter_path: (written && (written.path || written.fullPath || written.abspath)) || candidatePaths[0]
         });
       }
       return uploaded;
