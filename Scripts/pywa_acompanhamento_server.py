@@ -427,6 +427,62 @@ def _upsert_whatsapp_contact_profile(
             display_name,
         )
 
+    # Busca correspondência na tabela membros pelo telefone
+    norm_phone = normalize_phone(phone)
+    if norm_phone and id_paciente_sql == "NULL":
+        matched_ids = _find_membros_by_phone(norm_phone)
+        if matched_ids:
+            # Salva os ids encontrados como id_paciente (lista separada por vírgula)
+            ids_str = ",".join(str(mid) for mid in matched_ids)
+            try:
+                run_sql(
+                    f"UPDATE chatgpt_whatsapp "
+                    f"SET id_paciente = '{_sql_escape(ids_str)}', updated_at = UTC_TIMESTAMP() "
+                    f"WHERE whatsapp_phone = '{_sql_escape(norm_phone)}'"
+                )
+                elog.info(
+                    "Correlação membros encontrada: phone=%s → id_paciente=%s",
+                    norm_phone, ids_str,
+                )
+            except Exception:
+                log.exception("Falha ao atualizar id_paciente para phone=%s", norm_phone)
+
+
+def _find_membros_by_phone(phone: str) -> List[int]:
+    """Search membros table by telefone1/telefone2 matching the given phone.
+
+    membros.telefone format is "(81) 99729-2372". We normalize both sides
+    to digits-only for comparison.
+    """
+    norm = re.sub(r"\D", "", phone)
+    if len(norm) < 10:
+        return []
+    # Try matching the last 10-11 digits (without country code)
+    # to handle both +55 and without
+    suffix = norm[-11:] if len(norm) >= 11 else norm[-10:]
+    try:
+        rows = run_sql(
+            "SELECT id, telefone1, telefone2 FROM membros "
+            "WHERE telefone1 IS NOT NULL AND telefone1 <> '' "
+            "   OR telefone2 IS NOT NULL AND telefone2 <> ''"
+        )
+        matched = []
+        for row in (rows or []):
+            for col in ("telefone1", "telefone2"):
+                val = row.get(col) or ""
+                val_digits = re.sub(r"\D", "", val)
+                if not val_digits or len(val_digits) < 10:
+                    continue
+                val_suffix = val_digits[-11:] if len(val_digits) >= 11 else val_digits[-10:]
+                if val_suffix == suffix:
+                    mid = int(row["id"])
+                    if mid not in matched:
+                        matched.append(mid)
+        return matched
+    except Exception:
+        log.exception("Falha ao buscar membros por telefone=%s", phone)
+        return []
+
 
 def lookup_whatsapp_contact_profile(phone: str) -> Optional[Dict[str, Any]]:
     """Fetch a normalized WhatsApp contact profile from chatgpt_whatsapp."""
@@ -1618,14 +1674,30 @@ class WhatsAppWebClient:
                 elog.warning("open_chat_by_sidebar_click: falha no clique para '%s': %s", title, e)
                 return False
 
-            # 3) Aguarda o header do chat renderizar e confirma que é o chat certo
-            try:
-                self._page.wait_for_selector('#main header span[title]', timeout=5000)
-                self._page.wait_for_timeout(500)
-                return True
-            except Exception:
-                elog.warning("open_chat_by_sidebar_click: header não apareceu após clicar '%s'", title)
-                return False
+            # 3) Aguarda o header do chat renderizar — retry com espera para conexão lenta
+            for wait_attempt in range(3):
+                try:
+                    self._page.wait_for_selector('#main header span[title]', timeout=3000)
+                    self._page.wait_for_timeout(500)
+                    return True
+                except Exception:
+                    if wait_attempt < 2:
+                        elog.info(
+                            "open_chat_by_sidebar_click: header ainda não apareceu para '%s', "
+                            "aguardando mais 3s (tentativa %s/3)...",
+                            title, wait_attempt + 1,
+                        )
+                        self._page.wait_for_timeout(3000)
+                    else:
+                        # Última tentativa: tenta seletor alternativo
+                        try:
+                            self._page.wait_for_selector('#main header', timeout=3000)
+                            self._page.wait_for_timeout(500)
+                            return True
+                        except Exception:
+                            pass
+            elog.warning("open_chat_by_sidebar_click: header não apareceu após 3 tentativas para '%s'", title)
+            return False
 
         return self._run_on_browser_thread(_do)
 
