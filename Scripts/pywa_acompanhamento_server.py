@@ -3318,18 +3318,26 @@ def process_incoming_replies_once() -> Dict[str, int]:
     for new inbound messages using own message history (independent of
     unread count or sidebar time), forward new patient replies to the
     ChatGPT simulator and reply back via WhatsApp.
-
-    Detection logic:
-      - A chat is a candidate if it matches a monitored context (via alias/phone).
-      - The system opens each candidate chat and reads the last messages.
-      - If the last message overall is INBOUND (from patient) and hasn't been
-        processed yet → forward to ChatGPT simulator and send reply.
-      - This works regardless of whether the chat is open, selected, or
-        already read by the user.
     """
+    # ANSI color codes for CMD output
+    C_RESET = "\033[0m"
+    C_BOLD = "\033[1m"
+    C_GREEN = "\033[92m"
+    C_YELLOW = "\033[93m"
+    C_RED = "\033[91m"
+    C_CYAN = "\033[96m"
+    C_GRAY = "\033[90m"
+    C_BLUE = "\033[94m"
+    C_MAGENTA = "\033[95m"
+    C_WHITE = "\033[97m"
+    C_BG_GREEN = "\033[42m"
+    C_BG_RED = "\033[41m"
+    C_BG_YELLOW = "\033[43m"
+
     processed = 0
     skipped = 0
     no_match = 0
+    results_table: List[Dict[str, str]] = []  # for final summary table
 
     # 1) Scan sidebar
     chat_rows = wa_web.scan_chat_list_rows()
@@ -3352,7 +3360,6 @@ def process_incoming_replies_once() -> Dict[str, int]:
     )
 
     # 2) Seleciona candidatos: qualquer chat que corresponda a um contexto monitorado
-    #    SEM filtrar por time/unread — o histórico próprio cuida da deduplicação
     candidates: List[Dict[str, Any]] = []
     skipped_not_matched = 0
     for chat in chat_rows:
@@ -3372,48 +3379,89 @@ def process_incoming_replies_once() -> Dict[str, int]:
 
     if not candidates:
         log.info(
-            "Monitor replies: nenhum candidato | total_chats=%s | skip_not_matched=%s",
-            len(chat_rows), skipped_not_matched,
+            "%s── Monitor replies: nenhum candidato │ total_chats=%s │ sem_contexto=%s ──%s",
+            C_GRAY, len(chat_rows), skipped_not_matched, C_RESET,
         )
         return {"processed": 0, "skipped": 0, "no_match": 0}
 
+    # Header da tabela de verificação
     log.info(
-        "Monitor replies: %s chats monitorados a verificar: %s",
-        len(candidates),
-        ", ".join(f"[{c['title']}]" for c in candidates),
+        "\n%s%s╔══════════════════════════════════════════════════════════════════════════════╗%s\n"
+        "%s%s║  📋 MONITOR DE RESPOSTAS — %s chats monitorados a verificar                  ║%s\n"
+        "%s%s╚══════════════════════════════════════════════════════════════════════════════╝%s",
+        C_BOLD, C_CYAN, C_RESET,
+        C_BOLD, C_CYAN, len(candidates), C_RESET,
+        C_BOLD, C_CYAN, C_RESET,
     )
 
-    for chat in candidates:
+    for i, chat in enumerate(candidates, 1):
         title = chat["title"]
         try:
+            short_title = title[:45] + "…" if len(title) > 45 else title
+
             # 3) Open the chat by clicking in the sidebar
             if not wa_web.open_chat_by_sidebar_click(title):
-                log.warning("Não foi possível abrir chat '%s' pela sidebar", title)
+                reason = "❌ Falha ao abrir chat na sidebar"
+                results_table.append({"n": str(i), "title": short_title, "status": "ERRO", "reason": reason})
+                log.info(
+                    "  %s%s│ %s/%s │ %-45s │ %s%s%s",
+                    C_RED, C_BOLD, i, len(candidates), short_title, reason, C_RESET, "",
+                )
                 skipped += 1
                 continue
 
             # 4) Read last messages (in + out) to determine chat state
             last_msgs = wa_web.read_last_messages_from_open_chat(limit=10)
             if not last_msgs:
+                reason = "📭 Chat vazio — nenhuma mensagem encontrada"
+                results_table.append({"n": str(i), "title": short_title, "status": "SKIP", "reason": reason})
+                log.info(
+                    "  %s│ %s/%s │ %-45s │ %s%s",
+                    C_GRAY, i, len(candidates), short_title, reason, C_RESET,
+                )
                 skipped += 1
                 continue
 
             # 5) Check if the last message is INBOUND (from patient)
             last_msg = last_msgs[-1]
+            last_text_preview = build_preview_with_ellipsis(last_msg["text"], 40)
+
             if last_msg["direction"] != "in":
-                # Last message is outbound (from us/user) — no pending reply
+                reason = f"📤 Última msg é ENVIADA (out) — sem resposta pendente"
+                detail = f"última=[{last_text_preview}]"
+                results_table.append({"n": str(i), "title": short_title, "status": "SKIP", "reason": f"{reason} | {detail}"})
+                log.info(
+                    "  %s│ %s/%s │ %-45s │ %s │ %s%s",
+                    C_GRAY, i, len(candidates), short_title, reason, detail, C_RESET,
+                )
                 skipped += 1
                 continue
 
             # 6) Check if this inbound message was already processed
             phone_key_ctx = chat.get("phone_key") or title
             msg_key = last_msg.get("id") or hashlib.sha1(last_msg["text"].encode("utf-8")).hexdigest()
+
             if msg_key == state.get_last_seen_inbound(phone_key_ctx):
+                reason = f"🔄 Msg inbound já vista (last_seen_inbound match)"
+                detail = f"última=[{last_text_preview}]"
+                results_table.append({"n": str(i), "title": short_title, "status": "SKIP", "reason": f"{reason} | {detail}"})
+                log.info(
+                    "  %s│ %s/%s │ %-45s │ %s │ %s%s",
+                    C_YELLOW, i, len(candidates), short_title, reason, detail, C_RESET,
+                )
                 skipped += 1
                 continue
+
             dedupe_key = f"{phone_key_ctx}:{msg_key}"
             if state.was_forwarded(dedupe_key):
                 state.set_last_seen_inbound(phone_key_ctx, msg_key)
+                reason = f"✅ Msg inbound já encaminhada (dedupe match)"
+                detail = f"última=[{last_text_preview}]"
+                results_table.append({"n": str(i), "title": short_title, "status": "SKIP", "reason": f"{reason} | {detail}"})
+                log.info(
+                    "  %s│ %s/%s │ %-45s │ %s │ %s%s",
+                    C_YELLOW, i, len(candidates), short_title, reason, detail, C_RESET,
+                )
                 skipped += 1
                 continue
 
@@ -3425,12 +3473,12 @@ def process_incoming_replies_once() -> Dict[str, int]:
             # 8) Resolve to an atendimento record
             atendimento = _resolve_chat_to_atendimento(title, phone_hint)
             if not atendimento or not atendimento.get("chat_url"):
+                reason = f"⚠️  Sem atendimento/chat_url no DB (phone_hint={phone_hint or 'None'})"
+                detail = f"última=[{last_text_preview}]"
+                results_table.append({"n": str(i), "title": short_title, "status": "NO_MATCH", "reason": f"{reason} | {detail}"})
                 log.info(
-                    "Chat '%s' — última msg é INBOUND [%s] mas sem atendimento com chat_url "
-                    "(phone_hint=%s) — ignorando.",
-                    title,
-                    build_preview_with_ellipsis(last_msg["text"], 60),
-                    phone_hint,
+                    "  %s%s│ %s/%s │ %-45s │ %s │ %s%s",
+                    C_RED, C_BOLD, i, len(candidates), short_title, reason, detail, C_RESET,
                 )
                 no_match += 1
                 continue
@@ -3438,18 +3486,31 @@ def process_incoming_replies_once() -> Dict[str, int]:
             phone = atendimento.get("telefone") or phone_hint or chat.get("phone_key") or _phone_from_title(title)
             if phone:
                 state.set_contact_alias(title, phone)
-                phone_key_ctx = phone  # use normalized phone as key from now on
+                phone_key_ctx = phone
 
             chat_url = atendimento["chat_url"]
             id_atendimento = atendimento.get("id_atendimento")
             id_paciente = atendimento.get("id_paciente")
             nome_paciente = atendimento.get("nome_paciente") or title
 
+            # ═══ NOVA MENSAGEM DETECTADA ═══
             log.info(
-                "Chat '%s' → NOVA msg inbound detectada | atendimento=%s | paciente=%s | "
-                "phone=%s | msg=[%s]",
-                title, id_atendimento, nome_paciente, phone,
-                build_preview_with_ellipsis(last_msg["text"], 80),
+                "\n%s%s  ┌─────────────────────────────────────────────────────────────────────┐%s\n"
+                "%s%s  │ 🆕 NOVA MSG INBOUND │ %-46s │%s\n"
+                "%s%s  │    Paciente: %-55s │%s\n"
+                "%s%s  │    Phone: %-58s │%s\n"
+                "%s%s  │    Atendimento: %-51s │%s\n"
+                "%s%s  │    Mensagem: [%-54s] │%s\n"
+                "%s%s  │    ChatGPT URL: %-51s │%s\n"
+                "%s%s  └─────────────────────────────────────────────────────────────────────┘%s",
+                C_GREEN, C_BOLD, C_RESET,
+                C_GREEN, C_BOLD, short_title, C_RESET,
+                C_GREEN, C_BOLD, nome_paciente[:55], C_RESET,
+                C_GREEN, C_BOLD, phone or "(desconhecido)", C_RESET,
+                C_GREEN, C_BOLD, str(id_atendimento), C_RESET,
+                C_GREEN, C_BOLD, last_text_preview, C_RESET,
+                C_GREEN, C_BOLD, build_preview_with_ellipsis(chat_url, 51), C_RESET,
+                C_GREEN, C_BOLD, C_RESET,
             )
 
             # 9) Forward to ChatGPT simulator
@@ -3461,9 +3522,8 @@ def process_incoming_replies_once() -> Dict[str, int]:
             }
             prompt = build_forward_prompt(ctx, last_msg["text"])
             log.info(
-                "Encaminhando resposta do paciente '%s' ao ChatGPT simulator | msg: [%s]",
-                nome_paciente,
-                build_preview_with_ellipsis(last_msg["text"], 120),
+                "  %s🤖 Encaminhando ao ChatGPT Simulator...%s",
+                C_BLUE, C_RESET,
             )
             res = send_to_chatgpt(
                 url_chatgpt=chat_url,
@@ -3483,12 +3543,16 @@ def process_incoming_replies_once() -> Dict[str, int]:
             if dest_phone:
                 wa_web.send_message(dest_phone, answer)
                 log.info(
-                    "Resposta enviada ao paciente '%s' (phone=%s): [%s]",
-                    nome_paciente, dest_phone,
-                    build_preview_with_ellipsis(answer, 120),
+                    "  %s%s✅ Resposta enviada ao paciente '%s' (phone=%s)%s\n"
+                    "  %s│ Resposta: [%s]%s",
+                    C_BG_GREEN, C_WHITE, nome_paciente, dest_phone, C_RESET,
+                    C_GREEN, build_preview_with_ellipsis(answer, 100), C_RESET,
                 )
             else:
-                log.warning("Sem telefone para responder ao chat '%s'", title)
+                log.warning(
+                    "  %s⚠️  Sem telefone para responder ao chat '%s'%s",
+                    C_YELLOW, title, C_RESET,
+                )
 
             state.mark_forwarded(
                 dedupe_key,
@@ -3504,6 +3568,10 @@ def process_incoming_replies_once() -> Dict[str, int]:
             )
             state.set_last_seen_inbound(phone_key_ctx, msg_key)
             processed += 1
+            results_table.append({
+                "n": str(i), "title": short_title, "status": "PROCESSADO",
+                "reason": f"✅ Encaminhado e respondido | msg=[{last_text_preview}]",
+            })
 
             # 12) Atualiza snapshot do contato no DB
             try:
@@ -3521,11 +3589,59 @@ def process_incoming_replies_once() -> Dict[str, int]:
 
         except Exception:
             log.exception("Falha ao processar resposta do chat '%s'", title)
+            results_table.append({
+                "n": str(i), "title": title[:45], "status": "ERRO",
+                "reason": "💥 Exceção inesperada",
+            })
 
+    # ═══ TABELA RESUMO FINAL ═══
+    sep = f"{C_CYAN}{'─' * 100}{C_RESET}"
     log.info(
-        "Monitor respostas | processadas=%s ignoradas=%s sem_match=%s",
-        processed, skipped, no_match,
+        "\n%s%s╔══════════════════════════════════════════════════════════════════════════════════════════════════╗%s\n"
+        "%s%s║  📊 RESUMO DO MONITOR DE RESPOSTAS                                                             ║%s\n"
+        "%s%s╠══════╦══════════════════════════════════════════════════╦════════════╦═════════════════════════════╣%s\n"
+        "%s%s║  #   ║ Contato                                        ║ Status     ║ Motivo                      ║%s\n"
+        "%s%s╠══════╬══════════════════════════════════════════════════╬════════════╬═════════════════════════════╣%s",
+        C_BOLD, C_CYAN, C_RESET,
+        C_BOLD, C_CYAN, C_RESET,
+        C_BOLD, C_CYAN, C_RESET,
+        C_BOLD, C_CYAN, C_RESET,
+        C_BOLD, C_CYAN, C_RESET,
     )
+    for row in results_table:
+        status = row["status"]
+        if status == "PROCESSADO":
+            color = C_GREEN
+            icon = "✅"
+        elif status == "NO_MATCH":
+            color = C_RED
+            icon = "⚠️ "
+        elif status == "ERRO":
+            color = C_RED
+            icon = "❌"
+        else:
+            color = C_GRAY
+            icon = "⏭️ "
+        log.info(
+            "%s║ %-4s ║ %-48s ║ %s%-10s%s ║ %-27s ║%s",
+            C_CYAN, row["n"], row["title"][:48],
+            color, f"{icon}{status}", C_CYAN,
+            build_preview_with_ellipsis(row["reason"], 27),
+            C_RESET,
+        )
+    log.info(
+        "%s%s╠══════╩══════════════════════════════════════════════════╩════════════╩═════════════════════════════╣%s\n"
+        "%s%s║  %s✅ Processadas: %-3s%s  %s⏭️  Ignoradas: %-3s%s  %s⚠️  Sem match: %-3s%s                                 %s║%s\n"
+        "%s%s╚══════════════════════════════════════════════════════════════════════════════════════════════════╝%s",
+        C_BOLD, C_CYAN, C_RESET,
+        C_BOLD, C_CYAN,
+        C_GREEN, processed, C_CYAN,
+        C_YELLOW, skipped, C_CYAN,
+        C_RED, no_match, C_CYAN,
+        C_CYAN, C_RESET,
+        C_BOLD, C_CYAN, C_RESET,
+    )
+
     return {"processed": processed, "skipped": skipped, "no_match": no_match}
 
 
@@ -3564,14 +3680,7 @@ def replies_loop() -> None:
     log.info("Monitor de respostas iniciado (scan de sidebar). Intervalo: %ss", REPLY_POLL_INTERVAL_SEC)
     while True:
         try:
-            stats = process_incoming_replies_once()
-            if stats.get("processed", 0) > 0 or stats.get("no_match", 0) > 0:
-                log.info(
-                    "Monitor respostas | processadas=%s ignoradas=%s sem_match=%s",
-                    stats.get("processed", 0),
-                    stats.get("skipped", 0),
-                    stats.get("no_match", 0),
-                )
+            process_incoming_replies_once()
         except Exception:
             log.exception("Falha no monitor de respostas")
         time.sleep(REPLY_POLL_INTERVAL_SEC)
