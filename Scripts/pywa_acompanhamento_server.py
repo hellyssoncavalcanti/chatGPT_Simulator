@@ -1917,6 +1917,36 @@ class WhatsAppWebClient:
 
         return self._run_on_browser_thread(_do)
 
+    def read_last_messages_from_open_chat(self, limit: int = 10) -> List[Dict[str, str]]:
+        """Read last N messages (inbound + outbound) from the open chat.
+
+        Returns list of {id, text, direction} where direction is 'in' or 'out',
+        ordered from oldest to newest.
+        """
+        self.start()
+
+        def _do():
+            return self._page.evaluate(
+                """(limit) => {
+                    const allMsgs = Array.from(document.querySelectorAll('div.message-in, div.message-out'));
+                    const slice = allMsgs.slice(-limit);
+                    const results = [];
+                    for (const msg of slice) {
+                        const textNode = msg.querySelector('span.selectable-text.copyable-text span') ||
+                                         msg.querySelector('span.selectable-text span');
+                        const text = textNode ? textNode.textContent.trim() : '';
+                        if (!text) continue;
+                        const msgId = msg.getAttribute('data-id') || msg.id || '';
+                        const direction = msg.classList.contains('message-in') ? 'in' : 'out';
+                        results.push({ id: msgId || text, text: text, direction: direction });
+                    }
+                    return results;
+                }""",
+                limit,
+            )
+
+        return self._run_on_browser_thread(_do) or []
+
     def get_open_chat_identity(self) -> Dict[str, str]:
         """Return current open chat header identity {title, phone} when possible."""
         self.start()
@@ -3284,22 +3314,30 @@ def enrich_named_contacts_from_sidebar(
 
 
 def process_incoming_replies_once() -> Dict[str, int]:
-    """Scan WhatsApp sidebar for unread chats, resolve each to a
-    chatgpt_atendimentos_analise record, forward the patient reply to
-    the ChatGPT simulator via chat_url, and reply back."""
+    """Scan WhatsApp sidebar for chats with monitored contacts, check each
+    for new inbound messages using own message history (independent of
+    unread count or sidebar time), forward new patient replies to the
+    ChatGPT simulator and reply back via WhatsApp.
+
+    Detection logic:
+      - A chat is a candidate if it matches a monitored context (via alias/phone).
+      - The system opens each candidate chat and reads the last messages.
+      - If the last message overall is INBOUND (from patient) and hasn't been
+        processed yet → forward to ChatGPT simulator and send reply.
+      - This works regardless of whether the chat is open, selected, or
+        already read by the user.
+    """
     processed = 0
     skipped = 0
     no_match = 0
 
-    # 1) Scan sidebar completo e pré-filtra por chats monitorados cujo
-    # timestamp visível é posterior ao envio da pergunta.
+    # 1) Scan sidebar
     chat_rows = wa_web.scan_chat_list_rows()
     if not chat_rows:
         return {"processed": 0, "skipped": 0, "no_match": 0}
     log.info("Scan sidebar WhatsApp: %s chats visíveis.", len(chat_rows))
 
-    # Mesmo sem envio recente, enriquece alguns contatos nomeados para
-    # materializar mapeamentos nome->telefone na tabela dedicada.
+    # Enriquecimento preventivo de contatos nomeados
     try:
         enrich_named_contacts_from_sidebar(chat_rows, max_per_cycle=3, min_interval_sec=180)
     except Exception:
@@ -3312,12 +3350,11 @@ def process_incoming_replies_once() -> Dict[str, int]:
         len(contexts),
         len(aliases),
     )
+
+    # 2) Seleciona candidatos: qualquer chat que corresponda a um contexto monitorado
+    #    SEM filtrar por time/unread — o histórico próprio cuida da deduplicação
     candidates: List[Dict[str, Any]] = []
-    now_local = datetime.now()
     skipped_not_matched = 0
-    skipped_no_time = 0
-    skipped_before_sent = 0
-    skipped_no_recent_signal = 0
     for chat in chat_rows:
         title = (chat.get("title") or "").strip()
         if not title:
@@ -3327,73 +3364,72 @@ def process_incoming_replies_once() -> Dict[str, int]:
             skipped_not_matched += 1
             continue
         phone_key, ctx = matched
-        sent_at_raw = (ctx or {}).get("sent_at") or ""
-        sent_at = _parse_datetime(sent_at_raw)
-        list_dt = _parse_sidebar_datetime(chat.get("time_text") or "", now=now_local)
-        if not list_dt:
-            skipped_no_time += 1
-            continue
-        if sent_at:
-            if list_dt <= sent_at:
-                skipped_before_sent += 1
-                continue
-        else:
-            # Fallback de compatibilidade: sem sent_at persistido, considera
-            # somente chats com sinal de atividade recente (unread/preview).
-            if int(chat.get("unread_count") or 0) <= 0 and not (chat.get("preview_text") or "").strip():
-                skipped_no_recent_signal += 1
-                continue
         candidates.append({
             "title": title,
             "phone_key": phone_key,
             "ctx": ctx,
-            "time_text": chat.get("time_text") or "",
-            "unread_count": int(chat.get("unread_count") or 0),
-            "preview_text": chat.get("preview_text") or "",
         })
 
     if not candidates:
         log.info(
-            "Monitor replies: nenhum candidato após filtros | total_chats=%s | "
-            "skip_not_matched=%s | skip_no_time=%s | skip_before_sent=%s | skip_no_recent_signal=%s",
-            len(chat_rows),
-            skipped_not_matched,
-            skipped_no_time,
-            skipped_before_sent,
-            skipped_no_recent_signal,
+            "Monitor replies: nenhum candidato | total_chats=%s | skip_not_matched=%s",
+            len(chat_rows), skipped_not_matched,
         )
         return {"processed": 0, "skipped": 0, "no_match": 0}
 
     log.info(
-        "Chats candidatos por data (msg após envio): %s",
-        " | ".join(
-            f"[{c['title']}]({c.get('time_text') or 'sem_hora'}, unread={c.get('unread_count', 0)})"
-            for c in candidates
-        ),
+        "Monitor replies: %s chats monitorados a verificar: %s",
+        len(candidates),
+        ", ".join(f"[{c['title']}]" for c in candidates),
     )
 
     for chat in candidates:
         title = chat["title"]
         try:
-            # 2) Open the chat by clicking in the sidebar
+            # 3) Open the chat by clicking in the sidebar
             if not wa_web.open_chat_by_sidebar_click(title):
                 log.warning("Não foi possível abrir chat '%s' pela sidebar", title)
                 skipped += 1
                 continue
 
-            # 3) Try to extract phone from the open chat header
+            # 4) Read last messages (in + out) to determine chat state
+            last_msgs = wa_web.read_last_messages_from_open_chat(limit=10)
+            if not last_msgs:
+                skipped += 1
+                continue
+
+            # 5) Check if the last message is INBOUND (from patient)
+            last_msg = last_msgs[-1]
+            if last_msg["direction"] != "in":
+                # Last message is outbound (from us/user) — no pending reply
+                skipped += 1
+                continue
+
+            # 6) Check if this inbound message was already processed
+            phone_key_ctx = chat.get("phone_key") or title
+            msg_key = last_msg.get("id") or hashlib.sha1(last_msg["text"].encode("utf-8")).hexdigest()
+            if msg_key == state.get_last_seen_inbound(phone_key_ctx):
+                skipped += 1
+                continue
+            dedupe_key = f"{phone_key_ctx}:{msg_key}"
+            if state.was_forwarded(dedupe_key):
+                state.set_last_seen_inbound(phone_key_ctx, msg_key)
+                skipped += 1
+                continue
+
+            # 7) Resolve phone from alias/header
             phone_hint = wa_web.extract_phone_from_open_chat()
-            # Fallback: use alias phone when header doesn't show a phone number
             if not phone_hint and chat.get("phone_key"):
                 phone_hint = normalize_phone(chat["phone_key"])
 
-            # 4) Resolve to an atendimento record (phone or name lookup)
+            # 8) Resolve to an atendimento record
             atendimento = _resolve_chat_to_atendimento(title, phone_hint)
             if not atendimento or not atendimento.get("chat_url"):
                 log.info(
-                    "Chat '%s' não corresponde a nenhum atendimento com chat_url "
+                    "Chat '%s' — última msg é INBOUND [%s] mas sem atendimento com chat_url "
                     "(phone_hint=%s) — ignorando.",
                     title,
+                    build_preview_with_ellipsis(last_msg["text"], 60),
                     phone_hint,
                 )
                 no_match += 1
@@ -3402,6 +3438,7 @@ def process_incoming_replies_once() -> Dict[str, int]:
             phone = atendimento.get("telefone") or phone_hint or chat.get("phone_key") or _phone_from_title(title)
             if phone:
                 state.set_contact_alias(title, phone)
+                phone_key_ctx = phone  # use normalized phone as key from now on
 
             chat_url = atendimento["chat_url"]
             id_atendimento = atendimento.get("id_atendimento")
@@ -3409,46 +3446,24 @@ def process_incoming_replies_once() -> Dict[str, int]:
             nome_paciente = atendimento.get("nome_paciente") or title
 
             log.info(
-                "Chat '%s' → atendimento id=%s | paciente=%s | phone=%s | chat_url=%s",
-                title,
-                id_atendimento,
-                nome_paciente,
-                phone,
-                build_preview_with_ellipsis(chat_url, 60),
+                "Chat '%s' → NOVA msg inbound detectada | atendimento=%s | paciente=%s | "
+                "phone=%s | msg=[%s]",
+                title, id_atendimento, nome_paciente, phone,
+                build_preview_with_ellipsis(last_msg["text"], 80),
             )
 
-            # 5) Read inbound messages BEFORE any disruptive action (menu, panel, etc.)
-            inbound_msgs = wa_web.read_all_inbound_from_open_chat()
-            if not inbound_msgs:
-                skipped += 1
-                continue
-
-            # Process the last inbound message
-            last = inbound_msgs[-1]
-            msg_key = last.get("id") or hashlib.sha1(last["text"].encode("utf-8")).hexdigest()
-            phone_key = phone or title
-            if msg_key == state.get_last_seen_inbound(phone_key):
-                skipped += 1
-                continue
-
-            dedupe_key = f"{phone_key}:{msg_key}"
-            if state.was_forwarded(dedupe_key):
-                state.set_last_seen_inbound(phone_key, msg_key)
-                skipped += 1
-                continue
-
-            # 6) Forward to ChatGPT simulator
+            # 9) Forward to ChatGPT simulator
             ctx = {
                 "id_atendimento": id_atendimento,
                 "id_paciente": id_paciente,
                 "nome_paciente": nome_paciente,
-                "pergunta": state.get_phone_context_field(phone_key, "pergunta") or "(acompanhamento)",
+                "pergunta": state.get_phone_context_field(phone_key_ctx, "pergunta") or "(acompanhamento)",
             }
-            prompt = build_forward_prompt(ctx, last["text"])
+            prompt = build_forward_prompt(ctx, last_msg["text"])
             log.info(
                 "Encaminhando resposta do paciente '%s' ao ChatGPT simulator | msg: [%s]",
                 nome_paciente,
-                build_preview_with_ellipsis(last["text"], 120),
+                build_preview_with_ellipsis(last_msg["text"], 120),
             )
             res = send_to_chatgpt(
                 url_chatgpt=chat_url,
@@ -3458,34 +3473,39 @@ def process_incoming_replies_once() -> Dict[str, int]:
             )
             answer = (res.get("html") or "").strip() or "Recebido. A equipe entrará em contato se necessário."
 
-            # 7) Log patient message and simulator response in chatgpt_chats.mensagens
+            # 10) Log patient message and simulator response
             if phone:
-                append_whatsapp_message(phone, role="user", content=last["text"], source="whatsapp")
+                append_whatsapp_message(phone, role="user", content=last_msg["text"], source="whatsapp")
                 append_whatsapp_message(phone, role="assistant", content=answer, source="chatgpt_simulator")
 
-            # 8) Reply to the patient
+            # 11) Reply to the patient
             dest_phone = TEST_DESTINATION_PHONE if TEST_DESTINATION_PHONE else phone
             if dest_phone:
                 wa_web.send_message(dest_phone, answer)
+                log.info(
+                    "Resposta enviada ao paciente '%s' (phone=%s): [%s]",
+                    nome_paciente, dest_phone,
+                    build_preview_with_ellipsis(answer, 120),
+                )
             else:
                 log.warning("Sem telefone para responder ao chat '%s'", title)
 
             state.mark_forwarded(
                 dedupe_key,
                 {
-                    "phone": phone_key,
+                    "phone": phone_key_ctx,
                     "at": utc_now_iso(),
                     "id_atendimento": id_atendimento,
                     "id_paciente": id_paciente,
-                    "patient_text": last["text"],
+                    "patient_text": last_msg["text"],
                     "inbound_key": msg_key,
                     "chat_url": chat_url,
                 },
             )
-            state.set_last_seen_inbound(phone_key, msg_key)
+            state.set_last_seen_inbound(phone_key_ctx, msg_key)
             processed += 1
 
-            # 9) Atualiza snapshot do contato no DB (pós-processamento, não bloqueia fluxo)
+            # 12) Atualiza snapshot do contato no DB
             try:
                 _upsert_whatsapp_contact_profile(
                     phone=phone,
@@ -3502,6 +3522,10 @@ def process_incoming_replies_once() -> Dict[str, int]:
         except Exception:
             log.exception("Falha ao processar resposta do chat '%s'", title)
 
+    log.info(
+        "Monitor respostas | processadas=%s ignoradas=%s sem_match=%s",
+        processed, skipped, no_match,
+    )
     return {"processed": processed, "skipped": skipped, "no_match": no_match}
 
 
