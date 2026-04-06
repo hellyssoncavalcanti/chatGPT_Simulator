@@ -648,6 +648,109 @@ def append_whatsapp_message(
         log.exception("Falha ao atualizar mensagens do chat WhatsApp para phone=%s", phone)
 
 
+def sync_whatsapp_messages_to_db(
+    phone: str,
+    wa_messages: List[Dict[str, str]],
+) -> int:
+    """Sync visible WhatsApp messages into chatgpt_chats.mensagens.
+
+    Reads the existing mensagens JSON from the DB, compares with the WhatsApp
+    messages list, and appends any messages not already stored.
+
+    Uses text content + direction as fingerprint to avoid duplicates.
+    Returns the number of new messages appended.
+
+    Args:
+        phone: normalized phone number (digits only).
+        wa_messages: list of {text, direction, time_text, id} from WhatsApp DOM.
+    """
+    safe_phone = (phone or "").replace("'", "")
+    if not safe_phone or not wa_messages:
+        return 0
+
+    # 1) Load existing mensagens from DB
+    existing_msgs: List[Dict[str, Any]] = []
+    try:
+        rows = run_sql(
+            "SELECT mensagens FROM chatgpt_chats "
+            f"WHERE whatsapp_paciente LIKE '%{safe_phone[-9:]}' "
+            "  AND chat_mode = 'whatsapp' "
+            "ORDER BY id DESC LIMIT 1"
+        )
+        if rows and rows[0].get("mensagens"):
+            raw = rows[0]["mensagens"]
+            if isinstance(raw, str):
+                existing_msgs = json.loads(raw)
+            elif isinstance(raw, list):
+                existing_msgs = raw
+    except Exception:
+        log.exception("sync_whatsapp_messages_to_db: falha ao ler mensagens existentes para phone=%s", phone)
+        return 0
+
+    # 2) Build fingerprints of messages already in DB to avoid duplicates
+    #    Fingerprint: (role, first_80_chars_of_content)
+    existing_fps = set()
+    for msg in existing_msgs:
+        content = (msg.get("content") or "")[:80].strip().lower()
+        role = msg.get("role") or ""
+        existing_fps.add((role, content))
+
+    # 3) Convert WhatsApp messages to DB format and filter new ones
+    new_msgs: List[Dict[str, Any]] = []
+    for wa_msg in wa_messages:
+        text = (wa_msg.get("text") or "").strip()
+        if not text:
+            continue
+        direction = wa_msg.get("direction") or "in"
+        role = "user" if direction == "in" else "assistant"
+        source = "whatsapp"
+
+        # Check fingerprint
+        fp = (role, text[:80].strip().lower())
+        if fp in existing_fps:
+            continue  # already stored
+        existing_fps.add(fp)
+
+        time_text = wa_msg.get("time_text") or ""
+        new_msgs.append({
+            "role": role,
+            "content": text,
+            "timestamp": time_text or utc_now_iso(),
+            "source": source,
+        })
+
+    if not new_msgs:
+        return 0
+
+    # 4) Append new messages to DB
+    appended = 0
+    for msg in new_msgs:
+        msg_json = json.dumps(msg, ensure_ascii=False).replace("'", "''")
+        query = (
+            "UPDATE chatgpt_chats SET mensagens = "
+            f"CASE WHEN mensagens IS NULL OR mensagens = '' "
+            f"  THEN CONCAT('[', '{msg_json}', ']') "
+            f"  ELSE JSON_ARRAY_APPEND(mensagens, '$', CAST('{msg_json}' AS JSON)) "
+            f"END, "
+            f"datetime_atualizacao = NOW() "
+            f"WHERE whatsapp_paciente LIKE '%{safe_phone[-9:]}' AND chat_mode = 'whatsapp' "
+            f"ORDER BY id DESC LIMIT 1"
+        )
+        try:
+            run_sql(query)
+            appended += 1
+        except Exception:
+            log.exception("sync_whatsapp_messages_to_db: falha ao append msg para phone=%s", phone)
+
+    if appended > 0:
+        log.info(
+            "  \033[96m📝 Sync mensagens WhatsApp → DB: phone=%s | %s novas mensagens salvas "
+            "(total visíveis=%s, já no DB=%s)\033[0m",
+            phone, appended, len(wa_messages), len(existing_msgs),
+        )
+    return appended
+
+
 def lookup_whatsapp_chat(phone: str) -> Optional[Dict[str, Any]]:
     """Find the most recent chatgpt_chats record for a WhatsApp phone.
 
@@ -1943,6 +2046,51 @@ class WhatsAppWebClient:
                     return results;
                 }""",
                 limit,
+            )
+
+        return self._run_on_browser_thread(_do) or []
+
+    def read_all_visible_messages_from_open_chat(self) -> List[Dict[str, str]]:
+        """Read ALL visible messages (inbound + outbound) from the open chat,
+        including timestamps extracted from the DOM.
+
+        Returns list of {id, text, direction, time_text} ordered oldest→newest.
+        direction: 'in' (received) or 'out' (sent).
+        time_text: visible timestamp string (e.g. '09:00', '23:19') or ''.
+        """
+        self.start()
+
+        def _do():
+            return self._page.evaluate(
+                """() => {
+                    const allMsgs = Array.from(document.querySelectorAll('div.message-in, div.message-out'));
+                    const results = [];
+                    for (const msg of allMsgs) {
+                        const textNode = msg.querySelector('span.selectable-text.copyable-text span') ||
+                                         msg.querySelector('span.selectable-text span');
+                        const text = textNode ? textNode.textContent.trim() : '';
+                        if (!text) continue;
+                        const msgId = msg.getAttribute('data-id') || msg.id || '';
+                        const direction = msg.classList.contains('message-in') ? 'in' : 'out';
+                        // Try to get timestamp from the message metadata
+                        let timeText = '';
+                        const timeEl = msg.querySelector('span[data-testid="msg-time"], span.x1rg5ohu, div[data-pre-plain-text]');
+                        if (timeEl) {
+                            timeText = (timeEl.textContent || '').trim();
+                        }
+                        if (!timeText) {
+                            // Fallback: data-pre-plain-text attribute contains "[HH:MM, DD/MM/YYYY] Name: "
+                            const prePlain = msg.querySelector('[data-pre-plain-text]');
+                            if (prePlain) {
+                                const attr = prePlain.getAttribute('data-pre-plain-text') || '';
+                                const m = attr.match(/\\[(\\d{1,2}:\\d{2})/);
+                                if (m) timeText = m[1];
+                            }
+                        }
+                        results.push({ id: msgId || text, text: text, direction: direction, time_text: timeText });
+                    }
+                    return results;
+                }"""
             )
 
         return self._run_on_browser_thread(_do) or []
@@ -3410,9 +3558,9 @@ def process_incoming_replies_once() -> Dict[str, int]:
                 skipped += 1
                 continue
 
-            # 4) Read last messages (in + out) to determine chat state
-            last_msgs = wa_web.read_last_messages_from_open_chat(limit=10)
-            if not last_msgs:
+            # 4) Read ALL visible messages (in + out) for history sync
+            all_visible_msgs = wa_web.read_all_visible_messages_from_open_chat()
+            if not all_visible_msgs:
                 reason = "📭 Chat vazio — nenhuma mensagem encontrada"
                 results_table.append({"n": str(i), "title": short_title, "status": "SKIP", "reason": reason})
                 log.info(
@@ -3422,6 +3570,18 @@ def process_incoming_replies_once() -> Dict[str, int]:
                 skipped += 1
                 continue
 
+            # 4b) Sync messages to DB for contacts with membros match
+            sync_phone = normalize_phone(chat.get("phone_key"))
+            if sync_phone:
+                membros_ids = _find_membros_by_phone(sync_phone)
+                if membros_ids:
+                    try:
+                        sync_whatsapp_messages_to_db(sync_phone, all_visible_msgs)
+                    except Exception:
+                        log.exception("Falha ao sync mensagens para phone=%s", sync_phone)
+
+            # Use last messages for reply detection
+            last_msgs = all_visible_msgs
             # 5) Check if the last message is INBOUND (from patient)
             last_msg = last_msgs[-1]
             last_text_preview = build_preview_with_ellipsis(last_msg["text"], 40)
