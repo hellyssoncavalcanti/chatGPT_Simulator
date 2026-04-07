@@ -4025,6 +4025,10 @@ def analisar_prontuario(
 
     def _inline_status(prefixo: str, msg: str):
         texto = re.sub(r"\s+", " ", str(msg or "")).strip()
+        texto = re.sub(r"^\s*Remetente:\s*[^|]+\|\s*", "", texto, flags=re.IGNORECASE)
+        cooldown_match = re.search(r"nova tentativa em\s*([0-9]{1,2}:[0-9]{2})", texto, flags=re.IGNORECASE)
+        if cooldown_match:
+            texto = f"Aguardando cooldown do ChatGPT | nova tentativa em {cooldown_match.group(1)}"
         if not texto:
             return
 
@@ -4982,6 +4986,10 @@ def enriquecer_com_evidencias(resultado: dict, resultados_web: list,
 
         def _inline_status(prefixo: str, msg: str):
             texto = re.sub(r"\s+", " ", str(msg or "")).strip()
+            texto = re.sub(r"^\s*Remetente:\s*[^|]+\|\s*", "", texto, flags=re.IGNORECASE)
+            cooldown_match = re.search(r"nova tentativa em\s*([0-9]{1,2}:[0-9]{2})", texto, flags=re.IGNORECASE)
+            if cooldown_match:
+                texto = f"Aguardando cooldown do ChatGPT | nova tentativa em {cooldown_match.group(1)}"
             if not texto:
                 return
 
