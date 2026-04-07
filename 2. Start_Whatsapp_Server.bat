@@ -29,8 +29,8 @@ echo [INFO] Verificando dependencias minimas...
 %PYTHON_BOOTSTRAP% -m playwright install chromium
 
 echo [INFO] Iniciando servidor PyWa...
-echo [INFO] Arquivo: Scripts\pywa_acompanhamento_server.py
-%PYTHON_BOOTSTRAP% Scripts\pywa_acompanhamento_server.py
+echo [INFO] Arquivo: Scripts\acompanhamento_whatsapp.py
+%PYTHON_BOOTSTRAP% Scripts\acompanhamento_whatsapp.py
 if %errorLevel% neq 0 (
     echo.
     echo [ERRO] Falha ao iniciar o servidor WhatsApp Web.

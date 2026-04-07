@@ -156,7 +156,7 @@ function Import-Settings {
         syncIntervalMinutes = 10
         chatProcessPattern  = 'Scripts\\main.py'
         analyzerPattern     = 'Scripts\\analisador_prontuarios.py'
-        pywaPattern         = 'Scripts\\pywa_acompanhamento_server.py'
+        pywaPattern         = 'Scripts\\acompanhamento_whatsapp.py'
         whatsappServerBat   = '2. Start_Whatsapp_Server.bat'
         whatsappWindowTitle = 'WhatsApp Follow-up Server (Web)'
         remotePhpSaveUrl    = if ($env:CHATGPT_SIMULATOR_REMOTE_PHP_SAVE_URL) { $env:CHATGPT_SIMULATOR_REMOTE_PHP_SAVE_URL } else { 'https://conexaovida.org/editar_php.php?action=save_file_remote' }
