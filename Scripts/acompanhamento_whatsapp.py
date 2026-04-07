@@ -951,7 +951,7 @@ def send_to_chatgpt(url_chatgpt: str, text: str, id_paciente: Any, id_atendiment
     r.raise_for_status()
 
     def _merge_stream_markdown(current: str, incoming: str) -> str:
-        """Merge markdown chunks tolerating snapshot-style or delta-style streams."""
+        """Merge stream chunks, preferring latest full snapshot over blind append."""
         cur = current or ""
         inc = incoming or ""
         if not inc:
@@ -967,7 +967,11 @@ def send_to_chatgpt(url_chatgpt: str, text: str, id_paciente: Any, id_atendiment
         # Duplicação exata
         if inc == cur:
             return cur
-        # Delta mode: anexa somente o sufixo novo quando possível.
+        # Se parece um novo snapshot completo (tamanho relevante), substitui
+        # para evitar mistura com resposta anterior.
+        if len(inc) >= max(120, int(len(cur) * 0.6)):
+            return inc
+        # Delta mode (chunk pequeno): anexa somente o sufixo novo quando possível.
         overlap_max = min(len(cur), len(inc))
         for k in range(overlap_max, 0, -1):
             if cur.endswith(inc[:k]):
@@ -1375,10 +1379,22 @@ def _sanitize_simulator_answer(text: str) -> str:
         return ""
     # Ex.: "[PensandoMessage  Que bom...]" -> "Que bom..."
     out = re.sub(r"^\[\s*(pensando|thinking)\s*message\b[:\s-]*", "", out, flags=re.IGNORECASE)
+    # Ex.: "Thought for 7s\nEntendi..." ou "Pensou por 7s\n..."
+    out = re.sub(r"(?im)^\s*(thought\s+for|pensou\s+por)\s+\d+\s*s\s*$", "", out)
     # Remove prefixos avulsos no início
     out = re.sub(r"^(pensando|thinking)\b[:\s-]*", "", out, flags=re.IGNORECASE)
+    # Caso comum sem separador: "PensandoEntendi..."
+    out = re.sub(r"^(pensando|thinking)\s*(?=[A-ZÁÉÍÓÚÂÊÔÃÕÀÇ])", "", out, flags=re.IGNORECASE)
     # Fecha colchete pendente logo após o prefixo removido
     out = re.sub(r"^\]\s*", "", out)
+    # Remove blocos duplicados consecutivos por parágrafo.
+    parts = [p.strip() for p in re.split(r"\n{2,}", out) if p.strip()]
+    dedup_parts: List[str] = []
+    for p in parts:
+        if not dedup_parts or dedup_parts[-1] != p:
+            dedup_parts.append(p)
+    if dedup_parts:
+        out = "\n\n".join(dedup_parts)
     return out.strip()
 
 
