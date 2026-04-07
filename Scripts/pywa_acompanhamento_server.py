@@ -632,15 +632,19 @@ def append_whatsapp_message(
         ensure_ascii=False,
     ).replace("'", "''")
 
-    # Use JSON_ARRAY_APPEND if mensagens already exists, otherwise set a new array
+    # Use JSON_ARRAY_APPEND if mensagens already exists, otherwise set a new array.
+    # MariaDB doesn't allow ORDER BY / LIMIT in UPDATE, so use subquery for id.
     query = (
         "UPDATE chatgpt_chats SET mensagens = "
-        f"CASE WHEN mensagens IS NULL OR mensagens = '' "
+        f"CASE WHEN mensagens IS NULL OR mensagens = '' OR mensagens = '[]' "
         f"  THEN CONCAT('[', '{new_msg}', ']') "
         f"  ELSE JSON_ARRAY_APPEND(mensagens, '$', CAST('{new_msg}' AS JSON)) "
         f"END "
-        f"WHERE whatsapp_paciente = '{safe_phone}' AND chat_mode = 'whatsapp' "
-        f"ORDER BY id DESC LIMIT 1"
+        f"WHERE id = ("
+        f"  SELECT id FROM (SELECT id FROM chatgpt_chats "
+        f"    WHERE whatsapp_paciente = '{safe_phone}' AND chat_mode = 'whatsapp' "
+        f"    ORDER BY id DESC LIMIT 1) AS t"
+        f")"
     )
     try:
         run_sql(query)
@@ -893,28 +897,39 @@ def send_to_chatgpt(url_chatgpt: str, text: str, id_paciente: Any, id_atendiment
     r = requests.post(SIMULATOR_URL, headers=headers, json=payload, timeout=600, stream=True)
     r.raise_for_status()
 
-    # Processa stream SSE — acumula a resposta final enquanto exibe status no CMD
+    # Processa stream NDJSON — cada linha é um JSON com {type, content}
     full_html = ""
     last_status = ""
+    chat_url_returned = ""
     for raw_line in r.iter_lines():
         if not raw_line:
             continue
         line = raw_line.decode("utf-8", errors="replace").strip() if isinstance(raw_line, bytes) else raw_line.strip()
-        if line == "data: [DONE]":
+        # Skip SSE prefix if present (backwards compat)
+        if line.startswith("data: "):
+            line = line[len("data: "):]
+        if line == "[DONE]":
             break
-        if not line.startswith("data: "):
-            continue
-        json_str = line[len("data: "):]
         try:
-            chunk = json.loads(json_str)
+            chunk = json.loads(line)
         except (json.JSONDecodeError, ValueError):
             continue
+        msg_type = chunk.get("type") or ""
+        msg_content = chunk.get("content") or ""
         # Status updates (navigating, typing, waiting, etc.)
-        status = chunk.get("status") or ""
-        if status and status != last_status:
-            log.info("  [ChatGPT Simulator] Status: %s", status)
-            last_status = status
-        # Content delta (the actual response text)
+        if msg_type == "status":
+            if msg_content and msg_content != last_status:
+                log.info("  [ChatGPT Simulator] Status: %s", msg_content)
+                last_status = msg_content
+        # Markdown content (the actual response text)
+        elif msg_type == "markdown":
+            if isinstance(msg_content, str):
+                full_html += msg_content
+        # Finish signal — may contain final content
+        elif msg_type == "finish":
+            if isinstance(msg_content, dict):
+                chat_url_returned = msg_content.get("url") or ""
+        # Also handle OpenAI-compatible choices format (fallback)
         choices = chunk.get("choices") or []
         for choice in choices:
             delta = choice.get("delta") or {}
