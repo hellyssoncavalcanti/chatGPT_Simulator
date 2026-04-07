@@ -2446,6 +2446,18 @@ async def handle_chat_task_inner(task, page, q, stop_event: asyncio.Event, activ
 
     await _clear_input(page, q)
 
+    # Baseline da última resposta já existente no chat ANTES de enviar a nova pergunta.
+    # Isso evita vazar resposta antiga (ex.: pergunta manual do desenvolvedor) como se
+    # fosse resposta da solicitação atual.
+    baseline_markdown = ""
+    try:
+        baseline_snapshot = await _read_last_assistant_snapshot(page)
+        baseline_html = clean_html(baseline_snapshot.get("html", ""))
+        baseline_markdown = md(baseline_html, heading_style="ATX").strip()
+        baseline_markdown = baseline_markdown.replace("\\_", "_").replace("\\*", "*")
+    except Exception:
+        baseline_markdown = ""
+
     if atts:
         emit_event(q, 'status', f'Anexando {len(atts)} arquivo(s)...')
         await upload_files(page, atts)
@@ -2492,7 +2504,7 @@ async def handle_chat_task_inner(task, page, q, stop_event: asyncio.Event, activ
 
     start_time  = time.time()
     started     = False
-    last_html   = ""
+    last_html   = baseline_markdown
     last_status_text = ""
     stuck_count = 0
     loop_count  = 0
