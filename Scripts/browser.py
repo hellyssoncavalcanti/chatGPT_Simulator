@@ -66,7 +66,7 @@ SCREENSHOT_STREAM_INTERVAL_SEC = 2.0
 SCREENSHOT_STREAM_JPEG_QUALITY = 45
 SCREENSHOT_STREAM_MAX_BYTES = 300_000
 SCREENSHOT_STREAM_LOG_MIN_DELTA_KB = 3.0
-SCREENSHOT_STREAM_LOG_MAX_SILENCE_SEC = 12.0
+SCREENSHOT_STREAM_LOG_MAX_SILENCE_SEC = 60.0
 _SCREENSHOT_INLINE_LAST_LEN = 0
 _SCREENSHOT_INLINE_LAST_MSG = ""
 _SCREENSHOT_LOG_STATE = {}
@@ -434,6 +434,32 @@ async def _submit_prompt(page, q=None, timeout: float = 12.0) -> bool:
     return False
 
 
+async def _dismiss_rate_limit_modal_if_any(page, q=None):
+    """Fecha modal de rate-limit que pode interceptar cliques no composer."""
+    try:
+        handled = await page.evaluate("""() => {
+            const modal = document.querySelector('#modal-conversation-history-rate-limit, [data-testid="modal-conversation-history-rate-limit"]');
+            if (!modal) return false;
+            const buttons = Array.from(modal.querySelectorAll('button'));
+            const target = buttons.find((b) => {
+                const txt = (b.innerText || b.getAttribute('aria-label') || '').toLowerCase();
+                return txt.includes('entendido') || txt.includes('ok') || txt.includes('fechar') || txt.includes('close');
+            });
+            if (target) {
+                target.click();
+                return true;
+            }
+            return false;
+        }""")
+        if handled:
+            emit_log(q, "ℹ️ Modal de rate-limit detectado e fechado antes da digitação.")
+            await asyncio.sleep(0.2)
+            return
+        await page.keyboard.press("Escape")
+    except Exception:
+        return
+
+
 def _response_looks_incomplete_json(markdown_text: str) -> bool:
     texto = (markdown_text or '').strip()
     if not texto:
@@ -501,8 +527,13 @@ async def smart_input(page, message, q=None, activityts=None):
     import re
 
     selector = "#prompt-textarea"
+    await _dismiss_rate_limit_modal_if_any(page, q=q)
     await page.wait_for_selector(selector, timeout=10000)
-    await page.click(selector)
+    try:
+        await page.click(selector, timeout=5000)
+    except Exception:
+        await _dismiss_rate_limit_modal_if_any(page, q=q)
+        await page.click(selector, timeout=5000)
     await asyncio.sleep(0.3)
 
     start_marker = "[INICIO_TEXTO_COLADO]"
