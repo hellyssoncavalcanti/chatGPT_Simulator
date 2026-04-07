@@ -63,8 +63,11 @@ tab_semaphore = asyncio.Semaphore(MAX_TABS)
 SCREENSHOT_STREAM_INTERVAL_SEC = 2.0
 SCREENSHOT_STREAM_JPEG_QUALITY = 45
 SCREENSHOT_STREAM_MAX_BYTES = 300_000
+SCREENSHOT_STREAM_LOG_MIN_DELTA_KB = 3.0
+SCREENSHOT_STREAM_LOG_MAX_SILENCE_SEC = 12.0
 _SCREENSHOT_INLINE_LAST_LEN = 0
 _SCREENSHOT_INLINE_LAST_MSG = ""
+_SCREENSHOT_LOG_STATE = {}
 
 def emit_log(q, msg):
     if q: q.put(json.dumps({"type": "log", "content": f"[browser.py] {msg}"}) + "\n")
@@ -195,8 +198,20 @@ async def _emit_browser_screenshot(page, q, label: str = "browser"):
         if len(raw) > SCREENSHOT_STREAM_MAX_BYTES:
             return
         kb = len(raw) / 1024
-        msg = f"📸 Screenshot stream [{label}]: {kb:.1f} KB — {page.url}"
-        emit_log(q, msg)
+        now = time.time()
+        state_key = f"{label}|{page.url or ''}"
+        prev = _SCREENSHOT_LOG_STATE.get(state_key) or {}
+        prev_kb = float(prev.get("kb", -1))
+        prev_ts = float(prev.get("ts", 0))
+        should_log = (
+            prev_kb < 0
+            or abs(kb - prev_kb) >= SCREENSHOT_STREAM_LOG_MIN_DELTA_KB
+            or (now - prev_ts) >= SCREENSHOT_STREAM_LOG_MAX_SILENCE_SEC
+        )
+        if should_log:
+            msg = f"📸 Screenshot stream [{label}]: {kb:.1f} KB — {page.url}"
+            emit_log(q, msg)
+            _SCREENSHOT_LOG_STATE[state_key] = {"kb": kb, "ts": now}
         emit_event(q, "screenshot", {
             "label": label,
             "format": "jpeg",
@@ -2534,7 +2549,7 @@ async def handle_chat_task_inner(task, page, q, stop_event: asyncio.Event, activ
                 const details = lastAsst.querySelectorAll('details');
                 if (details.length > 0) return details[details.length - 1].innerText.trim();
             }
-            const targets = Array.from(document.querySelectorAll('div, span, button'));
+            const targets = Array.from(document.querySelectorAll('div, span'));
             const bad = ["Plus","Team","Enterprise","Upgrade","GPT-4","admin","ChatGPT","Send message"];
             const el = targets.find(t => {
                 const txt = t.innerText;
@@ -2553,7 +2568,8 @@ async def handle_chat_task_inner(task, page, q, stop_event: asyncio.Event, activ
                                  lower.includes('analisando')  || lower.includes('analyzing') ||
                                  lower.includes('trabalhando') || lower.includes('working')   ||
                                  lower.includes('lendo')       || lower.includes('reading');
-                return isStatus && !bad.some(b => txt.includes(b)) && t.offsetHeight > 0 && txt.length < 150;
+                const isUiChip = lower.includes('pensamento estendido') || lower.includes('extended thinking');
+                return isStatus && !isUiChip && !bad.some(b => txt.includes(b)) && t.offsetHeight > 0 && txt.length < 150;
             });
             return el ? el.innerText.trim() : null;
         }""")
@@ -2639,8 +2655,8 @@ async def handle_chat_task_inner(task, page, q, stop_event: asyncio.Event, activ
             if len(last_html) > 0:
                 incomplete_json = _response_looks_incomplete_json(last_html)
                 needs_followup = _response_requests_followup_actions(last_html)
-                max_stuck = 240 if needs_followup else 120
-                max_idle = 90 if needs_followup else 40
+                max_stuck = 120 if needs_followup else 24
+                max_idle = 40 if needs_followup else 10
                 if (not incomplete_json) and stuck_count > max_stuck and idle_ready_count > max_idle:
                     break
             else:
