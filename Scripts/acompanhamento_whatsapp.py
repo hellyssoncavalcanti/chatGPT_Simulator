@@ -1024,6 +1024,21 @@ def send_to_chatgpt(url_chatgpt: str, text: str, id_paciente: Any, id_atendiment
         # para evitar mistura com resposta anterior.
         if len(inc) >= max(120, int(len(cur) * 0.6)):
             return inc
+        # New response turn: when current is large and incoming is a short
+        # chunk that shares no prefix/suffix with current, the simulator has
+        # started streaming a *new* response (the previous content was from
+        # an older turn still visible on the page).  Replace instead of
+        # concatenating to avoid sending the entire chat history.
+        if len(cur) > 200 and len(inc) < len(cur) * 0.5:
+            # Check for any textual overlap before discarding.
+            overlap_max = min(len(cur), len(inc))
+            has_overlap = False
+            for k in range(overlap_max, 0, -1):
+                if cur.endswith(inc[:k]):
+                    has_overlap = True
+                    break
+            if not has_overlap:
+                return inc
         # Delta mode (chunk pequeno): anexa somente o sufixo novo quando possível.
         overlap_max = min(len(cur), len(inc))
         for k in range(overlap_max, 0, -1):
@@ -1105,6 +1120,14 @@ def send_to_chatgpt(url_chatgpt: str, text: str, id_paciente: Any, id_atendiment
         # Markdown content (the actual response text)
         elif msg_type == "markdown":
             if isinstance(msg_content, str):
+                # "Pensando"/"Thinking" signals the model is starting a new
+                # response turn.  Discard anything accumulated so far (which
+                # is likely a previous response still in the chat viewport)
+                # so we only keep the *new* answer.
+                stripped_md = msg_content.strip()
+                if stripped_md.lower() in ("pensando", "thinking"):
+                    full_html = ""
+                    continue
                 full_html = _merge_stream_markdown(full_html, msg_content)
         # Finish signal — may contain final content
         elif msg_type == "finish":
