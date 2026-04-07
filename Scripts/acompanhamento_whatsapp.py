@@ -1493,12 +1493,16 @@ def build_forward_prompt(
     atendimento = ctx.get("id_atendimento")
     pergunta = ctx.get("pergunta") or "(acompanhamento)"
 
-    # ── 1. Contexto do caso ──
-    parts: List[str] = ["[RESPOSTA WHATSAPP DE ACOMPANHAMENTO]"]
-    parts.append(f"Paciente: {nome} | Atendimento: {atendimento}")
+    # ── 1. Cabeçalho + Contexto do caso ──
+    parts: List[str] = [
+        "## 📋 RESPOSTA WHATSAPP DE ACOMPANHAMENTO",
+        "",
+        f"**Paciente:** {nome}",
+        f"**Atendimento:** {atendimento}",
+    ]
     if clinical_summary:
-        parts.append(f"Resumo clínico: {clinical_summary}")
-    parts.append(f"Pergunta inicial do acompanhamento: {pergunta}")
+        parts.append(f"**Resumo clínico:** {clinical_summary}")
+    parts.append(f"**Pergunta inicial:** {pergunta}")
 
     # ── 2. Histórico recente da conversa ──
     if recent_messages:
@@ -1507,60 +1511,75 @@ def build_forward_prompt(
             role = m.get("role", "?")
             text = m.get("text", "").strip()
             if text:
-                conversation_lines.append(f"  {role}: {text}")
+                prefix = "🟢" if role == "Equipe" else "🔵"
+                conversation_lines.append(f"> {prefix} **{role}:** {text}")
         if conversation_lines:
-            parts.append("\nHistórico recente da conversa:\n" + "\n".join(conversation_lines))
+            parts.append("")
+            parts.append("---")
+            parts.append("### 💬 Histórico recente")
+            parts.extend(conversation_lines)
 
     # ── 3. Última mensagem do responsável ──
+    parts.append("")
+    parts.append("---")
+    parts.append("### ✉️ Mensagem atual do responsável")
     if quoted_text:
-        parts.append(f"\nMensagem que o responsável citou como contexto: {quoted_text}")
-    parts.append(f"\nÚltima mensagem do responsável: {patient_text}")
+        parts.append(f"> *(citando:* {quoted_text}*)*")
+    parts.append(f"**>>> {patient_text}**")
 
     # ── 4. Tarefa ──
-    parts.append("\nEscreva a próxima mensagem da equipe para envio no WhatsApp.")
+    parts.append("")
+    parts.append("---")
+    parts.append("### 🎯 Tarefa")
+    parts.append("Escreva a **próxima mensagem da equipe** para envio no WhatsApp.")
 
     # ── 5. Regras de tom ──
+    parts.append("")
+    parts.append("---")
+    parts.append("### 🗣️ Tom")
     parts.append(
-        "\nTOM:\n"
-        "- Português do Brasil, frases curtas, conversa real de WhatsApp.\n"
-        "- Soe como pessoa da equipe, não como modelo de IA.\n"
-        "- Evite acolhimento exagerado, frases prontas e fechamentos robóticos.\n"
-        "- Se a resposta for curta ou vaga, continue com 1-2 perguntas curtas e úteis.\n"
-        "- Se for seca ou impaciente, responda simples, sem confronto."
+        "- Português do Brasil, frases curtas, conversa real de WhatsApp\n"
+        "- Soe como pessoa da equipe, não como modelo de IA\n"
+        "- Evite acolhimento exagerado, frases prontas e fechamentos robóticos\n"
+        "- Se a resposta for curta ou vaga, continue com 1-2 perguntas curtas e úteis\n"
+        "- Se for seca ou impaciente, responda simples, sem confronto"
     )
 
     # ── 5b. Regras específicas por tipo de assunto ──
     if reply_type == "admin":
+        parts.append("")
+        parts.append("### 🏢 Assunto administrativo")
         parts.append(
-            "\nASSUNTO ADMINISTRATIVO:\n"
-            "- A mensagem do responsável é sobre agenda, vaga, retorno, valor ou convênio.\n"
+            "- A mensagem é sobre agenda, vaga, retorno, valor ou convênio\n"
             "- Responda de forma prática: informe que a secretaria vai entrar em contato, "
-            "ou peça os dados necessários para agendar.\n"
-            "- NÃO misture orientação clínica numa resposta administrativa."
+            "ou peça os dados necessários para agendar\n"
+            "- **NÃO** misture orientação clínica numa resposta administrativa"
         )
     elif reply_type == "mixed":
+        parts.append("")
+        parts.append("### 🔀 Assunto misto (administrativo + clínico)")
         parts.append(
-            "\nASSUNTO MISTO (administrativo + clínico):\n"
             "- Separe os assuntos: primeiro resolva o administrativo de forma prática, "
-            "depois trate o clínico brevemente.\n"
-            "- Não misture os dois num único parágrafo."
+            "depois trate o clínico brevemente\n"
+            "- Não misture os dois num único parágrafo"
         )
-    # clinical: nenhum bloco extra necessário — o tom padrão já cobre
 
     # ── 6. Regra clínica ──
+    parts.append("")
+    parts.append("### ⚕️ Regra clínica")
     parts.append(
-        "\nREGRA CLÍNICA:\n"
-        "- Nunca invente informação nem presuma melhora/piora não relatada.\n"
-        "- Alerta de urgência só se houver risco real de lesão.\n"
-        "- Se faltar informação, pergunte mais antes de concluir."
+        "- Nunca invente informação nem presuma melhora/piora não relatada\n"
+        "- Alerta de urgência só se houver risco real de lesão\n"
+        "- Se faltar informação, pergunte mais antes de concluir"
     )
 
     # ── 7. Formato ──
+    parts.append("")
+    parts.append("### 📝 Formato de saída")
     parts.append(
-        "\nFORMATO:\n"
-        "- Texto puro WhatsApp. Marcações permitidas: *negrito*, _itálico_, ~tachado~.\n"
-        "- Sem Markdown avançado, sem HTML, sem metacomentários.\n"
-        "- Entregue somente a mensagem final ao responsável."
+        "- Texto puro WhatsApp: *negrito*, _itálico_, ~tachado~\n"
+        "- Sem Markdown avançado, sem HTML, sem metacomentários\n"
+        "- Entregue **somente** a mensagem final ao responsável"
     )
 
     core = "\n".join(parts)
