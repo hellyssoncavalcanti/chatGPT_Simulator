@@ -1419,16 +1419,21 @@ def select_followup_for_timing(
     return selected
 
 
-def build_forward_prompt(ctx: Dict[str, Any], patient_text: str) -> str:
+def build_forward_prompt(ctx: Dict[str, Any], patient_text: str, quoted_text: str = "") -> str:
     pergunta = ctx.get("pergunta") or "(não identificada)"
     nome = ctx.get("nome_paciente") or "Paciente"
     atendimento = ctx.get("id_atendimento")
+
+    quoted_line = ""
+    if quoted_text:
+        quoted_line = f"Mensagem citada pelo paciente como contexto: {quoted_text}\n"
 
     core = (
         "[RESPOSTA WHATSAPP DE ACOMPANHAMENTO]\n"
         f"Paciente: {nome}\n"
         f"ID atendimento: {atendimento}\n"
         f"Pergunta/mensagem de acompanhamento: {pergunta}\n"
+        f"{quoted_line}"
         f"Resposta do paciente: {patient_text}\n\n"
         "Com base nessa resposta, escreva a próxima mensagem para envio no WhatsApp.\n\n"
         "OBJETIVO:\n"
@@ -1951,11 +1956,24 @@ class WhatsAppWebClient:
                     const msgs = Array.from(document.querySelectorAll('div.message-in'));
                     if (!msgs.length) return null;
                     const last = msgs[msgs.length - 1];
-                    const textNode = last.querySelector('span[data-testid="selectable-text"]');
-                    const text = textNode ? textNode.textContent.trim() : '';
+                    const quotedBlock = last.querySelector('[aria-label="Mensagem citada"]');
+                    const allTextNodes = Array.from(last.querySelectorAll('span[data-testid="selectable-text"]'));
+                    let quotedText = '';
+                    const mainParts = [];
+                    for (const node of allTextNodes) {
+                        if (quotedBlock && quotedBlock.contains(node)) {
+                            quotedText = node.textContent.trim();
+                        } else {
+                            const t = node.textContent.trim();
+                            if (t) mainParts.push(t);
+                        }
+                    }
+                    const text = mainParts.join(' ').trim();
                     const msgId = last.getAttribute('data-id') || last.id || '';
                     if (!text) return null;
-                    return { id: msgId || text, text };
+                    const result = { id: msgId || text, text };
+                    if (quotedText) result.quoted_text = quotedText;
+                    return result;
                 }"""
             )
 
@@ -2361,11 +2379,24 @@ class WhatsAppWebClient:
                     const msgs = Array.from(document.querySelectorAll('div.message-in'));
                     const results = [];
                     for (const msg of msgs) {
-                        const textNode = msg.querySelector('span[data-testid="selectable-text"]');
-                        const text = textNode ? textNode.textContent.trim() : '';
+                        const quotedBlock = msg.querySelector('[aria-label="Mensagem citada"]');
+                        const allTextNodes = Array.from(msg.querySelectorAll('span[data-testid="selectable-text"]'));
+                        let quotedText = '';
+                        const mainParts = [];
+                        for (const node of allTextNodes) {
+                            if (quotedBlock && quotedBlock.contains(node)) {
+                                quotedText = node.textContent.trim();
+                            } else {
+                                const t = node.textContent.trim();
+                                if (t) mainParts.push(t);
+                            }
+                        }
+                        const text = mainParts.join(' ').trim();
                         if (!text) continue;
                         const msgId = msg.getAttribute('data-id') || msg.id || '';
-                        results.push({ id: msgId || text, text: text });
+                        const entry = { id: msgId || text, text: text };
+                        if (quotedText) entry.quoted_text = quotedText;
+                        results.push(entry);
                     }
                     return results;
                 }"""
@@ -2388,12 +2419,25 @@ class WhatsAppWebClient:
                     const slice = allMsgs.slice(-limit);
                     const results = [];
                     for (const msg of slice) {
-                        const textNode = msg.querySelector('span[data-testid="selectable-text"]');
-                        const text = textNode ? textNode.textContent.trim() : '';
+                        const quotedBlock = msg.querySelector('[aria-label="Mensagem citada"]');
+                        const allTextNodes = Array.from(msg.querySelectorAll('span[data-testid="selectable-text"]'));
+                        let quotedText = '';
+                        const mainParts = [];
+                        for (const node of allTextNodes) {
+                            if (quotedBlock && quotedBlock.contains(node)) {
+                                quotedText = node.textContent.trim();
+                            } else {
+                                const t = node.textContent.trim();
+                                if (t) mainParts.push(t);
+                            }
+                        }
+                        const text = mainParts.join(' ').trim();
                         if (!text) continue;
                         const msgId = msg.getAttribute('data-id') || msg.id || '';
                         const direction = msg.classList.contains('message-in') ? 'in' : 'out';
-                        results.push({ id: msgId || text, text: text, direction: direction });
+                        const entry = { id: msgId || text, text: text, direction: direction };
+                        if (quotedText) entry.quoted_text = quotedText;
+                        results.push(entry);
                     }
                     return results;
                 }""",
@@ -2418,8 +2462,19 @@ class WhatsAppWebClient:
                     const allMsgs = Array.from(document.querySelectorAll('div.message-in, div.message-out'));
                     const results = [];
                     for (const msg of allMsgs) {
-                        const textNode = msg.querySelector('span[data-testid="selectable-text"]');
-                        const text = textNode ? textNode.textContent.trim() : '';
+                        const quotedBlock = msg.querySelector('[aria-label="Mensagem citada"]');
+                        const allTextNodes = Array.from(msg.querySelectorAll('span[data-testid="selectable-text"]'));
+                        let quotedText = '';
+                        const mainParts = [];
+                        for (const node of allTextNodes) {
+                            if (quotedBlock && quotedBlock.contains(node)) {
+                                quotedText = node.textContent.trim();
+                            } else {
+                                const t = node.textContent.trim();
+                                if (t) mainParts.push(t);
+                            }
+                        }
+                        const text = mainParts.join(' ').trim();
                         if (!text) continue;
                         const msgId = msg.getAttribute('data-id') || msg.id || '';
                         const direction = msg.classList.contains('message-in') ? 'in' : 'out';
@@ -2444,7 +2499,9 @@ class WhatsAppWebClient:
                                 if (m) timeText = m[1];
                             }
                         }
-                        results.push({ id: msgId || text, text: text, direction: direction, time_text: timeText });
+                        const entry = { id: msgId || text, text: text, direction: direction, time_text: timeText };
+                        if (quotedText) entry.quoted_text = quotedText;
+                        results.push(entry);
                     }
                     return results;
                 }"""
@@ -3941,7 +3998,10 @@ def process_incoming_replies_once() -> Dict[str, int]:
             last_msgs = all_visible_msgs
             # 5) Check if the last message is INBOUND (from patient)
             last_msg = last_msgs[-1]
+            quoted_ctx = last_msg.get("quoted_text", "")
             last_text_preview = build_preview_with_ellipsis(last_msg["text"], 40)
+            if quoted_ctx:
+                last_text_preview += f" (citando: {build_preview_with_ellipsis(quoted_ctx, 30)})"
 
             if last_msg["direction"] != "in":
                 reason = f"📤 Última msg é ENVIADA (out) — sem resposta pendente"
@@ -4037,7 +4097,7 @@ def process_incoming_replies_once() -> Dict[str, int]:
                 "nome_paciente": nome_paciente,
                 "pergunta": state.get_phone_context_field(phone_key_ctx, "pergunta") or "(acompanhamento)",
             }
-            prompt = build_forward_prompt(ctx, last_msg["text"])
+            prompt = build_forward_prompt(ctx, last_msg["text"], last_msg.get("quoted_text", ""))
             log.info(
                 "  %s🤖 Encaminhando ao ChatGPT Simulator...%s",
                 C_BLUE, C_RESET,
@@ -4052,8 +4112,11 @@ def process_incoming_replies_once() -> Dict[str, int]:
             answer = _normalize_whatsapp_format(answer_raw) or "Recebido. A equipe entrará em contato se necessário."
 
             # 10) Log patient message and simulator response
+            stored_text = last_msg["text"]
+            if quoted_ctx:
+                stored_text = f"[Em resposta a: {quoted_ctx}]\n{stored_text}"
             if phone:
-                append_whatsapp_message(phone, role="user", content=last_msg["text"], source="whatsapp")
+                append_whatsapp_message(phone, role="user", content=stored_text, source="whatsapp")
                 append_whatsapp_message(phone, role="assistant", content=answer, source="chatgpt_simulator")
 
             # 11) Reply to the patient
