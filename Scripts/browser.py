@@ -2783,6 +2783,28 @@ async def handle_chat_task_inner(task, page, q, stop_event: asyncio.Event, activ
                 last_html = markdown_text
                 await asyncio.sleep(0.3)
                 continue
+
+            # Skip "Pensando"/"Thinking" indicators — these are the ChatGPT
+            # extended-thinking label, not actual response content.
+            stripped_md = markdown_text.strip().lower()
+            if stripped_md in ("pensando", "thinking"):
+                if not response_started:
+                    emit_event(q, "status", "Pensando")
+                last_html = markdown_text
+                await asyncio.sleep(0.3)
+                continue
+
+            # Skip stale content: if the new snapshot matches or contains the
+            # baseline (pre-existing) response, the ChatGPT UI temporarily
+            # showed old content in the new assistant node.  Ignore it.
+            if baseline_markdown and len(baseline_markdown) > 50:
+                norm_base = re.sub(r"\s+", " ", baseline_markdown).strip()[:300]
+                norm_curr = re.sub(r"\s+", " ", markdown_text).strip()[:300]
+                if norm_base and norm_curr.startswith(norm_base):
+                    last_html = markdown_text
+                    await asyncio.sleep(0.3)
+                    continue
+
             response_started = True
             if not started:
                 emit_event(q, "status", "Recebendo...")
