@@ -949,6 +949,30 @@ def send_to_chatgpt(url_chatgpt: str, text: str, id_paciente: Any, id_atendiment
     r = requests.post(SIMULATOR_URL, headers=headers, json=payload, timeout=600, stream=True)
     r.raise_for_status()
 
+    def _merge_stream_markdown(current: str, incoming: str) -> str:
+        """Merge markdown chunks tolerating snapshot-style or delta-style streams."""
+        cur = current or ""
+        inc = incoming or ""
+        if not inc:
+            return cur
+        if not cur:
+            return inc
+        # Snapshot mode: servidor envia o texto completo repetidamente.
+        if inc.startswith(cur):
+            return inc
+        # Chunk atrasado/menor do snapshot atual.
+        if cur.startswith(inc):
+            return cur
+        # Duplicação exata
+        if inc == cur:
+            return cur
+        # Delta mode: anexa somente o sufixo novo quando possível.
+        overlap_max = min(len(cur), len(inc))
+        for k in range(overlap_max, 0, -1):
+            if cur.endswith(inc[:k]):
+                return cur + inc[k:]
+        return cur + inc
+
     # Processa stream NDJSON — cada linha é um JSON com {type, content}
     full_html = ""
     last_status = ""
@@ -979,18 +1003,26 @@ def send_to_chatgpt(url_chatgpt: str, text: str, id_paciente: Any, id_atendiment
         # Markdown content (the actual response text)
         elif msg_type == "markdown":
             if isinstance(msg_content, str):
-                full_html += msg_content
+                full_html = _merge_stream_markdown(full_html, msg_content)
         # Finish signal — may contain final content
         elif msg_type == "finish":
             if isinstance(msg_content, dict):
                 chat_url_returned = msg_content.get("url") or ""
+                final_text = (
+                    msg_content.get("markdown")
+                    or msg_content.get("html")
+                    or msg_content.get("content")
+                    or ""
+                )
+                if isinstance(final_text, str) and final_text.strip():
+                    full_html = _merge_stream_markdown(full_html, final_text.strip())
         # Also handle OpenAI-compatible choices format (fallback)
         choices = chunk.get("choices") or []
         for choice in choices:
             delta = choice.get("delta") or {}
             content = delta.get("content") or ""
             if content:
-                full_html += content
+                full_html = _merge_stream_markdown(full_html, content)
 
     # Fallback: se não recebeu stream, tenta ler JSON normal da resposta
     if not full_html:
