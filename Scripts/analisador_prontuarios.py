@@ -3997,6 +3997,20 @@ def analisar_prontuario(
     new_chat_title = None
     markdown       = ""
 
+    def _clean_simulator_log_for_local_view(raw: str) -> str:
+        """Limpa redundâncias de remetente para exibição local no próprio remetente."""
+        msg = str(raw or "").strip()
+        if not msg:
+            return ""
+        # O analisador não usa screenshots; evita poluir o console.
+        if "screenshot stream" in msg.lower():
+            return ""
+        # Remove prefixo repetido vindo do server stream.
+        msg = re.sub(r"^\s*Remetente:\s*[^|]+\|\s*", "", msg, flags=re.IGNORECASE)
+        # Remove remetente duplicado no logger do browser: [browser.py] [analisador...]
+        msg = re.sub(r"(\[browser\.py\])\s+\[[^\]]+\]\s+", r"\1 ", msg, flags=re.IGNORECASE)
+        return msg.strip()
+
     # Funcao auxiliar para progresso inline (sobrescreve a linha atual no CMD)
     def _inline(msg):
         largura_terminal = shutil.get_terminal_size((140, 20)).columns
@@ -4045,7 +4059,9 @@ def analisar_prontuario(
             if inline_active:
                 _newline()
                 inline_active = False
-            log.info(f"  🔧 {obj.get('content', '').strip()}")
+            cleaned_log = _clean_simulator_log_for_local_view(obj.get("content", ""))
+            if cleaned_log:
+                log.info(f"  🔧 {cleaned_log}")
 
         elif t == "chatid":
             if inline_active:
@@ -4943,6 +4959,16 @@ def enriquecer_com_evidencias(resultado: dict, resultados_web: list,
         last_status = ""
         inline_active = False
 
+        def _clean_simulator_log_for_local_view(raw: str) -> str:
+            msg = str(raw or "").strip()
+            if not msg:
+                return ""
+            if "screenshot stream" in msg.lower():
+                return ""
+            msg = re.sub(r"^\s*Remetente:\s*[^|]+\|\s*", "", msg, flags=re.IGNORECASE)
+            msg = re.sub(r"(\[browser\.py\])\s+\[[^\]]+\]\s+", r"\1 ", msg, flags=re.IGNORECASE)
+            return msg.strip()
+
         def _inline(msg):
             largura_terminal = shutil.get_terminal_size((140, 20)).columns
             largura_util = max(30, largura_terminal - 2)
@@ -4985,7 +5011,9 @@ def enriquecer_com_evidencias(resultado: dict, resultados_web: list,
                 if inline_active:
                     _newline()
                     inline_active = False
-                log.info(f"  🔧 {obj.get('content', '').strip()}")
+                cleaned_log = _clean_simulator_log_for_local_view(obj.get("content", ""))
+                if cleaned_log:
+                    log.info(f"  🔧 {cleaned_log}")
             elif t == "chatid":
                 if inline_active:
                     _newline()
