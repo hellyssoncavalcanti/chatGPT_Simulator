@@ -680,7 +680,10 @@ def sync_whatsapp_messages_to_db(
         if rows and rows[0].get("mensagens"):
             raw = rows[0]["mensagens"]
             if isinstance(raw, str):
-                existing_msgs = json.loads(raw)
+                # Remove control characters (except common whitespace) that break json.loads
+                import re as _re_json
+                cleaned = _re_json.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f]', ' ', raw)
+                existing_msgs = json.loads(cleaned)
             elif isinstance(raw, list):
                 existing_msgs = raw
     except Exception:
@@ -893,10 +896,10 @@ def send_to_chatgpt(url_chatgpt: str, text: str, id_paciente: Any, id_atendiment
     # Processa stream SSE — acumula a resposta final enquanto exibe status no CMD
     full_html = ""
     last_status = ""
-    for raw_line in r.iter_lines(decode_unicode=True):
+    for raw_line in r.iter_lines():
         if not raw_line:
             continue
-        line = raw_line.strip()
+        line = raw_line.decode("utf-8", errors="replace").strip() if isinstance(raw_line, bytes) else raw_line.strip()
         if line == "data: [DONE]":
             break
         if not line.startswith("data: "):
