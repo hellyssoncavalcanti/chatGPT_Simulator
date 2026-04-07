@@ -22,9 +22,11 @@ import os
 import queue
 import random
 import re
+import shutil
 import threading
 import time
 import unicodedata
+import sys
 from concurrent.futures import Future
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
@@ -139,8 +141,8 @@ if TEST_ONLY_ID_PACIENTE is not None:
     )
     SUMMARY_SQL = SUMMARY_SQL + f"\n  AND caa.id_paciente = {TEST_ONLY_ID_PACIENTE}"
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-log = logging.getLogger("whatsapp_web_acompanhamento")
+logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
+log = logging.getLogger("acompanhamento_whatsapp.py")
 
 # Logger dedicado para enriquecimento — exibe [Associar_nome_contato_ao_numero] no log
 _elog_handler = logging.StreamHandler()
@@ -151,6 +153,29 @@ elog.addHandler(_elog_handler)
 elog.propagate = False  # não duplicar no root logger
 
 app = Flask(__name__)
+
+ANSI_RESET = "\033[0m"
+ANSI_CYAN = "\033[36m"
+ANSI_GREEN = "\033[32m"
+
+
+def log_table(title: str, rows: List[Tuple[str, str]]) -> None:
+    """Renderiza logs em tabela compacta/colorida para facilitar leitura no CMD."""
+    safe_rows = rows or [("info", "-")]
+    k_w = max(len(k) for k, _ in safe_rows)
+    v_w = max(len(v) for _, v in safe_rows)
+    width = max(len(title) + 4, k_w + v_w + 7)
+    top = f"╔{'═' * width}╗"
+    head = f"║ {title.ljust(width - 2)} ║"
+    sep = f"╠{'═' * (k_w + 2)}╦{'═' * (width - k_w - 3)}╣"
+    log.info("%s%s%s", ANSI_CYAN, top, ANSI_RESET)
+    log.info("%s%s%s", ANSI_CYAN, head, ANSI_RESET)
+    log.info("%s%s%s", ANSI_CYAN, sep, ANSI_RESET)
+    for key, value in safe_rows:
+        row = f"║ {key.ljust(k_w)} ║ {value.ljust(width - k_w - 6)} ║"
+        log.info("%s%s%s", ANSI_GREEN, row, ANSI_RESET)
+    bottom = f"╚{'═' * width}╝"
+    log.info("%s%s%s", ANSI_CYAN, bottom, ANSI_RESET)
 
 
 def utc_now_iso() -> str:
@@ -367,6 +392,15 @@ def run_sql(query: str) -> List[Dict[str, Any]]:
 def _sql_escape(value: Any) -> str:
     """Escape value for string interpolation in SQL built by this service."""
     return str(value or "").replace("\\", "\\\\").replace("'", "''")
+
+
+def _sql_utf8mb4_literal(value: Any) -> str:
+    """Build a utf8mb4 SQL string literal via hex payload.
+
+    This prevents free-text content from interfering with SQL parser/filters.
+    """
+    raw = str(value or "")
+    return f"CONVERT(0x{raw.encode('utf-8').hex()} USING utf8mb4)"
 
 
 def _upsert_whatsapp_contact_profile(
@@ -630,23 +664,36 @@ def append_whatsapp_message(
     new_msg = json.dumps(
         {"role": role, "content": content, "timestamp": utc_now_iso(), "source": source},
         ensure_ascii=False,
-    ).replace("'", "''")
-
-    # Use JSON_ARRAY_APPEND if mensagens already exists, otherwise set a new array.
-    # MariaDB doesn't allow ORDER BY / LIMIT in UPDATE, so use subquery for id.
-    query = (
-        "UPDATE chatgpt_chats SET mensagens = "
-        f"CASE WHEN mensagens IS NULL OR mensagens = '' OR mensagens = '[]' "
-        f"  THEN CONCAT('[', '{new_msg}', ']') "
-        f"  ELSE JSON_ARRAY_APPEND(mensagens, '$', CAST('{new_msg}' AS JSON)) "
-        f"END "
-        f"WHERE id = ("
-        f"  SELECT id FROM (SELECT id FROM chatgpt_chats "
-        f"    WHERE whatsapp_paciente = '{safe_phone}' AND chat_mode = 'whatsapp' "
-        f"    ORDER BY id DESC LIMIT 1) AS t"
-        f")"
     )
     try:
+        rows = run_sql(
+            "SELECT id, mensagens FROM chatgpt_chats "
+            f"WHERE whatsapp_paciente = '{safe_phone}' AND chat_mode = 'whatsapp' "
+            "ORDER BY id DESC LIMIT 1"
+        )
+        if not rows:
+            return
+        chat_id = int(rows[0]["id"])
+        raw = rows[0].get("mensagens")
+        existing: List[Dict[str, Any]] = []
+        if isinstance(raw, str) and raw.strip():
+            try:
+                existing = json.loads(raw, strict=False)
+            except Exception:
+                existing = []
+        elif isinstance(raw, list):
+            existing = raw
+        if not isinstance(existing, list):
+            existing = []
+
+        existing.append(json.loads(new_msg))
+        payload = json.dumps(existing, ensure_ascii=False)
+        query = (
+            "UPDATE chatgpt_chats SET "
+            f"mensagens = {_sql_utf8mb4_literal(payload)}, "
+            "datetime_atualizacao = NOW() "
+            f"WHERE id = {chat_id}"
+        )
         run_sql(query)
     except Exception:
         log.exception("Falha ao atualizar mensagens do chat WhatsApp para phone=%s", phone)
@@ -729,28 +776,30 @@ def sync_whatsapp_messages_to_db(
     if not new_msgs:
         return 0
 
-    # 4) Append new messages to DB
+    # 4) Persist all new messages in a single UPDATE
     appended = 0
-    for msg in new_msgs:
-        msg_json = json.dumps(msg, ensure_ascii=False).replace("'", "''")
-        query = (
-            "UPDATE chatgpt_chats SET mensagens = "
-            f"CASE WHEN mensagens IS NULL OR mensagens = '' OR mensagens = '[]' "
-            f"  THEN CONCAT('[', '{msg_json}', ']') "
-            f"  ELSE JSON_ARRAY_APPEND(mensagens, '$', CAST('{msg_json}' AS JSON)) "
-            f"END, "
-            f"datetime_atualizacao = NOW() "
-            f"WHERE id = ("
-            f"  SELECT id FROM (SELECT id FROM chatgpt_chats "
-            f"    WHERE whatsapp_paciente LIKE '%{safe_phone[-9:]}' AND chat_mode = 'whatsapp' "
-            f"    ORDER BY id DESC LIMIT 1) AS t"
-            f")"
+    try:
+        rows = run_sql(
+            "SELECT id FROM chatgpt_chats "
+            f"WHERE whatsapp_paciente LIKE '%{safe_phone[-9:]}' "
+            "  AND chat_mode = 'whatsapp' "
+            "ORDER BY id DESC LIMIT 1"
         )
-        try:
-            run_sql(query)
-            appended += 1
-        except Exception:
-            log.exception("sync_whatsapp_messages_to_db: falha ao append msg para phone=%s", phone)
+        if not rows:
+            return 0
+        chat_id = int(rows[0]["id"])
+        merged = existing_msgs + new_msgs
+        merged_json = json.dumps(merged, ensure_ascii=False)
+        query = (
+            "UPDATE chatgpt_chats SET "
+            f"mensagens = {_sql_utf8mb4_literal(merged_json)}, "
+            "datetime_atualizacao = NOW() "
+            f"WHERE id = {chat_id}"
+        )
+        run_sql(query)
+        appended = len(new_msgs)
+    except Exception:
+        log.exception("sync_whatsapp_messages_to_db: falha ao salvar lote para phone=%s", phone)
 
     if appended > 0:
         log.info(
@@ -884,26 +933,87 @@ def preload_sent_messages_for_analises(id_analises: List[Any]) -> Dict[int, set]
 
 def send_to_chatgpt(url_chatgpt: str, text: str, id_paciente: Any, id_atendimento: Any) -> Dict[str, Any]:
     """Send message to ChatGPT simulator and stream status updates to CMD."""
-    headers = {"Authorization": f"Bearer {SIMULATOR_API_KEY}"}
+    headers = {"Authorization": f"Bearer {SIMULATOR_API_KEY}", "X-Request-Source": "acompanhamento_whatsapp.py"}
     payload = {
         "model": "ChatGPT Simulator",
         "message": text,
         "url": url_chatgpt,
         "stream": True,
+        "request_source": "acompanhamento_whatsapp.py",
         "id_paciente": id_paciente,
         "id_atendimento": id_atendimento,
     }
-    log.info(
-        "  [ChatGPT Simulator] Enviando ao simulator | url=%s | paciente=%s",
-        build_preview_with_ellipsis(url_chatgpt, 60), id_paciente,
-    )
+    log_table("ChatGPT Simulator | Envio", [
+        ("remetente", "acompanhamento_whatsapp.py"),
+        ("paciente", str(id_paciente)),
+        ("url", build_preview_with_ellipsis(url_chatgpt, 60)),
+    ])
     r = requests.post(SIMULATOR_URL, headers=headers, json=payload, timeout=600, stream=True)
     r.raise_for_status()
+
+    def _merge_stream_markdown(current: str, incoming: str) -> str:
+        """Merge stream chunks, preferring latest full snapshot over blind append."""
+        cur = current or ""
+        inc = incoming or ""
+        if not inc:
+            return cur
+        if not cur:
+            return inc
+        # Snapshot mode: servidor envia o texto completo repetidamente.
+        if inc.startswith(cur):
+            return inc
+        # Chunk atrasado/menor do snapshot atual.
+        if cur.startswith(inc):
+            return cur
+        # Duplicação exata
+        if inc == cur:
+            return cur
+        # Se parece um novo snapshot completo (tamanho relevante), substitui
+        # para evitar mistura com resposta anterior.
+        if len(inc) >= max(120, int(len(cur) * 0.6)):
+            return inc
+        # Delta mode (chunk pequeno): anexa somente o sufixo novo quando possível.
+        overlap_max = min(len(cur), len(inc))
+        for k in range(overlap_max, 0, -1):
+            if cur.endswith(inc[:k]):
+                return cur + inc[k:]
+        return cur + inc
 
     # Processa stream NDJSON — cada linha é um JSON com {type, content}
     full_html = ""
     last_status = ""
     chat_url_returned = ""
+    inline_status_open = False
+    raw_stream_lines: List[str] = []
+
+    def _clean_status_text(raw: Any) -> str:
+        msg = str(raw or "").strip()
+        if not msg:
+            return ""
+        msg = re.sub(r"^\s*Remetente:\s*[^|]+\|\s*", "", msg, flags=re.IGNORECASE)
+        return msg.strip()
+
+    def _print_inline_status(msg: str) -> None:
+        nonlocal inline_status_open
+        txt = _clean_status_text(msg)
+        if not txt:
+            return
+        line = f"  ⏳ ChatGPT Simulator: {txt}"
+        width = max(80, shutil.get_terminal_size((140, 20)).columns - 1)
+        if len(line) > width:
+            line = line[: width - 3].rstrip() + "..."
+        # Limpa a linha atual e reescreve inline (sem gerar nova linha).
+        sys.stdout.write("\x1b[2K\r" + line.ljust(width))
+        sys.stdout.flush()
+        inline_status_open = True
+
+    def _close_inline_status() -> None:
+        nonlocal inline_status_open
+        if inline_status_open:
+            sys.stdout.write("\n")
+            sys.stdout.flush()
+            inline_status_open = False
+
     for raw_line in r.iter_lines():
         if not raw_line:
             continue
@@ -913,6 +1023,7 @@ def send_to_chatgpt(url_chatgpt: str, text: str, id_paciente: Any, id_atendiment
             line = line[len("data: "):]
         if line == "[DONE]":
             break
+        raw_stream_lines.append(line)
         try:
             chunk = json.loads(line)
         except (json.JSONDecodeError, ValueError):
@@ -922,25 +1033,34 @@ def send_to_chatgpt(url_chatgpt: str, text: str, id_paciente: Any, id_atendiment
         # Status updates (navigating, typing, waiting, etc.)
         if msg_type == "status":
             if msg_content and msg_content != last_status:
-                log.info("  [ChatGPT Simulator] Status: %s", msg_content)
+                _print_inline_status(str(msg_content))
                 last_status = msg_content
         # Markdown content (the actual response text)
         elif msg_type == "markdown":
             if isinstance(msg_content, str):
-                full_html += msg_content
+                full_html = _merge_stream_markdown(full_html, msg_content)
         # Finish signal — may contain final content
         elif msg_type == "finish":
             if isinstance(msg_content, dict):
                 chat_url_returned = msg_content.get("url") or ""
+                final_text = (
+                    msg_content.get("markdown")
+                    or msg_content.get("html")
+                    or msg_content.get("content")
+                    or ""
+                )
+                if isinstance(final_text, str) and final_text.strip():
+                    full_html = _merge_stream_markdown(full_html, final_text.strip())
         # Also handle OpenAI-compatible choices format (fallback)
         choices = chunk.get("choices") or []
         for choice in choices:
             delta = choice.get("delta") or {}
             content = delta.get("content") or ""
             if content:
-                full_html += content
+                full_html = _merge_stream_markdown(full_html, content)
 
     # Fallback: se não recebeu stream, tenta ler JSON normal da resposta
+    _close_inline_status()
     if not full_html:
         try:
             body = r.json() if hasattr(r, "_content") else {}
@@ -948,10 +1068,22 @@ def send_to_chatgpt(url_chatgpt: str, text: str, id_paciente: Any, id_atendiment
         except Exception:
             pass
 
-    log.info(
-        "  [ChatGPT Simulator] Resposta recebida (%s chars): %s",
-        len(full_html), build_preview_with_ellipsis(full_html, 150),
-    )
+    full_html = _sanitize_simulator_answer(full_html)
+
+    # DEBUG: registra retorno bruto exato do simulator para investigação de
+    # mistura de respostas prévias vs resposta atual.
+    if raw_stream_lines:
+        raw_dump = "\n".join(raw_stream_lines)
+        log.info(
+            "=== ChatGPT Simulator | Retorno bruto (início) ===\n%s\n=== ChatGPT Simulator | Retorno bruto (fim) ===",
+            raw_dump,
+        )
+
+    log_table("ChatGPT Simulator | Resposta", [
+        ("remetente", "acompanhamento_whatsapp.py"),
+        ("chars", str(len(full_html))),
+        ("preview", build_preview_with_ellipsis(full_html, 150)),
+    ])
     return {"html": full_html}
 
 
@@ -1235,15 +1367,81 @@ def build_forward_prompt(ctx: Dict[str, Any], patient_text: str) -> str:
     pergunta = ctx.get("pergunta") or "(não identificada)"
     nome = ctx.get("nome_paciente") or "Paciente"
     atendimento = ctx.get("id_atendimento")
-    return (
+    core = (
         "[RESPOSTA WHATSAPP DE ACOMPANHAMENTO]\n"
         f"Paciente: {nome}\n"
         f"ID atendimento: {atendimento}\n"
         f"Pergunta/mensagem de acompanhamento: {pergunta}\n"
         f"Resposta do paciente: {patient_text}\n\n"
         "Com base nessa resposta, forneça orientação clínica de continuidade, "
-        "objetiva e segura para envio ao paciente."
+        "objetiva e segura para envio ao paciente.\n\n"
+        "IMPORTANTE (FORMATO WHATSAPP):\n"
+        "- Responda em texto puro compatível com WhatsApp.\n"
+        "- Use apenas marcações do WhatsApp: *negrito*, _itálico_, ~tachado~, ```monoespaçado```.\n"
+        "- Não use Markdown avançado (títulos #, tabelas, links markdown [texto](url), HTML).\n"
+        "- Se usar listas, prefira '-' ou '•'.\n"
+        "- Entregue somente a mensagem final ao paciente, sem metacomentários."
     )
+    return f"[INICIO_TEXTO_COLADO]\n{core}\n[FIM_TEXTO_COLADO]"
+
+
+def _sanitize_simulator_answer(text: str) -> str:
+    """Remove artefatos de status de pensamento que vazam para a resposta final."""
+    out = (text or "").strip()
+    if not out:
+        return ""
+    # Ex.: "[PensandoMessage  Que bom...]" -> "Que bom..."
+    out = re.sub(r"^\[\s*(pensando|thinking)\s*message\b[:\s-]*", "", out, flags=re.IGNORECASE)
+    # Ex.: "Thought for 7s\nEntendi..." ou "Pensou por 7s\n..."
+    out = re.sub(r"(?im)^\s*(thought\s+for|pensou\s+por)\s+\d+\s*s\s*$", "", out)
+    # Remove prefixos avulsos no início
+    out = re.sub(r"^(pensando|thinking)\b[:\s-]*", "", out, flags=re.IGNORECASE)
+    # Caso comum sem separador: "PensandoEntendi..."
+    out = re.sub(r"^(pensando|thinking)\s*(?=[A-ZÁÉÍÓÚÂÊÔÃÕÀÇ])", "", out, flags=re.IGNORECASE)
+    # Fecha colchete pendente logo após o prefixo removido
+    out = re.sub(r"^\]\s*", "", out)
+    # Remove blocos duplicados consecutivos por parágrafo.
+    parts = [p.strip() for p in re.split(r"\n{2,}", out) if p.strip()]
+    dedup_parts: List[str] = []
+    for p in parts:
+        if not dedup_parts or dedup_parts[-1] != p:
+            dedup_parts.append(p)
+    if dedup_parts:
+        out = "\n\n".join(dedup_parts)
+    return out.strip()
+
+
+def _normalize_whatsapp_format(text: str) -> str:
+    """Normalize common Markdown artifacts into WhatsApp-friendly plain text."""
+    out = (text or "").strip()
+    if not out:
+        return ""
+    # Remove Markdown headings and blockquote markers.
+    out = re.sub(r"(?m)^\s{0,3}#{1,6}\s*", "", out)
+    out = re.sub(r"(?m)^\s*>\s?", "", out)
+    # Convert markdown links to plain "texto (url)".
+    out = re.sub(r"\[([^\]]+)\]\((https?://[^)]+)\)", r"\1 (\2)", out)
+    # Normalize bullets.
+    out = re.sub(r"(?m)^\s*[*+]\s+", "- ", out)
+    # Collapse excessive blank lines.
+    out = re.sub(r"\n{3,}", "\n\n", out)
+    return out.strip()
+
+
+def _collapse_accidental_duplicate_reply(text: str) -> str:
+    """Heuristically trims accidental concatenation of the same reply twice."""
+    out = (text or "").strip()
+    if len(out) < 200:
+        return out
+    first_line = out.splitlines()[0].strip()
+    if len(first_line) < 20:
+        return out
+    second_pos = out.find(first_line, max(40, len(first_line)))
+    if second_pos > 0:
+        tail_len = len(out) - second_pos
+        if tail_len > 120 and second_pos > 120:
+            return out[:second_pos].rstrip()
+    return out
 
 
 def lookup_atendimento_by_phone(phone_digits: str) -> Optional[Dict[str, Any]]:
@@ -1565,18 +1763,25 @@ class WhatsAppWebClient:
             outbound_count,
         )
 
-    def send_message(self, phone: str, text: str) -> None:
+    def send_message(self, phone: str, text: str) -> Dict[str, Any]:
         self.start()
 
         def _do():
             log.info("Iniciando fluxo de envio WhatsApp para %s", phone)
             self._open_chat(phone)
             box = self._page.locator("p._aupe, footer div[contenteditable='true']").first
+            normalized_text = _collapse_accidental_duplicate_reply(text)
+            if normalized_text != text:
+                log.warning(
+                    "Texto de resposta parece duplicado; aplicando dedupe antes do envio | chars_antes=%s chars_depois=%s",
+                    len(text or ""),
+                    len(normalized_text or ""),
+                )
             before_out = self._page.locator("div.message-out").count()
             box.click()
             # Type text line by line, using Shift+Enter for newlines
             # to avoid triggering message send on each line break.
-            lines = text.split("\n")
+            lines = normalized_text.split("\n")
             for i, line in enumerate(lines):
                 if line:
                     self._page.keyboard.type(line, delay=5)
@@ -1590,22 +1795,40 @@ class WhatsAppWebClient:
                 self._page.keyboard.press("Enter")
             self._page.wait_for_timeout(1200)
             after_out = self._page.locator("div.message-out").count()
+            sent_text = self._page.evaluate(
+                """() => {
+                    const nodes = Array.from(document.querySelectorAll('div.message-out'));
+                    if (!nodes.length) return '';
+                    const last = nodes[nodes.length - 1];
+                    return (last.innerText || '').trim();
+                }"""
+            ) or ""
             if after_out > before_out:
                 log.info(
-                    "Envio confirmado no browser para %s | out_antes=%s out_depois=%s",
+                    "Envio confirmado no browser para %s | out_antes=%s out_depois=%s | chars_digitados=%s chars_enviados=%s",
                     phone,
                     before_out,
                     after_out,
+                    len(normalized_text or ""),
+                    len(sent_text or ""),
                 )
             else:
                 log.warning(
-                    "Sem confirmação visual de envio no browser para %s | out_antes=%s out_depois=%s",
+                    "Sem confirmação visual de envio no browser para %s | out_antes=%s out_depois=%s | chars_digitados=%s chars_enviados=%s",
                     phone,
                     before_out,
                     after_out,
+                    len(normalized_text or ""),
+                    len(sent_text or ""),
                 )
+            return {
+                "chars_input": len(text or ""),
+                "chars_typed": len(normalized_text or ""),
+                "chars_sent": len(sent_text or ""),
+                "sent_text": sent_text,
+            }
 
-        self._run_on_browser_thread(_do)
+        return self._run_on_browser_thread(_do)
 
     def read_last_inbound(self, phone: str) -> Optional[Dict[str, str]]:
         self.start()
@@ -2089,18 +2312,23 @@ class WhatsAppWebClient:
                         if (!text) continue;
                         const msgId = msg.getAttribute('data-id') || msg.id || '';
                         const direction = msg.classList.contains('message-in') ? 'in' : 'out';
-                        // Try to get timestamp from the message metadata
+                        // Try to get timestamp from message metadata.
                         let timeText = '';
-                        const timeEl = msg.querySelector('span[data-testid="msg-time"], span.x1rg5ohu, div[data-pre-plain-text]');
-                        if (timeEl) {
-                            timeText = (timeEl.textContent || '').trim();
+                        const prePlain = msg.querySelector('[data-pre-plain-text]');
+                        if (prePlain) {
+                            const attr = prePlain.getAttribute('data-pre-plain-text') || '';
+                            const m = attr.match(/\\[(\\d{1,2}:\\d{2})/);
+                            if (m) timeText = m[1];
                         }
                         if (!timeText) {
-                            // Fallback: data-pre-plain-text attribute contains "[HH:MM, DD/MM/YYYY] Name: "
-                            const prePlain = msg.querySelector('[data-pre-plain-text]');
-                            if (prePlain) {
-                                const attr = prePlain.getAttribute('data-pre-plain-text') || '';
-                                const m = attr.match(/\\[(\\d{1,2}:\\d{2})/);
+                            // Restrict fallback selectors to explicit time labels only.
+                            const t1 = msg.querySelector('span[data-testid="msg-time"]');
+                            const t2 = msg.querySelector('div.copyable-text span[aria-hidden="true"]');
+                            const t3 = msg.querySelector('span[dir="auto"][aria-label*=":"]');
+                            const timeEl = t1 || t2 || t3;
+                            if (timeEl) {
+                                const txt = (timeEl.textContent || '').trim();
+                                const m = txt.match(/(\\d{1,2}:\\d{2})/);
                                 if (m) timeText = m[1];
                             }
                         }
@@ -3708,7 +3936,8 @@ def process_incoming_replies_once() -> Dict[str, int]:
                 id_paciente=id_paciente,
                 id_atendimento=id_atendimento,
             )
-            answer = (res.get("html") or "").strip() or "Recebido. A equipe entrará em contato se necessário."
+            answer_raw = _sanitize_simulator_answer((res.get("html") or "").strip())
+            answer = _normalize_whatsapp_format(answer_raw) or "Recebido. A equipe entrará em contato se necessário."
 
             # 10) Log patient message and simulator response
             if phone:
@@ -3718,11 +3947,17 @@ def process_incoming_replies_once() -> Dict[str, int]:
             # 11) Reply to the patient
             dest_phone = TEST_DESTINATION_PHONE if TEST_DESTINATION_PHONE else phone
             if dest_phone:
-                wa_web.send_message(dest_phone, answer)
+                send_meta = wa_web.send_message(dest_phone, answer) or {}
                 log.info(
                     "  %s%s✅ Resposta enviada ao paciente '%s' (phone=%s)%s\n"
+                    "  %s│ chars_resposta=%s | chars_digitados=%s | chars_enviados=%s%s\n"
                     "  %s│ Resposta: [%s]%s",
                     C_BG_GREEN, C_WHITE, nome_paciente, dest_phone, C_RESET,
+                    C_GREEN,
+                    len(answer or ""),
+                    send_meta.get("chars_typed", "-"),
+                    send_meta.get("chars_sent", "-"),
+                    C_RESET,
                     C_GREEN, build_preview_with_ellipsis(answer, 100), C_RESET,
                 )
             else:
@@ -3868,7 +4103,7 @@ def health():
     return jsonify(
         {
             "ok": True,
-            "service": "whatsapp_web_acompanhamento_server",
+            "service": "acompanhamento_whatsapp_server",
             "state_file": str(STATE_FILE),
             "whatsapp_web_url": WHATSAPP_WEB_URL,
             "simulator_url": SIMULATOR_URL,

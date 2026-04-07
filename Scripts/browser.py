@@ -29,6 +29,7 @@
 # =============================================================================
 import asyncio
 import base64
+import contextvars
 import json
 import random
 import time
@@ -63,12 +64,19 @@ tab_semaphore = asyncio.Semaphore(MAX_TABS)
 SCREENSHOT_STREAM_INTERVAL_SEC = 2.0
 SCREENSHOT_STREAM_JPEG_QUALITY = 45
 SCREENSHOT_STREAM_MAX_BYTES = 300_000
+SCREENSHOT_STREAM_LOG_MIN_DELTA_KB = 3.0
+SCREENSHOT_STREAM_LOG_MAX_SILENCE_SEC = 60.0
 _SCREENSHOT_INLINE_LAST_LEN = 0
 _SCREENSHOT_INLINE_LAST_MSG = ""
+_SCREENSHOT_LOG_STATE = {}
+_CURRENT_TASK_SENDER = contextvars.ContextVar("current_task_sender", default="usuario_remoto")
 
 def emit_log(q, msg):
-    if q: q.put(json.dumps({"type": "log", "content": f"[browser.py] {msg}"}) + "\n")
-    file_log("browser.py", msg)
+    sender = _CURRENT_TASK_SENDER.get()
+    prefix = f"[browser.py] [{sender}] "
+    if q:
+        q.put(json.dumps({"type": "log", "content": f"{prefix}{msg}"}) + "\n")
+    file_log("browser.py", f"[{sender}] {msg}")
 
 def emit_event(q, type_, content):
     if q:
@@ -76,6 +84,20 @@ def emit_event(q, type_, content):
         # O \n final é estritamente o separador do stream
         payload = json.dumps({"type": type_, "content": content}, separators=(',', ':'))
         q.put(payload + "\n")
+
+
+def _extract_task_sender(task: dict | None) -> str:
+    """Resolve sender label attached to the queued task."""
+    if not isinstance(task, dict):
+        return "usuario_remoto"
+    sender = (
+        task.get("sender")
+        or task.get("request_source")
+        or task.get("remetente")
+        or ""
+    )
+    sender = str(sender or "").strip()
+    return sender or "usuario_remoto"
 
 async def close_ephemeral_pages(context, baseline_pages, q=None, keep_pages=None):
     """
@@ -195,8 +217,20 @@ async def _emit_browser_screenshot(page, q, label: str = "browser"):
         if len(raw) > SCREENSHOT_STREAM_MAX_BYTES:
             return
         kb = len(raw) / 1024
-        msg = f"📸 Screenshot stream [{label}]: {kb:.1f} KB — {page.url}"
-        emit_log(q, msg)
+        now = time.time()
+        state_key = f"{label}|{page.url or ''}"
+        prev = _SCREENSHOT_LOG_STATE.get(state_key) or {}
+        prev_kb = float(prev.get("kb", -1))
+        prev_ts = float(prev.get("ts", 0))
+        should_log = (
+            prev_kb < 0
+            or abs(kb - prev_kb) >= SCREENSHOT_STREAM_LOG_MIN_DELTA_KB
+            or (now - prev_ts) >= SCREENSHOT_STREAM_LOG_MAX_SILENCE_SEC
+        )
+        if should_log:
+            msg = f"📸 Screenshot stream [{label}]: {kb:.1f} KB — {page.url}"
+            emit_log(q, msg)
+            _SCREENSHOT_LOG_STATE[state_key] = {"kb": kb, "ts": now}
         emit_event(q, "screenshot", {
             "label": label,
             "format": "jpeg",
@@ -398,6 +432,32 @@ async def _submit_prompt(page, q=None, timeout: float = 12.0) -> bool:
     return False
 
 
+async def _dismiss_rate_limit_modal_if_any(page, q=None):
+    """Fecha modal de rate-limit que pode interceptar cliques no composer."""
+    try:
+        handled = await page.evaluate("""() => {
+            const modal = document.querySelector('#modal-conversation-history-rate-limit, [data-testid="modal-conversation-history-rate-limit"]');
+            if (!modal) return false;
+            const buttons = Array.from(modal.querySelectorAll('button'));
+            const target = buttons.find((b) => {
+                const txt = (b.innerText || b.getAttribute('aria-label') || '').toLowerCase();
+                return txt.includes('entendido') || txt.includes('ok') || txt.includes('fechar') || txt.includes('close');
+            });
+            if (target) {
+                target.click();
+                return true;
+            }
+            return false;
+        }""")
+        if handled:
+            emit_log(q, "ℹ️ Modal de rate-limit detectado e fechado antes da digitação.")
+            await asyncio.sleep(0.2)
+            return
+        await page.keyboard.press("Escape")
+    except Exception:
+        return
+
+
 def _response_looks_incomplete_json(markdown_text: str) -> bool:
     texto = (markdown_text or '').strip()
     if not texto:
@@ -465,8 +525,13 @@ async def smart_input(page, message, q=None, activityts=None):
     import re
 
     selector = "#prompt-textarea"
+    await _dismiss_rate_limit_modal_if_any(page, q=q)
     await page.wait_for_selector(selector, timeout=10000)
-    await page.click(selector)
+    try:
+        await page.click(selector, timeout=5000)
+    except Exception:
+        await _dismiss_rate_limit_modal_if_any(page, q=q)
+        await page.click(selector, timeout=5000)
     await asyncio.sleep(0.3)
 
     start_marker = "[INICIO_TEXTO_COLADO]"
@@ -852,6 +917,16 @@ async def _read_last_assistant_snapshot(page):
         "html": snapshot.get("html") or "",
         "text": snapshot.get("text") or "",
     }
+
+
+async def _get_assistant_message_count(page) -> int:
+    try:
+        n = await page.evaluate("""() => {
+            return document.querySelectorAll('[data-message-author-role="assistant"]').length || 0;
+        }""")
+        return int(n or 0)
+    except Exception:
+        return 0
 
 
 def _resolve_chatgpt_download_url(raw_url: str) -> str:
@@ -2236,10 +2311,13 @@ async def handle_uptodate_search_task(context, task):
 async def handle_chat_task(context, task):
     async with tab_semaphore:
         q          = task.get('stream_queue')
+        sender     = _extract_task_sender(task)
+        sender_token = _CURRENT_TASK_SENDER.set(sender)
         stop_event = asyncio.Event()
         activityts = [time.time()]
         page = None
         try:
+            emit_log(q, "Iniciando tarefa CHAT no browser.")
             page = await context.new_page()
             watchdog_task = asyncio.create_task(
                 watchdog_page(page, q, stop_event,
@@ -2272,6 +2350,7 @@ async def handle_chat_task(context, task):
                     pass
             if q:
                 q.put(None)
+            _CURRENT_TASK_SENDER.reset(sender_token)
 
 
 async def handle_chat_task_inner(task, page, q, stop_event: asyncio.Event, activityts: list = None):
@@ -2390,6 +2469,21 @@ async def handle_chat_task_inner(task, page, q, stop_event: asyncio.Event, activ
 
     await _clear_input(page, q)
 
+    # Baseline da última resposta já existente no chat ANTES de enviar a nova pergunta.
+    # Isso evita vazar resposta antiga (ex.: pergunta manual do desenvolvedor) como se
+    # fosse resposta da solicitação atual.
+    baseline_markdown = ""
+    baseline_assistant_count = 0
+    try:
+        baseline_snapshot = await _read_last_assistant_snapshot(page)
+        baseline_html = clean_html(baseline_snapshot.get("html", ""))
+        baseline_markdown = md(baseline_html, heading_style="ATX").strip()
+        baseline_markdown = baseline_markdown.replace("\\_", "_").replace("\\*", "*")
+        baseline_assistant_count = await _get_assistant_message_count(page)
+    except Exception:
+        baseline_markdown = ""
+        baseline_assistant_count = 0
+
     if atts:
         emit_event(q, 'status', f'Anexando {len(atts)} arquivo(s)...')
         await upload_files(page, atts)
@@ -2436,13 +2530,14 @@ async def handle_chat_task_inner(task, page, q, stop_event: asyncio.Event, activ
 
     start_time  = time.time()
     started     = False
-    last_html   = ""
+    last_html   = baseline_markdown
     last_status_text = ""
     stuck_count = 0
     loop_count  = 0
     idle_ready_count = 0
     chat_error_reload_count = 0
     max_chat_error_reloads = 2
+    response_started = False
 
     while True:
         await emit_chat_meta_if_ready()
@@ -2534,7 +2629,7 @@ async def handle_chat_task_inner(task, page, q, stop_event: asyncio.Event, activ
                 const details = lastAsst.querySelectorAll('details');
                 if (details.length > 0) return details[details.length - 1].innerText.trim();
             }
-            const targets = Array.from(document.querySelectorAll('div, span, button'));
+            const targets = Array.from(document.querySelectorAll('div, span'));
             const bad = ["Plus","Team","Enterprise","Upgrade","GPT-4","admin","ChatGPT","Send message"];
             const el = targets.find(t => {
                 const txt = t.innerText;
@@ -2553,7 +2648,8 @@ async def handle_chat_task_inner(task, page, q, stop_event: asyncio.Event, activ
                                  lower.includes('analisando')  || lower.includes('analyzing') ||
                                  lower.includes('trabalhando') || lower.includes('working')   ||
                                  lower.includes('lendo')       || lower.includes('reading');
-                return isStatus && !bad.some(b => txt.includes(b)) && t.offsetHeight > 0 && txt.length < 150;
+                const isUiChip = lower.includes('pensamento estendido') || lower.includes('extended thinking');
+                return isStatus && !isUiChip && !bad.some(b => txt.includes(b)) && t.offsetHeight > 0 && txt.length < 150;
             });
             return el ? el.innerText.trim() : null;
         }""")
@@ -2592,6 +2688,8 @@ async def handle_chat_task_inner(task, page, q, stop_event: asyncio.Event, activ
             idle_ready_count = 0
 
         assistant_snapshot = await _read_last_assistant_snapshot(page)
+        assistant_count = await _get_assistant_message_count(page)
+        has_new_assistant_msg = assistant_count > baseline_assistant_count
         curr_html = clean_html(assistant_snapshot.get("html", ""))
         curr_text = re.sub(r"\s+", " ", assistant_snapshot.get("text", "")).strip()
 
@@ -2623,6 +2721,13 @@ async def handle_chat_task_inner(task, page, q, stop_event: asyncio.Event, activ
             idle_ready_count = 0
 
         if markdown_text != last_html:
+            # Ignora conteúdo pré-existente do chat; só começa a streamar quando
+            # houver novo balão de assistant após o envio atual.
+            if not response_started and not has_new_assistant_msg:
+                last_html = markdown_text
+                await asyncio.sleep(0.3)
+                continue
+            response_started = True
             if not started:
                 emit_event(q, "status", "Recebendo...")
                 started = True
@@ -2639,8 +2744,8 @@ async def handle_chat_task_inner(task, page, q, stop_event: asyncio.Event, activ
             if len(last_html) > 0:
                 incomplete_json = _response_looks_incomplete_json(last_html)
                 needs_followup = _response_requests_followup_actions(last_html)
-                max_stuck = 240 if needs_followup else 120
-                max_idle = 90 if needs_followup else 40
+                max_stuck = 120 if needs_followup else 24
+                max_idle = 40 if needs_followup else 10
                 if (not incomplete_json) and stuck_count > max_stuck and idle_ready_count > max_idle:
                     break
             else:

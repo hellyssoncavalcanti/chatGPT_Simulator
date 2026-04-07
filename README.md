@@ -111,7 +111,7 @@ Dentro do `main.py`, a inicialização acontece assim:
 
 ## Servidor de acompanhamento WhatsApp Web (modo isolado, sem Meta)
 
-Foi adicionado o script `Scripts/pywa_acompanhamento_server.py`, responsável por:
+Foi adicionado o script `Scripts/acompanhamento_whatsapp.py`, responsável por:
 
 1. Buscar no banco os registros com `mensagens_acompanhamento`;
 2. Enviar as mensagens ao WhatsApp do paciente via **automação do WhatsApp Web**;
@@ -124,7 +124,7 @@ Foi adicionado o script `Scripts/pywa_acompanhamento_server.py`, responsável po
 pip install -U requests flask playwright
 playwright install chromium
 
-python Scripts/pywa_acompanhamento_server.py
+python Scripts/acompanhamento_whatsapp.py
 ```
 
 > No primeiro uso, a janela do navegador abrirá em `https://web.whatsapp.com/` para login via QR Code.
