@@ -687,7 +687,7 @@ def sync_whatsapp_messages_to_db(
                 # Remove control characters (except common whitespace) that break json.loads
                 import re as _re_json
                 cleaned = _re_json.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f]', ' ', raw)
-                existing_msgs = json.loads(cleaned)
+                existing_msgs = json.loads(cleaned, strict=False)
             elif isinstance(raw, list):
                 existing_msgs = raw
     except Exception:
@@ -735,13 +735,16 @@ def sync_whatsapp_messages_to_db(
         msg_json = json.dumps(msg, ensure_ascii=False).replace("'", "''")
         query = (
             "UPDATE chatgpt_chats SET mensagens = "
-            f"CASE WHEN mensagens IS NULL OR mensagens = '' "
+            f"CASE WHEN mensagens IS NULL OR mensagens = '' OR mensagens = '[]' "
             f"  THEN CONCAT('[', '{msg_json}', ']') "
             f"  ELSE JSON_ARRAY_APPEND(mensagens, '$', CAST('{msg_json}' AS JSON)) "
             f"END, "
             f"datetime_atualizacao = NOW() "
-            f"WHERE whatsapp_paciente LIKE '%{safe_phone[-9:]}' AND chat_mode = 'whatsapp' "
-            f"ORDER BY id DESC LIMIT 1"
+            f"WHERE id = ("
+            f"  SELECT id FROM (SELECT id FROM chatgpt_chats "
+            f"    WHERE whatsapp_paciente LIKE '%{safe_phone[-9:]}' AND chat_mode = 'whatsapp' "
+            f"    ORDER BY id DESC LIMIT 1) AS t"
+            f")"
         )
         try:
             run_sql(query)
