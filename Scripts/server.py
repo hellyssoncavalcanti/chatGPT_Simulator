@@ -1450,7 +1450,8 @@ def chat_completions():
         'chat_id':          chat_id,
         'message':          message,
         'attachment_paths': saved_paths,
-        'stream_queue':     stream_q
+        'stream_queue':     stream_q,
+        'sender':           sender_label
     }
 
     def _dispatch_chat_task():

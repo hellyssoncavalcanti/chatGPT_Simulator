@@ -36,6 +36,7 @@ import re
 import os
 import queue
 import sys
+import contextvars
 from playwright.async_api import async_playwright
 import config
 from shared import browser_queue, register_file
@@ -65,8 +66,23 @@ SCREENSHOT_STREAM_JPEG_QUALITY = 45
 SCREENSHOT_STREAM_MAX_BYTES = 300_000
 _SCREENSHOT_INLINE_LAST_LEN = 0
 _SCREENSHOT_INLINE_LAST_MSG = ""
+_SCREENSHOT_LAST_LOG = {"url": "", "kb": 0.0, "ts": 0.0}
+_CURRENT_TASK_SENDER = contextvars.ContextVar("current_task_sender", default=None)
+
+
+def _extract_task_sender(task) -> str | None:
+    if not isinstance(task, dict):
+        return None
+    sender = task.get('sender') or task.get('source') or task.get('request_source')
+    if sender is None:
+        return None
+    sender_text = str(sender).strip()
+    return sender_text or None
 
 def emit_log(q, msg):
+    sender = _CURRENT_TASK_SENDER.get()
+    if sender and not str(msg).startswith("Remetente: "):
+        msg = f"Remetente: {sender} | {msg}"
     if q: q.put(json.dumps({"type": "log", "content": f"[browser.py] {msg}"}) + "\n")
     file_log("browser.py", msg)
 
@@ -180,6 +196,7 @@ async def _should_keep_context_minimized(context) -> bool:
 
 
 async def _emit_browser_screenshot(page, q, label: str = "browser"):
+    global _SCREENSHOT_LAST_LOG
     if not q:
         return
     try:
@@ -196,7 +213,16 @@ async def _emit_browser_screenshot(page, q, label: str = "browser"):
             return
         kb = len(raw) / 1024
         msg = f"📸 Screenshot stream [{label}]: {kb:.1f} KB — {page.url}"
-        emit_log(q, msg)
+        now_ts = time.time()
+        should_log = True
+        last_url = _SCREENSHOT_LAST_LOG.get("url") or ""
+        last_kb = float(_SCREENSHOT_LAST_LOG.get("kb") or 0.0)
+        last_ts = float(_SCREENSHOT_LAST_LOG.get("ts") or 0.0)
+        if page.url == last_url and abs(kb - last_kb) < 1.0 and (now_ts - last_ts) < 6.0:
+            should_log = False
+        if should_log:
+            emit_log(q, msg)
+            _SCREENSHOT_LAST_LOG = {"url": page.url, "kb": kb, "ts": now_ts}
         emit_event(q, "screenshot", {
             "label": label,
             "format": "jpeg",
@@ -1886,6 +1912,10 @@ async def handle_search_task(context, task):
       • searchresult — resultado final (success, query, results[])
     """
     async with tab_semaphore:
+        sender_token = None
+        sender = _extract_task_sender(task)
+        if sender:
+            sender_token = _CURRENT_TASK_SENDER.set(sender)
         q    = task.get('stream_queue')
         query = (task.get('query') or '').strip()
         baseline_pages = list(getattr(context, "pages", []) or [])
@@ -2076,6 +2106,8 @@ async def handle_search_task(context, task):
             await close_ephemeral_pages(context, baseline_pages, q=q)
             if q:
                 q.put(None)
+            if sender_token is not None:
+                _CURRENT_TASK_SENDER.reset(sender_token)
 
 
 async def handle_uptodate_search_task(context, task):
@@ -2084,6 +2116,10 @@ async def handle_uptodate_search_task(context, task):
     retorna os resultados estruturados encontrados na listagem principal.
     """
     async with tab_semaphore:
+        sender_token = None
+        sender = _extract_task_sender(task)
+        if sender:
+            sender_token = _CURRENT_TASK_SENDER.set(sender)
         q = task.get('stream_queue')
         query = (task.get('query') or '').strip()
         baseline_pages = list(getattr(context, "pages", []) or [])
@@ -2231,10 +2267,16 @@ async def handle_uptodate_search_task(context, task):
             await close_ephemeral_pages(context, baseline_pages, q=q)
             if q:
                 q.put(None)
+            if sender_token is not None:
+                _CURRENT_TASK_SENDER.reset(sender_token)
 
 
 async def handle_chat_task(context, task):
     async with tab_semaphore:
+        sender_token = None
+        sender = _extract_task_sender(task)
+        if sender:
+            sender_token = _CURRENT_TASK_SENDER.set(sender)
         q          = task.get('stream_queue')
         stop_event = asyncio.Event()
         activityts = [time.time()]
@@ -2272,6 +2314,8 @@ async def handle_chat_task(context, task):
                     pass
             if q:
                 q.put(None)
+            if sender_token is not None:
+                _CURRENT_TASK_SENDER.reset(sender_token)
 
 
 async def handle_chat_task_inner(task, page, q, stop_event: asyncio.Event, activityts: list = None):
