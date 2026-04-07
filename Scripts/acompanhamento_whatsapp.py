@@ -1030,6 +1030,9 @@ def send_to_chatgpt(url_chatgpt: str, text: str, id_paciente: Any, id_atendiment
         if not msg:
             return ""
         msg = re.sub(r"^\s*Remetente:\s*[^|]+\|\s*", "", msg, flags=re.IGNORECASE)
+        cooldown_match = re.search(r"nova tentativa em\s*([0-9]{1,2}:[0-9]{2})", msg, flags=re.IGNORECASE)
+        if cooldown_match:
+            return f"Cooldown ChatGPT | nova tentativa em {cooldown_match.group(1)}"
         return msg.strip()
 
     def _print_inline_status(msg: str) -> None:
@@ -1037,8 +1040,8 @@ def send_to_chatgpt(url_chatgpt: str, text: str, id_paciente: Any, id_atendiment
         txt = _clean_status_text(msg)
         if not txt:
             return
-        line = f"  ⏳ ChatGPT Simulator: {txt}"
-        width = max(80, shutil.get_terminal_size((140, 20)).columns - 1)
+        line = f"  ⏳ {txt}"
+        width = min(100, max(70, shutil.get_terminal_size((140, 20)).columns - 2))
         if len(line) > width:
             line = line[: width - 3].rstrip() + "..."
         # Limpa a linha atual e reescreve inline (sem gerar nova linha).

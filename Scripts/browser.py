@@ -921,6 +921,44 @@ async def _read_last_assistant_snapshot(page):
     }
 
 
+async def _read_assistant_snapshot_after_baseline(page, baseline_count: int):
+    """
+    Lê o primeiro balão do assistant criado após o baseline_count.
+    Evita juntar duas respostas quando, por qualquer motivo, duas perguntas
+    acabam sendo enviadas em sequência no mesmo chat.
+    """
+    try:
+        snapshot = await page.evaluate("""(baseline) => {
+            const nodes = Array.from(document.querySelectorAll('[data-message-author-role="assistant"]'));
+            if (!nodes.length) return { html: '', text: '' };
+            let preferred = null;
+            if (Number.isInteger(baseline) && baseline >= 0 && baseline < nodes.length) {
+                preferred = nodes[baseline];
+            }
+            if (!preferred) {
+                preferred =
+                    [...nodes].reverse().find((node) => {
+                        if (!node) return false;
+                        const txt = (node.innerText || '').trim();
+                        const html = (node.innerHTML || '').trim();
+                        return !!txt || !!html;
+                    }) || nodes[nodes.length - 1];
+            }
+            return {
+                html: preferred?.innerHTML || '',
+                text: (preferred?.innerText || '').trim(),
+            };
+        }""", int(max(0, baseline_count or 0)))
+    except Exception:
+        return {"html": "", "text": ""}
+    if not isinstance(snapshot, dict):
+        return {"html": "", "text": ""}
+    return {
+        "html": snapshot.get("html") or "",
+        "text": snapshot.get("text") or "",
+    }
+
+
 async def _get_assistant_message_count(page) -> int:
     try:
         n = await page.evaluate("""() => {
@@ -2705,7 +2743,7 @@ async def handle_chat_task_inner(task, page, q, stop_event: asyncio.Event, activ
             stuck_count = 0
             idle_ready_count = 0
 
-        assistant_snapshot = await _read_last_assistant_snapshot(page)
+        assistant_snapshot = await _read_assistant_snapshot_after_baseline(page, baseline_assistant_count)
         assistant_count = await _get_assistant_message_count(page)
         has_new_assistant_msg = assistant_count > baseline_assistant_count
         curr_html = clean_html(assistant_snapshot.get("html", ""))
