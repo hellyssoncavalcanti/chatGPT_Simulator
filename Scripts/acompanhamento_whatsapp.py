@@ -1612,17 +1612,32 @@ def _sanitize_simulator_answer(text: str) -> str:
 
 
 def _normalize_whatsapp_format(text: str) -> str:
-    """Normalize common Markdown artifacts into WhatsApp-friendly plain text."""
+    """Normalize Markdown artifacts into WhatsApp-compatible formatting.
+
+    WhatsApp supports: *bold*, _italic_, ~strikethrough~, ```monospace```.
+    """
     out = (text or "").strip()
     if not out:
         return ""
-    # Remove Markdown headings and blockquote markers.
-    out = re.sub(r"(?m)^\s{0,3}#{1,6}\s*", "", out)
+    # Convert Markdown bold (**text** or __text__) → WhatsApp bold (*text*)
+    out = re.sub(r"\*\*(.+?)\*\*", r"*\1*", out)
+    out = re.sub(r"__(.+?)__", r"*\1*", out)
+    # Remove Markdown headings but keep text as WhatsApp bold.
+    out = re.sub(r"(?m)^\s{0,3}#{1,6}\s+(.+)$", r"*\1*", out)
+    # Remove blockquote markers.
     out = re.sub(r"(?m)^\s*>\s?", "", out)
     # Convert markdown links to plain "texto (url)".
     out = re.sub(r"\[([^\]]+)\]\((https?://[^)]+)\)", r"\1 (\2)", out)
-    # Normalize bullets.
-    out = re.sub(r"(?m)^\s*[*+]\s+", "- ", out)
+    # Normalize bullets — keep them as simple dash lists.
+    out = re.sub(r"(?m)^\s*[*+]\s+", "• ", out)
+    # Convert numbered lists (1. 2. 3.) to bullets for consistency.
+    out = re.sub(r"(?m)^\s*\d+\.\s+", "• ", out)
+    # Remove horizontal rules (--- or ***).
+    out = re.sub(r"(?m)^\s*[-*_]{3,}\s*$", "", out)
+    # Convert markdown code blocks to WhatsApp monospace.
+    out = re.sub(r"```\w*\n?(.*?)```", r"```\1```", out, flags=re.DOTALL)
+    # Convert inline code `text` to WhatsApp monospace.
+    out = re.sub(r"`([^`]+)`", r"```\1```", out)
     # Collapse excessive blank lines.
     out = re.sub(r"\n{3,}", "\n\n", out)
     return out.strip()
@@ -4086,28 +4101,74 @@ def process_incoming_replies_once() -> Dict[str, int]:
             msg_key = last_msg.get("id") or hashlib.sha1(last_msg["text"].encode("utf-8")).hexdigest()
 
             if msg_key == state.get_last_seen_inbound(phone_key_ctx):
-                reason = f"🔄 Msg inbound já vista (last_seen_inbound match)"
-                detail = f"última=[{last_text_preview}]"
-                results_table.append({"n": str(i), "title": short_title, "status": "SKIP", "reason": f"{reason} | {detail}"})
-                log.info(
-                    "  %s│ %s/%s │ %-45s │ %s │ %s%s",
-                    C_YELLOW, i, len(candidates), short_title, reason, detail, C_RESET,
-                )
-                skipped += 1
-                continue
+                # The message was seen before — but is the patient still waiting
+                # for a reply?  Check if the last visible message is still inbound
+                # (no team reply after it).  If so, the patient is repeating the
+                # question and deserves a response.
+                dedupe_key_check = f"{phone_key_ctx}:{msg_key}"
+                forwarded_info = state.state.get("forwarded_messages", {}).get(dedupe_key_check)
+                forwarded_at = forwarded_info.get("at", "") if isinstance(forwarded_info, dict) else ""
+
+                # Check if any outbound (team) message exists AFTER this inbound
+                has_team_reply_after = False
+                for m in reversed(all_visible_msgs):
+                    if m is last_msg:
+                        break
+                    if m.get("direction") == "out":
+                        has_team_reply_after = True
+                        break
+
+                if has_team_reply_after:
+                    # Team already replied — genuinely skip
+                    reason = f"🔄 Msg inbound já vista (last_seen_inbound match)"
+                    detail = f"última=[{last_text_preview}]"
+                    results_table.append({"n": str(i), "title": short_title, "status": "SKIP", "reason": f"{reason} | {detail}"})
+                    log.info(
+                        "  %s│ %s/%s │ %-45s │ %s │ %s%s",
+                        C_YELLOW, i, len(candidates), short_title, reason, detail, C_RESET,
+                    )
+                    skipped += 1
+                    continue
+                else:
+                    # Patient is repeating / still waiting — reprocess
+                    log.info(
+                        "  %s%s🔁 Paciente repetindo pergunta sem resposta da equipe │ msg=[%s] │ 1ª vez encaminhada em: %s%s",
+                        C_BLUE, C_BOLD, last_text_preview,
+                        forwarded_at or "(não registrado)",
+                        C_RESET,
+                    )
+                    # Clear the forwarded state so the message is reprocessed
+                    # (fall through to processing below)
 
             dedupe_key = f"{phone_key_ctx}:{msg_key}"
             if state.was_forwarded(dedupe_key):
-                state.set_last_seen_inbound(phone_key_ctx, msg_key)
-                reason = f"✅ Msg inbound já encaminhada (dedupe match)"
-                detail = f"última=[{last_text_preview}]"
-                results_table.append({"n": str(i), "title": short_title, "status": "SKIP", "reason": f"{reason} | {detail}"})
-                log.info(
-                    "  %s│ %s/%s │ %-45s │ %s │ %s%s",
-                    C_YELLOW, i, len(candidates), short_title, reason, detail, C_RESET,
-                )
-                skipped += 1
-                continue
+                # Check if the team actually replied in WhatsApp after forwarding
+                has_team_reply_after = False
+                for m in reversed(all_visible_msgs):
+                    if m is last_msg:
+                        break
+                    if m.get("direction") == "out":
+                        has_team_reply_after = True
+                        break
+
+                if has_team_reply_after:
+                    state.set_last_seen_inbound(phone_key_ctx, msg_key)
+                    reason = f"✅ Msg inbound já encaminhada (dedupe match)"
+                    detail = f"última=[{last_text_preview}]"
+                    results_table.append({"n": str(i), "title": short_title, "status": "SKIP", "reason": f"{reason} | {detail}"})
+                    log.info(
+                        "  %s│ %s/%s │ %-45s │ %s │ %s%s",
+                        C_YELLOW, i, len(candidates), short_title, reason, detail, C_RESET,
+                    )
+                    skipped += 1
+                    continue
+                else:
+                    forwarded_info = state.state.get("forwarded_messages", {}).get(dedupe_key)
+                    forwarded_at = forwarded_info.get("at", "") if isinstance(forwarded_info, dict) else ""
+                    log.info(
+                        "  %s%s🔁 Pergunta encaminhada em %s mas sem resposta no WhatsApp — reprocessando%s",
+                        C_BLUE, C_BOLD, forwarded_at or "(desconhecido)", C_RESET,
+                    )
 
             # 7) Resolve phone from alias/header
             phone_hint = wa_web.extract_phone_from_open_chat()
