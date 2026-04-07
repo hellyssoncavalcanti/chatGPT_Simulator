@@ -1297,7 +1297,13 @@ def build_forward_prompt(ctx: Dict[str, Any], patient_text: str) -> str:
         f"Pergunta/mensagem de acompanhamento: {pergunta}\n"
         f"Resposta do paciente: {patient_text}\n\n"
         "Com base nessa resposta, forneça orientação clínica de continuidade, "
-        "objetiva e segura para envio ao paciente."
+        "objetiva e segura para envio ao paciente.\n\n"
+        "IMPORTANTE (FORMATO WHATSAPP):\n"
+        "- Responda em texto puro compatível com WhatsApp.\n"
+        "- Use apenas marcações do WhatsApp: *negrito*, _itálico_, ~tachado~, ```monoespaçado```.\n"
+        "- Não use Markdown avançado (títulos #, tabelas, links markdown [texto](url), HTML).\n"
+        "- Se usar listas, prefira '-' ou '•'.\n"
+        "- Entregue somente a mensagem final ao paciente, sem metacomentários."
     )
     return f"[INICIO_TEXTO_COLADO]\n{core}\n[FIM_TEXTO_COLADO]"
 
@@ -1313,6 +1319,23 @@ def _sanitize_simulator_answer(text: str) -> str:
     out = re.sub(r"^(pensando|thinking)\b[:\s-]*", "", out, flags=re.IGNORECASE)
     # Fecha colchete pendente logo após o prefixo removido
     out = re.sub(r"^\]\s*", "", out)
+    return out.strip()
+
+
+def _normalize_whatsapp_format(text: str) -> str:
+    """Normalize common Markdown artifacts into WhatsApp-friendly plain text."""
+    out = (text or "").strip()
+    if not out:
+        return ""
+    # Remove Markdown headings and blockquote markers.
+    out = re.sub(r"(?m)^\s{0,3}#{1,6}\s*", "", out)
+    out = re.sub(r"(?m)^\s*>\s?", "", out)
+    # Convert markdown links to plain "texto (url)".
+    out = re.sub(r"\[([^\]]+)\]\((https?://[^)]+)\)", r"\1 (\2)", out)
+    # Normalize bullets.
+    out = re.sub(r"(?m)^\s*[*+]\s+", "- ", out)
+    # Collapse excessive blank lines.
+    out = re.sub(r"\n{3,}", "\n\n", out)
     return out.strip()
 
 
@@ -3783,7 +3806,8 @@ def process_incoming_replies_once() -> Dict[str, int]:
                 id_paciente=id_paciente,
                 id_atendimento=id_atendimento,
             )
-            answer = _sanitize_simulator_answer((res.get("html") or "").strip()) or "Recebido. A equipe entrará em contato se necessário."
+            answer_raw = _sanitize_simulator_answer((res.get("html") or "").strip())
+            answer = _normalize_whatsapp_format(answer_raw) or "Recebido. A equipe entrará em contato se necessário."
 
             # 10) Log patient message and simulator response
             if phone:

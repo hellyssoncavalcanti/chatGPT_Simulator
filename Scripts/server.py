@@ -1464,6 +1464,8 @@ def chat_completions():
         'url':              url,
         'chat_id':          chat_id,
         'message':          message,
+        'sender':           sender_label,
+        'request_source':   source_hint or sender_label,
         'attachment_paths': saved_paths,
         'stream_queue':     stream_q,
         'sender':           sender_label

@@ -84,6 +84,20 @@ def emit_event(q, type_, content):
         payload = json.dumps({"type": type_, "content": content}, separators=(',', ':'))
         q.put(payload + "\n")
 
+
+def _extract_task_sender(task: dict | None) -> str:
+    """Resolve sender label attached to the queued task."""
+    if not isinstance(task, dict):
+        return "usuario_remoto"
+    sender = (
+        task.get("sender")
+        or task.get("request_source")
+        or task.get("remetente")
+        or ""
+    )
+    sender = str(sender or "").strip()
+    return sender or "usuario_remoto"
+
 async def close_ephemeral_pages(context, baseline_pages, q=None, keep_pages=None):
     """
     Fecha abas criadas durante uma tarefa (popups/abas órfãs), preservando
@@ -2272,10 +2286,12 @@ async def handle_chat_task(context, task):
         if sender:
             sender_token = _CURRENT_TASK_SENDER.set(sender)
         q          = task.get('stream_queue')
+        sender     = _extract_task_sender(task)
         stop_event = asyncio.Event()
         activityts = [time.time()]
         page = None
         try:
+            emit_log(q, f"Remetente: {sender} | Iniciando tarefa CHAT no browser.")
             page = await context.new_page()
             watchdog_task = asyncio.create_task(
                 watchdog_page(page, q, stop_event,
