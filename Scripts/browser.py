@@ -218,7 +218,7 @@ async def _emit_browser_screenshot(page, q, label: str = "browser"):
         last_url = _SCREENSHOT_LAST_LOG.get("url") or ""
         last_kb = float(_SCREENSHOT_LAST_LOG.get("kb") or 0.0)
         last_ts = float(_SCREENSHOT_LAST_LOG.get("ts") or 0.0)
-        if page.url == last_url and abs(kb - last_kb) < 1.0 and (now_ts - last_ts) < 6.0:
+        if page.url == last_url and abs(kb - last_kb) < 2.0 and (now_ts - last_ts) < 20.0:
             should_log = False
         if should_log:
             emit_log(q, msg)

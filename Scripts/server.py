@@ -288,7 +288,7 @@ def _iter_web_search_wait_messages(wait_ctx, query_str):
         }
 
 
-def _execute_single_browser_search(query_str, browser_action, source_label, phase_prefix, stream_queue=None):
+def _execute_single_browser_search(query_str, browser_action, source_label, phase_prefix, stream_queue=None, sender_label=None):
     wait_ctx = _reserve_web_search_slot()
 
     if wait_ctx["wait_seconds"] > 0:
@@ -318,7 +318,8 @@ def _execute_single_browser_search(query_str, browser_action, source_label, phas
     browser_queue.put({
         'action':       browser_action,
         'query':        query_str,
-        'stream_queue': q
+        'stream_queue': q,
+        'sender':       sender_label or source_label
     })
 
     try:
@@ -341,23 +342,25 @@ def _execute_single_browser_search(query_str, browser_action, source_label, phas
     return {'success': False, 'query': query_str, 'error': f'Busca {source_label} encerrada sem resultado', 'source': source_label}
 
 
-def _execute_single_web_search(query_str, stream_queue=None):
+def _execute_single_web_search(query_str, stream_queue=None, sender_label=None):
     return _execute_single_browser_search(
         query_str=query_str,
         browser_action='SEARCH',
         source_label='web',
         phase_prefix='web_search',
         stream_queue=stream_queue,
+        sender_label=sender_label,
     )
 
 
-def _execute_single_uptodate_search(query_str, stream_queue=None):
+def _execute_single_uptodate_search(query_str, stream_queue=None, sender_label=None):
     return _execute_single_browser_search(
         query_str=query_str,
         browser_action='UPTODATE_SEARCH',
         source_label='uptodate',
         phase_prefix='uptodate_search',
         stream_queue=stream_queue,
+        sender_label=sender_label,
     )
 
 # --- BLOQUEIO DE SEGURANÇA POR DOMÍNIO E IP ---
@@ -923,6 +926,18 @@ def _handle_browser_search_api(execute_fn, *, route_label, source_label):
     nome_membro = data.get("nome_membro_solicitante") or None
     id_membro   = data.get("id_membro_solicitante") or None
     _quem = f', por "{nome_membro}" (id_membro: "{id_membro}")' if (nome_membro or id_membro) else ""
+    source_hint = (
+        data.get("request_source")
+        or request.headers.get("X-Request-Source")
+        or request.headers.get("X-Client-Source")
+        or ""
+    )
+    source_hint_norm = str(source_hint).strip().lower()
+    sender_label = "analisador_prontuarios.py" if (
+        'analisador_prontuarios' in source_hint_norm
+        or 'analisador-prontuarios' in source_hint_norm
+        or source_hint_norm == 'analyzer'
+    ) else (source_hint or "usuario_remoto")
 
     if not queries or not isinstance(queries, list):
         return jsonify({'success': False, 'error': 'Missing queries array'}), 400
@@ -946,7 +961,7 @@ def _handle_browser_search_api(execute_fn, *, route_label, source_label):
 
                 progress_q = queue.Queue()
                 worker = threading.Thread(
-                    target=lambda q_str=query_str, out_q=progress_q: out_q.put(execute_fn(q_str, stream_queue=out_q)),
+                    target=lambda q_str=query_str, out_q=progress_q, snd=sender_label: out_q.put(execute_fn(q_str, stream_queue=out_q, sender_label=snd)),
                     daemon=True,
                 )
                 worker.start()
@@ -997,7 +1012,7 @@ def _handle_browser_search_api(execute_fn, *, route_label, source_label):
 
     all_results = []
     for query_str in queries:
-        all_results.append(execute_fn(query_str))
+        all_results.append(execute_fn(query_str, sender_label=sender_label))
 
     return jsonify({'success': True, 'results': all_results})
 
