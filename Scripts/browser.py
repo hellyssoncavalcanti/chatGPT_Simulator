@@ -890,6 +890,16 @@ async def _read_last_assistant_snapshot(page):
     }
 
 
+async def _get_assistant_message_count(page) -> int:
+    try:
+        n = await page.evaluate("""() => {
+            return document.querySelectorAll('[data-message-author-role="assistant"]').length || 0;
+        }""")
+        return int(n or 0)
+    except Exception:
+        return 0
+
+
 def _resolve_chatgpt_download_url(raw_url: str) -> str:
     """Normaliza URL de download do ChatGPT para forma absoluta."""
     if raw_url.startswith("/"):
@@ -2450,13 +2460,16 @@ async def handle_chat_task_inner(task, page, q, stop_event: asyncio.Event, activ
     # Isso evita vazar resposta antiga (ex.: pergunta manual do desenvolvedor) como se
     # fosse resposta da solicitação atual.
     baseline_markdown = ""
+    baseline_assistant_count = 0
     try:
         baseline_snapshot = await _read_last_assistant_snapshot(page)
         baseline_html = clean_html(baseline_snapshot.get("html", ""))
         baseline_markdown = md(baseline_html, heading_style="ATX").strip()
         baseline_markdown = baseline_markdown.replace("\\_", "_").replace("\\*", "*")
+        baseline_assistant_count = await _get_assistant_message_count(page)
     except Exception:
         baseline_markdown = ""
+        baseline_assistant_count = 0
 
     if atts:
         emit_event(q, 'status', f'Anexando {len(atts)} arquivo(s)...')
@@ -2511,6 +2524,7 @@ async def handle_chat_task_inner(task, page, q, stop_event: asyncio.Event, activ
     idle_ready_count = 0
     chat_error_reload_count = 0
     max_chat_error_reloads = 2
+    response_started = False
 
     while True:
         await emit_chat_meta_if_ready()
@@ -2661,6 +2675,8 @@ async def handle_chat_task_inner(task, page, q, stop_event: asyncio.Event, activ
             idle_ready_count = 0
 
         assistant_snapshot = await _read_last_assistant_snapshot(page)
+        assistant_count = await _get_assistant_message_count(page)
+        has_new_assistant_msg = assistant_count > baseline_assistant_count
         curr_html = clean_html(assistant_snapshot.get("html", ""))
         curr_text = re.sub(r"\s+", " ", assistant_snapshot.get("text", "")).strip()
 
@@ -2692,6 +2708,13 @@ async def handle_chat_task_inner(task, page, q, stop_event: asyncio.Event, activ
             idle_ready_count = 0
 
         if markdown_text != last_html:
+            # Ignora conteúdo pré-existente do chat; só começa a streamar quando
+            # houver novo balão de assistant após o envio atual.
+            if not response_started and not has_new_assistant_msg:
+                last_html = markdown_text
+                await asyncio.sleep(0.3)
+                continue
+            response_started = True
             if not started:
                 emit_event(q, "status", "Recebendo...")
                 started = True

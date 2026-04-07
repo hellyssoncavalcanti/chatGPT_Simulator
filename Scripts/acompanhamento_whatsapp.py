@@ -712,12 +712,40 @@ def append_whatsapp_message(
 ) -> None:
     """Append a message to the mensagens JSON array of the WhatsApp chat record."""
     safe_phone = (phone or "").replace("'", "")
-    new_msg = {"role": role, "content": content, "timestamp": utc_now_iso(), "source": source}
-
+    new_msg = json.dumps(
+        {"role": role, "content": content, "timestamp": utc_now_iso(), "source": source},
+        ensure_ascii=False,
+    )
     try:
-        existing = _read_mensagens_array(safe_phone, phone_match="exact")
-        existing.append(new_msg)
-        _write_mensagens_array(safe_phone, existing, phone_match="exact")
+        rows = run_sql(
+            "SELECT id, mensagens FROM chatgpt_chats "
+            f"WHERE whatsapp_paciente = '{safe_phone}' AND chat_mode = 'whatsapp' "
+            "ORDER BY id DESC LIMIT 1"
+        )
+        if not rows:
+            return
+        chat_id = int(rows[0]["id"])
+        raw = rows[0].get("mensagens")
+        existing: List[Dict[str, Any]] = []
+        if isinstance(raw, str) and raw.strip():
+            try:
+                existing = json.loads(raw, strict=False)
+            except Exception:
+                existing = []
+        elif isinstance(raw, list):
+            existing = raw
+        if not isinstance(existing, list):
+            existing = []
+
+        existing.append(json.loads(new_msg))
+        payload = json.dumps(existing, ensure_ascii=False)
+        query = (
+            "UPDATE chatgpt_chats SET "
+            f"mensagens = {_sql_utf8mb4_literal(payload)}, "
+            "datetime_atualizacao = NOW() "
+            f"WHERE id = {chat_id}"
+        )
+        run_sql(query)
     except Exception:
         log.exception("Falha ao atualizar mensagens do chat WhatsApp para phone=%s", phone)
 
@@ -786,13 +814,30 @@ def sync_whatsapp_messages_to_db(
     if not new_msgs:
         return 0
 
-    # 4) Merge and write full array back to DB in a single UPDATE (base64-safe)
-    merged = existing_msgs + new_msgs
+    # 4) Persist all new messages in a single UPDATE
+    appended = 0
     try:
-        _write_mensagens_array(safe_phone, merged, phone_match="suffix")
+        rows = run_sql(
+            "SELECT id FROM chatgpt_chats "
+            f"WHERE whatsapp_paciente LIKE '%{safe_phone[-9:]}' "
+            "  AND chat_mode = 'whatsapp' "
+            "ORDER BY id DESC LIMIT 1"
+        )
+        if not rows:
+            return 0
+        chat_id = int(rows[0]["id"])
+        merged = existing_msgs + new_msgs
+        merged_json = json.dumps(merged, ensure_ascii=False)
+        query = (
+            "UPDATE chatgpt_chats SET "
+            f"mensagens = {_sql_utf8mb4_literal(merged_json)}, "
+            "datetime_atualizacao = NOW() "
+            f"WHERE id = {chat_id}"
+        )
+        run_sql(query)
+        appended = len(new_msgs)
     except Exception:
-        log.exception("sync_whatsapp_messages_to_db: falha ao gravar mensagens para phone=%s", phone)
-        return 0
+        log.exception("sync_whatsapp_messages_to_db: falha ao salvar lote para phone=%s", phone)
 
     appended = len(new_msgs)
     log.info(
@@ -977,6 +1022,7 @@ def send_to_chatgpt(url_chatgpt: str, text: str, id_paciente: Any, id_atendiment
     last_status = ""
     chat_url_returned = ""
     inline_status_open = False
+    raw_stream_lines: List[str] = []
 
     def _clean_status_text(raw: Any) -> str:
         msg = str(raw or "").strip()
@@ -1014,6 +1060,7 @@ def send_to_chatgpt(url_chatgpt: str, text: str, id_paciente: Any, id_atendiment
             line = line[len("data: "):]
         if line == "[DONE]":
             break
+        raw_stream_lines.append(line)
         try:
             chunk = json.loads(line)
         except (json.JSONDecodeError, ValueError):
@@ -1059,6 +1106,15 @@ def send_to_chatgpt(url_chatgpt: str, text: str, id_paciente: Any, id_atendiment
             pass
 
     full_html = _sanitize_simulator_answer(full_html)
+
+    # DEBUG: registra retorno bruto exato do simulator para investigação de
+    # mistura de respostas prévias vs resposta atual.
+    if raw_stream_lines:
+        raw_dump = "\n".join(raw_stream_lines)
+        log.info(
+            "=== ChatGPT Simulator | Retorno bruto (início) ===\n%s\n=== ChatGPT Simulator | Retorno bruto (fim) ===",
+            raw_dump,
+        )
 
     log_table("ChatGPT Simulator | Resposta", [
         ("remetente", "acompanhamento_whatsapp.py"),
@@ -2254,7 +2310,6 @@ class WhatsAppWebClient:
                         const direction = msg.classList.contains('message-in') ? 'in' : 'out';
                         // Try to get timestamp from message metadata.
                         let timeText = '';
-                        // 1) data-pre-plain-text attribute: "[HH:MM, DD/MM/YYYY] Name: "
                         const prePlain = msg.querySelector('[data-pre-plain-text]');
                         if (prePlain) {
                             const attr = prePlain.getAttribute('data-pre-plain-text') || '';
@@ -2263,11 +2318,15 @@ class WhatsAppWebClient:
                         }
                         // 2) Specific msg-time testid (only this element, not parents)
                         if (!timeText) {
-                            const timeEl = msg.querySelector('span[data-testid="msg-time"]');
+                            // Restrict fallback selectors to explicit time labels only.
+                            const t1 = msg.querySelector('span[data-testid="msg-time"]');
+                            const t2 = msg.querySelector('div.copyable-text span[aria-hidden="true"]');
+                            const t3 = msg.querySelector('span[dir="auto"][aria-label*=":"]');
+                            const timeEl = t1 || t2 || t3;
                             if (timeEl) {
-                                const t = (timeEl.textContent || '').trim();
-                                // Validate it looks like a time (HH:MM)
-                                if (/^\\d{1,2}:\\d{2}$/.test(t)) timeText = t;
+                                const txt = (timeEl.textContent || '').trim();
+                                const m = txt.match(/(\\d{1,2}:\\d{2})/);
+                                if (m) timeText = m[1];
                             }
                         }
                         results.push({ id: msgId || text, text: text, direction: direction, time_text: timeText });
