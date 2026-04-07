@@ -29,6 +29,7 @@
 # =============================================================================
 import asyncio
 import base64
+import contextvars
 import json
 import random
 import time
@@ -69,13 +70,14 @@ SCREENSHOT_STREAM_LOG_MAX_SILENCE_SEC = 12.0
 _SCREENSHOT_INLINE_LAST_LEN = 0
 _SCREENSHOT_INLINE_LAST_MSG = ""
 _SCREENSHOT_LOG_STATE = {}
+_CURRENT_TASK_SENDER = contextvars.ContextVar("current_task_sender", default="usuario_remoto")
 
 def emit_log(q, msg):
     sender = _CURRENT_TASK_SENDER.get()
-    if sender and not str(msg).startswith("Remetente: "):
-        msg = f"Remetente: {sender} | {msg}"
-    if q: q.put(json.dumps({"type": "log", "content": f"[browser.py] {msg}"}) + "\n")
-    file_log("browser.py", msg)
+    prefix = f"[browser.py] [{sender}] "
+    if q:
+        q.put(json.dumps({"type": "log", "content": f"{prefix}{msg}"}) + "\n")
+    file_log("browser.py", f"[{sender}] {msg}")
 
 def emit_event(q, type_, content):
     if q:
@@ -2287,11 +2289,12 @@ async def handle_chat_task(context, task):
             sender_token = _CURRENT_TASK_SENDER.set(sender)
         q          = task.get('stream_queue')
         sender     = _extract_task_sender(task)
+        sender_token = _CURRENT_TASK_SENDER.set(sender)
         stop_event = asyncio.Event()
         activityts = [time.time()]
         page = None
         try:
-            emit_log(q, f"Remetente: {sender} | Iniciando tarefa CHAT no browser.")
+            emit_log(q, "Iniciando tarefa CHAT no browser.")
             page = await context.new_page()
             watchdog_task = asyncio.create_task(
                 watchdog_page(page, q, stop_event,
@@ -2324,8 +2327,7 @@ async def handle_chat_task(context, task):
                     pass
             if q:
                 q.put(None)
-            if sender_token is not None:
-                _CURRENT_TASK_SENDER.reset(sender_token)
+            _CURRENT_TASK_SENDER.reset(sender_token)
 
 
 async def handle_chat_task_inner(task, page, q, stop_event: asyncio.Event, activityts: list = None):
