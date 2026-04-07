@@ -139,8 +139,8 @@ if TEST_ONLY_ID_PACIENTE is not None:
     )
     SUMMARY_SQL = SUMMARY_SQL + f"\n  AND caa.id_paciente = {TEST_ONLY_ID_PACIENTE}"
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-log = logging.getLogger("whatsapp_web_acompanhamento")
+logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
+log = logging.getLogger("acompanhamento_whatsapp.py")
 
 # Logger dedicado para enriquecimento — exibe [Associar_nome_contato_ao_numero] no log
 _elog_handler = logging.StreamHandler()
@@ -151,6 +151,29 @@ elog.addHandler(_elog_handler)
 elog.propagate = False  # não duplicar no root logger
 
 app = Flask(__name__)
+
+ANSI_RESET = "\033[0m"
+ANSI_CYAN = "\033[36m"
+ANSI_GREEN = "\033[32m"
+
+
+def log_table(title: str, rows: List[Tuple[str, str]]) -> None:
+    """Renderiza logs em tabela compacta/colorida para facilitar leitura no CMD."""
+    safe_rows = rows or [("info", "-")]
+    k_w = max(len(k) for k, _ in safe_rows)
+    v_w = max(len(v) for _, v in safe_rows)
+    width = max(len(title) + 4, k_w + v_w + 7)
+    top = f"╔{'═' * width}╗"
+    head = f"║ {title.ljust(width - 2)} ║"
+    sep = f"╠{'═' * (k_w + 2)}╦{'═' * (width - k_w - 3)}╣"
+    log.info("%s%s%s", ANSI_CYAN, top, ANSI_RESET)
+    log.info("%s%s%s", ANSI_CYAN, head, ANSI_RESET)
+    log.info("%s%s%s", ANSI_CYAN, sep, ANSI_RESET)
+    for key, value in safe_rows:
+        row = f"║ {key.ljust(k_w)} ║ {value.ljust(width - k_w - 6)} ║"
+        log.info("%s%s%s", ANSI_GREEN, row, ANSI_RESET)
+    bottom = f"╚{'═' * width}╝"
+    log.info("%s%s%s", ANSI_CYAN, bottom, ANSI_RESET)
 
 
 def utc_now_iso() -> str:
@@ -908,19 +931,21 @@ def preload_sent_messages_for_analises(id_analises: List[Any]) -> Dict[int, set]
 
 def send_to_chatgpt(url_chatgpt: str, text: str, id_paciente: Any, id_atendimento: Any) -> Dict[str, Any]:
     """Send message to ChatGPT simulator and stream status updates to CMD."""
-    headers = {"Authorization": f"Bearer {SIMULATOR_API_KEY}"}
+    headers = {"Authorization": f"Bearer {SIMULATOR_API_KEY}", "X-Request-Source": "acompanhamento_whatsapp.py"}
     payload = {
         "model": "ChatGPT Simulator",
         "message": text,
         "url": url_chatgpt,
         "stream": True,
+        "request_source": "acompanhamento_whatsapp.py",
         "id_paciente": id_paciente,
         "id_atendimento": id_atendimento,
     }
-    log.info(
-        "  [ChatGPT Simulator] Enviando ao simulator | url=%s | paciente=%s",
-        build_preview_with_ellipsis(url_chatgpt, 60), id_paciente,
-    )
+    log_table("ChatGPT Simulator | Envio", [
+        ("remetente", "acompanhamento_whatsapp.py"),
+        ("paciente", str(id_paciente)),
+        ("url", build_preview_with_ellipsis(url_chatgpt, 60)),
+    ])
     r = requests.post(SIMULATOR_URL, headers=headers, json=payload, timeout=600, stream=True)
     r.raise_for_status()
 
@@ -946,7 +971,10 @@ def send_to_chatgpt(url_chatgpt: str, text: str, id_paciente: Any, id_atendiment
         # Status updates (navigating, typing, waiting, etc.)
         if msg_type == "status":
             if msg_content and msg_content != last_status:
-                log.info("  [ChatGPT Simulator] Status: %s", msg_content)
+                log_table("ChatGPT Simulator | Status", [
+                    ("remetente", "acompanhamento_whatsapp.py"),
+                    ("status", str(msg_content)[:140]),
+                ])
                 last_status = msg_content
         # Markdown content (the actual response text)
         elif msg_type == "markdown":
@@ -972,10 +1000,11 @@ def send_to_chatgpt(url_chatgpt: str, text: str, id_paciente: Any, id_atendiment
         except Exception:
             pass
 
-    log.info(
-        "  [ChatGPT Simulator] Resposta recebida (%s chars): %s",
-        len(full_html), build_preview_with_ellipsis(full_html, 150),
-    )
+    log_table("ChatGPT Simulator | Resposta", [
+        ("remetente", "acompanhamento_whatsapp.py"),
+        ("chars", str(len(full_html))),
+        ("preview", build_preview_with_ellipsis(full_html, 150)),
+    ])
     return {"html": full_html}
 
 
@@ -3897,7 +3926,7 @@ def health():
     return jsonify(
         {
             "ok": True,
-            "service": "whatsapp_web_acompanhamento_server",
+            "service": "acompanhamento_whatsapp_server",
             "state_file": str(STATE_FILE),
             "whatsapp_web_url": WHATSAPP_WEB_URL,
             "simulator_url": SIMULATOR_URL,
