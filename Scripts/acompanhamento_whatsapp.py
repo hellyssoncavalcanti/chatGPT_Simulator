@@ -257,6 +257,16 @@ class StateStore:
         with self.lock:
             return dict(self.state["phone_context"])
 
+    def update_phone_context(self, phone: str, updates: Dict[str, Any]) -> None:
+        """Merge *updates* into the existing phone_context for *phone*."""
+        with self.lock:
+            ctx = self.state["phone_context"].get(phone)
+            if not ctx or not isinstance(ctx, dict):
+                ctx = {}
+            ctx.update(updates)
+            self.state["phone_context"][phone] = ctx
+        self.save()
+
     def get_phone_context_field(self, phone: str, field: str) -> Any:
         with self.lock:
             ctx = self.state["phone_context"].get(phone)
@@ -1419,86 +1429,117 @@ def select_followup_for_timing(
     return selected
 
 
-def build_forward_prompt(ctx: Dict[str, Any], patient_text: str, quoted_text: str = "") -> str:
-    pergunta = ctx.get("pergunta") or "(não identificada)"
+def classify_reply(text: str) -> str:
+    """Classify a patient reply as 'admin', 'clinical', or 'mixed'.
+
+    Used to adjust the prompt tone so administrative questions
+    (scheduling, payments) are not mixed with clinical guidance.
+    """
+    t = (text or "").lower()
+    admin_terms = [
+        "consulta", "valor", "vaga", "retorno", "agenda", "secretaria",
+        "convênio", "pagamento", "remarcar", "horário", "agendar",
+        "cancelar", "encaixe", "plano de saúde",
+    ]
+    clinical_terms = [
+        "agressivo", "sono", "irritado", "medicação", "clonidina",
+        "bateu", "arranhou", "cabeça", "piorou", "melhorou", "crise",
+        "comportamento", "agitado", "chorando", "mordeu", "se jogou",
+        "risperidona", "melatonina", "remédio", "dose", "efeito",
+        "convulsão", "febre", "vômito", "diarreia", "alergia",
+    ]
+    has_admin = any(term in t for term in admin_terms)
+    has_clinical = any(term in t for term in clinical_terms)
+    if has_admin and has_clinical:
+        return "mixed"
+    if has_admin:
+        return "admin"
+    return "clinical"
+
+
+def build_forward_prompt(
+    ctx: Dict[str, Any],
+    patient_text: str,
+    quoted_text: str = "",
+    recent_messages: Optional[List[Dict[str, str]]] = None,
+    clinical_summary: str = "",
+    reply_type: str = "clinical",
+) -> str:
     nome = ctx.get("nome_paciente") or "Paciente"
     atendimento = ctx.get("id_atendimento")
+    pergunta = ctx.get("pergunta") or "(acompanhamento)"
 
-    quoted_line = ""
+    # ── 1. Contexto do caso ──
+    parts: List[str] = ["[RESPOSTA WHATSAPP DE ACOMPANHAMENTO]"]
+    parts.append(f"Paciente: {nome} | Atendimento: {atendimento}")
+    if clinical_summary:
+        parts.append(f"Resumo clínico: {clinical_summary}")
+    parts.append(f"Pergunta inicial do acompanhamento: {pergunta}")
+
+    # ── 2. Histórico recente da conversa ──
+    if recent_messages:
+        conversation_lines = []
+        for m in recent_messages:
+            role = m.get("role", "?")
+            text = m.get("text", "").strip()
+            if text:
+                conversation_lines.append(f"  {role}: {text}")
+        if conversation_lines:
+            parts.append("\nHistórico recente da conversa:\n" + "\n".join(conversation_lines))
+
+    # ── 3. Última mensagem do responsável ──
     if quoted_text:
-        quoted_line = f"Mensagem citada pelo paciente como contexto: {quoted_text}\n"
+        parts.append(f"\nMensagem que o responsável citou como contexto: {quoted_text}")
+    parts.append(f"\nÚltima mensagem do responsável: {patient_text}")
 
-    core = (
-        "[RESPOSTA WHATSAPP DE ACOMPANHAMENTO]\n"
-        f"Paciente: {nome}\n"
-        f"ID atendimento: {atendimento}\n"
-        f"Pergunta/mensagem de acompanhamento: {pergunta}\n"
-        f"{quoted_line}"
-        f"Resposta do paciente: {patient_text}\n\n"
-        "Com base nessa resposta, escreva a próxima mensagem para envio no WhatsApp.\n\n"
-        "OBJETIVO:\n"
-        "- A mensagem deve soar como uma pessoa real da equipe falando no WhatsApp.\n"
-        "- Mantenha a conversa natural, simples e direta.\n"
-        "- Quando a resposta vier curta, vaga, irritada ou incompleta, priorize fazer perguntas curtas e úteis.\n"
-        "- Oriente de forma objetiva e segura, sem exagero e sem tom robótico.\n\n"
-        "ESTILO OBRIGATÓRIO:\n"
-        "- Escreva em português do Brasil.\n"
-        "- Use frases curtas e naturais.\n"
-        "- Soe como conversa real, não como comunicado.\n"
-        "- Evite texto florido, acolhimento exagerado e simpatia artificial.\n"
-        "- Evite excesso de verbos no imperfeito, como: 'queria', 'gostaria', 'queríamos'.\n"
-        "- Prefira perguntas diretas, por exemplo: 'Ele está assim mais em quais momentos?'\n"
-        "- Evite repetir em outras palavras exatamente o que a mãe acabou de dizer.\n"
-        "- Evite responder como se estivesse fazendo relatório.\n"
-        "- Não use linguagem técnica demais.\n"
-        "- Não invente informações que não estejam na resposta do responsável.\n"
-        "- Não presuma melhora, piora, adesão, efeito colateral ou risco se isso não foi dito.\n\n"
-        "COMPORTAMENTO ESPERADO:\n"
-        "- Se a resposta do responsável for curta ou incompleta, NÃO encerre a conversa rápido.\n"
-        "- Nesses casos, priorize continuar a conversa com 2 ou 3 perguntas curtas, naturais e clinicamente úteis.\n"
-        "- Pergunte apenas o que realmente ajuda no acompanhamento, como:\n"
-        "  • em quais momentos o comportamento acontece;\n"
-        "  • se ocorre mais em casa, na escola ou na saída das terapias;\n"
-        "  • se fica só em birra/grito, ou se bate, arranha, se joga, bate a cabeça ou machuca alguém;\n"
-        "  • como estão sono, impaciência, irritabilidade e comportamento no restante do dia.\n"
-        "- Se a resposta estiver atravessada, seca ou impaciente, responda de forma simples, sem confronto e sem formalidade excessiva.\n"
-        "- Se houver espaço para orientação, faça isso de forma breve e natural.\n"
-        "- Quando fizer sentido, oriente manter medicações e terapias como foram passadas, sem mudar nada por conta própria.\n"
-        "- Só inclua alerta de urgência se houver risco real de lesão, autoagressão importante ou agressão importante.\n"
-        "- Se não houver informação suficiente, pergunte mais antes de concluir.\n\n"
-        "O QUE EVITAR:\n"
-        "- 'Entendi perfeitamente.'\n"
-        "- 'Agradecemos o retorno.'\n"
-        "- 'Orientamos manter...'\n"
-        "- 'Seguimos à disposição.'\n"
-        "- 'Caso apresente...'\n"
-        "- 'Qualquer dúvida, nos acione.'\n"
-        "- respostas excessivamente polidas, redondas ou simétricas.\n"
-        "- conectivos formais demais, como 'diante disso', 'desse modo', 'nesse contexto'.\n"
-        "- fechamento robótico, como 'seguimos acompanhando' em toda mensagem.\n\n"
-        "PREFIRA:\n"
-        "- 'Certo.'\n"
-        "- 'Entendi.'\n"
-        "- 'Mas isso acontece mais quando?'\n"
-        "- 'E no resto do dia, como ele está?'\n"
-        "- 'Por enquanto, mantenham como foi passado.'\n"
-        "- 'Se piorar, avisem a equipe antes do retorno.'\n\n"
-        "REGRA CLÍNICA:\n"
-        "- Nunca invente informação.\n"
-        "- Nunca presuma melhora, piora ou adesão se isso não foi dito.\n"
-        "- Só dê alerta de urgência se houver risco real de lesão, autoagressão importante ou agressão importante.\n"
-        "- Se não houver informação suficiente, pergunte mais antes de concluir.\n\n"
-        "FORMATO WHATSAPP:\n"
-        "- Responda em texto puro compatível com WhatsApp.\n"
-        "- Use apenas marcações do WhatsApp: *negrito*, _itálico_, ~tachado~, ```monoespaçado```.\n"
-        "- Não use Markdown avançado (títulos #, tabelas, links markdown [texto](url), HTML).\n"
-        "- Evite listas, a não ser que fiquem muito naturais.\n"
-        "- Entregue somente a mensagem final ao paciente/responsável, sem metacomentários.\n\n"
-        "REGRA FINAL:\n"
-        "- A mensagem precisa parecer conversa real de acompanhamento no WhatsApp.\n"
-        "- Se a resposta do responsável ainda não trouxer informação suficiente, prefira perguntar mais antes de concluir demais."
+    # ── 4. Tarefa ──
+    parts.append("\nEscreva a próxima mensagem da equipe para envio no WhatsApp.")
+
+    # ── 5. Regras de tom ──
+    parts.append(
+        "\nTOM:\n"
+        "- Português do Brasil, frases curtas, conversa real de WhatsApp.\n"
+        "- Soe como pessoa da equipe, não como modelo de IA.\n"
+        "- Evite acolhimento exagerado, frases prontas e fechamentos robóticos.\n"
+        "- Se a resposta for curta ou vaga, continue com 1-2 perguntas curtas e úteis.\n"
+        "- Se for seca ou impaciente, responda simples, sem confronto."
     )
 
+    # ── 5b. Regras específicas por tipo de assunto ──
+    if reply_type == "admin":
+        parts.append(
+            "\nASSUNTO ADMINISTRATIVO:\n"
+            "- A mensagem do responsável é sobre agenda, vaga, retorno, valor ou convênio.\n"
+            "- Responda de forma prática: informe que a secretaria vai entrar em contato, "
+            "ou peça os dados necessários para agendar.\n"
+            "- NÃO misture orientação clínica numa resposta administrativa."
+        )
+    elif reply_type == "mixed":
+        parts.append(
+            "\nASSUNTO MISTO (administrativo + clínico):\n"
+            "- Separe os assuntos: primeiro resolva o administrativo de forma prática, "
+            "depois trate o clínico brevemente.\n"
+            "- Não misture os dois num único parágrafo."
+        )
+    # clinical: nenhum bloco extra necessário — o tom padrão já cobre
+
+    # ── 6. Regra clínica ──
+    parts.append(
+        "\nREGRA CLÍNICA:\n"
+        "- Nunca invente informação nem presuma melhora/piora não relatada.\n"
+        "- Alerta de urgência só se houver risco real de lesão.\n"
+        "- Se faltar informação, pergunte mais antes de concluir."
+    )
+
+    # ── 7. Formato ──
+    parts.append(
+        "\nFORMATO:\n"
+        "- Texto puro WhatsApp. Marcações permitidas: *negrito*, _itálico_, ~tachado~.\n"
+        "- Sem Markdown avançado, sem HTML, sem metacomentários.\n"
+        "- Entregue somente a mensagem final ao responsável."
+    )
+
+    core = "\n".join(parts)
     return f"[INICIO_TEXTO_COLADO]\n{core}\n[FIM_TEXTO_COLADO]"
 
 def _sanitize_simulator_answer(text: str) -> str:
@@ -2341,33 +2382,6 @@ class WhatsAppWebClient:
 
         result = self._run_on_browser_thread(_do)
         return normalize_phone(result) if result else None
-
-    def extract_phone_from_open_chat(self) -> Optional[str]:
-        """Try to extract the phone number from the currently open chat header."""
-        self.start()
-
-        def _do():
-            return self._page.evaluate(
-                """() => {
-                    const header = document.querySelector('#main header');
-                    if (!header) return null;
-
-                    // Collect all text content from header spans
-                    const spans = header.querySelectorAll('span[title], span[dir="auto"], span');
-                    for (const span of spans) {
-                        const text = (span.getAttribute('title') || span.textContent || '').trim();
-                        if (!text) continue;
-                        const digits = text.replace(/\\D/g, '');
-                        // A phone number has 10-15 digits
-                        if (digits.length >= 10 && digits.length <= 15) {
-                            return digits;
-                        }
-                    }
-                    return null;
-                }"""
-            )
-
-        return self._run_on_browser_thread(_do)
 
     def read_all_inbound_from_open_chat(self) -> List[Dict[str, str]]:
         """Read ALL inbound messages from the currently open chat."""
@@ -4090,17 +4104,37 @@ def process_incoming_replies_once() -> Dict[str, int]:
                 C_GREEN, C_BOLD, C_RESET,
             )
 
-            # 9) Forward to ChatGPT simulator
+            # 9) Build recent conversation context from visible messages
+            recent_messages: List[Dict[str, str]] = []
+            # Use the last 8 visible messages (excluding the current last_msg itself)
+            history_window = all_visible_msgs[-9:-1] if len(all_visible_msgs) > 1 else []
+            for m in history_window:
+                direction = m.get("direction")
+                role = "Equipe" if direction == "out" else "Responsável"
+                text = (m.get("text") or "").strip()
+                if not text:
+                    continue
+                recent_messages.append({"role": role, "text": text})
+
+            # Classify reply type (admin / clinical / mixed)
+            reply_type = classify_reply(last_msg["text"])
+
             ctx = {
                 "id_atendimento": id_atendimento,
                 "id_paciente": id_paciente,
                 "nome_paciente": nome_paciente,
                 "pergunta": state.get_phone_context_field(phone_key_ctx, "pergunta") or "(acompanhamento)",
             }
-            prompt = build_forward_prompt(ctx, last_msg["text"], last_msg.get("quoted_text", ""))
+            prompt = build_forward_prompt(
+                ctx,
+                last_msg["text"],
+                last_msg.get("quoted_text", ""),
+                recent_messages=recent_messages,
+                reply_type=reply_type,
+            )
             log.info(
-                "  %s🤖 Encaminhando ao ChatGPT Simulator...%s",
-                C_BLUE, C_RESET,
+                "  %s🤖 Encaminhando ao ChatGPT Simulator (tipo=%s)...%s",
+                C_BLUE, reply_type, C_RESET,
             )
             res = send_to_chatgpt(
                 url_chatgpt=chat_url,
@@ -4154,6 +4188,11 @@ def process_incoming_replies_once() -> Dict[str, int]:
                 },
             )
             state.set_last_seen_inbound(phone_key_ctx, msg_key)
+            # Persist conversation context for future turns
+            state.update_phone_context(phone_key_ctx, {
+                "last_team_message": answer,
+                "last_topic": reply_type,
+            })
             processed += 1
             results_table.append({
                 "n": str(i), "title": short_title, "status": "PROCESSADO",
