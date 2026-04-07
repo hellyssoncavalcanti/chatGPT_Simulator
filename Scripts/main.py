@@ -273,6 +273,7 @@ if __name__ == "__main__":
     import server
     import browser
     import utils
+    from shared import browser_queue
 
     os.system('cls' if os.name == 'nt' else 'clear')
 
@@ -304,5 +305,14 @@ if __name__ == "__main__":
     try:
         ssl_context = (config.CERT_FILE, config.KEY_FILE)
         server.app.run(host="0.0.0.0", port=config.PORT, debug=False, use_reloader=False, ssl_context=ssl_context)
+    except KeyboardInterrupt:
+        print("\n[INFO] Encerramento solicitado pelo usuário.")
     except Exception as e:
         print(f"[ERRO] Falha ao iniciar HTTPS: {e}")
+    finally:
+        try:
+            browser_queue.put({'action': 'STOP'})
+            t_browser.join(timeout=8)
+            print("[INFO] Sinal de parada enviado ao browser worker.")
+        except Exception as e:
+            print(f"[WARN] Falha ao sinalizar parada do browser worker: {e}")

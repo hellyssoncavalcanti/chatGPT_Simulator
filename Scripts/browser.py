@@ -36,6 +36,7 @@ import re
 import os
 import queue
 import sys
+import contextvars
 from playwright.async_api import async_playwright
 import config
 from shared import browser_queue, register_file
@@ -65,8 +66,23 @@ SCREENSHOT_STREAM_JPEG_QUALITY = 45
 SCREENSHOT_STREAM_MAX_BYTES = 300_000
 _SCREENSHOT_INLINE_LAST_LEN = 0
 _SCREENSHOT_INLINE_LAST_MSG = ""
+_SCREENSHOT_LAST_LOG = {"url": "", "kb": 0.0, "ts": 0.0}
+_CURRENT_TASK_SENDER = contextvars.ContextVar("current_task_sender", default=None)
+
+
+def _extract_task_sender(task) -> str | None:
+    if not isinstance(task, dict):
+        return None
+    sender = task.get('sender') or task.get('source') or task.get('request_source')
+    if sender is None:
+        return None
+    sender_text = str(sender).strip()
+    return sender_text or None
 
 def emit_log(q, msg):
+    sender = _CURRENT_TASK_SENDER.get()
+    if sender and not str(msg).startswith("Remetente: "):
+        msg = f"Remetente: {sender} | {msg}"
     if q: q.put(json.dumps({"type": "log", "content": f"[browser.py] {msg}"}) + "\n")
     file_log("browser.py", msg)
 
@@ -76,6 +92,55 @@ def emit_event(q, type_, content):
         # O \n final é estritamente o separador do stream
         payload = json.dumps({"type": type_, "content": content}, separators=(',', ':'))
         q.put(payload + "\n")
+
+async def close_ephemeral_pages(context, baseline_pages, q=None, keep_pages=None):
+    """
+    Fecha abas criadas durante uma tarefa (popups/abas órfãs), preservando
+    apenas as abas de baseline e as explicitamente mantidas em keep_pages.
+    """
+    try:
+        baseline_ids = {id(p) for p in (baseline_pages or [])}
+        keep_ids = {id(p) for p in (keep_pages or []) if p is not None}
+        for p in list(getattr(context, "pages", []) or []):
+            if id(p) in baseline_ids or id(p) in keep_ids:
+                continue
+            try:
+                await p.close()
+            except Exception as e:
+                emit_log(q, f"⚠️ Falha ao fechar aba efêmera: {e}")
+    except Exception as e:
+        emit_log(q, f"⚠️ Limpeza de abas efêmeras falhou: {e}")
+
+
+def _is_known_orphan_tab_url(url: str) -> bool:
+    if not url:
+        return False
+    u = url.strip().lower()
+    if "residenciapediatrica.com.br/content/pdf/" in u:
+        return True
+    return False
+
+
+async def cleanup_known_orphan_tabs(context, q=None):
+    """
+    Remove abas persistentes/restauradas que não fazem parte do fluxo do worker
+    (ex.: PDF externo que reaparece após restauração de sessão do Chromium).
+    """
+    try:
+        for p in list(getattr(context, "pages", []) or []):
+            url = ""
+            try:
+                url = (p.url or "").strip()
+            except Exception:
+                url = ""
+            if _is_known_orphan_tab_url(url):
+                emit_log(q, f"🧹 Fechando aba órfã conhecida: {url[:120]}")
+                try:
+                    await p.close()
+                except Exception as close_err:
+                    emit_log(q, f"⚠️ Falha ao fechar aba órfã conhecida: {close_err}")
+    except Exception as e:
+        emit_log(q, f"⚠️ Falha na limpeza de abas órfãs conhecidas: {e}")
 
 async def _get_window_state(page):
     try:
@@ -131,7 +196,7 @@ async def _should_keep_context_minimized(context) -> bool:
 
 
 async def _emit_browser_screenshot(page, q, label: str = "browser"):
-    global _SCREENSHOT_INLINE_LAST_LEN, _SCREENSHOT_INLINE_LAST_MSG
+    global _SCREENSHOT_LAST_LOG
     if not q:
         return
     try:
@@ -147,13 +212,17 @@ async def _emit_browser_screenshot(page, q, label: str = "browser"):
         if len(raw) > SCREENSHOT_STREAM_MAX_BYTES:
             return
         kb = len(raw) / 1024
-        msg = f"📸 Screenshot stream [{label}]: {kb:.1f} KB — {page.url[:80]}"
-        # Evita “flood” no CMD quando o conteúdo do stream não mudou:
-        # mantém uma única linha por ação e atualiza apenas quando houver mudança.
-        if msg != _SCREENSHOT_INLINE_LAST_MSG:
-            print(f"\r{msg.ljust(_SCREENSHOT_INLINE_LAST_LEN)}", end="", flush=True)
-            _SCREENSHOT_INLINE_LAST_LEN = len(msg)
-            _SCREENSHOT_INLINE_LAST_MSG = msg
+        msg = f"📸 Screenshot stream [{label}]: {kb:.1f} KB — {page.url}"
+        now_ts = time.time()
+        should_log = True
+        last_url = _SCREENSHOT_LAST_LOG.get("url") or ""
+        last_kb = float(_SCREENSHOT_LAST_LOG.get("kb") or 0.0)
+        last_ts = float(_SCREENSHOT_LAST_LOG.get("ts") or 0.0)
+        if page.url == last_url and abs(kb - last_kb) < 2.0 and (now_ts - last_ts) < 20.0:
+            should_log = False
+        if should_log:
+            emit_log(q, msg)
+            _SCREENSHOT_LAST_LOG = {"url": page.url, "kb": kb, "ts": now_ts}
         emit_event(q, "screenshot", {
             "label": label,
             "format": "jpeg",
@@ -166,7 +235,6 @@ async def _emit_browser_screenshot(page, q, label: str = "browser"):
 
 
 async def _stream_browser_screenshots(page, q, stop_event: asyncio.Event, label: str = "browser"):
-    global _SCREENSHOT_INLINE_LAST_LEN, _SCREENSHOT_INLINE_LAST_MSG
     if not q:
         return
     try:
@@ -178,11 +246,6 @@ async def _stream_browser_screenshots(page, q, stop_event: asyncio.Event, label:
                 await _emit_browser_screenshot(page, q, label=label)
     except asyncio.CancelledError:
         raise
-    finally:
-        if _SCREENSHOT_INLINE_LAST_LEN > 0:
-            print("", flush=True)
-            _SCREENSHOT_INLINE_LAST_LEN = 0
-            _SCREENSHOT_INLINE_LAST_MSG = ""
 
 
 def _composer_state_script():
@@ -1024,8 +1087,10 @@ async def _click_chatgpt_download_elements(page, q=None):
             return False
 
         clicked = False
+        context = page.context
         for el in download_elements:
             try:
+                baseline_page_ids = {id(p) for p in list(getattr(context, "pages", []) or [])}
                 if el['selector'] == 'button_in_last':
                     last_msg = page.locator('[data-message-author-role="assistant"]').last
                     btn = last_msg.locator('button, [role="button"]').nth(el['index'])
@@ -1040,7 +1105,22 @@ async def _click_chatgpt_download_elements(page, q=None):
                     await link.click(timeout=2000, force=True)
                 emit_log(q, f"📎 Clicou elemento de download: {el['text']}")
                 clicked = True
-                await asyncio.sleep(1)
+                await asyncio.sleep(0.8)
+
+                # Alguns links de PDF abrem em nova aba persistente; fecha qualquer
+                # aba criada pelo clique para evitar acúmulo.
+                for maybe_new in list(getattr(context, "pages", []) or []):
+                    if id(maybe_new) in baseline_page_ids or maybe_new == page:
+                        continue
+                    try:
+                        opened_url = (maybe_new.url or "").strip()
+                    except Exception:
+                        opened_url = ""
+                    try:
+                        await maybe_new.close()
+                        emit_log(q, f"🧹 Aba aberta por download foi fechada: {opened_url[:120]}")
+                    except Exception as close_err:
+                        emit_log(q, f"⚠️ Falha ao fechar aba aberta por download: {close_err}")
             except Exception as e:
                 detalhe = str(e).splitlines()[0][:220]
                 emit_log(q, f"ℹ️ Clique de download ignorado '{el['text']}': {detalhe}")
@@ -1832,8 +1912,13 @@ async def handle_search_task(context, task):
       • searchresult — resultado final (success, query, results[])
     """
     async with tab_semaphore:
+        sender_token = None
+        sender = _extract_task_sender(task)
+        if sender:
+            sender_token = _CURRENT_TASK_SENDER.set(sender)
         q    = task.get('stream_queue')
         query = (task.get('query') or '').strip()
+        baseline_pages = list(getattr(context, "pages", []) or [])
         page = None
         try:
             if not query:
@@ -2018,8 +2103,11 @@ async def handle_search_task(context, task):
                     await page.close()
                 except:
                     pass
+            await close_ephemeral_pages(context, baseline_pages, q=q)
             if q:
                 q.put(None)
+            if sender_token is not None:
+                _CURRENT_TASK_SENDER.reset(sender_token)
 
 
 async def handle_uptodate_search_task(context, task):
@@ -2028,8 +2116,13 @@ async def handle_uptodate_search_task(context, task):
     retorna os resultados estruturados encontrados na listagem principal.
     """
     async with tab_semaphore:
+        sender_token = None
+        sender = _extract_task_sender(task)
+        if sender:
+            sender_token = _CURRENT_TASK_SENDER.set(sender)
         q = task.get('stream_queue')
         query = (task.get('query') or '').strip()
+        baseline_pages = list(getattr(context, "pages", []) or [])
         page = None
         try:
             if not query:
@@ -2171,12 +2264,19 @@ async def handle_uptodate_search_task(context, task):
                     await page.close()
                 except Exception:
                     pass
+            await close_ephemeral_pages(context, baseline_pages, q=q)
             if q:
                 q.put(None)
+            if sender_token is not None:
+                _CURRENT_TASK_SENDER.reset(sender_token)
 
 
 async def handle_chat_task(context, task):
     async with tab_semaphore:
+        sender_token = None
+        sender = _extract_task_sender(task)
+        if sender:
+            sender_token = _CURRENT_TASK_SENDER.set(sender)
         q          = task.get('stream_queue')
         stop_event = asyncio.Event()
         activityts = [time.time()]
@@ -2214,6 +2314,8 @@ async def handle_chat_task(context, task):
                     pass
             if q:
                 q.put(None)
+            if sender_token is not None:
+                _CURRENT_TASK_SENDER.reset(sender_token)
 
 
 async def handle_chat_task_inner(task, page, q, stop_event: asyncio.Event, activityts: list = None):
@@ -2394,6 +2496,33 @@ async def handle_chat_task_inner(task, page, q, stop_event: asyncio.Event, activ
             break
 
         loop_count += 1
+
+        rate_limit_state = await page.evaluate("""() => {
+            const bodyText = (document.body?.innerText || '').replace(/\\s+/g, ' ').trim();
+            const candidates = Array.from(document.querySelectorAll('div,section,article,[role="dialog"],main'));
+            const hit = candidates.find(el => {
+                const txt = (el.innerText || '').trim().toLowerCase();
+                if (!txt || txt.length < 10) return false;
+                const hasPt = txt.includes('excesso de solicita') && txt.includes('aguarde alguns minutos');
+                const hasEn = txt.includes('too many requests') || txt.includes('rate limit');
+                return hasPt || hasEn;
+            });
+            if (!hit) {
+                return { detected: false, message: '' };
+            }
+            const msg = (hit.innerText || bodyText || '').trim().slice(0, 1200);
+            return { detected: true, message: msg };
+        }""")
+
+        if rate_limit_state.get("detected"):
+            rate_limit_msg = (rate_limit_state.get("message") or "Excesso de solicitações").strip()
+            emit_log(q, f"⛔ Rate-limit detectado no ChatGPT: {rate_limit_msg[:220]}")
+            emit_event(q, "error", {
+                "code": "rate_limit",
+                "message": rate_limit_msg,
+                "retry_after_seconds": 240
+            })
+            break
 
         chat_error_state = await page.evaluate("""() => {
             const retryBtn = document.querySelector('button[data-testid="regenerate-thread-error-button"]');
@@ -2705,58 +2834,67 @@ async def browser_loop_async():
                 dp = await b.new_page()
                 await dp.goto("https://chatgpt.com")
             except: pass
+            await cleanup_known_orphan_tabs(b)
             return b
 
         # Inicia pela primeira vez
         browser = await start_browser()
         file_log("browser.py", "🟢 Async Worker Online. Aguardando tarefas...")
 
-        while True:
-            try:
-                loop = asyncio.get_running_loop()
-                task = await loop.run_in_executor(None, browser_queue.get)
-                
-                if task.get('action') == 'STOP': break
-                
-                # =======================================================
-                # AUTO-RECOVERY: TESTA SE O BROWSER AINDA ESTÁ VIVO
-                # =======================================================
+        try:
+            while True:
                 try:
-                    # 1. Se o usuário fechou todas as abas, consideramos fechado
-                    if len(browser.pages) == 0:
-                        raise Exception("Sem abas")
+                    loop = asyncio.get_running_loop()
+                    task = await loop.run_in_executor(None, browser_queue.get)
                     
-                    # 2. Faz um "Ping" real no Chromium. Se ele foi fechado no X, isso vai dar erro na hora!
-                    await browser.pages[0].evaluate("1")
+                    if task.get('action') == 'STOP': break
+                    await cleanup_known_orphan_tabs(browser)
                     
-                except Exception:
-                    file_log("browser.py", "⚠️ Navegador fechado ou desconectado detectado! Recriando...")
-                    try: await browser.close()
-                    except: pass
-                    
-                    # Reabre o navegador usando a função interna
-                    browser = await start_browser()
-                    file_log("browser.py", "✅ Navegador reaberto com sucesso!")
-                # =======================================================
+                    # =======================================================
+                    # AUTO-RECOVERY: TESTA SE O BROWSER AINDA ESTÁ VIVO
+                    # =======================================================
+                    try:
+                        # 1. Se o usuário fechou todas as abas, consideramos fechado
+                        if len(browser.pages) == 0:
+                            raise Exception("Sem abas")
+                        
+                        # 2. Faz um "Ping" real no Chromium. Se ele foi fechado no X, isso vai dar erro na hora!
+                        await browser.pages[0].evaluate("1")
+                        
+                    except Exception:
+                        file_log("browser.py", "⚠️ Navegador fechado ou desconectado detectado! Recriando...")
+                        try: await browser.close()
+                        except: pass
+                        
+                        # Reabre o navegador usando a função interna
+                        browser = await start_browser()
+                        file_log("browser.py", "✅ Navegador reaberto com sucesso!")
+                    # =======================================================
 
-                action = task.get('action', 'CHAT')
-                
-                if action in ['GET_MENU', 'EXEC_MENU']:
-                    asyncio.create_task(handle_menu_task(browser, task))
-                elif action == 'SYNC':
-                    asyncio.create_task(handle_sync_task(browser, task))
-                elif action == 'SEARCH':
-                    asyncio.create_task(handle_search_task(browser, task))
-                elif action == 'UPTODATE_SEARCH':
-                    asyncio.create_task(handle_uptodate_search_task(browser, task))
-                elif action == 'DOWNLOAD_FILE':
-                    asyncio.create_task(handle_download_file(browser, task))
-                else:
-                    asyncio.create_task(handle_chat_task(browser, task))
+                    action = task.get('action', 'CHAT')
                     
-            except Exception as e:
-                print(f"Erro no loop principal: {e}")
-                await asyncio.sleep(1)
+                    if action in ['GET_MENU', 'EXEC_MENU']:
+                        asyncio.create_task(handle_menu_task(browser, task))
+                    elif action == 'SYNC':
+                        asyncio.create_task(handle_sync_task(browser, task))
+                    elif action == 'SEARCH':
+                        asyncio.create_task(handle_search_task(browser, task))
+                    elif action == 'UPTODATE_SEARCH':
+                        asyncio.create_task(handle_uptodate_search_task(browser, task))
+                    elif action == 'DOWNLOAD_FILE':
+                        asyncio.create_task(handle_download_file(browser, task))
+                    else:
+                        asyncio.create_task(handle_chat_task(browser, task))
+                        
+                except Exception as e:
+                    print(f"Erro no loop principal: {e}")
+                    await asyncio.sleep(1)
+        finally:
+            try:
+                await browser.close()
+                file_log("browser.py", "🛑 Contexto Chromium encerrado corretamente.")
+            except Exception as close_err:
+                file_log("browser.py", f"⚠️ Falha ao encerrar Chromium com elegância: {close_err}")
 
 def browser_loop():
     # Wrapper para rodar o loop async dentro da Thread do main.py
