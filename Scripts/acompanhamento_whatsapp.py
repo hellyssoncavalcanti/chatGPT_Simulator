@@ -1064,12 +1064,25 @@ def send_to_chatgpt(url_chatgpt: str, text: str, id_paciente: Any, id_atendiment
         if line.startswith("data: "):
             line = line[len("data: "):]
         if line == "[DONE]":
+            raw_stream_lines.append("[DONE]")
             break
         raw_stream_lines.append(line)
         try:
             chunk = json.loads(line)
         except (json.JSONDecodeError, ValueError):
+            raw_stream_lines.append(line)
             continue
+        # Log bruto sanitizado: mantém o JSON exato, removendo apenas base64 de screenshot.
+        chunk_for_log = chunk
+        if isinstance(chunk_for_log, dict) and chunk_for_log.get("type") == "screenshot":
+            content_obj = chunk_for_log.get("content")
+            if isinstance(content_obj, dict) and "data_base64" in content_obj:
+                b64_len = len(str(content_obj.get("data_base64") or ""))
+                content_obj = dict(content_obj)
+                content_obj["data_base64"] = f"<omitted_base64:{b64_len}_chars>"
+                chunk_for_log = dict(chunk_for_log)
+                chunk_for_log["content"] = content_obj
+        raw_stream_lines.append(json.dumps(chunk_for_log, ensure_ascii=False))
         msg_type = chunk.get("type") or ""
         msg_content = chunk.get("content") or ""
         # Status updates (navigating, typing, waiting, etc.)
