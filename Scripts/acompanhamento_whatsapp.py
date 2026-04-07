@@ -1000,6 +1000,8 @@ def send_to_chatgpt(url_chatgpt: str, text: str, id_paciente: Any, id_atendiment
         except Exception:
             pass
 
+    full_html = _sanitize_simulator_answer(full_html)
+
     log_table("ChatGPT Simulator | Resposta", [
         ("remetente", "acompanhamento_whatsapp.py"),
         ("chars", str(len(full_html))),
@@ -1288,7 +1290,7 @@ def build_forward_prompt(ctx: Dict[str, Any], patient_text: str) -> str:
     pergunta = ctx.get("pergunta") or "(não identificada)"
     nome = ctx.get("nome_paciente") or "Paciente"
     atendimento = ctx.get("id_atendimento")
-    return (
+    core = (
         "[RESPOSTA WHATSAPP DE ACOMPANHAMENTO]\n"
         f"Paciente: {nome}\n"
         f"ID atendimento: {atendimento}\n"
@@ -1297,6 +1299,21 @@ def build_forward_prompt(ctx: Dict[str, Any], patient_text: str) -> str:
         "Com base nessa resposta, forneça orientação clínica de continuidade, "
         "objetiva e segura para envio ao paciente."
     )
+    return f"[INICIO_TEXTO_COLADO]\n{core}\n[FIM_TEXTO_COLADO]"
+
+
+def _sanitize_simulator_answer(text: str) -> str:
+    """Remove artefatos de status de pensamento que vazam para a resposta final."""
+    out = (text or "").strip()
+    if not out:
+        return ""
+    # Ex.: "[PensandoMessage  Que bom...]" -> "Que bom..."
+    out = re.sub(r"^\[\s*(pensando|thinking)\s*message\b[:\s-]*", "", out, flags=re.IGNORECASE)
+    # Remove prefixos avulsos no início
+    out = re.sub(r"^(pensando|thinking)\b[:\s-]*", "", out, flags=re.IGNORECASE)
+    # Fecha colchete pendente logo após o prefixo removido
+    out = re.sub(r"^\]\s*", "", out)
+    return out.strip()
 
 
 def lookup_atendimento_by_phone(phone_digits: str) -> Optional[Dict[str, Any]]:
@@ -3766,7 +3783,7 @@ def process_incoming_replies_once() -> Dict[str, int]:
                 id_paciente=id_paciente,
                 id_atendimento=id_atendimento,
             )
-            answer = (res.get("html") or "").strip() or "Recebido. A equipe entrará em contato se necessário."
+            answer = _sanitize_simulator_answer((res.get("html") or "").strip()) or "Recebido. A equipe entrará em contato se necessário."
 
             # 10) Log patient message and simulator response
             if phone:
