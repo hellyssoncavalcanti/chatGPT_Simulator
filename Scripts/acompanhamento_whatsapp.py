@@ -1068,7 +1068,6 @@ def send_to_chatgpt(url_chatgpt: str, text: str, id_paciente: Any, id_atendiment
         if line == "[DONE]":
             raw_stream_lines.append("[DONE]")
             break
-        raw_stream_lines.append(line)
         try:
             chunk = json.loads(line)
         except (json.JSONDecodeError, ValueError):
