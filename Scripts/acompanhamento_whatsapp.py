@@ -99,6 +99,7 @@ SELECT
   m.nome                              AS nome_paciente,
   m.data_nascimento,
   caa.mensagens_acompanhamento,
+  caa.resumo_texto,
   caa.chat_url,
   cc.url_chatgpt
 FROM chatgpt_atendimentos_analise caa
@@ -1613,7 +1614,7 @@ def lookup_atendimento_by_phone(phone_digits: str) -> Optional[Dict[str, Any]]:
     suffix = phone_digits[-9:] if len(phone_digits) >= 9 else phone_digits
     query = (
         "SELECT caa.id AS id_analise, caa.id_atendimento, caa.id_paciente, "
-        "       caa.chat_url, m.nome AS nome_paciente "
+        "       caa.chat_url, caa.resumo_texto, m.nome AS nome_paciente "
         "FROM chatgpt_atendimentos_analise caa "
         "JOIN membros m ON m.id = caa.id_paciente "
         "WHERE caa.chat_url IS NOT NULL AND caa.chat_url <> '' "
@@ -1634,6 +1635,7 @@ def lookup_atendimento_by_phone(phone_digits: str) -> Optional[Dict[str, Any]]:
                 "id_paciente": row.get("id_paciente"),
                 "chat_url": (row.get("chat_url") or "").strip(),
                 "nome_paciente": row.get("nome_paciente"),
+                "resumo_texto": (row.get("resumo_texto") or "").strip(),
             }
     except Exception:
         log.exception("Falha ao buscar atendimento por telefone %s", phone_digits)
@@ -1648,7 +1650,7 @@ def lookup_atendimento_by_name(name: str) -> Optional[Dict[str, Any]]:
     safe_name = name.replace("'", "''")
     query = (
         "SELECT caa.id AS id_analise, caa.id_atendimento, caa.id_paciente, "
-        "       caa.chat_url, m.nome AS nome_paciente, "
+        "       caa.chat_url, caa.resumo_texto, m.nome AS nome_paciente, "
         "       COALESCE(m.telefone1, m.telefone2, m.telefone1pais, m.telefone2pais) AS telefone "
         "FROM chatgpt_atendimentos_analise caa "
         "JOIN membros m ON m.id = caa.id_paciente "
@@ -1668,6 +1670,7 @@ def lookup_atendimento_by_name(name: str) -> Optional[Dict[str, Any]]:
                 "chat_url": (row.get("chat_url") or "").strip(),
                 "nome_paciente": row.get("nome_paciente"),
                 "telefone": normalize_phone(row.get("telefone")),
+                "resumo_texto": (row.get("resumo_texto") or "").strip(),
             }
     except Exception:
         log.exception("Falha ao buscar atendimento por nome '%s'", name)
@@ -3050,6 +3053,7 @@ def send_pending_followups_once(cycle_no: int) -> Dict[str, Any]:
         nome_paciente = row.get("nome_paciente")
         chat_url = (row.get("chat_url") or "").strip()
         url_chatgpt = (row.get("url_chatgpt") or "").strip()
+        resumo_texto = (row.get("resumo_texto") or "").strip()
         dias = int(row.get("dias_desde_atendimento") or 0)
         inicio_atendimento = row.get("datetime_atendimento_inicio") or "N/D"
 
@@ -3120,6 +3124,7 @@ def send_pending_followups_once(cycle_no: int) -> Dict[str, Any]:
                         "question_key": key,
                         "url_chatgpt": url_chatgpt,
                         "sent_at": fallback_sent_at,
+                        "resumo_texto": resumo_texto,
                     },
                 )
                 skipped += 1
@@ -3146,6 +3151,7 @@ def send_pending_followups_once(cycle_no: int) -> Dict[str, Any]:
                             "question_key": key,
                             "url_chatgpt": url_chatgpt,
                             "sent_at": fallback_sent_at,
+                            "resumo_texto": resumo_texto,
                         },
                     )
                     skipped += 1
@@ -3176,6 +3182,7 @@ def send_pending_followups_once(cycle_no: int) -> Dict[str, Any]:
                 "pergunta": pergunta,
                 "full_msg": full_msg,
                 "dedupe_key": dedupe_key,
+                "resumo_texto": resumo_texto,
             })
 
     # ── Log da fila antes de iniciar envios ───────────────────────────────
@@ -3285,6 +3292,7 @@ def send_pending_followups_once(cycle_no: int) -> Dict[str, Any]:
                     "question_key": item["key"],
                     "url_chatgpt": item["url_chatgpt"],
                     "sent_at": sent_at_iso,
+                    "resumo_texto": item.get("resumo_texto", ""),
                 },
             )
 
@@ -3450,6 +3458,7 @@ def _resolve_chat_to_atendimento(
             continue
         wa_chat = lookup_whatsapp_chat(candidate_phone)
         if wa_chat and (wa_chat.get("url_chatgpt") or "").strip():
+            # resumo_texto not in chatgpt_chats; will be filled from phone_context
             return {
                 "id_analise": wa_chat.get("id_chatgpt_atendimentos_analise"),
                 "id_atendimento": wa_chat.get("id_atendimento"),
@@ -3457,6 +3466,7 @@ def _resolve_chat_to_atendimento(
                 "chat_url": (wa_chat.get("url_chatgpt") or "").strip(),
                 "nome_paciente": None,
                 "telefone": candidate_phone,
+                "resumo_texto": "",
             }
 
     # 2) Lookup via chatgpt_atendimentos_analise + membros phone columns
@@ -3482,7 +3492,7 @@ def _resolve_chat_to_atendimento(
             try:
                 rows = run_sql(
                     "SELECT caa.id AS id_analise, caa.id_atendimento, caa.id_paciente, "
-                    "       caa.chat_url, m.nome AS nome_paciente "
+                    "       caa.chat_url, caa.resumo_texto, m.nome AS nome_paciente "
                     "FROM chatgpt_atendimentos_analise caa "
                     "JOIN membros m ON m.id = caa.id_paciente "
                     f"WHERE caa.id_paciente = {int(profile_patient)} "
@@ -3500,6 +3510,7 @@ def _resolve_chat_to_atendimento(
                         "chat_url": (row.get("chat_url") or "").strip(),
                         "nome_paciente": row.get("nome_paciente") or profile.get("wa_display_name"),
                         "telefone": candidate_phone,
+                        "resumo_texto": (row.get("resumo_texto") or "").strip(),
                     }
             except Exception:
                 log.exception(
@@ -4119,6 +4130,14 @@ def process_incoming_replies_once() -> Dict[str, int]:
             # Classify reply type (admin / clinical / mixed)
             reply_type = classify_reply(last_msg["text"])
 
+            # Clinical summary: prefer phone_context (persisted at send time),
+            # fallback to freshly resolved atendimento dict.
+            clinical_summary = (
+                state.get_phone_context_field(phone_key_ctx, "resumo_texto")
+                or atendimento.get("resumo_texto")
+                or ""
+            )
+
             ctx = {
                 "id_atendimento": id_atendimento,
                 "id_paciente": id_paciente,
@@ -4130,6 +4149,7 @@ def process_incoming_replies_once() -> Dict[str, int]:
                 last_msg["text"],
                 last_msg.get("quoted_text", ""),
                 recent_messages=recent_messages,
+                clinical_summary=clinical_summary,
                 reply_type=reply_type,
             )
             log.info(
