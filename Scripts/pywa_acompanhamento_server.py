@@ -16,6 +16,7 @@ Fluxo:
 """
 
 import hashlib
+import base64
 import json
 import logging
 import os
@@ -619,6 +620,57 @@ def insert_whatsapp_chat(
         return None
 
 
+def _write_mensagens_array(safe_phone: str, merged: list, phone_match: str = "exact") -> bool:
+    """Write a full mensagens JSON array to the DB using base64 to avoid SQL injection
+    and PHP keyword filters (content may contain words like 'alter', 'drop', etc.).
+
+    phone_match: 'exact' uses = match, 'suffix' uses LIKE '%last9digits'.
+    Returns True on success.
+    """
+    json_bytes = json.dumps(merged, ensure_ascii=False).encode("utf-8")
+    b64 = base64.b64encode(json_bytes).decode("ascii")
+
+    if phone_match == "suffix":
+        where = f"whatsapp_paciente LIKE '%{safe_phone[-9:]}' AND chat_mode = 'whatsapp'"
+    else:
+        where = f"whatsapp_paciente = '{safe_phone}' AND chat_mode = 'whatsapp'"
+
+    query = (
+        f"UPDATE chatgpt_chats "
+        f"SET mensagens = CONVERT(FROM_BASE64('{b64}') USING utf8mb4), "
+        f"    datetime_atualizacao = NOW() "
+        f"WHERE id = ("
+        f"  SELECT id FROM (SELECT id FROM chatgpt_chats "
+        f"    WHERE {where} "
+        f"    ORDER BY id DESC LIMIT 1) AS t"
+        f")"
+    )
+    run_sql(query)
+    return True
+
+
+def _read_mensagens_array(safe_phone: str, phone_match: str = "exact") -> List[Dict[str, Any]]:
+    """Read the mensagens JSON array from DB for a phone number.
+    Returns parsed list (empty list if not found or on error).
+    """
+    if phone_match == "suffix":
+        where = f"whatsapp_paciente LIKE '%{safe_phone[-9:]}' AND chat_mode = 'whatsapp'"
+    else:
+        where = f"whatsapp_paciente = '{safe_phone}' AND chat_mode = 'whatsapp'"
+
+    rows = run_sql(
+        f"SELECT mensagens FROM chatgpt_chats WHERE {where} ORDER BY id DESC LIMIT 1"
+    )
+    if not rows or not rows[0].get("mensagens"):
+        return []
+    raw = rows[0]["mensagens"]
+    if isinstance(raw, list):
+        return raw
+    if isinstance(raw, str):
+        return json.loads(raw, strict=False)
+    return []
+
+
 def append_whatsapp_message(
     phone: str,
     role: str,
@@ -627,27 +679,12 @@ def append_whatsapp_message(
 ) -> None:
     """Append a message to the mensagens JSON array of the WhatsApp chat record."""
     safe_phone = (phone or "").replace("'", "")
-    new_msg = json.dumps(
-        {"role": role, "content": content, "timestamp": utc_now_iso(), "source": source},
-        ensure_ascii=False,
-    ).replace("'", "''")
+    new_msg = {"role": role, "content": content, "timestamp": utc_now_iso(), "source": source}
 
-    # Use JSON_ARRAY_APPEND if mensagens already exists, otherwise set a new array.
-    # MariaDB doesn't allow ORDER BY / LIMIT in UPDATE, so use subquery for id.
-    query = (
-        "UPDATE chatgpt_chats SET mensagens = "
-        f"CASE WHEN mensagens IS NULL OR mensagens = '' OR mensagens = '[]' "
-        f"  THEN CONCAT('[', '{new_msg}', ']') "
-        f"  ELSE JSON_ARRAY_APPEND(mensagens, '$', CAST('{new_msg}' AS JSON)) "
-        f"END "
-        f"WHERE id = ("
-        f"  SELECT id FROM (SELECT id FROM chatgpt_chats "
-        f"    WHERE whatsapp_paciente = '{safe_phone}' AND chat_mode = 'whatsapp' "
-        f"    ORDER BY id DESC LIMIT 1) AS t"
-        f")"
-    )
     try:
-        run_sql(query)
+        existing = _read_mensagens_array(safe_phone, phone_match="exact")
+        existing.append(new_msg)
+        _write_mensagens_array(safe_phone, existing, phone_match="exact")
     except Exception:
         log.exception("Falha ao atualizar mensagens do chat WhatsApp para phone=%s", phone)
 
@@ -660,6 +697,8 @@ def sync_whatsapp_messages_to_db(
 
     Reads the existing mensagens JSON from the DB, compares with the WhatsApp
     messages list, and appends any messages not already stored.
+    Writes the full merged array back using base64 encoding to avoid
+    SQL injection and PHP keyword-filter issues.
 
     Uses text content + direction as fingerprint to avoid duplicates.
     Returns the number of new messages appended.
@@ -673,23 +712,8 @@ def sync_whatsapp_messages_to_db(
         return 0
 
     # 1) Load existing mensagens from DB
-    existing_msgs: List[Dict[str, Any]] = []
     try:
-        rows = run_sql(
-            "SELECT mensagens FROM chatgpt_chats "
-            f"WHERE whatsapp_paciente LIKE '%{safe_phone[-9:]}' "
-            "  AND chat_mode = 'whatsapp' "
-            "ORDER BY id DESC LIMIT 1"
-        )
-        if rows and rows[0].get("mensagens"):
-            raw = rows[0]["mensagens"]
-            if isinstance(raw, str):
-                # Remove control characters (except common whitespace) that break json.loads
-                import re as _re_json
-                cleaned = _re_json.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f]', ' ', raw)
-                existing_msgs = json.loads(cleaned, strict=False)
-            elif isinstance(raw, list):
-                existing_msgs = raw
+        existing_msgs = _read_mensagens_array(safe_phone, phone_match="suffix")
     except Exception:
         log.exception("sync_whatsapp_messages_to_db: falha ao ler mensagens existentes para phone=%s", phone)
         return 0
@@ -729,35 +753,20 @@ def sync_whatsapp_messages_to_db(
     if not new_msgs:
         return 0
 
-    # 4) Append new messages to DB
-    appended = 0
-    for msg in new_msgs:
-        msg_json = json.dumps(msg, ensure_ascii=False).replace("'", "''")
-        query = (
-            "UPDATE chatgpt_chats SET mensagens = "
-            f"CASE WHEN mensagens IS NULL OR mensagens = '' OR mensagens = '[]' "
-            f"  THEN CONCAT('[', '{msg_json}', ']') "
-            f"  ELSE JSON_ARRAY_APPEND(mensagens, '$', CAST('{msg_json}' AS JSON)) "
-            f"END, "
-            f"datetime_atualizacao = NOW() "
-            f"WHERE id = ("
-            f"  SELECT id FROM (SELECT id FROM chatgpt_chats "
-            f"    WHERE whatsapp_paciente LIKE '%{safe_phone[-9:]}' AND chat_mode = 'whatsapp' "
-            f"    ORDER BY id DESC LIMIT 1) AS t"
-            f")"
-        )
-        try:
-            run_sql(query)
-            appended += 1
-        except Exception:
-            log.exception("sync_whatsapp_messages_to_db: falha ao append msg para phone=%s", phone)
+    # 4) Merge and write full array back to DB in a single UPDATE (base64-safe)
+    merged = existing_msgs + new_msgs
+    try:
+        _write_mensagens_array(safe_phone, merged, phone_match="suffix")
+    except Exception:
+        log.exception("sync_whatsapp_messages_to_db: falha ao gravar mensagens para phone=%s", phone)
+        return 0
 
-    if appended > 0:
-        log.info(
-            "  \033[96m📝 Sync mensagens WhatsApp → DB: phone=%s | %s novas mensagens salvas "
-            "(total visíveis=%s, já no DB=%s)\033[0m",
-            phone, appended, len(wa_messages), len(existing_msgs),
-        )
+    appended = len(new_msgs)
+    log.info(
+        "  \033[96m📝 Sync mensagens WhatsApp → DB: phone=%s | %s novas mensagens salvas "
+        "(total visíveis=%s, já no DB=%s)\033[0m",
+        phone, appended, len(wa_messages), len(existing_msgs),
+    )
     return appended
 
 
@@ -2091,17 +2100,20 @@ class WhatsAppWebClient:
                         const direction = msg.classList.contains('message-in') ? 'in' : 'out';
                         // Try to get timestamp from the message metadata
                         let timeText = '';
-                        const timeEl = msg.querySelector('span[data-testid="msg-time"], span.x1rg5ohu, div[data-pre-plain-text]');
-                        if (timeEl) {
-                            timeText = (timeEl.textContent || '').trim();
+                        // 1) data-pre-plain-text attribute: "[HH:MM, DD/MM/YYYY] Name: "
+                        const prePlain = msg.querySelector('[data-pre-plain-text]');
+                        if (prePlain) {
+                            const attr = prePlain.getAttribute('data-pre-plain-text') || '';
+                            const m = attr.match(/\\[(\\d{1,2}:\\d{2})/);
+                            if (m) timeText = m[1];
                         }
+                        // 2) Specific msg-time testid (only this element, not parents)
                         if (!timeText) {
-                            // Fallback: data-pre-plain-text attribute contains "[HH:MM, DD/MM/YYYY] Name: "
-                            const prePlain = msg.querySelector('[data-pre-plain-text]');
-                            if (prePlain) {
-                                const attr = prePlain.getAttribute('data-pre-plain-text') || '';
-                                const m = attr.match(/\\[(\\d{1,2}:\\d{2})/);
-                                if (m) timeText = m[1];
+                            const timeEl = msg.querySelector('span[data-testid="msg-time"]');
+                            if (timeEl) {
+                                const t = (timeEl.textContent || '').trim();
+                                // Validate it looks like a time (HH:MM)
+                                if (/^\\d{1,2}:\\d{2}$/.test(t)) timeText = t;
                             }
                         }
                         results.push({ id: msgId || text, text: text, direction: direction, time_text: timeText });
