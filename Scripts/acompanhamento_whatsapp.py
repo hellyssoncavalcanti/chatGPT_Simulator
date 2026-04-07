@@ -1467,6 +1467,22 @@ def _normalize_whatsapp_format(text: str) -> str:
     return out.strip()
 
 
+def _collapse_accidental_duplicate_reply(text: str) -> str:
+    """Heuristically trims accidental concatenation of the same reply twice."""
+    out = (text or "").strip()
+    if len(out) < 200:
+        return out
+    first_line = out.splitlines()[0].strip()
+    if len(first_line) < 20:
+        return out
+    second_pos = out.find(first_line, max(40, len(first_line)))
+    if second_pos > 0:
+        tail_len = len(out) - second_pos
+        if tail_len > 120 and second_pos > 120:
+            return out[:second_pos].rstrip()
+    return out
+
+
 def lookup_atendimento_by_phone(phone_digits: str) -> Optional[Dict[str, Any]]:
     """Find the most recent chatgpt_atendimentos_analise record for a phone.
 
@@ -1786,18 +1802,25 @@ class WhatsAppWebClient:
             outbound_count,
         )
 
-    def send_message(self, phone: str, text: str) -> None:
+    def send_message(self, phone: str, text: str) -> Dict[str, Any]:
         self.start()
 
         def _do():
             log.info("Iniciando fluxo de envio WhatsApp para %s", phone)
             self._open_chat(phone)
             box = self._page.locator("p._aupe, footer div[contenteditable='true']").first
+            normalized_text = _collapse_accidental_duplicate_reply(text)
+            if normalized_text != text:
+                log.warning(
+                    "Texto de resposta parece duplicado; aplicando dedupe antes do envio | chars_antes=%s chars_depois=%s",
+                    len(text or ""),
+                    len(normalized_text or ""),
+                )
             before_out = self._page.locator("div.message-out").count()
             box.click()
             # Type text line by line, using Shift+Enter for newlines
             # to avoid triggering message send on each line break.
-            lines = text.split("\n")
+            lines = normalized_text.split("\n")
             for i, line in enumerate(lines):
                 if line:
                     self._page.keyboard.type(line, delay=5)
@@ -1811,22 +1834,40 @@ class WhatsAppWebClient:
                 self._page.keyboard.press("Enter")
             self._page.wait_for_timeout(1200)
             after_out = self._page.locator("div.message-out").count()
+            sent_text = self._page.evaluate(
+                """() => {
+                    const nodes = Array.from(document.querySelectorAll('div.message-out'));
+                    if (!nodes.length) return '';
+                    const last = nodes[nodes.length - 1];
+                    return (last.innerText || '').trim();
+                }"""
+            ) or ""
             if after_out > before_out:
                 log.info(
-                    "Envio confirmado no browser para %s | out_antes=%s out_depois=%s",
+                    "Envio confirmado no browser para %s | out_antes=%s out_depois=%s | chars_digitados=%s chars_enviados=%s",
                     phone,
                     before_out,
                     after_out,
+                    len(normalized_text or ""),
+                    len(sent_text or ""),
                 )
             else:
                 log.warning(
-                    "Sem confirmação visual de envio no browser para %s | out_antes=%s out_depois=%s",
+                    "Sem confirmação visual de envio no browser para %s | out_antes=%s out_depois=%s | chars_digitados=%s chars_enviados=%s",
                     phone,
                     before_out,
                     after_out,
+                    len(normalized_text or ""),
+                    len(sent_text or ""),
                 )
+            return {
+                "chars_input": len(text or ""),
+                "chars_typed": len(normalized_text or ""),
+                "chars_sent": len(sent_text or ""),
+                "sent_text": sent_text,
+            }
 
-        self._run_on_browser_thread(_do)
+        return self._run_on_browser_thread(_do)
 
     def read_last_inbound(self, phone: str) -> Optional[Dict[str, str]]:
         self.start()
@@ -3946,11 +3987,17 @@ def process_incoming_replies_once() -> Dict[str, int]:
             # 11) Reply to the patient
             dest_phone = TEST_DESTINATION_PHONE if TEST_DESTINATION_PHONE else phone
             if dest_phone:
-                wa_web.send_message(dest_phone, answer)
+                send_meta = wa_web.send_message(dest_phone, answer) or {}
                 log.info(
                     "  %s%s✅ Resposta enviada ao paciente '%s' (phone=%s)%s\n"
+                    "  %s│ chars_resposta=%s | chars_digitados=%s | chars_enviados=%s%s\n"
                     "  %s│ Resposta: [%s]%s",
                     C_BG_GREEN, C_WHITE, nome_paciente, dest_phone, C_RESET,
+                    C_GREEN,
+                    len(answer or ""),
+                    send_meta.get("chars_typed", "-"),
+                    send_meta.get("chars_sent", "-"),
+                    C_RESET,
                     C_GREEN, build_preview_with_ellipsis(answer, 100), C_RESET,
                 )
             else:
