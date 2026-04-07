@@ -23,6 +23,7 @@ import os
 import queue
 import random
 import re
+import shutil
 import threading
 import time
 import unicodedata
@@ -1037,10 +1038,11 @@ def send_to_chatgpt(url_chatgpt: str, text: str, id_paciente: Any, id_atendiment
         if not txt:
             return
         line = f"  ⏳ ChatGPT Simulator: {txt}"
-        width = 140
+        width = max(80, shutil.get_terminal_size((140, 20)).columns - 1)
         if len(line) > width:
             line = line[: width - 3].rstrip() + "..."
-        sys.stdout.write("\r" + line.ljust(width))
+        # Limpa a linha atual e reescreve inline (sem gerar nova linha).
+        sys.stdout.write("\x1b[2K\r" + line.ljust(width))
         sys.stdout.flush()
         inline_status_open = True
 
