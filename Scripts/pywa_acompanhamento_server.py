@@ -1596,8 +1596,7 @@ class WhatsAppWebClient:
                     const msgs = Array.from(document.querySelectorAll('div.message-in'));
                     if (!msgs.length) return null;
                     const last = msgs[msgs.length - 1];
-                    const textNode = last.querySelector('span.selectable-text.copyable-text span') ||
-                                     last.querySelector('span.selectable-text span');
+                    const textNode = last.querySelector('span[data-testid="selectable-text"]');
                     const text = textNode ? textNode.textContent.trim() : '';
                     const msgId = last.getAttribute('data-id') || last.id || '';
                     if (!text) return null;
@@ -2007,8 +2006,7 @@ class WhatsAppWebClient:
                     const msgs = Array.from(document.querySelectorAll('div.message-in'));
                     const results = [];
                     for (const msg of msgs) {
-                        const textNode = msg.querySelector('span.selectable-text.copyable-text span') ||
-                                         msg.querySelector('span.selectable-text span');
+                        const textNode = msg.querySelector('span[data-testid="selectable-text"]');
                         const text = textNode ? textNode.textContent.trim() : '';
                         if (!text) continue;
                         const msgId = msg.getAttribute('data-id') || msg.id || '';
@@ -2035,8 +2033,7 @@ class WhatsAppWebClient:
                     const slice = allMsgs.slice(-limit);
                     const results = [];
                     for (const msg of slice) {
-                        const textNode = msg.querySelector('span.selectable-text.copyable-text span') ||
-                                         msg.querySelector('span.selectable-text span');
+                        const textNode = msg.querySelector('span[data-testid="selectable-text"]');
                         const text = textNode ? textNode.textContent.trim() : '';
                         if (!text) continue;
                         const msgId = msg.getAttribute('data-id') || msg.id || '';
@@ -2066,8 +2063,7 @@ class WhatsAppWebClient:
                     const allMsgs = Array.from(document.querySelectorAll('div.message-in, div.message-out'));
                     const results = [];
                     for (const msg of allMsgs) {
-                        const textNode = msg.querySelector('span.selectable-text.copyable-text span') ||
-                                         msg.querySelector('span.selectable-text span');
+                        const textNode = msg.querySelector('span[data-testid="selectable-text"]');
                         const text = textNode ? textNode.textContent.trim() : '';
                         if (!text) continue;
                         const msgId = msg.getAttribute('data-id') || msg.id || '';
