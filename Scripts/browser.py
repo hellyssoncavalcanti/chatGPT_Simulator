@@ -180,7 +180,6 @@ async def _should_keep_context_minimized(context) -> bool:
 
 
 async def _emit_browser_screenshot(page, q, label: str = "browser"):
-    global _SCREENSHOT_INLINE_LAST_LEN, _SCREENSHOT_INLINE_LAST_MSG
     if not q:
         return
     try:
@@ -196,13 +195,8 @@ async def _emit_browser_screenshot(page, q, label: str = "browser"):
         if len(raw) > SCREENSHOT_STREAM_MAX_BYTES:
             return
         kb = len(raw) / 1024
-        msg = f"📸 Screenshot stream [{label}]: {kb:.1f} KB — {page.url[:80]}"
-        # Evita “flood” no CMD quando o conteúdo do stream não mudou:
-        # mantém uma única linha por ação e atualiza apenas quando houver mudança.
-        if msg != _SCREENSHOT_INLINE_LAST_MSG:
-            print(f"\r{msg.ljust(_SCREENSHOT_INLINE_LAST_LEN)}", end="", flush=True)
-            _SCREENSHOT_INLINE_LAST_LEN = len(msg)
-            _SCREENSHOT_INLINE_LAST_MSG = msg
+        msg = f"📸 Screenshot stream [{label}]: {kb:.1f} KB — {page.url}"
+        emit_log(q, msg)
         emit_event(q, "screenshot", {
             "label": label,
             "format": "jpeg",
@@ -215,7 +209,6 @@ async def _emit_browser_screenshot(page, q, label: str = "browser"):
 
 
 async def _stream_browser_screenshots(page, q, stop_event: asyncio.Event, label: str = "browser"):
-    global _SCREENSHOT_INLINE_LAST_LEN, _SCREENSHOT_INLINE_LAST_MSG
     if not q:
         return
     try:
@@ -227,11 +220,6 @@ async def _stream_browser_screenshots(page, q, stop_event: asyncio.Event, label:
                 await _emit_browser_screenshot(page, q, label=label)
     except asyncio.CancelledError:
         raise
-    finally:
-        if _SCREENSHOT_INLINE_LAST_LEN > 0:
-            print("", flush=True)
-            _SCREENSHOT_INLINE_LAST_LEN = 0
-            _SCREENSHOT_INLINE_LAST_MSG = ""
 
 
 def _composer_state_script():

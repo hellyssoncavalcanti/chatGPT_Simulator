@@ -1364,6 +1364,7 @@ def chat_completions():
         or 'analisador-prontuarios' in source_hint_norm
         or source_hint_norm == 'analyzer'
     )
+    sender_label = "analisador_prontuarios.py" if is_analyzer else (source_hint or "usuario_remoto")
     _origem = " [origem: analisador_prontuarios.py]" if is_analyzer else (f" [origem: {source_hint}]" if source_hint else "")
 
     if chat_id:
@@ -1495,6 +1496,11 @@ def chat_completions():
                     try:
                         msg_obj = json.loads(raw_msg)
                         t = msg_obj.get('type')
+                        if t in ('log', 'status', 'error'):
+                            content_text = msg_obj.get('content')
+                            if isinstance(content_text, str) and content_text and not content_text.startswith("Remetente: "):
+                                msg_obj['content'] = f"Remetente: {sender_label} | {content_text}"
+                                raw_msg = json.dumps(msg_obj, ensure_ascii=False)
                         if t == 'status':
                             ACTIVE_CHATS[chat_id]['status'] = msg_obj['content']
                         elif t == 'markdown':
