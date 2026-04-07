@@ -1073,8 +1073,10 @@ async def _click_chatgpt_download_elements(page, q=None):
             return False
 
         clicked = False
+        context = page.context
         for el in download_elements:
             try:
+                baseline_page_ids = {id(p) for p in list(getattr(context, "pages", []) or [])}
                 if el['selector'] == 'button_in_last':
                     last_msg = page.locator('[data-message-author-role="assistant"]').last
                     btn = last_msg.locator('button, [role="button"]').nth(el['index'])
@@ -1089,7 +1091,22 @@ async def _click_chatgpt_download_elements(page, q=None):
                     await link.click(timeout=2000, force=True)
                 emit_log(q, f"📎 Clicou elemento de download: {el['text']}")
                 clicked = True
-                await asyncio.sleep(1)
+                await asyncio.sleep(0.8)
+
+                # Alguns links de PDF abrem em nova aba persistente; fecha qualquer
+                # aba criada pelo clique para evitar acúmulo.
+                for maybe_new in list(getattr(context, "pages", []) or []):
+                    if id(maybe_new) in baseline_page_ids or maybe_new == page:
+                        continue
+                    try:
+                        opened_url = (maybe_new.url or "").strip()
+                    except Exception:
+                        opened_url = ""
+                    try:
+                        await maybe_new.close()
+                        emit_log(q, f"🧹 Aba aberta por download foi fechada: {opened_url[:120]}")
+                    except Exception as close_err:
+                        emit_log(q, f"⚠️ Falha ao fechar aba aberta por download: {close_err}")
             except Exception as e:
                 detalhe = str(e).splitlines()[0][:220]
                 emit_log(q, f"ℹ️ Clique de download ignorado '{el['text']}': {detalhe}")
