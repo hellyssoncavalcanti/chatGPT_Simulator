@@ -369,6 +369,15 @@ def _sql_escape(value: Any) -> str:
     return str(value or "").replace("\\", "\\\\").replace("'", "''")
 
 
+def _sql_utf8mb4_literal(value: Any) -> str:
+    """Build a utf8mb4 SQL string literal via hex payload.
+
+    This prevents free-text content from interfering with SQL parser/filters.
+    """
+    raw = str(value or "")
+    return f"CONVERT(0x{raw.encode('utf-8').hex()} USING utf8mb4)"
+
+
 def _upsert_whatsapp_contact_profile(
     *,
     phone: Optional[str],
@@ -630,23 +639,36 @@ def append_whatsapp_message(
     new_msg = json.dumps(
         {"role": role, "content": content, "timestamp": utc_now_iso(), "source": source},
         ensure_ascii=False,
-    ).replace("'", "''")
-
-    # Use JSON_ARRAY_APPEND if mensagens already exists, otherwise set a new array.
-    # MariaDB doesn't allow ORDER BY / LIMIT in UPDATE, so use subquery for id.
-    query = (
-        "UPDATE chatgpt_chats SET mensagens = "
-        f"CASE WHEN mensagens IS NULL OR mensagens = '' OR mensagens = '[]' "
-        f"  THEN CONCAT('[', '{new_msg}', ']') "
-        f"  ELSE JSON_ARRAY_APPEND(mensagens, '$', CAST('{new_msg}' AS JSON)) "
-        f"END "
-        f"WHERE id = ("
-        f"  SELECT id FROM (SELECT id FROM chatgpt_chats "
-        f"    WHERE whatsapp_paciente = '{safe_phone}' AND chat_mode = 'whatsapp' "
-        f"    ORDER BY id DESC LIMIT 1) AS t"
-        f")"
     )
     try:
+        rows = run_sql(
+            "SELECT id, mensagens FROM chatgpt_chats "
+            f"WHERE whatsapp_paciente = '{safe_phone}' AND chat_mode = 'whatsapp' "
+            "ORDER BY id DESC LIMIT 1"
+        )
+        if not rows:
+            return
+        chat_id = int(rows[0]["id"])
+        raw = rows[0].get("mensagens")
+        existing: List[Dict[str, Any]] = []
+        if isinstance(raw, str) and raw.strip():
+            try:
+                existing = json.loads(raw, strict=False)
+            except Exception:
+                existing = []
+        elif isinstance(raw, list):
+            existing = raw
+        if not isinstance(existing, list):
+            existing = []
+
+        existing.append(json.loads(new_msg))
+        payload = json.dumps(existing, ensure_ascii=False)
+        query = (
+            "UPDATE chatgpt_chats SET "
+            f"mensagens = {_sql_utf8mb4_literal(payload)}, "
+            "datetime_atualizacao = NOW() "
+            f"WHERE id = {chat_id}"
+        )
         run_sql(query)
     except Exception:
         log.exception("Falha ao atualizar mensagens do chat WhatsApp para phone=%s", phone)
@@ -729,28 +751,30 @@ def sync_whatsapp_messages_to_db(
     if not new_msgs:
         return 0
 
-    # 4) Append new messages to DB
+    # 4) Persist all new messages in a single UPDATE
     appended = 0
-    for msg in new_msgs:
-        msg_json = json.dumps(msg, ensure_ascii=False).replace("'", "''")
-        query = (
-            "UPDATE chatgpt_chats SET mensagens = "
-            f"CASE WHEN mensagens IS NULL OR mensagens = '' OR mensagens = '[]' "
-            f"  THEN CONCAT('[', '{msg_json}', ']') "
-            f"  ELSE JSON_ARRAY_APPEND(mensagens, '$', CAST('{msg_json}' AS JSON)) "
-            f"END, "
-            f"datetime_atualizacao = NOW() "
-            f"WHERE id = ("
-            f"  SELECT id FROM (SELECT id FROM chatgpt_chats "
-            f"    WHERE whatsapp_paciente LIKE '%{safe_phone[-9:]}' AND chat_mode = 'whatsapp' "
-            f"    ORDER BY id DESC LIMIT 1) AS t"
-            f")"
+    try:
+        rows = run_sql(
+            "SELECT id FROM chatgpt_chats "
+            f"WHERE whatsapp_paciente LIKE '%{safe_phone[-9:]}' "
+            "  AND chat_mode = 'whatsapp' "
+            "ORDER BY id DESC LIMIT 1"
         )
-        try:
-            run_sql(query)
-            appended += 1
-        except Exception:
-            log.exception("sync_whatsapp_messages_to_db: falha ao append msg para phone=%s", phone)
+        if not rows:
+            return 0
+        chat_id = int(rows[0]["id"])
+        merged = existing_msgs + new_msgs
+        merged_json = json.dumps(merged, ensure_ascii=False)
+        query = (
+            "UPDATE chatgpt_chats SET "
+            f"mensagens = {_sql_utf8mb4_literal(merged_json)}, "
+            "datetime_atualizacao = NOW() "
+            f"WHERE id = {chat_id}"
+        )
+        run_sql(query)
+        appended = len(new_msgs)
+    except Exception:
+        log.exception("sync_whatsapp_messages_to_db: falha ao salvar lote para phone=%s", phone)
 
     if appended > 0:
         log.info(
@@ -2089,18 +2113,23 @@ class WhatsAppWebClient:
                         if (!text) continue;
                         const msgId = msg.getAttribute('data-id') || msg.id || '';
                         const direction = msg.classList.contains('message-in') ? 'in' : 'out';
-                        // Try to get timestamp from the message metadata
+                        // Try to get timestamp from message metadata.
                         let timeText = '';
-                        const timeEl = msg.querySelector('span[data-testid="msg-time"], span.x1rg5ohu, div[data-pre-plain-text]');
-                        if (timeEl) {
-                            timeText = (timeEl.textContent || '').trim();
+                        const prePlain = msg.querySelector('[data-pre-plain-text]');
+                        if (prePlain) {
+                            const attr = prePlain.getAttribute('data-pre-plain-text') || '';
+                            const m = attr.match(/\\[(\\d{1,2}:\\d{2})/);
+                            if (m) timeText = m[1];
                         }
                         if (!timeText) {
-                            // Fallback: data-pre-plain-text attribute contains "[HH:MM, DD/MM/YYYY] Name: "
-                            const prePlain = msg.querySelector('[data-pre-plain-text]');
-                            if (prePlain) {
-                                const attr = prePlain.getAttribute('data-pre-plain-text') || '';
-                                const m = attr.match(/\\[(\\d{1,2}:\\d{2})/);
+                            // Restrict fallback selectors to explicit time labels only.
+                            const t1 = msg.querySelector('span[data-testid="msg-time"]');
+                            const t2 = msg.querySelector('div.copyable-text span[aria-hidden="true"]');
+                            const t3 = msg.querySelector('span[dir="auto"][aria-label*=":"]');
+                            const timeEl = t1 || t2 || t3;
+                            if (timeEl) {
+                                const txt = (timeEl.textContent || '').trim();
+                                const m = txt.match(/(\\d{1,2}:\\d{2})/);
                                 if (m) timeText = m[1];
                             }
                         }
