@@ -1359,6 +1359,60 @@ def robots_txt():
     # O mimetype "text/plain" garante que o navegador leia como texto puro
     return Response("User-agent: *\nDisallow: /\n", mimetype="text/plain")
 
+# --- ROTA: ENVIAR RESPOSTA MANUAL AO PACIENTE VIA WhatsApp ---
+# Recebe mensagem do profissional/secretária e repassa ao
+# acompanhamento_whatsapp.py (porta 3011) para enviar via WhatsApp Web.
+@app.route("/api/send_manual_whatsapp_reply", methods=["POST"])
+def send_manual_whatsapp_reply():
+    if not check_auth():
+        return jsonify({"error": "Unauthorized"}), 401
+
+    data = request.get_json() or {}
+    phone   = (data.get("phone") or "").strip()
+    message = (data.get("message") or "").strip()
+    chat_id = data.get("chat_id")
+    id_paciente      = data.get("id_paciente")
+    id_atendimento   = data.get("id_atendimento")
+    id_membro        = data.get("id_membro_solicitante")
+    nome_membro      = data.get("nome_membro_solicitante")
+
+    if not phone or not message:
+        return jsonify({"success": False, "error": "phone e message são obrigatórios"}), 400
+
+    _quem = f' por "{nome_membro}" (id={id_membro})' if (nome_membro or id_membro) else ""
+    print(f"\n[📨 MANUAL REPLY] Resposta manual{_quem} para phone={phone} | chat_id={chat_id}")
+
+    # Repassa ao acompanhamento_whatsapp.py (porta 3011)
+    import requests as http_requests
+    pywa_url = os.getenv("PYWA_URL", "http://127.0.0.1:3011")
+    try:
+        payload = {
+            "phone": phone,
+            "message": message,
+            "chat_id": chat_id,
+            "id_paciente": id_paciente,
+            "id_atendimento": id_atendimento,
+            "id_membro_solicitante": id_membro,
+            "nome_membro_solicitante": nome_membro,
+        }
+        resp = http_requests.post(
+            f"{pywa_url}/send-manual-reply",
+            json=payload,
+            timeout=30,
+        )
+        result = resp.json()
+        if resp.ok and result.get("ok"):
+            print(f"[📨 MANUAL REPLY] Enviado com sucesso para {phone}")
+            return jsonify({"success": True, "whatsapp_response": result})
+        else:
+            err = result.get("error") or f"HTTP {resp.status_code}"
+            print(f"[📨 MANUAL REPLY] Falha: {err}")
+            return jsonify({"success": False, "error": err}), 502
+    except Exception as e:
+        print(f"[📨 MANUAL REPLY] Erro ao contactar acompanhamento_whatsapp: {e}")
+        return jsonify({"success": False, "error": str(e)}), 502
+
+
 # --- ROTA DE CHAT (ATUALIZADA) ---
 @app.route("/v1/chat/completions", methods=["POST"])
 def chat_completions():
