@@ -673,6 +673,239 @@ if (isset($_GET['action']) && $_GET['action'] === 'execute_sql') {
 }
 
 // -----------------------------------------------------
+// HANDLER: VERIFICAR PENDÊNCIAS DE NOTIFICAÇÃO (WhatsApp)
+// -----------------------------------------------------
+// Consulta chatgpt_chats com notificacao_pendente != 'false' e verifica
+// se o usuário logado é o destinatário (id_criador ou secretária).
+if (isset($_GET['action']) && $_GET['action'] === 'check_pendencias') {
+    header('Content-Type: application/json; charset=utf-8');
+    global $row_login_atual;
+    @session_start();
+
+    $id_usuario = $row_login_atual['id'] ?? ($_SESSION['id'] ?? null);
+    if (!$id_usuario || !is_numeric($id_usuario)) {
+        echo json_encode(['success' => false, 'error' => 'Não autenticado']);
+        exit;
+    }
+    $id_usuario = intval($id_usuario);
+
+    try {
+        $db = get_mysql_connection_local();
+        if (!$db) throw new Exception("Falha na conexão com banco de dados");
+        $db->set_charset("utf8mb4");
+
+        // Garante que a coluna existe (idempotente)
+        @$db->query("ALTER TABLE chatgpt_chats ADD COLUMN IF NOT EXISTS notificacao_pendente VARCHAR(20) NOT NULL DEFAULT 'false' COMMENT 'Flag de notificacao pendente: false | id_criador | id_secretaria'");
+
+        $pendencias = [];
+
+        // 1) Pendências direcionadas ao criador (id_criador) deste usuário
+        $sql_criador = "SELECT cc.id, cc.id_criador, cc.id_paciente, cc.id_atendimento,
+                        cc.whatsapp_paciente, cc.mensagens, cc.titulo, cc.notificacao_pendente,
+                        m.nome AS nome_paciente
+                        FROM chatgpt_chats cc
+                        LEFT JOIN membros m ON m.id = cc.id_paciente
+                        WHERE cc.notificacao_pendente = 'id_criador'
+                        AND cc.id_criador = {$id_usuario}
+                        ORDER BY cc.datetime_atualizacao DESC";
+        $result = $db->query($sql_criador);
+        if ($result) {
+            while ($row = $result->fetch_assoc()) {
+                $row['tipo_notificacao'] = 'id_criador';
+                $pendencias[] = $row;
+            }
+        }
+
+        // 2) Verifica se o usuário logado é secretária
+        //    Critérios: classificacao='profissional', registro_conselho vazio/0,
+        //    e 'clinica_membros' presente na lista membros.incluir (separador &)
+        $is_secretaria = false;
+        $sql_user = "SELECT classificacao, registro_conselho, incluir
+                     FROM membros WHERE id = {$id_usuario} LIMIT 1";
+        $result_user = $db->query($sql_user);
+        if ($result_user && $result_user->num_rows > 0) {
+            $user_data = $result_user->fetch_assoc();
+            $classificacao = strtolower(trim($user_data['classificacao'] ?? ''));
+            $registro = trim($user_data['registro_conselho'] ?? '');
+            $incluir_raw = trim($user_data['incluir'] ?? '');
+            $incluir_list = array_map('trim', explode('&', $incluir_raw));
+
+            if ($classificacao === 'profissional'
+                && ($registro === '' || $registro === '0' || $registro === null)
+                && in_array('clinica_membros', $incluir_list)) {
+                $is_secretaria = true;
+            }
+        }
+
+        // 3) Se é secretária, busca pendências do tipo id_secretaria
+        if ($is_secretaria) {
+            $sql_secretaria = "SELECT cc.id, cc.id_criador, cc.id_paciente, cc.id_atendimento,
+                               cc.whatsapp_paciente, cc.mensagens, cc.titulo, cc.notificacao_pendente,
+                               m.nome AS nome_paciente
+                               FROM chatgpt_chats cc
+                               LEFT JOIN membros m ON m.id = cc.id_paciente
+                               WHERE cc.notificacao_pendente = 'id_secretaria'
+                               ORDER BY cc.datetime_atualizacao DESC";
+            $result_sec = $db->query($sql_secretaria);
+            if ($result_sec) {
+                while ($row = $result_sec->fetch_assoc()) {
+                    $row['tipo_notificacao'] = 'id_secretaria';
+                    $pendencias[] = $row;
+                }
+            }
+        }
+
+        echo json_encode([
+            'success'        => true,
+            'pendencias'     => $pendencias,
+            'is_secretaria'  => $is_secretaria,
+            'id_usuario'     => $id_usuario
+        ]);
+    } catch (Exception $e) {
+        echo json_encode(['success' => false, 'error' => $e->getMessage()]);
+    }
+    exit;
+}
+
+// -----------------------------------------------------
+// HANDLER: RESOLVER PENDÊNCIA (marcar notificação como lida)
+// -----------------------------------------------------
+if (isset($_GET['action']) && $_GET['action'] === 'resolver_pendencia') {
+    header('Content-Type: application/json; charset=utf-8');
+    global $row_login_atual;
+    @session_start();
+
+    $id_usuario = $row_login_atual['id'] ?? ($_SESSION['id'] ?? null);
+    if (!$id_usuario || !is_numeric($id_usuario)) {
+        echo json_encode(['success' => false, 'error' => 'Não autenticado']);
+        exit;
+    }
+
+    $inputJSON = file_get_contents('php://input');
+    $data = json_decode($inputJSON, true);
+    $chat_id = isset($data['chat_id']) && is_numeric($data['chat_id']) ? intval($data['chat_id']) : null;
+
+    if (!$chat_id) {
+        echo json_encode(['success' => false, 'error' => 'chat_id inválido']);
+        exit;
+    }
+
+    try {
+        $db = get_mysql_connection_local();
+        if (!$db) throw new Exception("Falha na conexão com banco de dados");
+        $db->set_charset("utf8mb4");
+
+        $sql = "UPDATE chatgpt_chats SET notificacao_pendente = 'false'
+                WHERE id = {$chat_id} AND notificacao_pendente != 'false'";
+        if (!$db->query($sql)) throw new Exception($db->error);
+
+        echo json_encode(['success' => true, 'affected_rows' => $db->affected_rows]);
+    } catch (Exception $e) {
+        echo json_encode(['success' => false, 'error' => $e->getMessage()]);
+    }
+    exit;
+}
+
+// -----------------------------------------------------
+// HANDLER: ENVIAR RESPOSTA MANUAL AO PACIENTE VIA WhatsApp
+// Rota: ?action=send_manual_whatsapp_reply
+// Repassa ao server.py (porta 3003) /api/send_manual_whatsapp_reply
+// que por sua vez envia ao acompanhamento_whatsapp.py (porta 3011)
+// para enviar a mensagem via WhatsApp Web ao paciente.
+// -----------------------------------------------------
+if (isset($_GET['action']) && $_GET['action'] === 'send_manual_whatsapp_reply') {
+    header('Content-Type: application/json; charset=utf-8');
+    global $row_login_atual, $ollama_manual_ip, $CHATGPT_VIA_API_KEY;
+    @session_start();
+
+    $id_usuario = $row_login_atual['id'] ?? ($_SESSION['id'] ?? null);
+    if (!$id_usuario || !is_numeric($id_usuario)) {
+        echo json_encode(['success' => false, 'error' => 'Não autenticado']);
+        exit;
+    }
+
+    $inputJSON = file_get_contents('php://input');
+    $data = json_decode($inputJSON, true);
+    $message = trim($data['message'] ?? '');
+    $phone   = trim($data['phone'] ?? '');
+
+    if (empty($message) || empty($phone)) {
+        echo json_encode(['success' => false, 'error' => 'message e phone são obrigatórios']);
+        exit;
+    }
+
+    // Resolve IP do servidor Python (porta 3003) — mesma lógica do proxy
+    $ip_final = '';
+    if (!empty($ollama_manual_ip)) {
+        $ip_final = preg_replace('/:\d+$/', ':3003', rtrim($ollama_manual_ip, '/'));
+    } else {
+        $url_monitor = "http://conexaovida.org/no-ip-dynamic_ip.php?port=3003";
+        $ch_ip = curl_init($url_monitor);
+        curl_setopt($ch_ip, CURLOPT_RETURNTRANSFER, true);
+        curl_setopt($ch_ip, CURLOPT_FOLLOWLOCATION, true);
+        curl_setopt($ch_ip, CURLOPT_HEADER, true);
+        curl_setopt($ch_ip, CURLOPT_TIMEOUT, 5);
+        $raw_resp = curl_exec($ch_ip);
+        $eff_url = curl_getinfo($ch_ip, CURLINFO_EFFECTIVE_URL);
+        curl_close($ch_ip);
+        $ip_found = null;
+        if (preg_match('/(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})/', $eff_url, $m)) $ip_found = $m[1];
+        elseif (preg_match('/(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})/', $raw_resp ?? '', $m)) $ip_found = $m[1];
+        if ($ip_found && filter_var($ip_found, FILTER_VALIDATE_IP)) {
+            $ip_final = "http://{$ip_found}:3003";
+        }
+    }
+
+    if (empty($ip_final)) {
+        echo json_encode(['success' => false, 'error' => 'Não foi possível detectar IP do servidor.']);
+        exit;
+    }
+
+    $payload = [
+        'phone'                   => $phone,
+        'message'                 => $message,
+        'chat_id'                 => intval($data['chat_id'] ?? 0),
+        'id_paciente'             => intval($data['id_paciente'] ?? 0),
+        'id_atendimento'          => intval($data['id_atendimento'] ?? 0),
+        'id_membro_solicitante'   => intval($id_usuario),
+        'nome_membro_solicitante' => $row_login_atual['nome'] ?? ($_SESSION['nome'] ?? ''),
+        'api_key'                 => $CHATGPT_VIA_API_KEY
+    ];
+
+    $url_destino = rtrim($ip_final, '/') . '/api/send_manual_whatsapp_reply';
+    $ch = curl_init($url_destino);
+    curl_setopt($ch, CURLOPT_POST, true);
+    curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($payload));
+    curl_setopt($ch, CURLOPT_HTTPHEADER, [
+        'Content-Type: application/json',
+        'Authorization: Bearer ' . $CHATGPT_VIA_API_KEY
+    ]);
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($ch, CURLOPT_TIMEOUT, 30);
+    $resp = curl_exec($ch);
+    $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    $curl_err = curl_error($ch);
+    curl_close($ch);
+
+    if ($curl_err) {
+        echo json_encode(['success' => false, 'error' => "Erro de rede: {$curl_err}"]);
+        exit;
+    }
+
+    $result = json_decode($resp, true);
+    if ($http_code >= 200 && $http_code < 300 && isset($result['success']) && $result['success']) {
+        echo json_encode(['success' => true, 'server_response' => $result]);
+    } else {
+        echo json_encode([
+            'success' => false,
+            'error'   => $result['error'] ?? "HTTP {$http_code}",
+            'server_response' => $result
+        ]);
+    }
+    exit;
+}
+
+// -----------------------------------------------------
 // HANDLER: SALVAR METADADOS DO CHAT NO BANCO (MYSQL)
 // -----------------------------------------------------
 if (isset($_GET['action']) && $_GET['action'] === 'save_chat_meta') {
@@ -3555,6 +3788,67 @@ header('Content-Type: application/javascript; charset=utf-8');
         .sb-view.active { display: block; }
         @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
 
+        /* === BADGE DE NOTIFICAÇÃO NO BOTÃO TOGGLE === */
+        #ow-toggle-btn { position: relative; }
+        #ow-pendencia-badge {
+            position: absolute; top: -4px; right: -4px;
+            width: 18px; height: 18px; border-radius: 50%;
+            background: #d32f2f; color: #fff; font-size: 10px; font-weight: 800;
+            display: none; align-items: center; justify-content: center;
+            border: 2px solid #fff; box-shadow: 0 1px 4px rgba(0,0,0,0.3);
+            line-height: 1; pointer-events: none;
+            animation: pulseBadge 2s infinite;
+        }
+        #ow-pendencia-badge.visible { display: flex; }
+        @keyframes pulseBadge { 0%,100% { transform: scale(1); } 50% { transform: scale(1.15); } }
+
+        /* === SIDEBAR — PENDÊNCIAS VIEW === */
+        #sb-view-pendencias .sb-pend-list { flex: 1; overflow-y: auto; margin-top: 10px; }
+        .sb-pend-card {
+            padding: 12px; border: 1px solid #fde68a; border-radius: 8px;
+            margin-bottom: 10px; cursor: pointer; background: linear-gradient(135deg,#fffdf5,#fff7db);
+            transition: box-shadow 0.2s;
+        }
+        .sb-pend-card:hover { box-shadow: 0 2px 8px rgba(180,83,9,0.15); }
+        .sb-pend-card-title { font-weight: 700; font-size: 13px; color: #92400e; }
+        .sb-pend-card-sub { font-size: 11px; color: #b45309; margin-top: 3px; }
+        .sb-pend-card-badge {
+            display: inline-block; font-size: 10px; font-weight: 700;
+            padding: 2px 7px; border-radius: 999px; color: #fff; margin-top: 5px;
+        }
+        .sb-pend-card-badge.criador { background: #2563eb; }
+        .sb-pend-card-badge.secretaria { background: #d97706; }
+
+        /* === CHAT VIEW DENTRO DE PENDÊNCIAS === */
+        #sb-view-pendencias-chat { display: flex; flex-direction: column; height: 100%; }
+        #sb-pend-chat-messages {
+            flex: 1; overflow-y: auto; padding: 10px 0;
+            display: flex; flex-direction: column; gap: 8px;
+        }
+        .sb-pend-msg {
+            max-width: 85%; padding: 8px 12px; border-radius: 10px;
+            font-size: 13px; line-height: 1.5; word-break: break-word;
+        }
+        .sb-pend-msg.user { align-self: flex-start; background: #f0f0f0; color: #333; border-bottom-left-radius: 2px; }
+        .sb-pend-msg.assistant { align-self: flex-end; background: #dcf8c6; color: #1a1a1a; border-bottom-right-radius: 2px; }
+        .sb-pend-msg.system { align-self: center; background: #fff3cd; color: #856404; font-size: 11px; font-style: italic; text-align: center; border-radius: 6px; }
+        .sb-pend-msg-time { font-size: 9px; color: #999; margin-top: 3px; }
+        #sb-pend-chat-input-area {
+            display: flex; gap: 8px; padding-top: 10px; border-top: 1px solid #eee;
+            flex-shrink: 0;
+        }
+        #sb-pend-chat-input {
+            flex: 1; padding: 8px 10px; border: 1px solid #ddd; border-radius: 6px;
+            font-size: 13px; resize: none; height: 38px; outline: none;
+        }
+        #sb-pend-chat-send {
+            background: #212121; color: #fff; border: none; padding: 0 16px;
+            border-radius: 6px; cursor: pointer; font-weight: 600; font-size: 13px;
+            white-space: nowrap;
+        }
+        #sb-pend-chat-send:disabled { background: #aaa; cursor: not-allowed; }
+        .sb-pend-empty { text-align: center; color: #999; font-size: 13px; padding: 30px 10px; }
+
         /* ── Imagens dentro de mensagens da IA ── */
         .msg-ai img {
             max-width: 100%;
@@ -3767,6 +4061,10 @@ header('Content-Type: application/javascript; charset=utf-8');
                     <div class="sb-menu-item" onclick="switchSidebarView('prompts')">
                         <span>✏️</span> <span>Personalizar IA</span>
                     </div>
+                    <div class="sb-menu-item" id="sb-menu-pendencias" onclick="switchSidebarView('pendencias')">
+                        <span>🔔</span> <span>Pendências</span>
+                        <span id="sb-pend-menu-count" style="display:none; background:#d32f2f; color:#fff; font-size:10px; font-weight:800; padding:2px 7px; border-radius:999px; margin-left:auto;"></span>
+                    </div>
                 </div>
 
                 <div id="sb-view-install" class="sb-view sb-content">
@@ -3819,6 +4117,30 @@ header('Content-Type: application/javascript; charset=utf-8');
                         <?php endif; ?>
                     </div>
                 </div>
+
+                <div id="sb-view-pendencias" class="sb-view sb-content">
+                    <div class="sb-title">
+                        <button class="sb-close-btn" onclick="switchSidebarView('menu')">&#8592;</button>
+                        <span>Pendencias WhatsApp</span>
+                        <button id="sb-btn-close-pendencias" class="sb-close-btn">&#215;</button>
+                    </div>
+                    <div id="sb-pend-list" class="sb-pend-list">
+                        <div class="sb-pend-empty">Nenhuma pendencia encontrada.</div>
+                    </div>
+                </div>
+
+                <div id="sb-view-pendencias-chat" class="sb-view sb-content">
+                    <div class="sb-title">
+                        <button class="sb-close-btn" onclick="switchSidebarView('pendencias')">&#8592;</button>
+                        <span id="sb-pend-chat-title">Chat</span>
+                        <button id="sb-btn-close-pend-chat" class="sb-close-btn">&#215;</button>
+                    </div>
+                    <div id="sb-pend-chat-messages"></div>
+                    <div id="sb-pend-chat-input-area">
+                        <textarea id="sb-pend-chat-input" placeholder="Digite sua resposta ao paciente..."></textarea>
+                        <button id="sb-pend-chat-send">Enviar</button>
+                    </div>
+                </div>
             </div>
 
             <div id="ow-header">
@@ -3855,7 +4177,7 @@ header('Content-Type: application/javascript; charset=utf-8');
                 </div>
             </div>
         </div>
-        <button id="ow-toggle-btn">💬</button>
+        <button id="ow-toggle-btn">💬<span id="ow-pendencia-badge"></span></button>
     `;
     
 
@@ -8867,11 +9189,249 @@ header('Content-Type: application/javascript; charset=utf-8');
         });
 
 
-        ['sb-btn-close-main', 'sb-btn-close-install', 'sb-btn-close-prompts'].forEach(id => {
+        ['sb-btn-close-main', 'sb-btn-close-install', 'sb-btn-close-prompts', 'sb-btn-close-pendencias', 'sb-btn-close-pend-chat'].forEach(id => {
             const el = document.getElementById(id);
             if(el) el.onclick = () => document.getElementById('ow-sidebar').classList.remove('open');
         });
-        
+
+        // =====================================================================
+        // SISTEMA DE PENDÊNCIAS WhatsApp — Polling, Badge, Lista e Chat
+        // =====================================================================
+        (function initPendenciasSystem() {
+            const PEND_POLL_INTERVAL = 30000; // 30s
+            const PHP_SELF = '<?php echo $_SERVER['PHP_SELF']; ?>';
+            let pendenciasCache = [];
+            let activePendChat = null; // { chatId, phone, ... }
+
+            // --- Badge ---
+            function updateBadge(count) {
+                const badge = document.getElementById('ow-pendencia-badge');
+                const menuCount = document.getElementById('sb-pend-menu-count');
+                if (badge) {
+                    if (count > 0) {
+                        badge.textContent = count > 9 ? '9+' : String(count);
+                        badge.classList.add('visible');
+                    } else {
+                        badge.classList.remove('visible');
+                        badge.textContent = '';
+                    }
+                }
+                if (menuCount) {
+                    if (count > 0) {
+                        menuCount.textContent = String(count);
+                        menuCount.style.display = 'inline-block';
+                    } else {
+                        menuCount.style.display = 'none';
+                    }
+                }
+            }
+
+            // --- Polling ---
+            async function pollPendencias() {
+                try {
+                    const res = await fetch(`${PHP_SELF}?action=check_pendencias`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({})
+                    });
+                    const data = await res.json();
+                    if (data.success && Array.isArray(data.pendencias)) {
+                        pendenciasCache = data.pendencias;
+                        updateBadge(pendenciasCache.length);
+                        // Se a view de lista está visível, re-renderiza
+                        const listView = document.getElementById('sb-view-pendencias');
+                        if (listView && listView.classList.contains('active')) {
+                            renderPendenciasList();
+                        }
+                    }
+                } catch (e) {
+                    console.warn('Pendencias poll error:', e.message);
+                }
+            }
+
+            // --- Renderizar lista de pendências ---
+            function renderPendenciasList() {
+                const container = document.getElementById('sb-pend-list');
+                if (!container) return;
+                if (!pendenciasCache.length) {
+                    container.innerHTML = '<div class="sb-pend-empty">Nenhuma pendencia encontrada.</div>';
+                    return;
+                }
+                let html = '';
+                for (const p of pendenciasCache) {
+                    const nome = p.nome_paciente || 'Paciente';
+                    const tipo = p.tipo_notificacao === 'id_criador' ? 'criador' : 'secretaria';
+                    const tipoLabel = p.tipo_notificacao === 'id_criador' ? 'Dr/Dra' : 'Secretaria';
+                    const phone = p.whatsapp_paciente || '';
+                    const phoneMask = phone ? phone.replace(/^(\d{2})(\d{2})(\d{4,5})(\d{4})$/, '+$1 ($2) $3-$4') : '';
+                    html += `<div class="sb-pend-card" data-chat-id="${p.id}" data-phone="${phone}">
+                        <div class="sb-pend-card-title">${_escHtml(nome)}</div>
+                        <div class="sb-pend-card-sub">${phoneMask ? phoneMask + ' | ' : ''}${p.titulo || ''}</div>
+                        <span class="sb-pend-card-badge ${tipo}">Para: ${tipoLabel}</span>
+                    </div>`;
+                }
+                container.innerHTML = html;
+                container.querySelectorAll('.sb-pend-card').forEach(card => {
+                    card.onclick = () => {
+                        const chatId = card.getAttribute('data-chat-id');
+                        const pend = pendenciasCache.find(x => String(x.id) === chatId);
+                        if (pend) openPendChat(pend);
+                    };
+                });
+            }
+
+            function _escHtml(s) {
+                const d = document.createElement('div');
+                d.textContent = s || '';
+                return d.innerHTML;
+            }
+
+            // --- Abrir chat de pendência ---
+            function openPendChat(pend) {
+                activePendChat = {
+                    chatId: pend.id,
+                    phone: pend.whatsapp_paciente,
+                    idPaciente: pend.id_paciente,
+                    idAtendimento: pend.id_atendimento,
+                    idCriador: pend.id_criador,
+                    nomePaciente: pend.nome_paciente || 'Paciente'
+                };
+                document.getElementById('sb-pend-chat-title').textContent = activePendChat.nomePaciente;
+                renderPendChatMessages(pend.mensagens);
+                switchSidebarView('pendencias-chat');
+            }
+
+            // --- Renderizar mensagens do chat ---
+            function renderPendChatMessages(mensagensRaw) {
+                const container = document.getElementById('sb-pend-chat-messages');
+                if (!container) return;
+                let msgs = [];
+                if (typeof mensagensRaw === 'string' && mensagensRaw.trim()) {
+                    try { msgs = JSON.parse(mensagensRaw); } catch(e) { msgs = []; }
+                } else if (Array.isArray(mensagensRaw)) {
+                    msgs = mensagensRaw;
+                }
+                if (!msgs.length) {
+                    container.innerHTML = '<div class="sb-pend-empty">Sem mensagens neste chat.</div>';
+                    return;
+                }
+                let html = '';
+                for (const m of msgs) {
+                    const role = (m.role || 'system').toLowerCase();
+                    const cls = role === 'user' ? 'user' : (role === 'assistant' ? 'assistant' : 'system');
+                    const label = role === 'user' ? 'Paciente' : (role === 'assistant' ? 'Equipe' : 'Sistema');
+                    const ts = m.timestamp ? new Date(m.timestamp).toLocaleString('pt-BR', { day:'2-digit', month:'2-digit', hour:'2-digit', minute:'2-digit' }) : '';
+                    html += `<div class="sb-pend-msg ${cls}">
+                        <div><strong>${label}</strong></div>
+                        <div>${_escHtml(m.content || '')}</div>
+                        ${ts ? `<div class="sb-pend-msg-time">${ts}</div>` : ''}
+                    </div>`;
+                }
+                container.innerHTML = html;
+                container.scrollTop = container.scrollHeight;
+            }
+
+            // --- Enviar mensagem do profissional/secretária ---
+            const sendBtn = document.getElementById('sb-pend-chat-send');
+            const inputEl = document.getElementById('sb-pend-chat-input');
+            if (sendBtn && inputEl) {
+                async function sendPendMessage() {
+                    if (!activePendChat) return;
+                    const text = (inputEl.value || '').trim();
+                    if (!text) return;
+                    sendBtn.disabled = true;
+                    sendBtn.textContent = 'Enviando...';
+                    try {
+                        const ctx = window.PAGE_CTX || {};
+                        const payload = {
+                            chat_id: activePendChat.chatId,
+                            phone: activePendChat.phone,
+                            message: text,
+                            id_paciente: activePendChat.idPaciente,
+                            id_atendimento: activePendChat.idAtendimento,
+                            id_membro_solicitante: ctx.id_profissional_atual || null,
+                            nome_membro_solicitante: ctx.nome || null
+                        };
+
+                        // 1) Envia ao server.py via PHP proxy para repassar ao WhatsApp
+                        const res = await fetch(`${PHP_SELF}?action=send_manual_whatsapp_reply`, {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify(payload)
+                        });
+                        const data = await res.json();
+
+                        if (data.success) {
+                            // 2) Adiciona a mensagem visualmente ao chat
+                            const container = document.getElementById('sb-pend-chat-messages');
+                            const msgDiv = document.createElement('div');
+                            msgDiv.className = 'sb-pend-msg assistant';
+                            const now = new Date().toLocaleString('pt-BR', { day:'2-digit', month:'2-digit', hour:'2-digit', minute:'2-digit' });
+                            msgDiv.innerHTML = `<div><strong>Equipe</strong></div><div>${_escHtml(text)}</div><div class="sb-pend-msg-time">${now}</div>`;
+                            container.appendChild(msgDiv);
+                            container.scrollTop = container.scrollHeight;
+                            inputEl.value = '';
+
+                            // 3) Resolve a pendência (marca como 'false')
+                            await fetch(`${PHP_SELF}?action=resolver_pendencia`, {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify({ chat_id: activePendChat.chatId })
+                            });
+
+                            // 4) Remove da cache local e atualiza badge
+                            pendenciasCache = pendenciasCache.filter(x => String(x.id) !== String(activePendChat.chatId));
+                            updateBadge(pendenciasCache.length);
+
+                            if (typeof window.apToast === 'function') {
+                                window.apToast('Resposta enviada ao paciente via WhatsApp.');
+                            }
+                        } else {
+                            alert('Erro ao enviar: ' + (data.error || 'Erro desconhecido'));
+                        }
+                    } catch(e) {
+                        alert('Erro de rede ao enviar mensagem: ' + e.message);
+                    } finally {
+                        sendBtn.disabled = false;
+                        sendBtn.textContent = 'Enviar';
+                    }
+                }
+                sendBtn.onclick = sendPendMessage;
+                inputEl.addEventListener('keydown', (e) => {
+                    if (e.key === 'Enter' && e.ctrlKey) {
+                        e.preventDefault();
+                        sendPendMessage();
+                    }
+                });
+            }
+
+            // --- Hook no switchSidebarView para renderizar lista ao abrir ---
+            const origSwitch = window.switchSidebarView;
+            window.switchSidebarView = function(view) {
+                if (typeof origSwitch === 'function') origSwitch(view);
+                if (view === 'pendencias') renderPendenciasList();
+            };
+
+            // --- Inicia polling ---
+            pollPendencias();
+            setInterval(pollPendencias, PEND_POLL_INTERVAL);
+
+            // Toast notification quando há novas pendências
+            let lastPendCount = 0;
+            setInterval(() => {
+                if (pendenciasCache.length > lastPendCount && lastPendCount >= 0) {
+                    const diff = pendenciasCache.length - lastPendCount;
+                    if (diff > 0 && typeof window.apToast === 'function') {
+                        window.apToast(`${diff} nova(s) pendencia(s) de resposta WhatsApp.`);
+                    }
+                }
+                lastPendCount = pendenciasCache.length;
+            }, PEND_POLL_INTERVAL + 500);
+        })();
+        // =====================================================================
+        // FIM SISTEMA DE PENDÊNCIAS
+        // =====================================================================
+
         // ── MARKED.JS: motor de markdown confiável ──────────────────────────────────
         (function() {
             const s = document.createElement('script');

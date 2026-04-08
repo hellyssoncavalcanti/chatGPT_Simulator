@@ -37,7 +37,7 @@ from urllib.parse import quote
 from typing import Any, Dict
 
 import requests
-from flask import Flask, jsonify
+from flask import Flask, jsonify, request as flask_request
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from playwright.sync_api import sync_playwright
 
@@ -161,6 +161,8 @@ app = Flask(__name__)
 ANSI_RESET = "\033[0m"
 ANSI_CYAN = "\033[36m"
 ANSI_GREEN = "\033[32m"
+ANSI_YELLOW = "\033[93m"
+ANSI_BOLD = "\033[1m"
 
 
 def log_table(title: str, rows: List[Tuple[str, str]]) -> None:
@@ -1479,6 +1481,91 @@ def classify_reply(text: str) -> str:
     if has_admin:
         return "admin"
     return "clinical"
+
+
+def detect_professional_inquiry(answer_text: str) -> Optional[str]:
+    """Detect if the LLM response indicates it will consult a professional or secretary.
+
+    Returns:
+        "id_criador"    — if the LLM mentions it will ask the doctor/professional
+        "id_secretaria" — if the LLM mentions it will ask the secretary/reception
+        None            — no inquiry detected
+    """
+    t = (answer_text or "").lower()
+
+    # Keywords indicating the LLM will consult the secretary
+    secretary_patterns = [
+        "verificar com a secretária", "verificar com a secretaria",
+        "consultar a secretária", "consultar a secretaria",
+        "perguntar à secretária", "perguntar a secretaria",
+        "falar com a secretária", "falar com a secretaria",
+        "entrar em contato com a secretária", "entrar em contato com a secretaria",
+        "vou verificar com a recepção", "verificar na recepção",
+        "checar com a secretária", "checar com a secretaria",
+        "vou checar a agenda", "vou verificar a agenda",
+        "vou consultar a agenda", "verificar disponibilidade",
+        "consultar disponibilidade", "vou ver com a secretária",
+        "vou ver com a secretaria",
+    ]
+
+    # Keywords indicating the LLM will consult the doctor/professional
+    doctor_patterns = [
+        "verificar com o dr", "verificar com a dra",
+        "consultar o dr", "consultar a dra",
+        "perguntar ao dr", "perguntar à dra",
+        "falar com o dr", "falar com a dra",
+        "consultar o médico", "consultar a médica",
+        "consultar o profissional", "verificar com o profissional",
+        "verificar com o médico", "verificar com a médica",
+        "vou consultar o doutor", "vou consultar a doutora",
+        "encaminhar ao dr", "encaminhar à dra",
+        "repassar ao dr", "repassar à dra",
+        "vou verificar com o doutor", "vou verificar com a doutora",
+    ]
+
+    for p in secretary_patterns:
+        if p in t:
+            return "id_secretaria"
+    for p in doctor_patterns:
+        if p in t:
+            return "id_criador"
+    return None
+
+
+def set_notificacao_pendente(phone: str, notificacao_tipo: str, id_atendimento: Any = None) -> None:
+    """Set notificacao_pendente flag on the chatgpt_chats record for a WhatsApp chat.
+
+    Also ensures id_criador is populated (from clinica_atendimentos) for 'id_criador'
+    notifications to work correctly in the frontend.
+    """
+    safe_phone = (phone or "").replace("'", "")
+    safe_tipo = "id_criador" if notificacao_tipo == "id_criador" else "id_secretaria"
+    try:
+        # Update notificacao_pendente
+        run_sql(
+            f"UPDATE chatgpt_chats SET notificacao_pendente = '{safe_tipo}', "
+            f"datetime_atualizacao = NOW() "
+            f"WHERE whatsapp_paciente = '{safe_phone}' AND chat_mode = 'whatsapp' "
+            f"ORDER BY id DESC LIMIT 1"
+        )
+        # For 'id_criador' notifications, ensure id_criador is set from the atendimento
+        if safe_tipo == "id_criador" and id_atendimento:
+            run_sql(
+                f"UPDATE chatgpt_chats cc "
+                f"JOIN clinica_atendimentos ca ON ca.id = cc.id_atendimento "
+                f"SET cc.id_criador = ca.id_criador "
+                f"WHERE cc.whatsapp_paciente = '{safe_phone}' "
+                f"AND cc.chat_mode = 'whatsapp' "
+                f"AND cc.id_criador IS NULL "
+                f"AND cc.id_atendimento = {int(id_atendimento)} "
+                f"ORDER BY cc.id DESC LIMIT 1"
+            )
+        log.info(
+            "  %s🔔 Notificação pendente definida: %s para phone=%s%s",
+            ANSI_YELLOW, safe_tipo, safe_phone, ANSI_RESET,
+        )
+    except Exception:
+        log.exception("Falha ao definir notificacao_pendente para phone=%s", phone)
 
 
 def build_forward_prompt(
@@ -4276,6 +4363,11 @@ def process_incoming_replies_once() -> Dict[str, int]:
                 append_whatsapp_message(phone, role="user", content=stored_text, source="whatsapp")
                 append_whatsapp_message(phone, role="assistant", content=answer, source="chatgpt_simulator")
 
+            # 10b) Detect if LLM wants to consult professional or secretary
+            inquiry_target = detect_professional_inquiry(answer)
+            if inquiry_target and phone:
+                set_notificacao_pendente(phone, inquiry_target, id_atendimento=id_atendimento)
+
             # 11) Reply to the patient
             dest_phone = TEST_DESTINATION_PHONE if TEST_DESTINATION_PHONE else phone
             if dest_phone:
@@ -4460,6 +4552,84 @@ def send_now():
 @app.post("/process-replies-now")
 def process_replies_now():
     return jsonify({"ok": True, **process_incoming_replies_once()})
+
+
+@app.post("/send-manual-reply")
+def send_manual_reply():
+    """Endpoint para envio de resposta manual pelo profissional/secretária.
+
+    Recebe a mensagem do server.py e a envia ao paciente via WhatsApp Web,
+    como se fosse uma resposta do ChatGPT Simulator. Também registra a
+    mensagem no histórico do chat (chatgpt_chats.mensagens) e reseta
+    o flag notificacao_pendente.
+    """
+    data = flask_request.get_json() or {}
+    phone   = (data.get("phone") or "").strip()
+    message = (data.get("message") or "").strip()
+    chat_id = data.get("chat_id")
+    id_paciente      = data.get("id_paciente")
+    id_atendimento   = data.get("id_atendimento")
+    id_membro        = data.get("id_membro_solicitante")
+    nome_membro      = data.get("nome_membro_solicitante") or ""
+
+    if not phone or not message:
+        return jsonify({"ok": False, "error": "phone e message são obrigatórios"}), 400
+
+    log.info(
+        "\n%s%s  ┌──────────────────────────────────────────────────────────────┐%s\n"
+        "%s%s  │ 📨 RESPOSTA MANUAL │ phone=%-34s │%s\n"
+        "%s%s  │    Remetente: %-48s │%s\n"
+        "%s%s  │    Mensagem: [%-48s] │%s\n"
+        "%s%s  └──────────────────────────────────────────────────────────────┘%s",
+        ANSI_CYAN, ANSI_BOLD, ANSI_RESET,
+        ANSI_CYAN, ANSI_BOLD, phone, ANSI_RESET,
+        ANSI_CYAN, ANSI_BOLD, f"{nome_membro} (id={id_membro})"[:48], ANSI_RESET,
+        ANSI_CYAN, ANSI_BOLD, build_preview_with_ellipsis(message, 48), ANSI_RESET,
+        ANSI_CYAN, ANSI_BOLD, ANSI_RESET,
+    )
+
+    try:
+        # 1) Envia a mensagem via WhatsApp Web
+        dest_phone = TEST_DESTINATION_PHONE if TEST_DESTINATION_PHONE else phone
+        send_meta = {}
+        if dest_phone:
+            send_meta = wa_web.send_message(dest_phone, message) or {}
+            log.info(
+                "  %s✅ Resposta manual enviada via WhatsApp para %s | chars=%s%s",
+                ANSI_GREEN, dest_phone, len(message), ANSI_RESET,
+            )
+        else:
+            log.warning("  %s⚠️  Sem telefone destino para resposta manual%s", ANSI_YELLOW, ANSI_RESET)
+
+        # 2) Registra a mensagem no histórico do chat
+        if phone:
+            append_whatsapp_message(phone, role="assistant", content=message, source="manual_reply")
+
+        # 3) Reseta notificacao_pendente para 'false'
+        safe_phone = phone.replace("'", "")
+        try:
+            run_sql(
+                f"UPDATE chatgpt_chats SET notificacao_pendente = 'false', "
+                f"datetime_atualizacao = NOW() "
+                f"WHERE whatsapp_paciente = '{safe_phone}' "
+                f"AND chat_mode = 'whatsapp' "
+                f"AND notificacao_pendente != 'false' "
+                f"ORDER BY id DESC LIMIT 1"
+            )
+        except Exception:
+            log.exception("Falha ao resetar notificacao_pendente para phone=%s", phone)
+
+        return jsonify({
+            "ok": True,
+            "phone": dest_phone,
+            "chars_sent": send_meta.get("chars_sent", len(message)),
+            "id_membro_solicitante": id_membro,
+            "nome_membro_solicitante": nome_membro,
+        })
+
+    except Exception as e:
+        log.exception("Falha ao enviar resposta manual para phone=%s", phone)
+        return jsonify({"ok": False, "error": str(e)}), 500
 
 
 if __name__ == "__main__":
