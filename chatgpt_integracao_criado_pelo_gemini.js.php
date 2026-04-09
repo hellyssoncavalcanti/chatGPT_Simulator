@@ -1052,8 +1052,25 @@ if (isset($_GET['action']) && $_GET['action'] === 'save_chat_meta') {
                 $r_an = $db->query("SELECT id FROM chatgpt_atendimentos_analise WHERE id_criador = $id_criador_esc AND id_paciente = $id_paciente ORDER BY id DESC LIMIT 1");
                 if ($r_an && $r_an->num_rows > 0) $analise_id = intval($r_an->fetch_assoc()['id']);
             }
+            // Verifica se a vinculação atual ainda é válida (análise pode ter sido deletada)
+            $should_update = false;
             if ($analise_id) {
-                $db->query("UPDATE chatgpt_chats SET id_chatgpt_atendimentos_analise = $analise_id WHERE id = $chat_id_for_analise AND (id_chatgpt_atendimentos_analise IS NULL OR id_chatgpt_atendimentos_analise = 0)");
+                $r_cur = $db->query("SELECT id_chatgpt_atendimentos_analise FROM chatgpt_chats WHERE id = $chat_id_for_analise LIMIT 1");
+                $cur_analise = ($r_cur && $r_cur->num_rows > 0) ? $r_cur->fetch_assoc()['id_chatgpt_atendimentos_analise'] : null;
+                if (!$cur_analise || intval($cur_analise) === 0) {
+                    // Sem vinculação — vincular
+                    $should_update = true;
+                } elseif (intval($cur_analise) !== $analise_id) {
+                    // Vinculação diferente — verificar se a atual ainda existe
+                    $r_exists = $db->query("SELECT 1 FROM chatgpt_atendimentos_analise WHERE id = " . intval($cur_analise) . " LIMIT 1");
+                    if (!$r_exists || $r_exists->num_rows === 0) {
+                        // Análise antiga foi deletada — sobrescrever
+                        $should_update = true;
+                    }
+                }
+                if ($should_update) {
+                    $db->query("UPDATE chatgpt_chats SET id_chatgpt_atendimentos_analise = $analise_id WHERE id = $chat_id_for_analise");
+                }
             }
         }
 
