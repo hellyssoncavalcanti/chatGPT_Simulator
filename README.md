@@ -134,6 +134,7 @@ python Scripts/acompanhamento_whatsapp.py
 - `GET /health` — status básico do serviço
 - `POST /send-now` — força um ciclo imediato de envio de mensagens pendentes
 - `POST /process-replies-now` — força um ciclo imediato de captura e processamento de respostas
+- `POST /send-manual-reply` — envia resposta manual de profissional/secretária ao paciente via WhatsApp Web
 
 ### Variáveis de ambiente principais
 
@@ -153,6 +154,11 @@ pela migration:
 
 - `Scripts/migrations/002_create_chatgpt_whatsapp.sql`
 
+O sistema de notificações de pendência profissional utiliza a coluna
+`chatgpt_chats.notificacao_pendente`, criada pela migration:
+
+- `Scripts/migrations/003_chatgpt_chats_add_notificacao_pendente.sql`
+
 Objetivo dessa tabela:
 
 1. Guardar telefone WhatsApp normalizado (`whatsapp_phone`);
@@ -163,6 +169,95 @@ Objetivo dessa tabela:
    reduzindo falhas de correlação de respostas.
 5. Executar enriquecimento preventivo da sidebar (amostra de chats nomeados),
    mesmo sem envio novo no ciclo, para popular o cache nome→telefone.
+
+### Sistema de notificações de pendência profissional
+
+Quando a LLM/ChatGPT Simulator responde a um paciente via WhatsApp e menciona que irá consultar o médico (Dr/Dra) ou a secretária, o sistema detecta automaticamente essa intenção e cria uma notificação pendente para que o profissional ou a secretária responda diretamente.
+
+#### Coluna `chatgpt_chats.notificacao_pendente`
+
+- **Migration:** `Scripts/migrations/003_chatgpt_chats_add_notificacao_pendente.sql`
+- **Tipo:** `VARCHAR(20) NOT NULL DEFAULT 'false'`
+- **Valores possíveis:**
+  - `"false"` — sem pendência (padrão)
+  - `"id_criador"` — pendência direcionada ao profissional criador do atendimento (o sistema exibe alerta ao usuário cujo `membros.id` corresponda a `chatgpt_chats.id_criador`)
+  - `"id_secretaria"` — pendência direcionada a secretárias (o sistema identifica secretárias por: `membros.classificacao = 'profissional'` AND (`membros.registro_conselho` IS NULL OR vazio OR `'0'`) AND `'clinica_membros'` está contido na lista `membros.incluir`, que usa `&` como separador)
+
+#### Fluxo completo
+
+```text
+Paciente envia mensagem via WhatsApp
+        │
+        ▼
+acompanhamento_whatsapp.py recebe e encaminha ao ChatGPT Simulator
+        │
+        ▼
+ChatGPT Simulator gera resposta (ex: "Vou verificar com a secretária")
+        │
+        ▼
+detect_professional_inquiry() detecta keywords na resposta
+        │
+        ├─ "secretária/secretaria/agenda/recepção" → notificacao_pendente = 'id_secretaria'
+        └─ "Dr./Dra./médico/profissional"          → notificacao_pendente = 'id_criador'
+        │
+        ▼
+set_notificacao_pendente() atualiza a coluna no banco
+(para 'id_criador', também garante que chatgpt_chats.id_criador está preenchido
+ a partir de clinica_atendimentos.id_criador)
+        │
+        ▼
+Frontend PHP (chatgpt_integracao_criado_pelo_gemini.js.php) faz polling a cada 30s
+via ?action=check_pendencias
+        │
+        ├─ Badge vermelho aparece no botão toggle (#ow-toggle-btn)
+        └─ Contador aparece no item "Pendências" do menu lateral (#ow-sidebar)
+        │
+        ▼
+Usuário abre "Pendências" → vê lista de chats pendentes → abre chat completo
+        │
+        ▼
+Usuário digita resposta → JS envia via ?action=send_manual_whatsapp_reply
+        │
+        ▼
+PHP proxy → server.py /api/send_manual_whatsapp_reply
+        │
+        ▼
+server.py repassa ao acompanhamento_whatsapp.py /send-manual-reply
+        │
+        ▼
+acompanhamento_whatsapp.py envia a mensagem via WhatsApp Web ao paciente,
+registra no histórico (chatgpt_chats.mensagens) e reseta notificacao_pendente = 'false'
+```
+
+#### Handlers PHP (chatgpt_integracao_criado_pelo_gemini.js.php)
+
+| Action | Método | Descrição |
+|---|---|---|
+| `?action=check_pendencias` | POST | Verifica se há chats com `notificacao_pendente != 'false'` relevantes ao usuário logado. Para `id_criador`, compara com `$row_login_atual['id']`. Para `id_secretaria`, verifica critérios de secretária. Retorna array de pendências com mensagens completas. |
+| `?action=resolver_pendencia` | POST | Marca `notificacao_pendente = 'false'` para um `chat_id` específico. |
+| `?action=send_manual_whatsapp_reply` | POST | Resolve IP do servidor Python (porta 3003) e repassa payload ao `server.py` `/api/send_manual_whatsapp_reply`. |
+
+#### Endpoint server.py
+
+| Rota | Método | Descrição |
+|---|---|---|
+| `/api/send_manual_whatsapp_reply` | POST | Recebe `phone`, `message`, `id_membro_solicitante`, `nome_membro_solicitante`, etc. Repassa ao `acompanhamento_whatsapp.py` na porta 3011 via `/send-manual-reply`. |
+
+#### Funções acompanhamento_whatsapp.py
+
+| Função | Descrição |
+|---|---|
+| `detect_professional_inquiry(answer_text)` | Analisa resposta da LLM e retorna `"id_criador"`, `"id_secretaria"` ou `None` conforme keywords detectadas. |
+| `set_notificacao_pendente(phone, tipo, id_atendimento)` | Atualiza `chatgpt_chats.notificacao_pendente` no banco via SQL. Para `id_criador`, também preenche `chatgpt_chats.id_criador` a partir de `clinica_atendimentos`. |
+| `/send-manual-reply` (endpoint Flask) | Envia mensagem via WhatsApp Web, registra no histórico (`chatgpt_chats.mensagens` com source `"manual_reply"`) e reseta o flag de notificação. |
+
+#### Interface do usuário (sidebar)
+
+- **Badge vermelho** no botão `#ow-toggle-btn` com contador (anima com `pulseBadge`)
+- **Item "Pendências"** no menu lateral (`#ow-sidebar`) com contador de pendências
+- **View de lista** (`#sb-view-pendencias`): cards com nome do paciente, telefone, tipo de notificação (Dr/Dra ou Secretária)
+- **View de chat** (`#sb-view-pendencias-chat`): histórico completo de mensagens (paciente/equipe/sistema) + campo de input para resposta + botão enviar
+- **Polling automático** a cada 30 segundos com toast notification para novas pendências
 
 ### Guia rápido de configuração (modo isolado)
 
@@ -333,6 +428,9 @@ A UI usa o próprio backend do simulador como fonte de dados, especialmente:
 - `POST /api/sync`
 - `POST /api/delete`
 - `POST /v1/chat/completions`
+
+### WhatsApp e notificações
+- `POST /api/send_manual_whatsapp_reply` — repassa resposta manual de profissional/secretária ao `acompanhamento_whatsapp.py` para envio via WhatsApp Web
 
 ### Infraestrutura e pesquisa
 - `GET /health`
@@ -565,7 +663,8 @@ Se outra LLM ler este README para atuar no projeto, deve assumir o seguinte mode
 - a fila `browser_queue` é o ponto central de desacoplamento;
 - `storage.py` e `auth.py` fornecem persistência simples, local e baseada em JSON;
 - `analisador_prontuarios.py` é um cliente interno importante e deve ser considerado ao alterar contratos da API;
-- mudanças em payloads, nomes de campos ou formato de resposta podem quebrar integrações PHP e o pipeline clínico.
+- mudanças em payloads, nomes de campos ou formato de resposta podem quebrar integrações PHP e o pipeline clínico;
+- o sistema de notificações de pendência profissional (`notificacao_pendente`) conecta 4 camadas: detecção na resposta da LLM (`acompanhamento_whatsapp.py`), flag no banco (`chatgpt_chats`), polling no frontend (PHP/JS) e envio manual de resposta ao paciente (`server.py` → `acompanhamento_whatsapp.py` → WhatsApp Web). Alterar qualquer uma dessas camadas pode quebrar o fluxo completo.
 
 ---
 
@@ -584,4 +683,5 @@ Em termos práticos:
 - `storage.py` salva histórico local;
 - `auth.py` controla acesso;
 - `utils.py` cuida de infraestrutura;
-- `analisador_prontuarios.py` usa o simulador como engine LLM para um fluxo médico.
+- `analisador_prontuarios.py` usa o simulador como engine LLM para um fluxo médico;
+- `acompanhamento_whatsapp.py` monitora respostas de pacientes, gera respostas via ChatGPT Simulator e detecta quando a LLM precisa de intervenção humana (médico ou secretária), criando notificações pendentes no banco e permitindo resposta manual via interface web.
