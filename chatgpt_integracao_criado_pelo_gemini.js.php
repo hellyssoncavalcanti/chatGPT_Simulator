@@ -4861,9 +4861,9 @@ header('Content-Type: application/javascript; charset=utf-8');
         html = html.replace(/<table\b/g, '<div class="ow-table-scroll"><table')
                    .replace(/<\/table>/g, '</table></div>');
 
-        // 1b) Envolve imagens grandes (base64 ou externas) em container scrollável
+        // 1b) Envolve imagens (base64 ou externas) em container scrollável
         html = html.replace(
-            /<img\s+([^>]*src="data:image\/[^"]+")[^>]*>/gi,
+            /<img\s+([^>]*src="[^"]+")[^>]*>/gi,
             '<div class="ow-img-scroll"><img $1></div>'
         );
 
@@ -6530,6 +6530,7 @@ header('Content-Type: application/javascript; charset=utf-8');
         ov.innerHTML = `<button class="ow-overlay-close" title="Fechar">&times;</button><img src="" alt="screenshot"/>`;
         ov.querySelector('.ow-overlay-close').onclick = () => ov.classList.remove('active');
         ov.addEventListener('click', (e) => { if (e.target === ov) ov.classList.remove('active'); });
+        document.addEventListener('keydown', (e) => { if (e.key === 'Escape') ov.classList.remove('active'); });
         target.appendChild(ov);
     }
     if (document.body) { _ensureScreenshotOverlay(); }
@@ -6589,6 +6590,20 @@ header('Content-Type: application/javascript; charset=utf-8');
         ovImg.style.transformOrigin = `${cx}px ${cy}px`;
         ov.classList.add('active');
     }
+
+    // ── Delegated click handler: expand any image inside .msg-ai ───
+    // Captures clicks on all images rendered in AI messages (base64, external URLs, etc.)
+    // and reuses the screenshot overlay to show them fullscreen.
+    document.addEventListener('click', function(e) {
+        const img = e.target;
+        if (img.tagName !== 'IMG') return;
+        // Only expand images inside AI messages (not UI icons, avatars, etc.)
+        if (!img.closest('.msg-ai')) return;
+        // Screenshot thumbs already have their own onclick — skip to avoid double trigger
+        if (img.classList.contains('ow-screenshot-thumb')) return;
+        e.preventDefault();
+        _expandScreenshot(img);
+    });
 
     function appendAssistantMarkdown(markdown) {
         const safeMd = String(markdown || '').trim();
