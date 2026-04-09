@@ -630,6 +630,18 @@ def insert_whatsapp_chat(
     )
     safe_mensagens = initial_mensagens.replace("'", "''")
 
+    # Look up id_criador from chatgpt_atendimentos_analise
+    id_criador_value = "NULL"
+    if id_analise:
+        try:
+            rows_criador = run_sql(
+                f"SELECT id_criador FROM chatgpt_atendimentos_analise WHERE id = {int(id_analise)} LIMIT 1"
+            )
+            if rows_criador and rows_criador[0].get("id_criador"):
+                id_criador_value = str(int(rows_criador[0]["id_criador"]))
+        except Exception:
+            log.warning("Não foi possível buscar id_criador de chatgpt_atendimentos_analise.id=%s", id_analise)
+
     # id_chatgpt and url_chatgpt may be empty at insert time (populated
     # later when the ChatGPT Simulator returns a conversation URL).
     query = (
@@ -637,7 +649,7 @@ def insert_whatsapp_chat(
         "(id_criador, id_paciente, id_atendimento, id_chatgpt_atendimentos_analise, "
         " url_atual, titulo, id_chatgpt, url_chatgpt, chat_mode, whatsapp_paciente, mensagens) "
         "VALUES ("
-        f"NULL, "
+        f"{id_criador_value}, "
         f"{int(id_paciente) if id_paciente else 'NULL'}, "
         f"{int(id_atendimento) if id_atendimento else 'NULL'}, "
         f"{int(id_analise) if id_analise else 'NULL'}, "
@@ -1535,7 +1547,7 @@ def detect_professional_inquiry(answer_text: str) -> Optional[str]:
 def set_notificacao_pendente(phone: str, notificacao_tipo: str, id_atendimento: Any = None) -> None:
     """Set notificacao_pendente flag on the chatgpt_chats record for a WhatsApp chat.
 
-    Also ensures id_criador is populated (from clinica_atendimentos) for 'id_criador'
+    Also ensures id_criador is populated (from chatgpt_atendimentos_analise) for 'id_criador'
     notifications to work correctly in the frontend.
     """
     safe_phone = (phone or "").replace("'", "")
@@ -1548,16 +1560,15 @@ def set_notificacao_pendente(phone: str, notificacao_tipo: str, id_atendimento: 
             f"WHERE whatsapp_paciente = '{safe_phone}' AND chat_mode = 'whatsapp' "
             f"ORDER BY id DESC LIMIT 1"
         )
-        # For 'id_criador' notifications, ensure id_criador is set from the atendimento
-        if safe_tipo == "id_criador" and id_atendimento:
+        # For 'id_criador' notifications, ensure id_criador is set from chatgpt_atendimentos_analise
+        if safe_tipo == "id_criador":
             run_sql(
                 f"UPDATE chatgpt_chats cc "
-                f"JOIN clinica_atendimentos ca ON ca.id = cc.id_atendimento "
-                f"SET cc.id_criador = ca.id_criador "
+                f"JOIN chatgpt_atendimentos_analise caa ON caa.id = cc.id_chatgpt_atendimentos_analise "
+                f"SET cc.id_criador = caa.id_criador "
                 f"WHERE cc.whatsapp_paciente = '{safe_phone}' "
                 f"AND cc.chat_mode = 'whatsapp' "
                 f"AND cc.id_criador IS NULL "
-                f"AND cc.id_atendimento = {int(id_atendimento)} "
                 f"ORDER BY cc.id DESC LIMIT 1"
             )
         log.info(
