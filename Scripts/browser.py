@@ -992,7 +992,16 @@ async def _detect_and_register_files(page, markdown_text, q=None, allow_click_fa
         r'\[([^\]]+)\]\(((?:https?://(?:files\.oaiusercontent\.com|cdn-uploads\.[^)]+)|/backend-api/files/[^)]+|sandbox:/[^)]+))\)'
     )
 
+    # Padrão secundário: qualquer link markdown cujo texto termina com extensão de arquivo comum
+    file_ext_link_pattern = re.compile(
+        r'\[([^\]]*\.(?:xlsx|xls|csv|pdf|docx|doc|pptx|ppt|zip|rar|json|xml|txt|png|jpg|jpeg|gif|svg))\]\(([^)]+)\)',
+        re.IGNORECASE
+    )
+
     matches = list(link_pattern.finditer(markdown_text))
+    # Se o padrão principal não encontrar nada, tenta o padrão secundário (por extensão de arquivo)
+    if not matches:
+        matches = list(file_ext_link_pattern.finditer(markdown_text))
     if not matches:
         # Fallback: tenta detectar links de download na página via múltiplos seletores
         try:
@@ -1023,6 +1032,20 @@ async def _detect_and_register_files(page, markdown_text, q=None, allow_click_fa
                     const href = a.getAttribute('href') || '';
                     const text = (a.textContent || '').trim();
                     if (href && text && !seen.has(href)) { seen.add(href); links.push({href, text}); }
+                });
+                // Seletor 5: qualquer <a> cujo texto ou href termina com extensão de arquivo comum
+                // (captura padrões novos do ChatGPT que não usam as URLs tradicionais)
+                const fileExts = /\.(xlsx|xls|csv|pdf|docx|doc|pptx|ppt|zip|rar|json|xml|txt|png|jpg|jpeg|gif|svg)$/i;
+                document.querySelectorAll('a').forEach(a => {
+                    const href = a.getAttribute('href') || '';
+                    const text = (a.textContent || '').trim();
+                    const dl = a.getAttribute('download') || '';
+                    if ((fileExts.test(text) || fileExts.test(dl) || fileExts.test(href))
+                        && href && !href.startsWith('#') && !href.startsWith('javascript:')
+                        && !seen.has(href)) {
+                        seen.add(href);
+                        links.push({href, text: text || dl || href.split('/').pop()});
+                    }
                 });
                 return links;
             }""")
@@ -1685,7 +1708,11 @@ async def handle_sync_task(context, task):
 
         # Garante persistência de links de download também no fluxo de SYNC:
         # quando o ChatGPT renderiza "cards" de arquivo sem URL visível no markdown,
-        # tentamos detectar/registrar os links na página e anexá-los na última resposta da IA.
+        # tentamos detectar/registrar os links na página e anexá-los na resposta da IA.
+        # A detecção por DOM (Seletores 1-5) varre a página INTEIRA,
+        # por isso basta rodar na última mensagem — os links encontrados são anexados a ela.
+        # Para mensagens anteriores que mencionam arquivos, fazemos um segundo passo
+        # para injetar os links registrados no local correto.
         try:
             last_ai_idx = max((i for i, m in enumerate(msgs) if m.get('role') == 'assistant'), default=-1)
             if last_ai_idx >= 0:
