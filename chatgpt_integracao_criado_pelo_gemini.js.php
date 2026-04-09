@@ -1029,6 +1029,34 @@ if (isset($_GET['action']) && $_GET['action'] === 'save_chat_meta') {
             }
         }
 
+        // ------------------------------------------------------------------
+        // Vincula id_chatgpt_atendimentos_analise a partir de
+        // chatgpt_atendimentos_analise quando houver análise disponível
+        // para o conjunto id_criador / id_atendimento / id_paciente.
+        // ------------------------------------------------------------------
+        $chat_id_for_analise = isset($db_id) ? $db_id : $db->insert_id;
+        if (!$chat_id_for_analise) {
+            // fallback: buscar o id que acabamos de inserir/atualizar
+            $r_id = $db->query("SELECT id FROM chatgpt_chats WHERE $where_check ORDER BY id DESC LIMIT 1");
+            if ($r_id && $r_id->num_rows > 0) $chat_id_for_analise = intval($r_id->fetch_assoc()['id']);
+        }
+        if ($chat_id_for_analise) {
+            $analise_id = null;
+            // Prioridade 1: buscar por id_atendimento (mais específico)
+            if ($id_atendimento) {
+                $r_an = $db->query("SELECT id FROM chatgpt_atendimentos_analise WHERE id_atendimento = $id_atendimento ORDER BY id DESC LIMIT 1");
+                if ($r_an && $r_an->num_rows > 0) $analise_id = intval($r_an->fetch_assoc()['id']);
+            }
+            // Prioridade 2: buscar por id_criador + id_paciente
+            if (!$analise_id && $id_criador_esc !== "NULL" && $id_paciente) {
+                $r_an = $db->query("SELECT id FROM chatgpt_atendimentos_analise WHERE id_criador = $id_criador_esc AND id_paciente = $id_paciente ORDER BY id DESC LIMIT 1");
+                if ($r_an && $r_an->num_rows > 0) $analise_id = intval($r_an->fetch_assoc()['id']);
+            }
+            if ($analise_id) {
+                $db->query("UPDATE chatgpt_chats SET id_chatgpt_atendimentos_analise = $analise_id WHERE id = $chat_id_for_analise AND (id_chatgpt_atendimentos_analise IS NULL OR id_chatgpt_atendimentos_analise = 0)");
+            }
+        }
+
         echo json_encode(['success' => true, 'titulo' => $titulo, 'sql' => ((isset($insert_sql) && !empty($insert_sql))?$insert_sql:$update_sql)]);
     } catch (Exception $e) {
         echo json_encode(['success' => false, 'error' => $e->getMessage(), 'sql' => ((isset($insert_sql) && !empty($insert_sql))?$insert_sql:$update_sql)]);

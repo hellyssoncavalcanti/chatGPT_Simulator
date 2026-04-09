@@ -236,6 +236,7 @@ registra no histórico (chatgpt_chats.mensagens) e reseta notificacao_pendente =
 | `?action=check_pendencias` | POST | Verifica se há chats com `notificacao_pendente != 'false'` relevantes ao usuário logado. Para `id_criador`, compara com `$row_login_atual['id']`. Para `id_secretaria`, verifica critérios de secretária. Retorna array de pendências com mensagens completas. |
 | `?action=resolver_pendencia` | POST | Marca `notificacao_pendente = 'false'` para um `chat_id` específico. |
 | `?action=send_manual_whatsapp_reply` | POST | Resolve IP do servidor Python (porta 3003) e repassa payload ao `server.py` `/api/send_manual_whatsapp_reply`. |
+| `?action=save_chat_meta` | POST | Salva metadados do chat (título, URLs, contexto clínico). **Agora também vincula `id_chatgpt_atendimentos_analise`** automaticamente: busca em `chatgpt_atendimentos_analise` por `id_atendimento` (prioridade 1) ou `id_criador + id_paciente` (prioridade 2), e preenche o campo caso esteja NULL/0. |
 
 #### Endpoint server.py
 
