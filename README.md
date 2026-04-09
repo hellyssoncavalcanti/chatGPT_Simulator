@@ -203,7 +203,7 @@ detect_professional_inquiry() detecta keywords na resposta
         ▼
 set_notificacao_pendente() atualiza a coluna no banco
 (para 'id_criador', também garante que chatgpt_chats.id_criador está preenchido
- a partir de clinica_atendimentos.id_criador)
+ a partir de chatgpt_atendimentos_analise.id_criador)
         │
         ▼
 Frontend PHP (chatgpt_integracao_criado_pelo_gemini.js.php) faz polling a cada 30s
@@ -248,7 +248,8 @@ registra no histórico (chatgpt_chats.mensagens) e reseta notificacao_pendente =
 | Função | Descrição |
 |---|---|
 | `detect_professional_inquiry(answer_text)` | Analisa resposta da LLM e retorna `"id_criador"`, `"id_secretaria"` ou `None` conforme keywords detectadas. |
-| `set_notificacao_pendente(phone, tipo, id_atendimento)` | Atualiza `chatgpt_chats.notificacao_pendente` no banco via SQL. Para `id_criador`, também preenche `chatgpt_chats.id_criador` a partir de `clinica_atendimentos`. |
+| `set_notificacao_pendente(phone, tipo, id_atendimento)` | Atualiza `chatgpt_chats.notificacao_pendente` no banco via SQL. Para `id_criador`, também preenche `chatgpt_chats.id_criador` a partir de `chatgpt_atendimentos_analise.id_criador` (JOIN via `cc.id_chatgpt_atendimentos_analise = caa.id`). |
+| `insert_whatsapp_chat(phone, id_paciente, id_atendimento, id_analise, chat_url, first_message)` | Insere registro em `chatgpt_chats` para conversa WhatsApp. Busca `id_criador` automaticamente de `chatgpt_atendimentos_analise` usando `id_analise` antes do INSERT. |
 | `/send-manual-reply` (endpoint Flask) | Envia mensagem via WhatsApp Web, registra no histórico (`chatgpt_chats.mensagens` com source `"manual_reply"`) e reseta o flag de notificação. |
 
 #### Interface do usuário (sidebar)
