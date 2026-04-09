@@ -261,6 +261,11 @@ registra no histórico (chatgpt_chats.mensagens) e reseta notificacao_pendente =
 - **View de chat** (`#sb-view-pendencias-chat`): histórico completo de mensagens (paciente/equipe/sistema) + campo de input para resposta + botão enviar
 - **Polling automático** a cada 30 segundos com toast notification para novas pendências
 
+#### Imagens e downloads nas mensagens da IA
+
+- **Imagens**: todas as `<img>` dentro de `.msg-ai` (base64 e URLs externas) são envolvidas em `.ow-img-scroll` (scroll horizontal) e possuem click-to-expand via overlay fullscreen (`#ow-screenshot-overlay`). O handler delegado (`document.addEventListener('click')`) detecta cliques em qualquer imagem dentro de `.msg-ai`, excluindo `.ow-screenshot-thumb` (que já possui handler próprio). Fechar: clique fora, botão × ou tecla Escape.
+- **Downloads**: o `browser.py` detecta links de download do ChatGPT (URLs `/backend-api/files/`, `files.oaiusercontent.com`, `sandbox:/`, atributo `download`) e os reescreve para `/api/downloads/{file_id}`. O `_postProcessHtml()` no frontend reescreve essas URLs para `?action=download_file&name=...` (proxy PHP) e aplica a classe `.ow-file-download` com ícone 📎. O handler PHP `?action=download_file` faz proxy via cURL para o `server.py` que usa o contexto autenticado do browser para fetch do arquivo.
+
 ### Guia rápido de configuração (modo isolado)
 
 1. Garanta acesso ao WhatsApp Web:  
