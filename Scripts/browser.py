@@ -845,7 +845,7 @@ def clean_html(html_content):
     # Preserva <a> de download antes de remover buttons
     # ChatGPT às vezes embute download links dentro de divs/buttons
     download_links = re.findall(
-        r'<a\s+[^>]*href="([^"]*(?:/backend-api/files/|files\.oaiusercontent\.com|sandbox:/)[^"]*)"[^>]*>([^<]*)</a>',
+        r'<a\s+[^>]*href="([^"]*(?:/backend-api/files/|/backend-api/conversation/[^"]*/interpreter/download|files\.oaiusercontent\.com|sandbox:/)[^"]*)"[^>]*>([^<]*)</a>',
         html, re.IGNORECASE
     )
     # Também captura links com atributo download
@@ -994,10 +994,11 @@ async def _detect_and_register_files(page, markdown_text, q=None, allow_click_fa
     # Padrões de URL de download do ChatGPT:
     # [filename](url) onde url é:
     #   /backend-api/files/.../download
+    #   /backend-api/conversation/<id>/interpreter/download?... (UI atual de planilhas)
     #   https://files.oaiusercontent.com/...
     #   sandbox:/mnt/data/...
     link_pattern = re.compile(
-        r'\[([^\]]+)\]\(((?:https?://(?:files\.oaiusercontent\.com|cdn-uploads\.[^)]+)|/backend-api/files/[^)]+|sandbox:/[^)]+))\)'
+        r'\[([^\]]+)\]\(((?:https?://(?:files\.oaiusercontent\.com|cdn-uploads\.[^)]+)|/backend-api/files/[^)]+|/backend-api/conversation/[^)]+/interpreter/download[^)]*|sandbox:/[^)]+))\)'
     )
 
     # Padrão secundário: qualquer link markdown cujo texto termina com extensão de arquivo comum
@@ -1021,6 +1022,15 @@ async def _detect_and_register_files(page, markdown_text, q=None, allow_click_fa
                     const href = a.getAttribute('href') || '';
                     const text = (a.textContent || '').trim();
                     if (href && text && !seen.has(href)) { seen.add(href); links.push({href, text}); }
+                });
+                // Seletor 1b: endpoint de download do interpreter (cards de planilha atuais)
+                document.querySelectorAll('a[href*="/backend-api/conversation/"][href*="/interpreter/download"]').forEach(a => {
+                    const href = a.getAttribute('href') || '';
+                    const text = (a.textContent || '').trim();
+                    if (href && !href.startsWith('#') && !seen.has(href)) {
+                        seen.add(href);
+                        links.push({href, text: text || href.split('/').pop()});
+                    }
                 });
                 // Seletor 2: links com files.oaiusercontent.com
                 document.querySelectorAll('a[href*="files.oaiusercontent.com"]').forEach(a => {
@@ -1281,6 +1291,25 @@ def _install_conversation_file_capture(page, q=None):
                         fid = mfid.group(1) if mfid else ""
                         if dl or nm or fid:
                             _maybe_add(file_id=fid, name=nm, url=dl)
+                # Caso 3: GET /backend-api/conversation/<id>/interpreter/download?... (UI atual)
+                elif "/backend-api/conversation/" in url and "/interpreter/download" in url:
+                    # Extrai metadados úteis direto da query string para não depender
+                    # de um JSON específico na resposta (que pode vir como blob/binário).
+                    try:
+                        from urllib.parse import urlparse, parse_qs, unquote
+                        parsed = urlparse(url)
+                        qd = parse_qs(parsed.query or "")
+                        message_id = (qd.get("message_id") or [""])[0]
+                        sandbox_path = (qd.get("sandbox_path") or [""])[0]
+                        sandbox_path = unquote(sandbox_path or "")
+                        guessed_name = os.path.basename(sandbox_path) if sandbox_path else ""
+                        # Usa o próprio endpoint autenticado como URL sob demanda.
+                        # O proxy /api/downloads buscará via Playwright com credentials.
+                        if message_id or guessed_name:
+                            fid = f"interpreter:{message_id}:{sandbox_path}" if (message_id or sandbox_path) else ""
+                            _maybe_add(file_id=fid, name=guessed_name, url=url)
+                    except Exception:
+                        pass
             except Exception as e:
                 emit_log(q, f"⚠️ Erro ao inspecionar resposta de rede: {e}")
 
