@@ -866,7 +866,15 @@ def clean_html(html_content):
             unique_dl.append((href, text))
     download_links = unique_dl
 
-    html = re.sub(r'<button.*?</button>', '', html, flags=re.DOTALL)
+    # Remove <button>…</button> mas PRESERVA <img> e <a> que estiverem dentro deles.
+    # Motivo: ChatGPT envolve previews de imagens e cards de arquivo em <button>,
+    # e uma remoção ingênua faria sumir a imagem e o link de download da mensagem.
+    def _strip_button_keep_media(match):
+        inner = match.group(1) or ''
+        imgs = re.findall(r'<img[^>]*>', inner, flags=re.IGNORECASE)
+        anchors = re.findall(r'<a[^>]*>.*?</a>', inner, flags=re.IGNORECASE | re.DOTALL)
+        return ''.join(imgs) + ''.join(anchors)
+    html = re.sub(r'<button[^>]*>(.*?)</button>', _strip_button_keep_media, html, flags=re.DOTALL | re.IGNORECASE)
     html = re.sub(r'<div class="flex gap-1.*?</div>', '', html, flags=re.DOTALL)
     # Reinsere links de download que podem ter sido perdidos
     for href, text in download_links:
@@ -1112,6 +1120,167 @@ async def _detect_and_register_files(page, markdown_text, q=None, allow_click_fa
     return result
 
 
+def _install_conversation_file_capture(page, q=None):
+    """
+    Instala um listener de respostas de rede que captura metadados de arquivos
+    a partir das APIs internas do ChatGPT. Muitos arquivos gerados por
+    code_interpreter / canvas não aparecem como <a> ou <button> com href,
+    então interceptar o JSON da conversa é a fonte mais confiável.
+
+    Captura:
+      • /backend-api/conversation/<id> (JSON completo da conversa — contém
+        attachments/metadata com file_id e filename)
+      • /backend-api/files/<id>/download (resposta com URL pré-assinada para
+        download efetivo — pode aparecer na aba Network quando o usuário clica)
+
+    Os arquivos capturados ficam em page._captured_files como dicts
+    {file_id, name, url} para consumo posterior pelo fluxo de SYNC / resposta.
+    """
+    try:
+        page._captured_files = []
+        seen_ids = set()
+
+        def _maybe_add(file_id: str, name: str, url: str = ""):
+            key = (file_id or "") + "|" + (name or "") + "|" + (url or "")
+            if not key or key in seen_ids:
+                return
+            seen_ids.add(key)
+            page._captured_files.append({
+                "file_id": file_id or "",
+                "name": name or "",
+                "url": url or "",
+            })
+
+        async def _on_response(response):
+            try:
+                url = response.url or ""
+            except Exception:
+                return
+            try:
+                # Caso 1: GET /backend-api/conversation/<id> → JSON completo da conversa
+                if "/backend-api/conversation/" in url and "/prepare" not in url and "/interrupt" not in url:
+                    try:
+                        ct = (response.headers.get("content-type") or "").lower()
+                    except Exception:
+                        ct = ""
+                    if "json" in ct:
+                        try:
+                            data = await response.json()
+                        except Exception:
+                            return
+                        mapping = (data or {}).get("mapping") or {}
+                        for node in mapping.values():
+                            msg = (node or {}).get("message") or {}
+                            meta = msg.get("metadata") or {}
+                            # Formato 1: metadata.attachments = [{id, name, ...}]
+                            for att in (meta.get("attachments") or []):
+                                _maybe_add(
+                                    file_id=str(att.get("id") or ""),
+                                    name=str(att.get("name") or att.get("file_name") or ""),
+                                    url=""
+                                )
+                            # Formato 2: metadata.aggregate_result.messages[].results[].files[]
+                            agg = meta.get("aggregate_result") or {}
+                            for sub in (agg.get("messages") or []):
+                                for res in (sub.get("results") or []):
+                                    for f in (res.get("files") or []):
+                                        _maybe_add(
+                                            file_id=str(f.get("id") or f.get("sandbox_path") or ""),
+                                            name=str(f.get("name") or f.get("file_name") or ""),
+                                            url=str(f.get("url") or "")
+                                        )
+                            # Formato 3: content.parts[].asset_pointer (file-service://file-xxx)
+                            content = msg.get("content") or {}
+                            for part in (content.get("parts") or []):
+                                if isinstance(part, dict):
+                                    ap = part.get("asset_pointer") or ""
+                                    if isinstance(ap, str) and ap.startswith("file-service://"):
+                                        fid = ap.replace("file-service://", "")
+                                        _maybe_add(
+                                            file_id=fid,
+                                            name=str(part.get("metadata", {}).get("filename") or ""),
+                                            url=""
+                                        )
+                # Caso 2: GET /backend-api/files/<id>/download → JSON com {download_url, file_name}
+                elif "/backend-api/files/" in url and "/download" in url:
+                    try:
+                        ct = (response.headers.get("content-type") or "").lower()
+                    except Exception:
+                        ct = ""
+                    if "json" in ct:
+                        try:
+                            data = await response.json()
+                        except Exception:
+                            return
+                        dl = (data or {}).get("download_url") or ""
+                        nm = (data or {}).get("file_name") or ""
+                        # Extrai file_id do próprio URL: /backend-api/files/{file_id}/download
+                        mfid = re.search(r'/backend-api/files/([^/]+)/download', url)
+                        fid = mfid.group(1) if mfid else ""
+                        if dl or nm or fid:
+                            _maybe_add(file_id=fid, name=nm, url=dl)
+            except Exception as e:
+                emit_log(q, f"⚠️ Erro ao inspecionar resposta de rede: {e}")
+
+        page.on("response", lambda resp: asyncio.create_task(_on_response(resp)))
+    except Exception as e:
+        emit_log(q, f"⚠️ Falha ao instalar captura de conversa: {e}")
+
+
+async def _register_captured_files(page, q=None):
+    """
+    Lê page._captured_files (preenchido por _install_conversation_file_capture),
+    resolve URLs de download ainda não resolvidas (via /backend-api/files/{id}/download)
+    e registra cada arquivo em shared.file_registry.
+
+    Retorna uma lista de tuplas (file_id_local, display_name) para os arquivos
+    que foram efetivamente registrados para proxy.
+    """
+    registered = []
+    try:
+        captured = list(getattr(page, "_captured_files", []) or [])
+    except Exception:
+        captured = []
+    if not captured:
+        return registered
+
+    for item in captured:
+        chatgpt_file_id = (item.get("file_id") or "").strip()
+        name = (item.get("name") or "").strip() or (chatgpt_file_id or "file")
+        url = (item.get("url") or "").strip()
+
+        # Se não temos URL mas temos file_id, tenta resolver via API
+        if not url and chatgpt_file_id and chatgpt_file_id.startswith("file-"):
+            try:
+                resolved = await page.evaluate("""async (fid) => {
+                    try {
+                        const resp = await fetch('/backend-api/files/' + fid + '/download', {
+                            credentials: 'include'
+                        });
+                        if (!resp.ok) return null;
+                        const data = await resp.json();
+                        return { url: data.download_url || '', name: data.file_name || '' };
+                    } catch (e) { return null; }
+                }""", chatgpt_file_id)
+                if resolved:
+                    url = resolved.get("url") or url
+                    if not name or name == chatgpt_file_id:
+                        name = resolved.get("name") or name
+            except Exception:
+                pass
+
+        if not url:
+            continue
+
+        safe = re.sub(r'[^\w.\-]', '_', name) or "file"
+        local_file_id = f"conv_{int(time.time() * 1000)}_{safe}"
+        register_file(local_file_id, url, name)
+        registered.append((local_file_id, name))
+        emit_log(q, f"📎 Arquivo (via conversation API): {name} → {local_file_id}")
+
+    return registered
+
+
 async def _click_chatgpt_download_elements(page, q=None):
     """
     Detecta e clica elementos de download de arquivo do ChatGPT code interpreter.
@@ -1266,6 +1435,15 @@ async def scrape_full_chat(page):
                     pass  # Continua mesmo sem encontrar — os fallbacks do JS tentam tudo
 
         msgs = await page.evaluate("""() => {
+            // Helper: remove buttons mas preserva <img> e <a> que estejam dentro deles
+            function stripButtonsKeepMedia(html) {
+                return html.replace(/<button[^>]*>([\\s\\S]*?)<\\/button>/gi, function(match, inner) {
+                    var imgs = inner.match(/<img[^>]*>/gi) || [];
+                    var anchors = inner.match(/<a[^>]*>[\\s\\S]*?<\\/a>/gi) || [];
+                    return imgs.concat(anchors).join('');
+                });
+            }
+
             // ── Estratégia 1: div[data-message-author-role] (layout 2025+) ──
             const roleDivs = document.querySelectorAll('[data-message-author-role]');
             if (roleDivs.length > 0) {
@@ -1283,7 +1461,7 @@ async def scrape_full_chat(page):
                     }
 
                     let html = contentEl.innerHTML || '';
-                    html = html.replace(/<button[^>]*>[\\s\\S]*?<\\/button>/gi, '');
+                    html = stripButtonsKeepMedia(html);
                     return { role, content: html };
                 }).filter(m => m.content && m.content.trim().length > 0);
             }
@@ -1308,7 +1486,7 @@ async def scrape_full_chat(page):
                     if (!contentEl) contentEl = art;
 
                     let html = contentEl.innerHTML || '';
-                    html = html.replace(/<button[^>]*>[\\s\\S]*?<\\/button>/gi, '');
+                    html = stripButtonsKeepMedia(html);
                     return { role, content: html };
                 }).filter(m => m.content && m.content.trim().length > 0);
             }
@@ -1329,7 +1507,7 @@ async def scrape_full_chat(page):
                     }
                     if (!contentEl) return null;
                     let html = contentEl.innerHTML || '';
-                    html = html.replace(/<button[^>]*>[\\s\\S]*?<\\/button>/gi, '');
+                    html = stripButtonsKeepMedia(html);
                     return { role, content: html };
                 }).filter(m => m && m.content && m.content.trim().length > 0);
             }
@@ -1588,6 +1766,10 @@ async def handle_sync_task(context, task):
         _sync_download_tasks.append(asyncio.create_task(_save()))
 
     page.on("download", _on_sync_download)
+    # Captura metadados de arquivos diretamente das respostas da API da conversa.
+    # Isso é mais confiável do que clicar em cards, já que a UI nova do ChatGPT
+    # frequentemente renderiza arquivos como botões sem href.
+    _install_conversation_file_capture(page, q)
     try:
         url    = task.get('url')
         chat_id = task.get('chat_id')
@@ -1669,6 +1851,14 @@ async def handle_sync_task(context, task):
             emit_log(q, "⚠️ Scrape vazio — tentando section[data-turn]...")
             try:
                 msgs = await page.evaluate("""() => {
+                    // Helper: remove buttons mas preserva <img> e <a> que estejam dentro deles
+                    function stripButtonsKeepMedia(html) {
+                        return html.replace(/<button[^>]*>([\\s\\S]*?)<\\/button>/gi, function(match, inner) {
+                            var imgs = inner.match(/<img[^>]*>/gi) || [];
+                            var anchors = inner.match(/<a[^>]*>[\\s\\S]*?<\\/a>/gi) || [];
+                            return imgs.concat(anchors).join('');
+                        });
+                    }
                     const sections = document.querySelectorAll('section[data-turn]');
                     if (!sections.length) return [];
                     return Array.from(sections).map(sec => {
@@ -1684,7 +1874,7 @@ async def handle_sync_task(context, task):
                         }
                         if (!contentEl) return null;
                         let html = contentEl.innerHTML || '';
-                        html = html.replace(/<button[^>]*>[\\s\\S]*?<\\/button>/gi, '');
+                        html = stripButtonsKeepMedia(html);
                         return { role, content: html };
                     }).filter(m => m && m.content && m.content.trim().length > 0);
                 }""")
@@ -1725,9 +1915,37 @@ async def handle_sync_task(context, task):
         except Exception as e_files:
             emit_log(q, f"⚠️ Falha ao detectar links de download durante SYNC: {e_files}")
 
-        # Fallback extra: alguns cards novos do ChatGPT não expõem URL no HTML/markdown.
-        # Nesses casos, tentamos clicar nos elementos de download para disparar o evento
-        # Playwright "download" e então registrar o arquivo no stream.
+        # Fallback extra 1: usa metadados de arquivos capturados via network listener
+        # (_install_conversation_file_capture). Este é o caminho preferido para a UI
+        # nova do ChatGPT, que não expõe URLs em <a> ou atributos HTML.
+        try:
+            captured_registered = await _register_captured_files(page, q)
+            if captured_registered:
+                assistant_indices = [i for i, m in enumerate(msgs) if m.get('role') == 'assistant']
+                target_ai_idx = assistant_indices[-1] if assistant_indices else -1
+                if target_ai_idx >= 0:
+                    base = msgs[target_ai_idx].get('content') or ''
+                    existing_ids = set(re.findall(r'/api/downloads/([A-Za-z0-9_\-\.]+)', base))
+                    novos = []
+                    for file_id_local, name in captured_registered:
+                        if file_id_local in existing_ids:
+                            continue
+                        # Evita duplicar se o mesmo nome de arquivo já aparece com link
+                        if name and f']({name})' in base:
+                            continue
+                        novos.append(f"📎 Arquivo: [{name}](/api/downloads/{file_id_local})")
+                    if novos:
+                        msgs[target_ai_idx]['content'] = (base + "\n\n" + "\n".join(novos)).strip()
+                        emit_log(
+                            q,
+                            f"📎 [SYNC] {len(novos)} link(s) de download (network) anexado(s) à msg assistant #{target_ai_idx + 1}"
+                        )
+        except Exception as e_cap:
+            emit_log(q, f"⚠️ Falha ao anexar arquivos capturados via network: {e_cap}")
+
+        # Fallback extra 2: alguns cards novos do ChatGPT não expõem URL no HTML/markdown
+        # nem geram tráfego de rede até que o usuário clique. Tentamos clicar nos
+        # elementos de download para disparar o evento Playwright "download".
         try:
             has_download_markers = any(
                 (m.get('role') == 'assistant') and (
@@ -2511,6 +2729,10 @@ async def handle_chat_task_inner(task, page, q, stop_event: asyncio.Event, activ
         _download_tasks.append(asyncio.create_task(_save()))
 
     page.on("download", _on_download)
+    # Captura metadados de arquivos diretamente das respostas da API da conversa.
+    # Necessário para que `_register_captured_files` possa anexar links de download
+    # em mensagens onde a UI nova do ChatGPT não expõe <a> nem href.
+    _install_conversation_file_capture(page, q)
 
     if url and url != 'None':
         emit_log(q, f'Abrindo chat existente: {url}')
@@ -2884,6 +3106,23 @@ async def handle_chat_task_inner(task, page, q, stop_event: asyncio.Event, activ
                 changed = True
         except Exception as e:
             emit_log(q, f"⚠️ Falha ao registrar arquivos: {e}")
+
+    # Arquivos capturados via network listener (conversation API) — este é o caminho
+    # mais confiável para cards de arquivo da UI nova, que não expõem href em HTML.
+    try:
+        captured_registered = await _register_captured_files(page, q)
+        if captured_registered:
+            existing_ids = set(re.findall(r'/api/downloads/([A-Za-z0-9_\-\.]+)', markdown_text or ''))
+            novos = []
+            for file_id_local, name in captured_registered:
+                if file_id_local in existing_ids:
+                    continue
+                novos.append(f"📎 Arquivo: [{name}](/api/downloads/{file_id_local})")
+            if novos:
+                markdown_text = ((markdown_text or '') + "\n\n" + "\n".join(novos)).strip()
+                changed = True
+    except Exception as e:
+        emit_log(q, f"⚠️ Falha ao anexar arquivos capturados (network): {e}")
 
     # Auto-downloads capturados pelo Playwright: aguarda tarefas pendentes e registra para proxy
     if _download_tasks:
