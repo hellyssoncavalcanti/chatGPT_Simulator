@@ -1340,8 +1340,18 @@ async def _register_captured_files(page, q=None):
     if not captured:
         return registered
 
+    chat_id_for_interpreter = ""
+    try:
+        page_url = page.url or ""
+        m_chat = re.search(r"/c/([A-Za-z0-9\-]+)", page_url)
+        if m_chat:
+            chat_id_for_interpreter = m_chat.group(1)
+    except Exception:
+        chat_id_for_interpreter = ""
+
     for item in captured:
         chatgpt_file_id = (item.get("file_id") or "").strip()
+        message_id = (item.get("message_id") or "").strip()
         name = (item.get("name") or "").strip() or (chatgpt_file_id or "file")
         url = (item.get("url") or "").strip()
 
@@ -1366,6 +1376,22 @@ async def _register_captured_files(page, q=None):
                 pass
 
         if not url:
+            # Fallback para UI nova: monta endpoint interpreter/download quando
+            # temos message_id + sandbox_path mas sem URL explícita.
+            sandbox_like = chatgpt_file_id.startswith("/mnt/data/") or chatgpt_file_id.startswith("mnt/data/")
+            if (not sandbox_like) and chatgpt_file_id and ("/mnt/data/" in chatgpt_file_id):
+                sandbox_like = True
+            if (not url) and chat_id_for_interpreter and message_id and sandbox_like:
+                sandbox_path = chatgpt_file_id if chatgpt_file_id.startswith("/") else f"/{chatgpt_file_id}"
+                from urllib.parse import quote
+                url = (
+                    f"https://chatgpt.com/backend-api/conversation/{chat_id_for_interpreter}"
+                    f"/interpreter/download?message_id={quote(message_id)}&sandbox_path={quote(sandbox_path)}"
+                )
+                if not name:
+                    name = os.path.basename(sandbox_path) or "file"
+
+        if not url:
             continue
 
         safe = re.sub(r'[^\w.\-]', '_', name) or "file"
@@ -1374,7 +1400,7 @@ async def _register_captured_files(page, q=None):
         registered.append({
             "file_id_local": local_file_id,
             "name": name,
-            "message_id": (item.get("message_id") or "").strip()
+            "message_id": message_id
         })
         emit_log(q, f"📎 Arquivo (via conversation API): {name} → {local_file_id}")
 
@@ -2338,6 +2364,36 @@ async def handle_sync_task(context, task):
                         q,
                         f"📎 [SYNC] {len(novos)} link(s) de download anexado(s) à msg assistant #{target_ai_idx + 1}"
                     )
+
+        # Higieniza placeholders de "URL indisponível" quando já existe link resolvido
+        # para o mesmo arquivo na mesma mensagem.
+        try:
+            for i, m in enumerate(msgs):
+                if m.get('role') != 'assistant':
+                    continue
+                base = m.get('content') or ''
+                linked_names = set(re.findall(r'📎\s*Arquivo:\s*\[([^\]]+)\]\(/api/downloads/', base))
+                if not linked_names:
+                    continue
+                cleaned = base
+                for nm in linked_names:
+                    esc = re.escape(nm.strip())
+                    cleaned = re.sub(
+                        rf'\n*📎\s*Arquivo:\s*\*\*{esc}\*\*\s*\(URL indisponível[^\n]*\)',
+                        '',
+                        cleaned,
+                        flags=re.IGNORECASE
+                    )
+                    cleaned = re.sub(
+                        rf'\n*📎\s*Arquivo:\s*{esc}\s*\(URL indisponível[^\n]*\)',
+                        '',
+                        cleaned,
+                        flags=re.IGNORECASE
+                    )
+                if cleaned != base:
+                    msgs[i]['content'] = re.sub(r'\n{3,}', '\n\n', cleaned).strip()
+        except Exception as e_cleanup:
+            emit_log(q, f"⚠️ Falha ao limpar placeholders de URL indisponível: {e_cleanup}")
 
         title = await get_chat_title(page)
         emit_event(q, 'syncresult', {
