@@ -105,8 +105,8 @@ ANALISADOR_MIN_CHARS                = 80    # mínimo de caracteres válidos
 ANALISADOR_TIMEOUT_PROCESSANDO_MIN  = 15    # minutos antes de considerar travado
 
 # Pausa humana entre análises individuais do lote
-ANALISADOR_PAUSA_MIN = 15   # mínimo (seg)
-ANALISADOR_PAUSA_MAX = 45   # máximo (seg)
+ANALISADOR_PAUSA_MIN = 630   # ~10 minutos (seg)
+ANALISADOR_PAUSA_MAX = 800   # ~13 minutos (seg)
 
 # Filtro de horário útil (preserva limite de mensagens do ChatGPT Plus)
 ANALISADOR_FILTRO_HORARIO_UTIL_ATIVO = False  # True para bloquear em horário útil
