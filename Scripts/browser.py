@@ -1390,14 +1390,6 @@ async def _register_captured_files(page, q=None):
                 )
                 if not name:
                     name = os.path.basename(sandbox_path) or "file"
-            # Último fallback: usa nome como sandbox_path padrão.
-            if (not url) and chat_id_for_interpreter and message_id and name:
-                from urllib.parse import quote
-                sandbox_path = f"/mnt/data/{name}"
-                url = (
-                    f"https://chatgpt.com/backend-api/conversation/{chat_id_for_interpreter}"
-                    f"/interpreter/download?message_id={quote(message_id)}&sandbox_path={quote(sandbox_path)}"
-                )
 
         if not url:
             continue
