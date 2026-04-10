@@ -1390,6 +1390,14 @@ async def _register_captured_files(page, q=None):
                 )
                 if not name:
                     name = os.path.basename(sandbox_path) or "file"
+            # Último fallback: usa nome como sandbox_path padrão.
+            if (not url) and chat_id_for_interpreter and message_id and name:
+                from urllib.parse import quote
+                sandbox_path = f"/mnt/data/{name}"
+                url = (
+                    f"https://chatgpt.com/backend-api/conversation/{chat_id_for_interpreter}"
+                    f"/interpreter/download?message_id={quote(message_id)}&sandbox_path={quote(sandbox_path)}"
+                )
 
         if not url:
             continue
@@ -1447,6 +1455,7 @@ async def _scan_file_cards(page):
                 'div[class*="corner-superellipse"]'
             ];
             const seen = new Set();
+            const seenRows = new Set();
             const results = [];
             selectors.forEach(sel => {
                 document.querySelectorAll(sel).forEach((card, idx) => {
@@ -1489,6 +1498,10 @@ async def _scan_file_cards(page):
                         const allMsgs = Array.from(document.querySelectorAll('[data-message-author-role]'));
                         turnIndex = allMsgs.findIndex(el => el.getAttribute('data-message-id') === messageId);
                     }
+
+                    const rowKey = `${messageId || ''}|${name}|${preview || ''}`;
+                    if (seenRows.has(rowKey)) return;
+                    seenRows.add(rowKey);
 
                     results.push({
                         name: name,
@@ -2171,6 +2184,7 @@ async def handle_sync_task(context, task):
                     # Resolve URL de download via conversation API capture
                     matched = cap_by_name.get(name.lower())
                     download_url = ""
+                    card_message_id = (card.get("message_id") or "").strip()
                     if matched:
                         download_url = (matched.get("url") or "").strip()
                         chatgpt_fid = (matched.get("file_id") or "").strip()
@@ -2189,6 +2203,19 @@ async def handle_sync_task(context, task):
                                     download_url = resolved
                             except Exception:
                                 pass
+                    # Fallback determinístico para UI nova do interpreter:
+                    # quando temos chat_id + message_id do card, monta URL canônica
+                    # /interpreter/download usando sandbox_path padrão /mnt/data/<nome>.
+                    if not download_url and chat_id and card_message_id:
+                        try:
+                            from urllib.parse import quote
+                            sandbox_path = f"/mnt/data/{name}"
+                            download_url = (
+                                f"https://chatgpt.com/backend-api/conversation/{chat_id}"
+                                f"/interpreter/download?message_id={quote(card_message_id)}&sandbox_path={quote(sandbox_path)}"
+                            )
+                        except Exception:
+                            download_url = ""
 
                     append_parts = []
 
