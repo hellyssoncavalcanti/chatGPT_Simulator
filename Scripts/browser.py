@@ -984,7 +984,7 @@ def _resolve_chatgpt_download_url(raw_url: str) -> str:
     return raw_url
 
 
-async def _detect_and_register_files(page, markdown_text, q=None, allow_click_fallback=True):
+async def _detect_and_register_files(page, markdown_text, q=None, allow_click_fallback=True, scan_page_fallback=True):
     """
     Detecta links de download no markdown da resposta do ChatGPT e
     registra as URLs originais em shared.file_registry para proxy
@@ -1009,7 +1009,7 @@ async def _detect_and_register_files(page, markdown_text, q=None, allow_click_fa
 
     matches = list(link_pattern.finditer(markdown_text))
     # Se o padrão principal não encontrar nada, tenta o padrão secundário (por extensão de arquivo)
-    if not matches:
+    if not matches and scan_page_fallback:
         matches = list(file_ext_link_pattern.finditer(markdown_text))
     if not matches:
         # Fallback: tenta detectar links de download na página via múltiplos seletores
@@ -1212,8 +1212,8 @@ def _install_conversation_file_capture(page, q=None):
         page._captured_files = []
         seen_ids = set()
 
-        def _maybe_add(file_id: str, name: str, url: str = ""):
-            key = (file_id or "") + "|" + (name or "") + "|" + (url or "")
+        def _maybe_add(file_id: str, name: str, url: str = "", message_id: str = ""):
+            key = (file_id or "") + "|" + (name or "") + "|" + (url or "") + "|" + (message_id or "")
             if not key or key in seen_ids:
                 return
             seen_ids.add(key)
@@ -1221,6 +1221,7 @@ def _install_conversation_file_capture(page, q=None):
                 "file_id": file_id or "",
                 "name": name or "",
                 "url": url or "",
+                "message_id": message_id or "",
             })
 
         async def _on_response(response):
@@ -1249,7 +1250,8 @@ def _install_conversation_file_capture(page, q=None):
                                 _maybe_add(
                                     file_id=str(att.get("id") or ""),
                                     name=str(att.get("name") or att.get("file_name") or ""),
-                                    url=""
+                                    url="",
+                                    message_id=str(msg.get("id") or "")
                                 )
                             # Formato 2: metadata.aggregate_result.messages[].results[].files[]
                             agg = meta.get("aggregate_result") or {}
@@ -1259,7 +1261,8 @@ def _install_conversation_file_capture(page, q=None):
                                         _maybe_add(
                                             file_id=str(f.get("id") or f.get("sandbox_path") or ""),
                                             name=str(f.get("name") or f.get("file_name") or ""),
-                                            url=str(f.get("url") or "")
+                                            url=str(f.get("url") or ""),
+                                            message_id=str(msg.get("id") or "")
                                         )
                             # Formato 3: content.parts[].asset_pointer (file-service://file-xxx)
                             content = msg.get("content") or {}
@@ -1271,7 +1274,8 @@ def _install_conversation_file_capture(page, q=None):
                                         _maybe_add(
                                             file_id=fid,
                                             name=str(part.get("metadata", {}).get("filename") or ""),
-                                            url=""
+                                            url="",
+                                            message_id=str(msg.get("id") or "")
                                         )
                 # Caso 2: GET /backend-api/files/<id>/download → JSON com {download_url, file_name}
                 elif "/backend-api/files/" in url and "/download" in url:
@@ -1307,7 +1311,7 @@ def _install_conversation_file_capture(page, q=None):
                         # O proxy /api/downloads buscará via Playwright com credentials.
                         if message_id or guessed_name:
                             fid = f"interpreter:{message_id}:{sandbox_path}" if (message_id or sandbox_path) else ""
-                            _maybe_add(file_id=fid, name=guessed_name, url=url)
+                            _maybe_add(file_id=fid, name=guessed_name, url=url, message_id=message_id)
                     except Exception:
                         pass
             except Exception as e:
@@ -1324,8 +1328,9 @@ async def _register_captured_files(page, q=None):
     resolve URLs de download ainda não resolvidas (via /backend-api/files/{id}/download)
     e registra cada arquivo em shared.file_registry.
 
-    Retorna uma lista de tuplas (file_id_local, display_name) para os arquivos
-    que foram efetivamente registrados para proxy.
+    Retorna uma lista de dicts:
+      {file_id_local, name, message_id}
+    para os arquivos efetivamente registrados para proxy.
     """
     registered = []
     try:
@@ -1366,7 +1371,11 @@ async def _register_captured_files(page, q=None):
         safe = re.sub(r'[^\w.\-]', '_', name) or "file"
         local_file_id = f"conv_{int(time.time() * 1000)}_{safe}"
         register_file(local_file_id, url, name)
-        registered.append((local_file_id, name))
+        registered.append({
+            "file_id_local": local_file_id,
+            "name": name,
+            "message_id": (item.get("message_id") or "").strip()
+        })
         emit_log(q, f"📎 Arquivo (via conversation API): {name} → {local_file_id}")
 
     return registered
@@ -2186,14 +2195,17 @@ async def handle_sync_task(context, task):
         # Para mensagens anteriores que mencionam arquivos, fazemos um segundo passo
         # para injetar os links registrados no local correto.
         try:
-            last_ai_idx = max((i for i, m in enumerate(msgs) if m.get('role') == 'assistant'), default=-1)
-            if last_ai_idx >= 0:
-                msgs[last_ai_idx]['content'] = await _detect_and_register_files(
+            for i, m in enumerate(msgs):
+                if m.get('role') != 'assistant':
+                    continue
+                updated = await _detect_and_register_files(
                     page,
-                    msgs[last_ai_idx].get('content') or '',
+                    m.get('content') or '',
                     q,
-                    allow_click_fallback=False
+                    allow_click_fallback=False,
+                    scan_page_fallback=False
                 )
+                msgs[i]['content'] = updated
         except Exception as e_files:
             emit_log(q, f"⚠️ Falha ao detectar links de download durante SYNC: {e_files}")
 
@@ -2203,25 +2215,48 @@ async def handle_sync_task(context, task):
         try:
             captured_registered = await _register_captured_files(page, q)
             if captured_registered:
+                msg_idx_by_id = {
+                    (m.get("message_id") or "").strip(): i
+                    for i, m in enumerate(msgs)
+                    if (m.get("message_id") or "").strip()
+                }
                 assistant_indices = [i for i, m in enumerate(msgs) if m.get('role') == 'assistant']
-                target_ai_idx = assistant_indices[-1] if assistant_indices else -1
-                if target_ai_idx >= 0:
+
+                def _find_target_for_name(name: str) -> int:
+                    n = (name or "").strip().lower()
+                    if not n:
+                        return assistant_indices[-1] if assistant_indices else -1
+                    for idx in reversed(assistant_indices):
+                        txt = (msgs[idx].get('content') or '').lower()
+                        if n in txt:
+                            return idx
+                    return assistant_indices[-1] if assistant_indices else -1
+
+                appended_count = 0
+                for reg in captured_registered:
+                    file_id_local = reg.get("file_id_local") or ""
+                    name = reg.get("name") or "arquivo"
+                    msg_id = (reg.get("message_id") or "").strip()
+
+                    target_ai_idx = msg_idx_by_id.get(msg_id, -1) if msg_id else -1
+                    if target_ai_idx < 0:
+                        target_ai_idx = _find_target_for_name(name)
+                    if target_ai_idx < 0:
+                        continue
+
                     base = msgs[target_ai_idx].get('content') or ''
                     existing_ids = set(re.findall(r'/api/downloads/([A-Za-z0-9_\-\.]+)', base))
-                    novos = []
-                    for file_id_local, name in captured_registered:
-                        if file_id_local in existing_ids:
-                            continue
-                        # Evita duplicar se o mesmo nome de arquivo já aparece com link
-                        if name and f']({name})' in base:
-                            continue
-                        novos.append(f"📎 Arquivo: [{name}](/api/downloads/{file_id_local})")
-                    if novos:
-                        msgs[target_ai_idx]['content'] = (base + "\n\n" + "\n".join(novos)).strip()
-                        emit_log(
-                            q,
-                            f"📎 [SYNC] {len(novos)} link(s) de download (network) anexado(s) à msg assistant #{target_ai_idx + 1}"
-                        )
+                    if file_id_local in existing_ids:
+                        continue
+                    link_line = f"📎 Arquivo: [{name}](/api/downloads/{file_id_local})"
+                    if link_line in base:
+                        continue
+
+                    msgs[target_ai_idx]['content'] = (base + "\n\n" + link_line).strip()
+                    appended_count += 1
+
+                if appended_count:
+                    emit_log(q, f"📎 [SYNC] {appended_count} link(s) de download (network) anexado(s) nas mensagens corretas")
         except Exception as e_cap:
             emit_log(q, f"⚠️ Falha ao anexar arquivos capturados via network: {e_cap}")
 
@@ -2229,13 +2264,17 @@ async def handle_sync_task(context, task):
         # nem geram tráfego de rede até que o usuário clique. Tentamos clicar nos
         # elementos de download para disparar o evento Playwright "download".
         try:
-            has_download_markers = any(
+            has_resolved_download_links = any(
                 (m.get('role') == 'assistant') and (
-                    '/api/downloads/' in (m.get('content') or '') or '📎 Arquivo:' in (m.get('content') or '')
+                    '/api/downloads/' in (m.get('content') or '')
                 )
                 for m in msgs
             )
-            if not has_download_markers and not _sync_auto_downloads:
+            has_unresolved_downloads = any(
+                (m.get('role') == 'assistant') and ('URL indisponível' in (m.get('content') or ''))
+                for m in msgs
+            )
+            if (has_unresolved_downloads or not has_resolved_download_links) and not _sync_auto_downloads:
                 clicked = await _click_chatgpt_download_elements(page, q)
                 if clicked:
                     await asyncio.sleep(2)
@@ -3396,7 +3435,9 @@ async def handle_chat_task_inner(task, page, q, stop_event: asyncio.Event, activ
         if captured_registered:
             existing_ids = set(re.findall(r'/api/downloads/([A-Za-z0-9_\-\.]+)', markdown_text or ''))
             novos = []
-            for file_id_local, name in captured_registered:
+            for reg in captured_registered:
+                file_id_local = reg.get("file_id_local") or ""
+                name = reg.get("name") or "arquivo"
                 if file_id_local in existing_ids:
                     continue
                 novos.append(f"📎 Arquivo: [{name}](/api/downloads/{file_id_local})")
