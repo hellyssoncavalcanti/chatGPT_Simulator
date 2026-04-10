@@ -1068,6 +1068,68 @@ async def _detect_and_register_files(page, markdown_text, q=None, allow_click_fa
         except Exception as e:
             emit_log(q, f"⚠️ Erro ao detectar links na página: {e}")
 
+        # Fallback extra: varre cards de arquivo do ChatGPT (div.group.my-4.w-full.rounded-2xl)
+        # e cruza com metadados capturados via network listener (_install_conversation_file_capture).
+        # Para cada card encontrado, anexa o nome do arquivo + preview (se houver) + link de download
+        # (resolvido via API da conversa, quando disponível).
+        try:
+            cards = await _scan_file_cards(page)
+            if cards:
+                captured = list(getattr(page, "_captured_files", []) or [])
+                cap_by_name = {}
+                for cf in captured:
+                    nm = (cf.get("name") or "").strip().lower()
+                    if nm:
+                        cap_by_name.setdefault(nm, cf)
+
+                for card in cards:
+                    name = (card.get("name") or "").strip()
+                    if not name:
+                        continue
+                    if f"]({name})" in markdown_text or f"/{name}" in markdown_text:
+                        # Já referenciado como link
+                        continue
+
+                    # Tenta resolver download URL via conversation API capture
+                    matched = cap_by_name.get(name.lower())
+                    download_url = ""
+                    if matched:
+                        download_url = (matched.get("url") or "").strip()
+                        chatgpt_fid = (matched.get("file_id") or "").strip()
+                        if not download_url and chatgpt_fid and chatgpt_fid.startswith("file-"):
+                            try:
+                                resolved = await page.evaluate("""async (fid) => {
+                                    try {
+                                        const r = await fetch('/backend-api/files/' + fid + '/download',
+                                            { credentials: 'include' });
+                                        if (!r.ok) return null;
+                                        const d = await r.json();
+                                        return d.download_url || '';
+                                    } catch (e) { return null; }
+                                }""", chatgpt_fid)
+                                if resolved:
+                                    download_url = resolved
+                            except Exception:
+                                pass
+
+                    safe = re.sub(r'[^\w.\-]', '_', name) or "file"
+                    file_id = f"card_{int(time.time() * 1000)}_{safe}"
+                    if download_url:
+                        register_file(file_id, download_url, name)
+                        markdown_text += f"\n\n📎 Arquivo: [{name}](/api/downloads/{file_id})"
+                        emit_log(q, f"📎 Card de arquivo registrado: {name} → {file_id}")
+                    else:
+                        # Mesmo sem URL resolvida, exibe o nome para o usuário saber que o arquivo existe
+                        markdown_text += f"\n\n📎 Arquivo: **{name}** (URL indisponível — clique manualmente no ChatGPT para baixar)"
+                        emit_log(q, f"⚠️ Card de arquivo sem URL resolvida: {name}")
+
+                    # Preview image do card (geralmente base64 data URI)
+                    preview = (card.get("preview") or "").strip()
+                    if preview and preview not in markdown_text:
+                        markdown_text += f"\n\n![{name}]({preview})"
+        except Exception as e:
+            emit_log(q, f"⚠️ Erro ao varrer file cards: {e}")
+
         # Fallback 2: clica em elementos de download do code interpreter para capturar via auto-download
         if not page_links and allow_click_fallback:
             try:
@@ -1279,6 +1341,104 @@ async def _register_captured_files(page, q=None):
         emit_log(q, f"📎 Arquivo (via conversation API): {name} → {local_file_id}")
 
     return registered
+
+
+async def _scan_file_cards(page):
+    """
+    Varre o DOM procurando pelos "cards" de arquivo que o ChatGPT novo renderiza
+    para planilhas, canvases e outros artefatos do code interpreter.
+
+    Estrutura típica observada (abril/2026):
+        <div class="group my-4 w-full rounded-2xl corner-superellipse/1.1 ...">
+          <div class="... border-b">                       ← cabeçalho
+            <div class="... ps-1">
+              <div class="rounded-md p-1 ...">
+                <svg>...</svg>
+              </div>
+              <div class="truncate text-sm font-medium">NOME.ext</div>  ← filename
+            </div>
+            <div class="text-token-text-secondary ...">
+              <button class="... rounded-full p-1"> ... </button>     ← expand/fullscreen
+              <button class="... rounded-full p-1"> ... </button>     ← download
+            </div>
+          </div>
+          <div class="... bg-token-bg-tertiary ...">                  ← preview
+            ...
+            <img src="data:image/png;base64,...">
+          </div>
+        </div>
+
+    Como o filename NÃO fica dentro de <a>, nenhum dos seletores tradicionais
+    o encontra. Esta função extrai:
+      - name    : nome do arquivo (do div.truncate.text-sm.font-medium)
+      - preview : src do <img> dentro do card (pode ser data: base64 ou URL)
+
+    Retorna lista de dicts {name, preview, card_index}.
+    """
+    try:
+        return await page.evaluate("""() => {
+            const fileExts = /\\.(xlsx|xls|csv|pdf|docx|doc|pptx|ppt|zip|rar|json|xml|txt|png|jpg|jpeg|gif|svg)$/i;
+            const selectors = [
+                'div.group.my-4.w-full.rounded-2xl',
+                'div[class*="corner-superellipse"]'
+            ];
+            const seen = new Set();
+            const results = [];
+            selectors.forEach(sel => {
+                document.querySelectorAll(sel).forEach((card, idx) => {
+                    if (seen.has(card)) return;
+                    seen.add(card);
+
+                    // Tenta encontrar o filename via seletor direto;
+                    // fallback: qualquer texto dentro do card que termine com extensão conhecida.
+                    let name = '';
+                    const nameEl = card.querySelector('div.truncate.text-sm.font-medium');
+                    if (nameEl) {
+                        name = (nameEl.textContent || '').trim();
+                    }
+                    if (!name || !fileExts.test(name)) {
+                        const text = (card.innerText || '').trim();
+                        const m = text.match(/[\\w\\-. ]+\\.(xlsx|xls|csv|pdf|docx|doc|pptx|ppt|zip|rar|json|xml|txt|png|jpg|jpeg|gif|svg)/i);
+                        if (m) name = m[0].trim();
+                    }
+                    if (!name) return;
+
+                    // Preview image (base64 ou URL)
+                    let preview = '';
+                    const imgEl = card.querySelector('img[src]');
+                    if (imgEl) preview = imgEl.getAttribute('src') || '';
+
+                    // Identifica a qual mensagem o card pertence (assistant-turn)
+                    // subindo na árvore até achar um [data-message-id].
+                    let messageId = '';
+                    let turnIndex = -1;
+                    let node = card.parentElement;
+                    while (node) {
+                        if (node.getAttribute && node.getAttribute('data-message-id')) {
+                            messageId = node.getAttribute('data-message-id') || '';
+                            break;
+                        }
+                        node = node.parentElement;
+                    }
+                    // Índice do turn (1-based) dentro da conversa
+                    if (messageId) {
+                        const allMsgs = Array.from(document.querySelectorAll('[data-message-author-role]'));
+                        turnIndex = allMsgs.findIndex(el => el.getAttribute('data-message-id') === messageId);
+                    }
+
+                    results.push({
+                        name: name,
+                        preview: preview,
+                        card_index: idx,
+                        message_id: messageId,
+                        turn_index: turnIndex
+                    });
+                });
+            });
+            return results;
+        }""")
+    except Exception:
+        return []
 
 
 async def _click_chatgpt_download_elements(page, q=None):
@@ -1895,6 +2055,84 @@ async def handle_sync_task(context, task):
                 m['content'] = md(clean).strip()
             m['content'] = m['content'].replace('\u200b', '').replace('\xa0', ' ')
             m['content'] = m['content'].replace('\\_', '_').replace('\\*', '*')  # ✅ FIX — era omitido aqui
+
+        # Varre TODOS os file cards do ChatGPT (em todas as mensagens) e injeta
+        # o nome do arquivo + preview na mensagem CORRETA — cada card conhece seu
+        # turn_index via data-message-id. Isso recupera imagens e downloads que
+        # a conversão HTML→markdown (via markdownify) eventualmente descarta, já
+        # que esses cards usam <div> dentro de <p> (HTML inválido) + botões sem
+        # href nem <a>.
+        try:
+            cards_all = await _scan_file_cards(page)
+            if cards_all:
+                captured = list(getattr(page, "_captured_files", []) or [])
+                cap_by_name = {}
+                for cf in captured:
+                    nm = (cf.get("name") or "").strip().lower()
+                    if nm:
+                        cap_by_name.setdefault(nm, cf)
+
+                for card in cards_all:
+                    name = (card.get("name") or "").strip()
+                    if not name:
+                        continue
+                    turn_index = card.get("turn_index", -1)
+                    if turn_index < 0 or turn_index >= len(msgs):
+                        # Sem âncora de mensagem → anexa na última assistant
+                        assistant_indices = [i for i, m in enumerate(msgs) if m.get('role') == 'assistant']
+                        turn_index = assistant_indices[-1] if assistant_indices else -1
+                    if turn_index < 0:
+                        continue
+
+                    target_content = msgs[turn_index].get('content') or ''
+                    if name in target_content and ('/api/downloads/' in target_content or '![' in target_content):
+                        # Já presente
+                        continue
+
+                    # Resolve URL de download via conversation API capture
+                    matched = cap_by_name.get(name.lower())
+                    download_url = ""
+                    if matched:
+                        download_url = (matched.get("url") or "").strip()
+                        chatgpt_fid = (matched.get("file_id") or "").strip()
+                        if not download_url and chatgpt_fid and chatgpt_fid.startswith("file-"):
+                            try:
+                                resolved = await page.evaluate("""async (fid) => {
+                                    try {
+                                        const r = await fetch('/backend-api/files/' + fid + '/download',
+                                            { credentials: 'include' });
+                                        if (!r.ok) return null;
+                                        const d = await r.json();
+                                        return d.download_url || '';
+                                    } catch (e) { return null; }
+                                }""", chatgpt_fid)
+                                if resolved:
+                                    download_url = resolved
+                            except Exception:
+                                pass
+
+                    append_parts = []
+
+                    # Link de download (se resolvido)
+                    if download_url:
+                        safe = re.sub(r'[^\w.\-]', '_', name) or "file"
+                        file_id = f"card_{int(time.time() * 1000)}_{safe}"
+                        register_file(file_id, download_url, name)
+                        append_parts.append(f"📎 Arquivo: [{name}](/api/downloads/{file_id})")
+                        emit_log(q, f"📎 [SYNC] Card registrado: {name} (msg #{turn_index + 1})")
+                    else:
+                        append_parts.append(f"📎 Arquivo: **{name}**")
+                        emit_log(q, f"⚠️ [SYNC] Card sem URL resolvida: {name} (msg #{turn_index + 1})")
+
+                    # Preview (data: ou URL externa) — reinjeta como markdown image
+                    preview = (card.get("preview") or "").strip()
+                    if preview and preview not in target_content:
+                        append_parts.append(f"![{name}]({preview})")
+
+                    if append_parts:
+                        msgs[turn_index]['content'] = (target_content + "\n\n" + "\n\n".join(append_parts)).strip()
+        except Exception as e_cards:
+            emit_log(q, f"⚠️ Falha ao varrer file cards no SYNC: {e_cards}")
 
         # Garante persistência de links de download também no fluxo de SYNC:
         # quando o ChatGPT renderiza "cards" de arquivo sem URL visível no markdown,
