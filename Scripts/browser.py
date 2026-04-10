@@ -1609,6 +1609,7 @@ async def scrape_full_chat(page):
             if (roleDivs.length > 0) {
                 return Array.from(roleDivs).map(el => {
                     const role = el.getAttribute('data-message-author-role') || 'user';
+                    const messageId = el.getAttribute('data-message-id') || '';
 
                     let contentEl;
                     if (role === 'assistant') {
@@ -1622,7 +1623,7 @@ async def scrape_full_chat(page):
 
                     let html = contentEl.innerHTML || '';
                     html = stripButtonsKeepMedia(html);
-                    return { role, content: html };
+                    return { role, content: html, message_id: messageId };
                 }).filter(m => m.content && m.content.trim().length > 0);
             }
 
@@ -1634,6 +1635,7 @@ async def scrape_full_chat(page):
                     const role   = roleEl
                         ? roleEl.getAttribute('data-message-author-role')
                         : (art.querySelector('.markdown') ? 'assistant' : 'user');
+                    const messageId = roleEl ? (roleEl.getAttribute('data-message-id') || '') : '';
 
                     let contentEl;
                     if (role === 'assistant') {
@@ -1647,7 +1649,7 @@ async def scrape_full_chat(page):
 
                     let html = contentEl.innerHTML || '';
                     html = stripButtonsKeepMedia(html);
-                    return { role, content: html };
+                    return { role, content: html, message_id: messageId };
                 }).filter(m => m.content && m.content.trim().length > 0);
             }
 
@@ -1656,6 +1658,8 @@ async def scrape_full_chat(page):
             if (sections.length > 0) {
                 return Array.from(sections).map(sec => {
                     const role = sec.getAttribute('data-turn') || 'user';
+                    const messageRoleEl = sec.querySelector('[data-message-author-role]');
+                    const messageId = messageRoleEl ? (messageRoleEl.getAttribute('data-message-id') || '') : '';
                     let contentEl;
                     if (role === 'assistant') {
                         contentEl = sec.querySelector('.markdown')
@@ -1668,7 +1672,7 @@ async def scrape_full_chat(page):
                     if (!contentEl) return null;
                     let html = contentEl.innerHTML || '';
                     html = stripButtonsKeepMedia(html);
-                    return { role, content: html };
+                    return { role, content: html, message_id: messageId };
                 }).filter(m => m && m.content && m.content.trim().length > 0);
             }
 
@@ -2065,6 +2069,12 @@ async def handle_sync_task(context, task):
         try:
             cards_all = await _scan_file_cards(page)
             if cards_all:
+                msg_idx_by_id = {}
+                for i, m in enumerate(msgs):
+                    mid = (m.get("message_id") or "").strip()
+                    if mid:
+                        msg_idx_by_id[mid] = i
+
                 captured = list(getattr(page, "_captured_files", []) or [])
                 cap_by_name = {}
                 for cf in captured:
@@ -2076,7 +2086,12 @@ async def handle_sync_task(context, task):
                     name = (card.get("name") or "").strip()
                     if not name:
                         continue
-                    turn_index = card.get("turn_index", -1)
+                    turn_index = -1
+                    card_msg_id = (card.get("message_id") or "").strip()
+                    if card_msg_id and card_msg_id in msg_idx_by_id:
+                        turn_index = msg_idx_by_id[card_msg_id]
+                    if turn_index < 0:
+                        turn_index = card.get("turn_index", -1)
                     if turn_index < 0 or turn_index >= len(msgs):
                         # Sem âncora de mensagem → anexa na última assistant
                         assistant_indices = [i for i, m in enumerate(msgs) if m.get('role') == 'assistant']
