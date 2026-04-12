@@ -91,8 +91,32 @@ def _terminate_previous_same_server_instances(script_name: str) -> None:
         "} "
         "| Select-Object -ExpandProperty ProcessId"
     )
+    ps_cmd_ancestors = (
+        f"$p={current_pid}; "
+        "while ($p -and $p -ne 0) { "
+        "  $proc=Get-CimInstance Win32_Process -Filter (\"ProcessId = \" + $p); "
+        "  if (-not $proc) { break }; "
+        "  $pp=$proc.ParentProcessId; "
+        "  if ($pp -and $pp -ne 0) { Write-Output $pp }; "
+        "  $p=$pp "
+        "}"
+    )
 
     try:
+        ancestors_proc = subprocess.run(
+            ["powershell", "-NoProfile", "-Command", ps_cmd_ancestors],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=15,
+        )
+        protected_pids = {current_pid}
+        protected_pids.update(
+            int(pid_txt.strip())
+            for pid_txt in (ancestors_proc.stdout or "").splitlines()
+            if pid_txt.strip().isdigit()
+        )
+
         shell_proc = subprocess.run(
             ["powershell", "-NoProfile", "-Command", ps_cmd_shells],
             stdout=subprocess.PIPE,
@@ -106,6 +130,8 @@ def _terminate_previous_same_server_instances(script_name: str) -> None:
             if pid_txt.strip().isdigit()
         }
         for pid in sorted(shell_targets):
+            if pid in protected_pids:
+                continue
             subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
             print(f"[BOOT] Janela CMD anterior do servidor foi finalizada (PID {pid}) para {script_name}.")
 
@@ -122,6 +148,8 @@ def _terminate_previous_same_server_instances(script_name: str) -> None:
             if pid_txt.strip().isdigit()
         }
         for pid in sorted(py_targets):
+            if pid in protected_pids:
+                continue
             subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
             print(f"[BOOT] Processo Python anterior finalizado (PID {pid}) para {script_name}.")
     except Exception as exc:
