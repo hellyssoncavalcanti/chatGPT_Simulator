@@ -699,3 +699,43 @@ Em termos práticos:
 - `utils.py` cuida de infraestrutura;
 - `analisador_prontuarios.py` usa o simulador como engine LLM para um fluxo médico;
 - `acompanhamento_whatsapp.py` monitora respostas de pacientes, gera respostas via ChatGPT Simulator e detecta quando a LLM precisa de intervenção humana (médico ou secretária), criando notificações pendentes no banco e permitindo resposta manual via interface web.
+
+---
+
+## Agente autônomo de melhoria contínua
+
+Foi adicionado o script `Scripts/auto_dev_agent.py`, que atua como um orquestrador de operação contínua:
+
+1. não inicia servidores automaticamente; detecta a cada ciclo quais processos do ecossistema estão ativos (main, analisador e browser worker) e passa a monitorá-los;
+2. monitora logs em tempo real por ciclos;
+3. detecta padrões de erro/warning;
+4. consulta a LLM local (`/v1/chat/completions`, via Simulator/browser.py) para obter sugestões;
+5. mesmo sem erro, entra em ciclo de melhoria contínua no intervalo configurado;
+6. interpreta logs, envia contexto de erros para a LLM, aplica correções, reexecuta testes e tenta novamente até validar (máximo configurável de tentativas por rodada);
+7. executa ações automáticas de shell/patch e validações rápidas (`py_compile`, `git status`).
+8. registra snapshot de serviços ativos monitorados em cada mudança de estado (ON/OFF por processo alvo).
+
+### Como executar
+
+```bat
+3. start_agente_autonomo.bat
+```
+
+ou diretamente:
+
+```bash
+python Scripts/auto_dev_agent.py
+```
+
+### Variáveis de ambiente úteis
+
+- `AUTODEV_AGENT_SIMULATOR_URL` (default `http://127.0.0.1:3003/v1/chat/completions`)
+- `AUTODEV_AGENT_MODEL` (default `ChatGPT Simulator`)
+- `AUTODEV_AGENT_API_KEY` (opcional)
+- `AUTODEV_AGENT_CYCLE_SEC` (default `60`)
+- `AUTODEV_AGENT_SUGGESTION_SEC` (default `300`)
+- `AUTODEV_AGENT_MAX_ATTEMPTS` (default `3`) → tentativas de correção por rodada
+- `AUTODEV_AGENT_UNSAFE` (default `0`) → habilita auto-apply de patch
+
+> Operação automática: por padrão, o agente valida e monitora em loop, mas **não aplica patch automaticamente** (`AUTODEV_AGENT_UNSAFE=0`), com bloqueio adicional para arquivo crítico `Scripts/analisador_prontuarios.py`.
+> Autenticação: se `AUTODEV_AGENT_API_KEY` não for definida, o agente tenta reutilizar `config.API_KEY` automaticamente.
