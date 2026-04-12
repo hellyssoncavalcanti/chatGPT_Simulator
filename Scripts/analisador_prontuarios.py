@@ -2082,7 +2082,11 @@ def salvar_resultado(id_atendimento: int, resultado: dict):
 
 
 def buscar_maior_resumo_texto_paciente(id_paciente: str, id_atendimento_atual=None) -> str:
-    """Retorna o maior resumo_texto concluído do paciente para fallback de evolução curta."""
+    """Retorna o maior resumo_texto concluído do paciente para fallback de evolução curta.
+
+    Descarta resumos nulos, vazios, curtos demais ou que são apenas outros
+    fallbacks reciclados (sem conteúdo clínico real).
+    """
     if not id_paciente:
         return ""
 
@@ -2096,13 +2100,18 @@ def buscar_maior_resumo_texto_paciente(id_paciente: str, id_atendimento_atual=No
         WHERE id_paciente = '{esc(str(id_paciente))}'
           AND status = 'concluido'
           AND COALESCE(id_criador, '') <> 'analise_compilada_paciente'
-          AND COALESCE(resumo_texto, '') <> ''
+          AND COALESCE(TRIM(resumo_texto), '') <> ''
+          AND CHAR_LENGTH(TRIM(resumo_texto)) >= {MIN_CHARS}
+          AND LOWER(TRIM(resumo_texto)) NOT LIKE 'consulta de %:%'
           {filtro_atual}
         ORDER BY CHAR_LENGTH(resumo_texto) DESC, datetime_analise_concluida DESC
         LIMIT 1
     """, reason="buscar_maior_resumo_texto_paciente").get("data") or [{}])[0]
 
-    return str(row.get("resumo_texto") or "").strip()
+    resultado = str(row.get("resumo_texto") or "").strip()
+    if len(resultado) < MIN_CHARS:
+        return ""
+    return resultado
 
 
 def corrigir_erros_texto_insuficiente_no_startup():
