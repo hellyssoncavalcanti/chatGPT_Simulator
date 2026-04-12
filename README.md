@@ -702,33 +702,36 @@ Em termos práticos:
 
 ---
 
-## Agente autônomo de melhoria contínua (experimental)
+## Agente autônomo de melhoria contínua
 
-Foi adicionado o script `Scripts/auto_dev_agent.py`, que opera como um orquestrador autônomo para dev/debug contínuo.
+Foi adicionado o script `Scripts/agente_autonomo.py`, que atua como um orquestrador de operação contínua:
 
-Capacidades principais:
+1. inicia os arquivos `.bat` de execução (em Windows);
+2. monitora logs em tempo real por ciclos;
+3. detecta padrões de erro/warning;
+4. consulta a LLM local (`/v1/chat/completions`, via Simulator/browser.py) para obter sugestões;
+5. executa ações de shell seguras e validações rápidas (`py_compile`);
+6. pode aplicar patches automáticos **somente** quando habilitado explicitamente.
 
-- inicia um `.bat` do sistema (padrão: `0. start.bat`, em ambiente Windows);
-- monitora logs em tempo real e detecta erros por padrões (`error`, `exception`, `traceback`, etc.);
-- consulta uma LLM (via endpoint compatível com `chat/completions`) para propor plano de ação em JSON;
-- executa comandos de diagnóstico;
-- opcionalmente aplica `patch_diff` via `git apply` (desligado por padrão);
-- roda ciclo de melhoria contínua mesmo sem erro.
+### Como executar
 
-### Execução
+```bat
+3. start_agente_autonomo.bat
+```
+
+ou diretamente:
 
 ```bash
-python Scripts/auto_dev_agent.py
+python Scripts/agente_autonomo.py
 ```
 
 ### Variáveis de ambiente úteis
 
-- `AUTO_AGENT_BAT` (default: `0. start.bat`)
-- `AUTO_AGENT_LLM_URL` (default: `http://127.0.0.1:3003/v1/chat/completions`)
-- `AUTO_AGENT_LLM_API_KEY`
-- `AUTO_AGENT_MODEL` (default: `gpt-4o-mini`)
-- `AUTO_AGENT_SAFE_MODE` (default: `true`)
-- `AUTO_AGENT_AUTO_APPLY_PATCHES` (default: `false`)
-- `AUTO_AGENT_IMPROVEMENT_INTERVAL` (default: `120` segundos)
+- `AUTON_AGENT_SIMULATOR_URL` (default `http://127.0.0.1:3003/v1/chat/completions`)
+- `AUTON_AGENT_MODEL` (default `ChatGPT Simulator`)
+- `AUTON_AGENT_API_KEY` (opcional)
+- `AUTON_AGENT_CYCLE_SEC` (default `60`)
+- `AUTON_AGENT_SUGGESTION_SEC` (default `300`)
+- `AUTON_AGENT_UNSAFE` (default `0`) → `1` permite auto-apply de patch
 
-> Recomendação: manter `AUTO_AGENT_SAFE_MODE=true` e habilitar `AUTO_AGENT_AUTO_APPLY_PATCHES` apenas em ambiente de staging/controlado.
+> Segurança: por padrão, o agente **não** aplica patch automaticamente (`AUTON_AGENT_UNSAFE=0`).
