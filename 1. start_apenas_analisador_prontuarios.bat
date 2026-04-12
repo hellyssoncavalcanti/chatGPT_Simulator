@@ -13,6 +13,6 @@ python -m pip install requests --quiet
 
 echo [INFO] Iniciando Analisador de Prontuarios...
 echo.
-.venv\Scripts\python.exe scripts\analisador_prontuarios.py
+.venv\Scripts\python.exe Scripts\analisador_prontuarios.py
 
 pause

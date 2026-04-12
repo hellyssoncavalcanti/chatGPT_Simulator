@@ -48,8 +48,112 @@ LÓGICA DE ORDENAÇÃO DA FILA:
 # ─────────────────────────────────────────────────────────────
 # AUTO-INSTALAÇÃO DE DEPENDÊNCIAS
 # ─────────────────────────────────────────────────────────────
-import sys, subprocess
+import os, re, sys, subprocess
 import random
+
+
+def _terminate_previous_same_server_instances(script_name: str) -> None:
+    """Fecha processos antigos do mesmo servidor, incluindo janela CMD/.bat anterior."""
+    if os.name != "nt":
+        return
+
+    current_pid = os.getpid()
+    escaped_script = re.escape(script_name).replace("'", "''")
+    extra_shell_tokens = {
+        "analisador_prontuarios.py": [
+            "1. start_apenas_analisador_prontuarios.bat",
+            "1.start_apenas_analisador_prontuarios.bat",
+            "start_apenas_analisador_prontuarios.bat",
+        ],
+    }
+    shell_tokens = [script_name, *extra_shell_tokens.get(script_name.lower(), [])]
+    shell_regex = "|".join(re.escape(token) for token in shell_tokens).replace("'", "''")
+
+    ps_cmd_shells = (
+        f"$self={current_pid}; "
+        "$selfParent=(Get-CimInstance Win32_Process -Filter \"ProcessId = $self\" | Select-Object -ExpandProperty ParentProcessId); "
+        "Get-CimInstance Win32_Process "
+        "| Where-Object { "
+        "($_.Name -match '^(cmd|powershell|pwsh)\\.exe$') -and "
+        "($_.ProcessId -ne $selfParent) -and "
+        "($_.CommandLine -match '(?i)(" + shell_regex + ")') "
+        "} "
+        "| Select-Object -ExpandProperty ProcessId"
+    )
+
+    ps_cmd_python = (
+        f"$self={current_pid}; "
+        "Get-CimInstance Win32_Process "
+        "| Where-Object { "
+        "($_.Name -match 'python|py') -and "
+        "($_.ProcessId -ne $self) -and "
+        "($_.CommandLine -match '(?i)" + escaped_script + "') "
+        "} "
+        "| Select-Object -ExpandProperty ProcessId"
+    )
+    ps_cmd_ancestors = (
+        f"$p={current_pid}; "
+        "while ($p -and $p -ne 0) { "
+        "  $proc=Get-CimInstance Win32_Process -Filter (\"ProcessId = \" + $p); "
+        "  if (-not $proc) { break }; "
+        "  $pp=$proc.ParentProcessId; "
+        "  if ($pp -and $pp -ne 0) { Write-Output $pp }; "
+        "  $p=$pp "
+        "}"
+    )
+
+    try:
+        ancestors_proc = subprocess.run(
+            ["powershell", "-NoProfile", "-Command", ps_cmd_ancestors],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=15,
+        )
+        protected_pids = {current_pid}
+        protected_pids.update(
+            int(pid_txt.strip())
+            for pid_txt in (ancestors_proc.stdout or "").splitlines()
+            if pid_txt.strip().isdigit()
+        )
+
+        shell_proc = subprocess.run(
+            ["powershell", "-NoProfile", "-Command", ps_cmd_shells],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=15,
+        )
+        shell_targets = {
+            int(pid_txt.strip())
+            for pid_txt in (shell_proc.stdout or "").splitlines()
+            if pid_txt.strip().isdigit()
+        }
+        for pid in sorted(shell_targets):
+            if pid in protected_pids:
+                continue
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+            print(f"[BOOT] Janela CMD anterior do servidor foi finalizada (PID {pid}) para {script_name}.")
+
+        py_proc = subprocess.run(
+            ["powershell", "-NoProfile", "-Command", ps_cmd_python],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=15,
+        )
+        py_targets = {
+            int(pid_txt.strip())
+            for pid_txt in (py_proc.stdout or "").splitlines()
+            if pid_txt.strip().isdigit()
+        }
+        for pid in sorted(py_targets):
+            if pid in protected_pids:
+                continue
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+            print(f"[BOOT] Processo Python anterior finalizado (PID {pid}) para {script_name}.")
+    except Exception as exc:
+        print(f"[BOOT] Aviso: não foi possível substituir instâncias anteriores de {script_name}: {exc}")
 
 def _ensure(pkg, import_name=None):
     """Verifica se pacote esta instalado via find_spec (sem importar o modulo).
@@ -5565,6 +5669,7 @@ def main():
 
 
 if __name__ == "__main__":
+    _terminate_previous_same_server_instances("analisador_prontuarios.py")
     while True:
         try:
             main()
