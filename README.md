@@ -730,6 +730,7 @@ python Scripts/auto_dev_agent.py
 ### Variáveis de ambiente úteis
 
 - `AUTODEV_AGENT_SIMULATOR_URL` (default `http://127.0.0.1:3003/v1/chat/completions`)
+- `AUTODEV_AGENT_CODEX_URL` (default `https://chatgpt.com/codex/cloud`)
 - `AUTODEV_AGENT_MODEL` (default `ChatGPT Simulator`)
 - `AUTODEV_AGENT_API_KEY` (opcional)
 - `AUTODEV_AGENT_CYCLE_SEC` (default `60`)

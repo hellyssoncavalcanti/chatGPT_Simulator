@@ -58,6 +58,7 @@ def _env(name_new: str, default: str, legacy_name: str | None = None) -> str:
 
 
 SIMULATOR_URL = _env("AUTODEV_AGENT_SIMULATOR_URL", "http://127.0.0.1:3003/v1/chat/completions", "AUTON_AGENT_SIMULATOR_URL")
+CODEX_CLOUD_URL = _env("AUTODEV_AGENT_CODEX_URL", "https://chatgpt.com/codex/cloud")
 SIMULATOR_MODEL = _env("AUTODEV_AGENT_MODEL", "ChatGPT Simulator", "AUTON_AGENT_MODEL")
 _cfg_api_key = getattr(config, "API_KEY", "") if config else ""
 API_KEY = _env("AUTODEV_AGENT_API_KEY", _cfg_api_key, "AUTON_AGENT_API_KEY")
@@ -310,6 +311,9 @@ def ask_llm_for_actions(context: dict, objective: str) -> Optional[dict]:
 
     body = {
         "model": SIMULATOR_MODEL,
+        "url": CODEX_CLOUD_URL,
+        "origin_url": CODEX_CLOUD_URL,
+        "request_source": "auto_dev_agent_codex_cloud",
         "messages": [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
@@ -325,7 +329,9 @@ def ask_llm_for_actions(context: dict, objective: str) -> Optional[dict]:
         resp = requests.post(SIMULATOR_URL, headers=_llm_headers(), json=body, timeout=180)
         resp.raise_for_status()
         data = resp.json()
-        if isinstance(data, dict) and "choices" in data:
+        if isinstance(data, dict) and data.get("success") is True and "html" in data:
+            content = data.get("html", "")
+        elif isinstance(data, dict) and "choices" in data:
             content = data["choices"][0]["message"]["content"]
         elif isinstance(data, dict) and "response" in data:
             content = data.get("response", "")
@@ -333,6 +339,11 @@ def ask_llm_for_actions(context: dict, objective: str) -> Optional[dict]:
             raise ValueError(f"Simulator/browser.py retornou erro: {data.get('error')}")
         else:
             raise ValueError(f"Resposta inesperada do Simulator/browser.py: chaves={list(data.keys()) if isinstance(data, dict) else type(data)}")
+        content = (content or "").strip()
+        if content.startswith("```"):
+            content = re.sub(r"^```[a-zA-Z0-9_-]*\n?", "", content).strip()
+            if content.endswith("```"):
+                content = content[:-3].strip()
         parsed = json.loads(content)
         if not isinstance(parsed, dict):
             raise ValueError("JSON de resposta não é objeto")
