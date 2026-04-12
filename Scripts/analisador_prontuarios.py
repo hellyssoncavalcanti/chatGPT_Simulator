@@ -2143,7 +2143,7 @@ def corrigir_erros_texto_insuficiente_no_startup():
         texto_curto = strip_html(row.get("consulta_conteudo") or "")
         dt_base = str(row.get("datetime_base") or "").strip()
         maior_resumo = buscar_maior_resumo_texto_paciente(id_paciente, id_atendimento)
-        sufixo_evolucao = f"Evolução de {dt_base}: {texto_curto}".strip()
+        sufixo_evolucao = f"Consulta de {dt_base}: {texto_curto}".strip()
         resumo_fallback = f"{maior_resumo}\n{sufixo_evolucao}".strip() if maior_resumo else sufixo_evolucao
 
         salvar_resultado(id_atendimento, {
@@ -5439,7 +5439,7 @@ def processar_lote(pendentes: list):
                 or ""
             ).strip()
             maior_resumo = buscar_maior_resumo_texto_paciente(id_paciente, idat)
-            sufixo_evolucao = f"Evolução de {dt_evolucao}: {texto}".strip()
+            sufixo_evolucao = f"Consulta de {dt_evolucao}: {texto}".strip()
             resumo_fallback = f"{maior_resumo}\n{sufixo_evolucao}".strip() if maior_resumo else sufixo_evolucao
 
             salvar_resultado(idat, {
