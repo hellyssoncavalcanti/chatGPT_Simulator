@@ -99,11 +99,12 @@ WARN_PATTERNS = [
     r"\bretry\b",
 ]
 
-START_COMMANDS = [
-    ["cmd", "/d", "/c", "set AUTODEV_AGENT_SKIP_CLEANUP=1 && 0. start.bat"],
-    ["cmd", "/d", "/c", "1. start_apenas_analisador_prontuarios.bat"],
-]
-CHILD_PROCS: list[dict] = []
+SERVICE_PATTERNS = {
+    "main": "Scripts\\\\main.py",
+    "analisador_prontuarios": "Scripts\\\\analisador_prontuarios.py",
+    "browser_worker": "Scripts\\\\browser.py",
+}
+_last_active_services_signature = ""
 
 
 @dataclass
@@ -145,51 +146,51 @@ def is_windows() -> bool:
     return os.name == "nt"
 
 
-def start_bats_if_needed() -> list[subprocess.Popen]:
-    """Inicia os processos declarados, se estiver em ambiente Windows.
-
-    Em Linux/macOS, registra aviso e segue somente com monitoramento/sugestões.
-    """
-    procs: list[subprocess.Popen] = []
+def discover_active_services() -> dict:
+    """Descobre processos ativos do ecossistema sem iniciá-los."""
     if not is_windows():
-        log("⚠️ Ambiente não-Windows detectado; start dos .bat foi pulado.")
-        return procs
+        return {}
 
-    for cmd in START_COMMANDS:
+    service_map: dict[str, list[int]] = {name: [] for name in SERVICE_PATTERNS.keys()}
+    for name, pattern in SERVICE_PATTERNS.items():
+        ps_cmd = (
+            "Get-CimInstance Win32_Process "
+            f"| Where-Object {{ $_.CommandLine -like '*{pattern}*' }} "
+            "| Select-Object -ExpandProperty ProcessId"
+        )
         try:
-            proc = subprocess.Popen(cmd, cwd=str(ROOT_DIR), creationflags=subprocess.CREATE_NEW_CONSOLE)  # type: ignore[attr-defined]
-            procs.append(proc)
-            CHILD_PROCS.append({"cmd": cmd, "proc": proc, "started_at": time.time(), "last_restart": 0.0})
-            label = "main" if "0. start.bat" in " ".join(cmd) else "analisador_prontuarios"
-            log(f"✅ Processo iniciado em janela própria: {label} (pid={proc.pid})")
-        except Exception as exc:
-            log(f"❌ Falha ao iniciar {' '.join(cmd)}: {exc}")
-    return procs
+            proc = subprocess.run(
+                ["powershell", "-NoProfile", "-Command", ps_cmd],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=15,
+            )
+            pids = []
+            for line in (proc.stdout or "").splitlines():
+                line = line.strip()
+                if line.isdigit():
+                    pids.append(int(line))
+            service_map[name] = sorted(set(pids))
+        except Exception:
+            service_map[name] = []
+    return service_map
 
 
-def keep_child_processes_alive() -> None:
-    """Reinicia .bat filho se ele terminar inesperadamente."""
-    now = time.time()
-    for item in CHILD_PROCS:
-        proc = item["proc"]
-        if proc.poll() is None:
-            continue
+def log_active_services_snapshot(service_map: dict) -> None:
+    global _last_active_services_signature
+    signature = json.dumps(service_map, sort_keys=True, ensure_ascii=False)
+    if signature == _last_active_services_signature:
+        return
+    _last_active_services_signature = signature
 
-        cmd = item["cmd"]
-        exit_code = proc.returncode
-        last_restart = float(item.get("last_restart", 0.0))
-        # evita loop agressivo de restart
-        if now - last_restart < 10:
-            continue
-
-        log(f"⚠️ Processo filho encerrado (exit={exit_code}): {' '.join(cmd)}. Reiniciando...")
-        try:
-            new_proc = subprocess.Popen(cmd, cwd=str(ROOT_DIR), creationflags=subprocess.CREATE_NEW_CONSOLE)  # type: ignore[attr-defined]
-            item["proc"] = new_proc
-            item["last_restart"] = now
-            log(f"✅ Processo reiniciado: {' '.join(cmd)} (pid={new_proc.pid})")
-        except Exception as exc:
-            log(f"❌ Falha ao reiniciar {' '.join(cmd)}: {exc}")
+    msg = []
+    for name, pids in service_map.items():
+        if pids:
+            msg.append(f"{name}={pids}")
+        else:
+            msg.append(f"{name}=OFF")
+    log("🛰️ Serviços ativos monitorados: " + " | ".join(msg))
 
 
 def tail_last_lines(path: Path, max_lines: int = 80) -> list[str]:
@@ -492,13 +493,15 @@ def main() -> None:
     log(f"📄 Log: {AGENT_LOG}")
     if not API_KEY:
         log("⚠️ API_KEY ausente no ambiente/config. Requisições ao Simulator podem retornar 401.", level=logging.WARNING)
-    start_bats_if_needed()
+    log("🔎 Modo monitor: não inicia servidores automaticamente; apenas detecta e monitora serviços ativos.")
 
     last_suggestion_ts = 0.0
     while True:
         try:
-            keep_child_processes_alive()
+            active_services = discover_active_services()
+            log_active_services_snapshot(active_services)
             context = collect_runtime_context()
+            context["active_services"] = active_services
             checks = quick_checks()
 
             has_error = any(i.get("level") == "error" for i in context.get("incidents", []))
