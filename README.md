@@ -704,7 +704,7 @@ Em termos práticos:
 
 ## Agente autônomo de melhoria contínua
 
-Foi adicionado o script `Scripts/agente_autonomo.py`, que atua como um orquestrador de operação contínua:
+Foi adicionado o script `Scripts/auto_dev_agent.py`, que atua como um orquestrador de operação contínua:
 
 1. inicia os arquivos `.bat` de execução (em Windows);
 2. monitora logs em tempo real por ciclos;
@@ -722,16 +722,16 @@ Foi adicionado o script `Scripts/agente_autonomo.py`, que atua como um orquestra
 ou diretamente:
 
 ```bash
-python Scripts/agente_autonomo.py
+python Scripts/auto_dev_agent.py
 ```
 
 ### Variáveis de ambiente úteis
 
-- `AUTON_AGENT_SIMULATOR_URL` (default `http://127.0.0.1:3003/v1/chat/completions`)
-- `AUTON_AGENT_MODEL` (default `ChatGPT Simulator`)
-- `AUTON_AGENT_API_KEY` (opcional)
-- `AUTON_AGENT_CYCLE_SEC` (default `60`)
-- `AUTON_AGENT_SUGGESTION_SEC` (default `300`)
-- `AUTON_AGENT_UNSAFE` (default `0`) → `1` permite auto-apply de patch
+- `AUTODEV_AGENT_SIMULATOR_URL` (default `http://127.0.0.1:3003/v1/chat/completions`)
+- `AUTODEV_AGENT_MODEL` (default `ChatGPT Simulator`)
+- `AUTODEV_AGENT_API_KEY` (opcional)
+- `AUTODEV_AGENT_CYCLE_SEC` (default `60`)
+- `AUTODEV_AGENT_SUGGESTION_SEC` (default `300`)
+- `AUTODEV_AGENT_UNSAFE` (default `0`) → `1` permite auto-apply de patch
 
-> Segurança: por padrão, o agente **não** aplica patch automaticamente (`AUTON_AGENT_UNSAFE=0`).
+> Segurança: por padrão, o agente **não** aplica patch automaticamente (`AUTODEV_AGENT_UNSAFE=0`).
