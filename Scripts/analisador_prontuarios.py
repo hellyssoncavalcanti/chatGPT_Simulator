@@ -2036,6 +2036,30 @@ def salvar_resultado(id_atendimento: int, resultado: dict):
     sql_exec(sql, reason="salvar_resultado_unitario")
 
 
+def buscar_maior_resumo_texto_paciente(id_paciente: str, id_atendimento_atual=None) -> str:
+    """Retorna o maior resumo_texto concluído do paciente para fallback de evolução curta."""
+    if not id_paciente:
+        return ""
+
+    filtro_atual = ""
+    if id_atendimento_atual is not None:
+        filtro_atual = f"AND id_atendimento <> {int(id_atendimento_atual)}"
+
+    row = (sql_exec(f"""
+        SELECT resumo_texto
+        FROM {TABELA}
+        WHERE id_paciente = '{esc(str(id_paciente))}'
+          AND status = 'concluido'
+          AND COALESCE(id_criador, '') <> 'analise_compilada_paciente'
+          AND COALESCE(resumo_texto, '') <> ''
+          {filtro_atual}
+        ORDER BY CHAR_LENGTH(resumo_texto) DESC, datetime_analise_concluida DESC
+        LIMIT 1
+    """, reason="buscar_maior_resumo_texto_paciente").get("data") or [{}])[0]
+
+    return str(row.get("resumo_texto") or "").strip()
+
+
 def _stringify_compact(value) -> str:
     try:
         parsed = json.loads(value) if isinstance(value, str) else value
@@ -5305,8 +5329,27 @@ def processar_lote(pendentes: list):
         marcar_processando(row)
 
         if len(texto) < MIN_CHARS:
-            salvar_erro(idat, "Texto insuficiente após remoção de HTML.")
-            log.warning(f"  ID={idat} ignorado: texto muito curto.")
+            id_paciente = str(row.get("id_paciente") or "")
+            dt_evolucao = str(
+                row.get("datetime_consulta_inicio")
+                or row.get("datetime_atendimento_inicio")
+                or row.get("datetime_prontuario_atual")
+                or ""
+            ).strip()
+            maior_resumo = buscar_maior_resumo_texto_paciente(id_paciente, idat)
+            sufixo_evolucao = f"Evolução de {dt_evolucao}: {texto}".strip()
+            resumo_fallback = f"{maior_resumo}\n{sufixo_evolucao}".strip() if maior_resumo else sufixo_evolucao
+
+            salvar_resultado(idat, {
+                "resumo_texto": resumo_fallback,
+                "observacoes_gerais": "Registro curto: fallback sem chamada ao ChatGPT Simulator.",
+                "pontos_chave": [],
+                "condutas_sugeridas": [],
+            })
+            log.warning(
+                f"  ID={idat} sem conteúdo suficiente ({len(texto)} chars). "
+                f"Análise LLM pulada; resumo_fallback salvo ({len(resumo_fallback)} chars)."
+            )
             continue
 
         # Busca contexto clínico (paciente, profissional, hospital)
