@@ -1,551 +1,1566 @@
 #!/usr/bin/env python3
-"""
-auto_dev_agent.py
-
-Orquestrador autônomo para melhoria contínua do ChatGPT_Simulator.
-
-Objetivos:
-1) Subir os .bat principais automaticamente.
-2) Monitorar logs em tempo real (tail) buscando erros, warnings e padrões de travamento.
-3) Pedir sugestões de melhoria para a LLM local (via endpoint /v1/chat/completions,
-   que internamente usa browser.py no Simulator).
-4) Rodar checks locais (py_compile) e aplicar melhorias seguras por patch automático.
-5) Manter ciclo contínuo de otimização mesmo sem erro explícito.
-
-IMPORTANTE:
-- Este agente aplica patches apenas em modo "safe" por padrão.
-- Alterações potencialmente destrutivas são bloqueadas por regras de segurança.
-- Toda ação é registrada em logs/auto_dev_agent.log.
-"""
-
+# =============================================================================
+# auto_dev_agent.py — Agente Autônomo de Desenvolvimento Contínuo
+# =============================================================================
+#
+# RESPONSABILIDADE:
+#   Agir como um desenvolvedor sênior autônomo que monitora continuamente o
+#   ChatGPT_Simulator, detecta erros em tempo real, consulta o ChatGPT (via
+#   browser.py → endpoint /v1/chat/completions) para obter diagnósticos e
+#   correções, aplica alterações localmente com segurança e propõe melhorias
+#   contínuas de arquitetura, performance e robustez.
+#
+# FLUXO GERAL DE CADA CICLO:
+#   1. Health-check do Simulator (server.py + browser.py).
+#   2. Descoberta multiplataforma de serviços ativos do ecossistema.
+#   3. Leitura dos logs recentes e detecção de incidentes (erros/warnings).
+#   4. Leitura do código-fonte relevante (com foco em arquivos com erros).
+#   5. Construção de contexto estruturado para o ChatGPT.
+#   6. Consulta ao ChatGPT via browser.py:
+#        a) Quando há erros  → pede diagnóstico + plano de correção.
+#        b) Periodicamente    → pede sugestões de melhoria contínua.
+#   7. Parsing da resposta JSON (actions: edit_file | create_file | shell | note).
+#   8. Backup dos arquivos afetados.
+#   9. Execução segura das ações propostas (políticas de segurança aplicadas).
+#  10. Validação das alterações (py_compile de todos os .py do projeto).
+#  11. Rollback automático em caso de falha na validação.
+#  12. Commit + push automáticos em caso de sucesso (branch configurável).
+#  13. Registro detalhado de tudo em logs/auto_dev_agent-*.log.
+#  14. Sleep e repetição indefinida — mesmo em caso de exceção fatal no ciclo.
+#
+# PRINCÍPIOS DE SEGURANÇA:
+#   • Arquivos protegidos (certs/, db/, .git/, logs/, analisador_prontuarios.py,
+#     acompanhamento_whatsapp.py) jamais são modificados.
+#   • Comandos destrutivos (rm -rf, git reset --hard, shutdown, mkfs, dd, …)
+#     são bloqueados por allowlist explícita.
+#   • Toda edição cria backup em temp/agent_backups/<timestamp>/ antes de atuar.
+#   • Toda falha de validação dispara rollback imediato.
+#   • O agente nunca se auto-modifica sem validação adicional (dry-run).
+#   • Limite de ações por ciclo (MAX_ACTIONS_PER_CYCLE) para evitar drift.
+#
+# VARIÁVEIS DE AMBIENTE SUPORTADAS (todas opcionais, com defaults sensatos):
+#   AUTODEV_AGENT_SIMULATOR_URL    — URL do endpoint /v1/chat/completions
+#   AUTODEV_AGENT_CODEX_URL        — URL do Codex/ChatGPT para o agente usar
+#   AUTODEV_AGENT_MODEL            — nome lógico do modelo ("ChatGPT Simulator")
+#   AUTODEV_AGENT_API_KEY          — override da API_KEY do config.py
+#   AUTODEV_AGENT_CYCLE_SEC        — intervalo entre ciclos (default 120s)
+#   AUTODEV_AGENT_SUGGESTION_SEC   — intervalo entre rodadas proativas (default 600s)
+#   AUTODEV_AGENT_REQUEST_TIMEOUT  — timeout HTTP por pergunta (default 900s)
+#   AUTODEV_AGENT_CONTEXT_CHARS    — tamanho máx. do contexto enviado (default 28000)
+#   AUTODEV_AGENT_MAX_ACTIONS      — ações máx. aplicadas por ciclo (default 5)
+#   AUTODEV_AGENT_AUTOCOMMIT       — "1" para commit automático (default "1")
+#   AUTODEV_AGENT_AUTOPUSH         — "1" para push automático (default "0")
+#   AUTODEV_AGENT_AUTOFIX          — "1" para aplicar patches (default "1")
+#   AUTODEV_AGENT_BRANCH           — nome do branch de trabalho (default atual)
+#   AUTODEV_AGENT_REUSE_CHAT       — "1" reutiliza mesma conversa (default "1")
+#
+# =============================================================================
 from __future__ import annotations
 
 import json
 import logging
 import os
+import platform
 import re
+import shutil
 import subprocess
 import sys
+import textwrap
+import threading
 import time
-from dataclasses import dataclass
+import traceback
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterable, Optional
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
-import requests
 try:
-    import config
+    import requests
+except Exception as _exc:
+    print(f"[auto_dev_agent] ❌ 'requests' indisponível: {_exc}", file=sys.stderr)
+    raise
+
+try:
+    import config  # type: ignore
 except Exception:
-    config = None
+    config = None  # type: ignore
 
 
-# ==============================
-# Configuração
-# ==============================
+# =============================================================================
+# CONSTANTES DE CAMINHO E AMBIENTE
+# =============================================================================
 ROOT_DIR = Path(__file__).resolve().parents[1]
+SCRIPTS_DIR = ROOT_DIR / "Scripts"
 LOGS_DIR = ROOT_DIR / "logs"
-_log_ts = datetime.now().strftime("%d_%m_%Y-%H_%M_%S")
-AGENT_LOG = LOGS_DIR / f"auto_dev_agent-{_log_ts}.log"
-IS_WINDOWS = os.name == "nt"
+TEMP_DIR = ROOT_DIR / "temp"
+BACKUP_DIR = TEMP_DIR / "agent_backups"
+STATE_FILE = TEMP_DIR / "auto_dev_agent_state.json"
 
-def _env(name_new: str, default: str, legacy_name: str | None = None) -> str:
-    """Lê variável nova, com fallback opcional para nome legado."""
-    if name_new in os.environ:
-        return os.environ[name_new]
-    if legacy_name and legacy_name in os.environ:
-        return os.environ[legacy_name]
+for _d in (LOGS_DIR, TEMP_DIR, BACKUP_DIR):
+    try:
+        _d.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
+
+_LOG_TS = datetime.now().strftime("%d_%m_%Y-%H_%M_%S")
+AGENT_LOG = LOGS_DIR / f"auto_dev_agent-{_LOG_TS}.log"
+
+IS_WINDOWS = platform.system().lower().startswith("win")
+IS_LINUX = platform.system().lower() == "linux"
+IS_MAC = platform.system().lower() == "darwin"
+
+
+def _env(name: str, default: str, legacy: Optional[str] = None) -> str:
+    """Lê variável de ambiente com fallback para um nome legado."""
+    if name in os.environ:
+        return os.environ[name]
+    if legacy and legacy in os.environ:
+        return os.environ[legacy]
     return default
 
 
-SIMULATOR_URL = _env("AUTODEV_AGENT_SIMULATOR_URL", "http://127.0.0.1:3003/v1/chat/completions", "AUTON_AGENT_SIMULATOR_URL")
-CODEX_CLOUD_URL = _env("AUTODEV_AGENT_CODEX_URL", "https://chatgpt.com/codex/cloud")
+def _env_bool(name: str, default: bool, legacy: Optional[str] = None) -> bool:
+    raw = _env(name, "1" if default else "0", legacy).strip().lower()
+    return raw in {"1", "true", "yes", "y", "on"}
+
+
+# =============================================================================
+# CONFIGURAÇÃO — URLs, Modelo, API Key
+# =============================================================================
+SIMULATOR_URL = _env(
+    "AUTODEV_AGENT_SIMULATOR_URL",
+    "http://127.0.0.1:3003/v1/chat/completions",
+    "AUTON_AGENT_SIMULATOR_URL",
+)
+SIMULATOR_HEALTH_URL = SIMULATOR_URL.replace("/v1/chat/completions", "/health")
+
+# Codex cloud: quando vazio, o agente inicia uma conversa nova no ChatGPT
+# regular (sem URL) e REUSA o chat_id retornado nas rodadas subsequentes.
+CODEX_URL = _env("AUTODEV_AGENT_CODEX_URL", "")
+
 SIMULATOR_MODEL = _env("AUTODEV_AGENT_MODEL", "ChatGPT Simulator", "AUTON_AGENT_MODEL")
-_cfg_api_key = getattr(config, "API_KEY", "") if config else ""
-API_KEY = _env("AUTODEV_AGENT_API_KEY", _cfg_api_key, "AUTON_AGENT_API_KEY")
+_CFG_API_KEY = getattr(config, "API_KEY", "") if config else ""
+API_KEY = _env("AUTODEV_AGENT_API_KEY", _CFG_API_KEY, "AUTON_AGENT_API_KEY")
 
-# janelas de ciclo
-SLEEP_BETWEEN_CYCLES = int(_env("AUTODEV_AGENT_CYCLE_SEC", "60", "AUTON_AGENT_CYCLE_SEC"))
-SUGGESTION_INTERVAL_SEC = int(_env("AUTODEV_AGENT_SUGGESTION_SEC", "300", "AUTON_AGENT_SUGGESTION_SEC"))
-MAX_CONTEXT_CHARS = int(_env("AUTODEV_AGENT_CONTEXT_CHARS", "12000", "AUTON_AGENT_CONTEXT_CHARS"))
+# =============================================================================
+# CONFIGURAÇÃO — Ciclos e Temporização
+# =============================================================================
+CYCLE_INTERVAL_SEC = int(_env("AUTODEV_AGENT_CYCLE_SEC", "120", "AUTON_AGENT_CYCLE_SEC"))
+SUGGESTION_INTERVAL_SEC = int(
+    _env("AUTODEV_AGENT_SUGGESTION_SEC", "600", "AUTON_AGENT_SUGGESTION_SEC")
+)
+REQUEST_TIMEOUT_SEC = int(_env("AUTODEV_AGENT_REQUEST_TIMEOUT", "900"))
+STREAM_IDLE_TIMEOUT_SEC = int(_env("AUTODEV_AGENT_STREAM_IDLE_SEC", "180"))
+STARTUP_WAIT_SEC = int(_env("AUTODEV_AGENT_STARTUP_WAIT_SEC", "30"))
+HEALTH_LOG_THROTTLE_SEC = 30.0
 
-# segurança de patch
-MAX_PATCH_BYTES = int(_env("AUTODEV_AGENT_MAX_PATCH_BYTES", "120000", "AUTON_AGENT_MAX_PATCH_BYTES"))
-ALLOW_UNSAFE_AUTOFIX = _env("AUTODEV_AGENT_UNSAFE", "0", "AUTON_AGENT_UNSAFE") == "1"
-IMPROVEMENT_MAX_ATTEMPTS = int(_env("AUTODEV_AGENT_MAX_ATTEMPTS", "3"))
-TEST_COMMANDS = [
-    _env("AUTODEV_AGENT_TEST_CMD_1", "python -m py_compile Scripts/*.py"),
-    _env("AUTODEV_AGENT_TEST_CMD_2", "git status --short"),
+# =============================================================================
+# CONFIGURAÇÃO — Contexto e Limites
+# =============================================================================
+MAX_CONTEXT_CHARS = int(_env("AUTODEV_AGENT_CONTEXT_CHARS", "28000", "AUTON_AGENT_CONTEXT_CHARS"))
+MAX_FILE_LINES_IN_CONTEXT = int(_env("AUTODEV_AGENT_MAX_FILE_LINES", "400"))
+MAX_LOG_LINES_PER_FILE = int(_env("AUTODEV_AGENT_MAX_LOG_LINES", "120"))
+MAX_LOG_FILES = int(_env("AUTODEV_AGENT_MAX_LOG_FILES", "6"))
+MAX_INCIDENTS_IN_CONTEXT = 60
+
+# =============================================================================
+# CONFIGURAÇÃO — Segurança e Políticas
+# =============================================================================
+ENABLE_AUTOFIX = _env_bool("AUTODEV_AGENT_AUTOFIX", True, "AUTON_AGENT_UNSAFE")
+ENABLE_AUTOCOMMIT = _env_bool("AUTODEV_AGENT_AUTOCOMMIT", True)
+ENABLE_AUTOPUSH = _env_bool("AUTODEV_AGENT_AUTOPUSH", False)
+REUSE_CHAT_CONVERSATION = _env_bool("AUTODEV_AGENT_REUSE_CHAT", True)
+
+MAX_EDIT_SIZE_BYTES = int(_env("AUTODEV_AGENT_MAX_EDIT_BYTES", "200000"))
+MAX_ACTIONS_PER_CYCLE = int(_env("AUTODEV_AGENT_MAX_ACTIONS", "5"))
+MAX_RETRY_ATTEMPTS = int(_env("AUTODEV_AGENT_MAX_RETRIES", "2"))
+MAX_SHELL_TIMEOUT_SEC = int(_env("AUTODEV_AGENT_SHELL_TIMEOUT", "180"))
+
+GIT_BRANCH = _env("AUTODEV_AGENT_BRANCH", "").strip()
+GIT_REMOTE = _env("AUTODEV_AGENT_REMOTE", "origin")
+COMMIT_PREFIX = _env("AUTODEV_AGENT_COMMIT_PREFIX", "[auto-dev-agent]")
+
+# Extensões editáveis — outras são tratadas como read-only
+EDITABLE_EXTENSIONS = {".py", ".md", ".bat", ".txt", ".json", ".ini", ".cfg", ".yml", ".yaml"}
+
+# Caminhos proibidos (nunca ler nem escrever)
+BLOCKED_PATH_SEGMENTS = [
+    ".git/", ".git\\",
+    "certs/", "certs\\",
+    "db/", "db\\",
+    "logs/", "logs\\",
+    "chrome_profile/", "chrome_profile\\",
+    "__pycache__/", "__pycache__\\",
+    ".venv/", ".venv\\",
+    "node_modules/", "node_modules\\",
+    "temp/agent_backups/",
 ]
-_last_llm_unavailable_log = 0.0
 
-# monitoramento
+# Arquivos protegidos contra edição (negócio crítico)
+PROTECTED_FILES = {
+    "Scripts/analisador_prontuarios.py",
+    "Scripts/acompanhamento_whatsapp.py",
+    "Scripts/config.py",  # Configurações críticas — só altera sob supervisão
+}
+
+# O próprio agente só pode se auto-modificar quando AUTODEV_AGENT_SELF_EDIT=1
+ALLOW_SELF_EDIT = _env_bool("AUTODEV_AGENT_SELF_EDIT", False)
+SELF_FILE_REL = "Scripts/auto_dev_agent.py"
+
+# Padrões destrutivos em comandos de shell (bloqueia antes de executar)
+FORBIDDEN_SHELL_PATTERNS = [
+    r"\brm\s+-[a-z]*r[a-z]*f[a-z]*\b",
+    r"\brm\s+-[a-z]*f[a-z]*r[a-z]*\b",
+    r"\brmdir\s+/s\b",
+    r"\bdel\s+/[fsq]\b",
+    r"\bshutdown\b",
+    r"\breboot\b",
+    r"\bhalt\b",
+    r"\bpoweroff\b",
+    r"\bmkfs\b",
+    r"\bformat\s+[a-z]:\b",
+    r"\bdd\s+if=",
+    r"\bgit\s+reset\s+--hard\b",
+    r"\bgit\s+push\s+--force\b",
+    r"\bgit\s+push\s+-f\b",
+    r":\(\)\s*\{\s*:\|\:&\s*\};:",
+    r"\bDROP\s+TABLE\b",
+    r"\bDROP\s+DATABASE\b",
+    r"\bTRUNCATE\s+TABLE\b",
+    r"\bchmod\s+-R\s+777\b",
+    r"\bkill\s+-9\s+1\b",
+]
+
+# Padrões regex de erro/warning nos logs
 ERROR_PATTERNS = [
-    r"\btraceback\b",
+    r"Traceback \(most recent call last\)",
+    r"\bERROR\b",
+    r"\bException\b",
     r"\bexception\b",
-    r"\berror\b",
-    r"\berro\b",
-    r"\bfalha\b",
-    r"\bfalhou\b",
-    r"\bfatal\b",
+    r"\bERRO\b",
+    r"\bErro\b",
+    r"\bFALHA\b",
+    r"\bFalha\b",
+    r"\bFATAL\b",
+    r"\bFatal\b",
+    r"\bConnectionResetError\b",
+    r"\bConnectionRefusedError\b",
+    r"\bTimeoutError\b",
+    r"\bSegmentation fault\b",
+    r"\bModuleNotFoundError\b",
+    r"\bImportError\b",
+    r"\bSyntaxError\b",
+    r"\bTypeError\b",
+    r"\bKeyError\b",
+    r"\bAttributeError\b",
+    r"\bValueError\b",
+    r"\bRuntimeError\b",
+    r"\bPlaywrightError\b",
     r"\bcannot access local variable\b",
-    r"\bconnectionreseterror\b",
-    r"\bsegmentation fault\b",
 ]
 
 WARN_PATTERNS = [
-    r"\bwarning\b",
+    r"\bWARNING\b",
+    r"\bWarning\b",
+    r"\bAviso\b",
     r"\btimeout\b",
-    r"\brate limit\b",
+    r"\brate.?limit\b",
     r"\bthrottle\b",
     r"\bretry\b",
+    r"\bdeprecated\b",
+    r"\bexcesso de solicita",
 ]
 
-SERVICE_PATTERNS = {
-    "main": "Scripts\\\\main.py",
-    "analisador_prontuarios": "Scripts\\\\analisador_prontuarios.py",
-    "browser_worker": "Scripts\\\\browser.py",
-}
-_last_active_services_signature = ""
 
-
-@dataclass
-class Incident:
-    level: str
-    source: str
-    line: str
-    when_utc: str
-
-
-def _now_utc() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
-def setup_logger() -> logging.Logger:
+# =============================================================================
+# LOGGER
+# =============================================================================
+def _setup_logger() -> logging.Logger:
     LOGS_DIR.mkdir(parents=True, exist_ok=True)
     logger = logging.getLogger("auto_dev_agent")
     logger.setLevel(logging.INFO)
-
-    if not logger.handlers:
-        formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
-        stream = logging.StreamHandler(sys.stdout)
-        stream.setFormatter(formatter)
-        file_handler = logging.FileHandler(AGENT_LOG, encoding="utf-8")
-        file_handler.setFormatter(formatter)
-        logger.addHandler(stream)
-        logger.addHandler(file_handler)
+    if logger.handlers:
+        return logger
+    fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
+    try:
+        fh = logging.FileHandler(AGENT_LOG, encoding="utf-8")
+        fh.setFormatter(fmt)
+        logger.addHandler(fh)
+    except Exception as exc:
+        print(f"[auto_dev_agent] ❌ Falha ao abrir log file: {exc}", file=sys.stderr)
+    sh = logging.StreamHandler(sys.stdout)
+    sh.setFormatter(fmt)
+    logger.addHandler(sh)
     return logger
 
 
-LOGGER = setup_logger()
+LOGGER = _setup_logger()
 
 
 def log(msg: str, level: int = logging.INFO) -> None:
     LOGGER.log(level, msg)
 
 
-def is_windows() -> bool:
-    return os.name == "nt"
+# =============================================================================
+# DATACLASSES
+# =============================================================================
+@dataclass
+class Incident:
+    """Erro ou warning detectado em um arquivo de log."""
+    level: str          # "error" | "warning"
+    source: str         # caminho relativo do log
+    line: str           # linha do log (stripped)
+    when_utc: str       # ISO 8601 UTC
 
 
-def discover_active_services() -> dict:
-    """Descobre processos ativos do ecossistema sem iniciá-los."""
-    if not is_windows():
-        return {}
+@dataclass
+class AgentState:
+    """Estado persistente entre ciclos."""
+    chat_id: Optional[str] = None       # id da conversa com ChatGPT (reuso)
+    chat_url: Optional[str] = None      # URL da conversa ativa
+    last_suggestion_ts: float = 0.0     # timestamp da última rodada proativa
+    cycles_total: int = 0               # total de ciclos executados
+    cycles_with_errors: int = 0         # ciclos que detectaram incidentes
+    cycles_with_fixes: int = 0          # ciclos que aplicaram correções
+    total_actions: int = 0              # total de ações aplicadas
+    last_services_signature: str = ""   # última assinatura do mapa de serviços
 
-    service_map: dict[str, list[int]] = {name: [] for name in SERVICE_PATTERNS.keys()}
-    for name, pattern in SERVICE_PATTERNS.items():
-        ps_cmd = (
-            "Get-CimInstance Win32_Process "
-            f"| Where-Object {{ $_.CommandLine -like '*{pattern}*' }} "
-            "| Select-Object -ExpandProperty ProcessId"
+
+@dataclass
+class ActionResult:
+    """Resultado da execução de uma ação proposta pelo ChatGPT."""
+    action_type: str
+    ok: bool
+    description: str
+    details: str = ""
+    changed_files: List[str] = field(default_factory=list)
+
+
+_AGENT_STATE = AgentState()
+
+
+def _load_state() -> None:
+    global _AGENT_STATE
+    try:
+        if STATE_FILE.exists():
+            data = json.loads(STATE_FILE.read_text(encoding="utf-8"))
+            _AGENT_STATE = AgentState(**{k: v for k, v in data.items() if hasattr(AgentState, k)})
+            log(f"📦 Estado anterior carregado (ciclos={_AGENT_STATE.cycles_total}, chat_id={_AGENT_STATE.chat_id!s})")
+    except Exception as exc:
+        log(f"⚠️ Falha ao carregar state: {exc}", logging.WARNING)
+
+
+def _save_state() -> None:
+    try:
+        STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        STATE_FILE.write_text(
+            json.dumps(_AGENT_STATE.__dict__, ensure_ascii=False, indent=2),
+            encoding="utf-8",
         )
+    except Exception as exc:
+        log(f"⚠️ Falha ao persistir state: {exc}", logging.WARNING)
+
+
+def _now_utc_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+# =============================================================================
+# SEGURANÇA — validação de paths e comandos
+# =============================================================================
+def _normalize_rel_path(path_str: str) -> Optional[Path]:
+    """Normaliza um caminho relativo ao ROOT_DIR; retorna None se inválido."""
+    if not path_str or not isinstance(path_str, str):
+        return None
+    raw = path_str.strip().replace("\\", "/")
+    # Remove prefixos absolutos do workspace, se vierem
+    try:
+        root_abs = str(ROOT_DIR).replace("\\", "/")
+        if raw.startswith(root_abs + "/"):
+            raw = raw[len(root_abs) + 1:]
+    except Exception:
+        pass
+    if raw.startswith("/"):
+        raw = raw.lstrip("/")
+    # Bloqueia escape de diretório
+    parts = [p for p in raw.split("/") if p]
+    if any(p == ".." for p in parts):
+        return None
+    candidate = ROOT_DIR.joinpath(*parts)
+    # Garante que o alvo fique dentro de ROOT_DIR
+    try:
+        candidate.resolve().relative_to(ROOT_DIR.resolve())
+    except Exception:
+        return None
+    return candidate
+
+
+def is_path_blocked(rel_path: str) -> bool:
+    """True quando o path cai em segmento bloqueado."""
+    low = rel_path.lower().replace("\\", "/")
+    for seg in BLOCKED_PATH_SEGMENTS:
+        if seg.lower().replace("\\", "/") in low:
+            return True
+    return False
+
+
+def is_path_protected(rel_path: str) -> bool:
+    low = rel_path.replace("\\", "/").lower()
+    for prot in PROTECTED_FILES:
+        if low == prot.lower():
+            return True
+    if low == SELF_FILE_REL.lower() and not ALLOW_SELF_EDIT:
+        return True
+    return False
+
+
+def is_path_editable(rel_path: str) -> Tuple[bool, str]:
+    """Retorna (pode_editar, motivo)."""
+    if is_path_blocked(rel_path):
+        return False, f"path bloqueado por política: {rel_path}"
+    if is_path_protected(rel_path):
+        return False, f"arquivo protegido: {rel_path}"
+    ext = Path(rel_path).suffix.lower()
+    if ext and ext not in EDITABLE_EXTENSIONS:
+        return False, f"extensão não editável ({ext}): {rel_path}"
+    return True, "ok"
+
+
+def command_is_safe(command: str) -> Tuple[bool, str]:
+    """Retorna (seguro, motivo) aplicando a allowlist de padrões destrutivos."""
+    if not command or not isinstance(command, str):
+        return False, "comando vazio"
+    cmd = command.strip()
+    if len(cmd) > 4000:
+        return False, "comando excede 4000 chars"
+    low = cmd.lower()
+    for pat in FORBIDDEN_SHELL_PATTERNS:
+        if re.search(pat, low, re.IGNORECASE):
+            return False, f"bloqueado por padrão destrutivo: {pat}"
+    return True, "ok"
+
+
+# =============================================================================
+# DESCOBERTA DE SERVIÇOS — multiplataforma
+# =============================================================================
+# Nomes lógicos → padrão a buscar em argv/CommandLine (substring case-insensitive)
+SERVICE_MARKERS: Dict[str, List[str]] = {
+    "main":                  ["scripts/main.py", "scripts\\main.py", "/main.py"],
+    "browser_worker":        ["scripts/browser.py", "scripts\\browser.py", "/browser.py"],
+    "analisador_prontuarios": ["analisador_prontuarios.py"],
+    "acompanhamento_whatsapp": ["acompanhamento_whatsapp.py"],
+    "auto_dev_agent":        ["auto_dev_agent.py"],
+}
+
+
+def _discover_services_posix() -> Dict[str, List[int]]:
+    """Descoberta via /proc (Linux) ou `ps` (macOS/BSD)."""
+    result: Dict[str, List[int]] = {k: [] for k in SERVICE_MARKERS}
+    # Tenta /proc primeiro
+    proc_dir = Path("/proc")
+    if proc_dir.is_dir():
         try:
-            proc = subprocess.run(
-                ["powershell", "-NoProfile", "-Command", ps_cmd],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                timeout=15,
-            )
-            pids = []
-            for line in (proc.stdout or "").splitlines():
-                line = line.strip()
-                if line.isdigit():
-                    pids.append(int(line))
-            service_map[name] = sorted(set(pids))
+            for entry in proc_dir.iterdir():
+                if not entry.name.isdigit():
+                    continue
+                try:
+                    cmdline = (entry / "cmdline").read_bytes().decode("utf-8", "replace")
+                except Exception:
+                    continue
+                if not cmdline:
+                    continue
+                cmdline_norm = cmdline.replace("\x00", " ").lower()
+                for name, markers in SERVICE_MARKERS.items():
+                    for m in markers:
+                        if m.lower() in cmdline_norm:
+                            result[name].append(int(entry.name))
+                            break
+            return result
         except Exception:
-            service_map[name] = []
-    return service_map
+            pass
+    # Fallback: ps
+    try:
+        proc = subprocess.run(
+            ["ps", "-axo", "pid,command"],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, timeout=10,
+        )
+        for line in (proc.stdout or "").splitlines():
+            parts = line.strip().split(None, 1)
+            if len(parts) != 2 or not parts[0].isdigit():
+                continue
+            pid = int(parts[0])
+            cmd = parts[1].lower()
+            for name, markers in SERVICE_MARKERS.items():
+                if any(m.lower() in cmd for m in markers):
+                    result[name].append(pid)
+    except Exception:
+        pass
+    return result
 
 
-def log_active_services_snapshot(service_map: dict) -> None:
-    global _last_active_services_signature
-    signature = json.dumps(service_map, sort_keys=True, ensure_ascii=False)
-    if signature == _last_active_services_signature:
+def _discover_services_windows() -> Dict[str, List[int]]:
+    """Descoberta via PowerShell/WMI em Windows."""
+    result: Dict[str, List[int]] = {k: [] for k in SERVICE_MARKERS}
+    ps_base = (
+        "Get-CimInstance Win32_Process "
+        "| Select-Object -Property ProcessId, CommandLine "
+        "| ConvertTo-Json -Compress"
+    )
+    try:
+        proc = subprocess.run(
+            ["powershell", "-NoProfile", "-Command", ps_base],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, timeout=20,
+        )
+        data = json.loads(proc.stdout or "[]")
+        if isinstance(data, dict):
+            data = [data]
+        for row in data:
+            cmdline = (row.get("CommandLine") or "").lower()
+            pid = row.get("ProcessId")
+            if not cmdline or not isinstance(pid, int):
+                continue
+            for name, markers in SERVICE_MARKERS.items():
+                if any(m.lower() in cmdline for m in markers):
+                    result[name].append(pid)
+                    break
+    except Exception:
+        pass
+    return result
+
+
+def discover_active_services() -> Dict[str, List[int]]:
+    if IS_WINDOWS:
+        svc = _discover_services_windows()
+    else:
+        svc = _discover_services_posix()
+    # Deduplica e ordena
+    return {k: sorted(set(v)) for k, v in svc.items()}
+
+
+def log_active_services_snapshot(svc_map: Dict[str, List[int]]) -> None:
+    """Só registra em log quando a assinatura muda — evita spam."""
+    signature = json.dumps(svc_map, sort_keys=True, ensure_ascii=False)
+    if signature == _AGENT_STATE.last_services_signature:
         return
-    _last_active_services_signature = signature
-
-    msg = []
-    for name, pids in service_map.items():
-        if pids:
-            msg.append(f"{name}={pids}")
-        else:
-            msg.append(f"{name}=OFF")
-    log("🛰️ Serviços ativos monitorados: " + " | ".join(msg))
+    _AGENT_STATE.last_services_signature = signature
+    parts = []
+    for name, pids in svc_map.items():
+        parts.append(f"{name}={pids}" if pids else f"{name}=OFF")
+    log("🛰️ Serviços ativos: " + " | ".join(parts))
 
 
-def tail_last_lines(path: Path, max_lines: int = 80) -> list[str]:
+# =============================================================================
+# LEITURA DE LOGS E DETECÇÃO DE INCIDENTES
+# =============================================================================
+def _tail_lines(path: Path, max_lines: int) -> List[str]:
     if not path.exists() or not path.is_file():
         return []
     try:
-        content = path.read_text(encoding="utf-8", errors="replace")
+        # Leitura bloco final do arquivo para evitar carregar tudo
+        size = path.stat().st_size
+        read_bytes = min(size, 256_000)
+        with path.open("rb") as f:
+            if size > read_bytes:
+                f.seek(size - read_bytes)
+            data = f.read()
+        text = data.decode("utf-8", errors="replace")
+        lines = text.splitlines()
+        return lines[-max_lines:]
     except Exception:
         return []
-    lines = content.splitlines()
-    return lines[-max_lines:]
 
 
-def pick_log_files(max_files: int = 12) -> list[Path]:
+def _recent_log_files(max_files: int) -> List[Path]:
     if not LOGS_DIR.exists():
         return []
-    files = sorted(
-        [p for p in LOGS_DIR.iterdir() if p.is_file() and p.suffix.lower() in {".log", ".txt"}],
-        key=lambda p: p.stat().st_mtime,
-        reverse=True,
-    )
-    return files[:max_files]
+    try:
+        files = [
+            p for p in LOGS_DIR.iterdir()
+            if p.is_file() and p.suffix.lower() in {".log", ".txt"}
+        ]
+        files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+        return files[:max_files]
+    except Exception:
+        return []
 
 
-def scan_incidents(lines: Iterable[str], source: str) -> list[Incident]:
-    incidents: list[Incident] = []
+def _scan_incidents(lines: Iterable[str], source: str) -> List[Incident]:
+    out: List[Incident] = []
+    for raw in lines:
+        low = raw.lower()
+        if any(re.search(p, raw) or re.search(p, low) for p in ERROR_PATTERNS):
+            out.append(Incident("error", source, raw.strip()[:1000], _now_utc_iso()))
+        elif any(re.search(p, raw) or re.search(p, low) for p in WARN_PATTERNS):
+            out.append(Incident("warning", source, raw.strip()[:1000], _now_utc_iso()))
+    return out
+
+
+def _extract_traceback_files(lines: Iterable[str]) -> List[str]:
+    """Extrai paths `File "..."` de tracebacks, úteis para priorizar leitura."""
+    files: List[str] = []
+    pat = re.compile(r'File "([^"]+)"')
     for line in lines:
-        low = line.lower()
-        if any(re.search(p, low) for p in ERROR_PATTERNS):
-            incidents.append(Incident("error", source, line.strip(), _now_utc()))
-        elif any(re.search(p, low) for p in WARN_PATTERNS):
-            incidents.append(Incident("warning", source, line.strip(), _now_utc()))
-    return incidents
+        for m in pat.finditer(line):
+            files.append(m.group(1))
+    # Deduplica mantendo ordem
+    seen: set = set()
+    out: List[str] = []
+    for f in files:
+        if f not in seen:
+            seen.add(f)
+            out.append(f)
+    return out
 
 
-def collect_runtime_context() -> dict:
-    payload: dict = {
-        "timestamp": _now_utc(),
-        "repo": str(ROOT_DIR),
-        "python": sys.version,
-        "incidents": [],
-        "log_excerpt": [],
-    }
+# =============================================================================
+# LEITURA DE CÓDIGO-FONTE
+# =============================================================================
+def list_project_files() -> List[Tuple[str, int]]:
+    """Retorna (rel_path, num_linhas) dos arquivos relevantes do projeto."""
+    results: List[Tuple[str, int]] = []
+    for ext in EDITABLE_EXTENSIONS:
+        for p in ROOT_DIR.rglob(f"*{ext}"):
+            try:
+                rel = p.relative_to(ROOT_DIR).as_posix()
+            except Exception:
+                continue
+            if is_path_blocked(rel):
+                continue
+            try:
+                num = sum(1 for _ in p.open("r", encoding="utf-8", errors="replace"))
+            except Exception:
+                num = 0
+            results.append((rel, num))
+    results.sort()
+    return results
+
+
+def read_source_file(rel_path: str, max_lines: Optional[int] = None) -> Optional[str]:
+    """Lê o conteúdo do arquivo; aplica truncagem de linhas se solicitado."""
+    target = _normalize_rel_path(rel_path)
+    if target is None:
+        return None
+    if is_path_blocked(rel_path):
+        return None
+    if not target.exists() or not target.is_file():
+        return None
+    try:
+        text = target.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return None
+    if max_lines and max_lines > 0:
+        lines = text.splitlines()
+        if len(lines) > max_lines:
+            head = lines[: max_lines // 2]
+            tail = lines[-max_lines // 2 :]
+            omitted = len(lines) - len(head) - len(tail)
+            text = "\n".join(head) + f"\n... [{omitted} linhas omitidas] ...\n" + "\n".join(tail)
+    return text
+
+
+def map_tracebacks_to_project_files(tb_files: Iterable[str]) -> List[str]:
+    """Converte paths absolutos de tracebacks para rel paths do projeto."""
+    rels: List[str] = []
+    root_abs = str(ROOT_DIR.resolve()).replace("\\", "/").lower()
+    for f in tb_files:
+        norm = f.replace("\\", "/")
+        low = norm.lower()
+        if low.startswith(root_abs + "/"):
+            rel = norm[len(root_abs) + 1:]
+            if rel and not is_path_blocked(rel):
+                rels.append(rel)
+        else:
+            # Pode ser path relativo já
+            base = Path(norm).name
+            if base:
+                for candidate in SCRIPTS_DIR.glob(base):
+                    try:
+                        rels.append(candidate.relative_to(ROOT_DIR).as_posix())
+                    except Exception:
+                        continue
+    # Dedup mantendo ordem
+    seen: set = set()
+    out = []
+    for r in rels:
+        if r not in seen:
+            seen.add(r)
+            out.append(r)
+    return out
+
+
+# =============================================================================
+# CONSTRUÇÃO DO CONTEXTO ENVIADO AO ChatGPT
+# =============================================================================
+def collect_runtime_context() -> Dict[str, Any]:
+    """Monta dict com: serviços, incidentes, excertos de logs, métricas."""
+    incidents: List[Incident] = []
+    log_excerpts: List[Dict[str, str]] = []
+    tb_files_raw: List[str] = []
 
     total_chars = 0
-    all_incidents = []
-    for log_file in pick_log_files():
-        lines = tail_last_lines(log_file)
-        all_incidents.extend(scan_incidents(lines, str(log_file.relative_to(ROOT_DIR))))
+    for log_file in _recent_log_files(MAX_LOG_FILES):
+        lines = _tail_lines(log_file, MAX_LOG_LINES_PER_FILE)
+        if not lines:
+            continue
+        file_incidents = _scan_incidents(lines, log_file.name)
+        incidents.extend(file_incidents)
+        tb_files_raw.extend(_extract_traceback_files(lines))
         excerpt = "\n".join(lines)
-        if excerpt:
-            block = f"### {log_file.name}\n{excerpt}"
-            if total_chars + len(block) > MAX_CONTEXT_CHARS:
-                break
-            payload["log_excerpt"].append(block)
-            total_chars += len(block)
+        block = {"file": log_file.name, "tail": excerpt}
+        approx = len(excerpt) + len(log_file.name) + 32
+        if total_chars + approx > MAX_CONTEXT_CHARS // 2:
+            # Corta para não ultrapassar orçamento de logs (metade do contexto)
+            remaining = max(0, (MAX_CONTEXT_CHARS // 2) - total_chars - 64)
+            if remaining > 0:
+                block["tail"] = excerpt[-remaining:]
+                log_excerpts.append(block)
+                total_chars += len(block["tail"]) + len(log_file.name)
+            break
+        log_excerpts.append(block)
+        total_chars += approx
 
-    payload["incidents"] = [inc.__dict__ for inc in all_incidents[-100:]]
+    # Arquivos do projeto (mapa resumido)
+    files = list_project_files()
+    file_index = [{"path": p, "lines": n} for p, n in files]
+
+    payload: Dict[str, Any] = {
+        "timestamp": _now_utc_iso(),
+        "platform": {
+            "system": platform.system(),
+            "release": platform.release(),
+            "python": sys.version.split(" ", 1)[0],
+        },
+        "root_dir": str(ROOT_DIR),
+        "services": discover_active_services(),
+        "incidents": [inc.__dict__ for inc in incidents[-MAX_INCIDENTS_IN_CONTEXT:]],
+        "log_excerpts": log_excerpts,
+        "file_index": file_index[:80],  # top-80 files
+        "traceback_files": map_tracebacks_to_project_files(tb_files_raw)[:12],
+        "metrics": {
+            "cycles_total": _AGENT_STATE.cycles_total,
+            "cycles_with_errors": _AGENT_STATE.cycles_with_errors,
+            "cycles_with_fixes": _AGENT_STATE.cycles_with_fixes,
+            "total_actions": _AGENT_STATE.total_actions,
+        },
+    }
     return payload
 
 
-def _llm_headers() -> dict:
-    headers = {
+def select_relevant_source_files(context: Dict[str, Any], budget_chars: int) -> Dict[str, str]:
+    """Seleciona arquivos-fonte relevantes a incluir no prompt.
+
+    Prioriza:
+      1) Arquivos aparecendo em tracebacks recentes.
+      2) Arquivos core do sistema (main, server, browser, shared, utils, storage, auth).
+      3) O próprio auto_dev_agent.py (só como referência, nunca para editar).
+    """
+    selected: Dict[str, str] = {}
+    budget = max(2000, budget_chars)
+    picks: List[str] = []
+
+    picks.extend(context.get("traceback_files", []))
+    core = [
+        "Scripts/main.py", "Scripts/server.py", "Scripts/shared.py",
+        "Scripts/utils.py", "Scripts/storage.py", "Scripts/auth.py",
+    ]
+    for c in core:
+        if c not in picks:
+            picks.append(c)
+
+    for rel in picks:
+        if rel in selected:
+            continue
+        if is_path_blocked(rel):
+            continue
+        content = read_source_file(rel, max_lines=MAX_FILE_LINES_IN_CONTEXT)
+        if not content:
+            continue
+        snippet = content
+        # Orçamento dinâmico: usa até metade do restante por arquivo
+        allowed = min(len(snippet), max(1500, budget // 2))
+        if len(snippet) > allowed:
+            head = snippet[: allowed // 2]
+            tail = snippet[-allowed // 2 :]
+            snippet = head + "\n... [conteúdo truncado] ...\n" + tail
+        if len(snippet) > budget:
+            break
+        selected[rel] = snippet
+        budget -= len(snippet)
+        if budget < 1500:
+            break
+    return selected
+
+
+# =============================================================================
+# COMUNICAÇÃO COM O ChatGPT via browser.py (server.py /v1/chat/completions)
+# =============================================================================
+_last_health_log = 0.0
+
+
+def simulator_is_ready() -> bool:
+    """Health-check do Simulator. Faz log throttle para não poluir."""
+    global _last_health_log
+    try:
+        r = requests.get(SIMULATOR_HEALTH_URL, timeout=5)
+        if r.status_code == 200:
+            return True
+    except Exception:
+        pass
+    now = time.time()
+    if now - _last_health_log >= HEALTH_LOG_THROTTLE_SEC:
+        log(f"⏳ Simulator indisponível em {SIMULATOR_HEALTH_URL}; aguardando...")
+        _last_health_log = now
+    return False
+
+
+def _llm_headers() -> Dict[str, str]:
+    h = {
         "Content-Type": "application/json",
         "X-Request-Source": "auto_dev_agent.py",
     }
     if API_KEY:
-        headers["Authorization"] = f"Bearer {API_KEY}"
-    return headers
+        h["Authorization"] = f"Bearer {API_KEY}"
+    return h
 
 
-def simulator_is_ready() -> bool:
-    """Verifica se o Simulator HTTP está respondendo health-check."""
-    global _last_llm_unavailable_log
-    health_url = SIMULATOR_URL.replace("/v1/chat/completions", "/health")
-    try:
-        resp = requests.get(health_url, timeout=5)
-        return resp.status_code == 200
-    except Exception:
-        now = time.time()
-        if now - _last_llm_unavailable_log >= 30:
-            log(f"⏳ Simulator ainda indisponível em {health_url}; aguardando subir...")
-            _last_llm_unavailable_log = now
-        return False
+SYSTEM_PROMPT_BASE = textwrap.dedent("""\
+    Você é um engenheiro de software sênior atuando como AGENTE AUTÔNOMO
+    responsável pela manutenção contínua do projeto "ChatGPT_Simulator".
 
+    Seu papel:
+      • Analisar o estado atual do sistema (logs, serviços, código-fonte).
+      • Diagnosticar erros com precisão quando existirem.
+      • Propor alterações MÍNIMAS, SEGURAS e CIRÚRGICAS.
+      • Sugerir melhorias contínuas de robustez, performance e observabilidade.
 
-def ask_llm_for_actions(context: dict, objective: str) -> Optional[dict]:
-    """Solicita plano de melhoria à LLM local.
+    REGRAS OBRIGATÓRIAS DE RESPOSTA:
+      1) Responda APENAS com JSON válido. Sem markdown. Sem prosa fora do JSON.
+      2) Nunca proponha comandos destrutivos (rm -rf, git reset --hard,
+         shutdown, format, dd, DROP TABLE, kill -9 1, chmod 777 -R).
+      3) NUNCA edite arquivos protegidos:
+         - Scripts/analisador_prontuarios.py
+         - Scripts/acompanhamento_whatsapp.py
+         - Scripts/config.py
+         - qualquer caminho em .git/, certs/, db/, logs/, chrome_profile/
+      4) Em edições use 'search/replace' com trechos EXATOS do código atual.
+         Inclua contexto suficiente para que 'search' seja único no arquivo.
+      5) Prefira correções pequenas a refatorações grandes.
+      6) Se não houver nada seguro a fazer, retorne lista 'actions' vazia
+         e uma 'analysis' explicando o motivo.
 
-    A resposta esperada é JSON estrito com o formato:
+    FORMATO EXATO:
     {
-      "summary": "...",
+      "analysis": "texto curto com o diagnóstico/raciocínio",
       "actions": [
         {
-          "type": "shell" | "patch" | "note",
-          "reason": "...",
-          "command": "...",          # se shell
-          "unified_diff": "...",      # se patch
-          "priority": 1
+          "type": "edit_file",
+          "file": "Scripts/server.py",
+          "description": "explica o que muda e por quê",
+          "search": "trecho exato presente no arquivo hoje",
+          "replace": "texto que substituirá o search"
+        },
+        {
+          "type": "create_file",
+          "file": "Scripts/novo_modulo.py",
+          "description": "por que criar este arquivo",
+          "content": "conteúdo completo do novo arquivo"
+        },
+        {
+          "type": "shell",
+          "command": "python -m py_compile Scripts/server.py",
+          "description": "validação rápida"
+        },
+        {
+          "type": "note",
+          "content": "observação ou recomendação para humanos"
         }
       ]
     }
-    """
-    system_prompt = (
-        "Você é um engenheiro sênior Python focado em confiabilidade. "
-        "Retorne APENAS JSON válido, sem markdown. "
-        "Priorize correções pequenas e seguras. "
-        "Nunca proponha comandos destrutivos (rm -rf, format, shutdown)."
-    )
-    user_prompt = (
-        f"Objetivo desta rodada: {objective}\n\n"
-        "Contexto de execução do sistema:\n"
-        f"{json.dumps(context, ensure_ascii=False)}\n\n"
-        "Proponha até 3 ações de melhoria/correção. "
-        "Use patch somente quando necessário e mantenha diff mínimo."
-    )
+    """)
 
-    body = {
-        "model": SIMULATOR_MODEL,
-        "url": CODEX_CLOUD_URL,
-        "origin_url": CODEX_CLOUD_URL,
-        "request_source": "auto_dev_agent_codex_cloud",
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ],
-        "temperature": 0.2,
-        "stream": False,
+
+def _build_user_prompt(context: Dict[str, Any],
+                       objective: str,
+                       source_files: Dict[str, str],
+                       prior_attempt: Optional[Dict[str, Any]] = None) -> str:
+    ctx_for_prompt = {
+        k: v for k, v in context.items()
+        if k in {"timestamp", "platform", "services", "incidents",
+                 "log_excerpts", "file_index", "traceback_files", "metrics"}
     }
+    # Compactação: deixa o JSON legível mas limita fatia de logs
+    ctx_json = json.dumps(ctx_for_prompt, ensure_ascii=False)
 
+    parts: List[str] = []
+    parts.append(f"OBJETIVO DESTE CICLO:\n{objective}\n")
+    parts.append("CONTEXTO DE EXECUÇÃO (JSON):\n" + ctx_json + "\n")
+
+    if source_files:
+        parts.append("CÓDIGO-FONTE RELEVANTE:\n")
+        for rel, content in source_files.items():
+            parts.append(f"--- BEGIN FILE: {rel} ---\n{content}\n--- END FILE: {rel} ---\n")
+
+    if prior_attempt:
+        parts.append("RESULTADO DA TENTATIVA ANTERIOR (FALHOU):\n" +
+                     json.dumps(prior_attempt, ensure_ascii=False) + "\n")
+        parts.append("Reavalie: proponha um plano DIFERENTE que corrija o motivo da falha.")
+
+    parts.append("Responda apenas com JSON no formato especificado.")
+    return "\n".join(parts)
+
+
+def _strip_code_fences(text: str) -> str:
+    t = text.strip()
+    if t.startswith("```"):
+        # remove fences tipo ```json ... ```
+        t = re.sub(r"^```[a-zA-Z0-9_-]*\s*", "", t)
+        if t.endswith("```"):
+            t = t[:-3]
+    return t.strip()
+
+
+def _extract_json_object(text: str) -> Optional[dict]:
+    """Extrai o primeiro objeto JSON válido a partir de 'text'."""
+    if not text:
+        return None
+    raw = _strip_code_fences(text)
+    # Tentativa direta
+    try:
+        data = json.loads(raw)
+        return data if isinstance(data, dict) else None
+    except Exception:
+        pass
+    # Busca por chave JSON balanceada iniciando no primeiro '{'
+    start = raw.find("{")
+    while start != -1:
+        depth = 0
+        in_str = False
+        esc = False
+        for idx in range(start, len(raw)):
+            ch = raw[idx]
+            if esc:
+                esc = False
+                continue
+            if ch == "\\":
+                esc = True
+                continue
+            if ch == '"':
+                in_str = not in_str
+                continue
+            if in_str:
+                continue
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    candidate = raw[start:idx + 1]
+                    try:
+                        data = json.loads(candidate)
+                        if isinstance(data, dict):
+                            return data
+                    except Exception:
+                        break
+        start = raw.find("{", start + 1)
+    return None
+
+
+def _stream_chat_completion(body: Dict[str, Any]) -> Tuple[str, Optional[str], Optional[str]]:
+    """Envia mensagem em modo streaming e coleta (markdown_final, chat_id, url).
+
+    Usa stream=True para evitar timeouts longos do servidor (que pode aguardar
+    cooldown de rate-limit) e tolera pausas até STREAM_IDLE_TIMEOUT_SEC.
+    """
+    body = dict(body)
+    body["stream"] = True
+    markdown_buf: str = ""
+    chat_id: Optional[str] = None
+    chat_url: Optional[str] = None
+    error_msg: Optional[str] = None
+
+    resp = requests.post(
+        SIMULATOR_URL,
+        headers=_llm_headers(),
+        json=body,
+        stream=True,
+        timeout=(30, STREAM_IDLE_TIMEOUT_SEC),
+    )
+    try:
+        resp.raise_for_status()
+    except Exception as exc:
+        detail = ""
+        try:
+            detail = resp.text[:1200]
+        except Exception:
+            pass
+        raise RuntimeError(f"HTTP {resp.status_code} no Simulator: {exc} | {detail}")
+
+    started = time.time()
+    last_event = started
+    for raw_line in resp.iter_lines(decode_unicode=True):
+        if raw_line is None:
+            continue
+        if not raw_line.strip():
+            # Checa idle timeout manual
+            if time.time() - last_event > STREAM_IDLE_TIMEOUT_SEC:
+                raise TimeoutError("stream idle timeout aguardando eventos do Simulator")
+            continue
+        last_event = time.time()
+        try:
+            msg = json.loads(raw_line)
+        except Exception:
+            continue
+        t = msg.get("type")
+        c = msg.get("content")
+        if t == "chat_id" and isinstance(c, str):
+            chat_id = c
+        elif t == "chat_meta" and isinstance(c, dict):
+            chat_url = c.get("url") or chat_url
+            chat_id = c.get("chat_id") or chat_id
+        elif t == "markdown" and isinstance(c, str):
+            markdown_buf = c
+        elif t == "finish" and isinstance(c, dict):
+            chat_url = c.get("url") or chat_url
+        elif t == "error":
+            error_msg = str(c)
+            break
+        # Hard timeout total
+        if time.time() - started > REQUEST_TIMEOUT_SEC:
+            raise TimeoutError("timeout total excedido aguardando resposta do ChatGPT")
+    if error_msg and not markdown_buf:
+        raise RuntimeError(f"ChatGPT retornou erro: {error_msg}")
+    return markdown_buf, chat_id, chat_url
+
+
+def ask_chatgpt_for_plan(context: Dict[str, Any],
+                         objective: str,
+                         source_files: Dict[str, str],
+                         prior_attempt: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
+    """Consulta o ChatGPT e devolve um plano (dict) com 'analysis' + 'actions'."""
     if not simulator_is_ready():
         return None
 
+    user_prompt = _build_user_prompt(context, objective, source_files, prior_attempt)
+    body: Dict[str, Any] = {
+        "model": SIMULATOR_MODEL,
+        "messages": [
+            {"role": "system", "content": SYSTEM_PROMPT_BASE},
+            {"role": "user", "content": user_prompt},
+        ],
+        "temperature": 0.2,
+        "request_source": "auto_dev_agent.py",
+    }
+    # Reuso de conversa (continua o mesmo chat entre ciclos)
+    if REUSE_CHAT_CONVERSATION:
+        if _AGENT_STATE.chat_id:
+            body["chat_id"] = _AGENT_STATE.chat_id
+        if _AGENT_STATE.chat_url:
+            body["url"] = _AGENT_STATE.chat_url
+    # Se um Codex URL foi configurado explicitamente e ainda não há conversa,
+    # usa ele como URL inicial.
+    if CODEX_URL and not body.get("url"):
+        body["url"] = CODEX_URL
+        body["origin_url"] = CODEX_URL
+
     try:
-        resp = requests.post(SIMULATOR_URL, headers=_llm_headers(), json=body, timeout=180)
-        resp.raise_for_status()
-        data = resp.json()
-        if isinstance(data, dict) and data.get("success") is True and "html" in data:
-            content = data.get("html", "")
-        elif isinstance(data, dict) and "choices" in data:
-            content = data["choices"][0]["message"]["content"]
-        elif isinstance(data, dict) and "response" in data:
-            content = data.get("response", "")
-        elif isinstance(data, dict) and "error" in data:
-            raise ValueError(f"Simulator/browser.py retornou erro: {data.get('error')}")
-        else:
-            raise ValueError(f"Resposta inesperada do Simulator/browser.py: chaves={list(data.keys()) if isinstance(data, dict) else type(data)}")
-        content = (content or "").strip()
-        if content.startswith("```"):
-            content = re.sub(r"^```[a-zA-Z0-9_-]*\n?", "", content).strip()
-            if content.endswith("```"):
-                content = content[:-3].strip()
-        parsed = json.loads(content)
-        if not isinstance(parsed, dict):
-            raise ValueError("JSON de resposta não é objeto")
-        return parsed
+        markdown, chat_id, chat_url = _stream_chat_completion(body)
     except Exception as exc:
-        log(f"❌ Falha ao consultar Simulator/browser.py: {exc}")
+        log(f"❌ Falha na comunicação com Simulator/ChatGPT: {exc}", logging.ERROR)
         return None
 
+    # Atualiza conversa ativa para próximos ciclos
+    if REUSE_CHAT_CONVERSATION:
+        if chat_id and chat_id != _AGENT_STATE.chat_id:
+            _AGENT_STATE.chat_id = chat_id
+        if chat_url and chat_url != _AGENT_STATE.chat_url:
+            _AGENT_STATE.chat_url = chat_url
+        _save_state()
 
-def command_is_safe(command: str) -> bool:
-    forbidden = [
-        "rm -rf",
-        "shutdown",
-        "reboot",
-        "mkfs",
-        "dd if=",
-        "del /f /q",
-        ":(){:|:&};:",
-        "git reset --hard",
-    ]
-    cmd = command.lower().strip()
-    if any(token in cmd for token in forbidden):
-        return False
-    return True
+    plan = _extract_json_object(markdown or "")
+    if not plan:
+        log("⚠️ ChatGPT respondeu sem JSON válido — resposta ignorada neste ciclo.",
+            logging.WARNING)
+        return None
+    if not isinstance(plan.get("actions"), list):
+        plan["actions"] = []
+    if "analysis" not in plan:
+        plan["analysis"] = ""
+    return plan
 
 
-def run_shell(command: str, timeout: int = 180) -> tuple[int, str]:
-    if not command_is_safe(command):
-        return 2, "blocked by safety policy"
+# =============================================================================
+# BACKUP E ROLLBACK DE ARQUIVOS
+# =============================================================================
+class FileBackup:
+    """Snapshot dos arquivos antes de modificá-los, para rollback atômico."""
 
+    def __init__(self) -> None:
+        self.session_dir = BACKUP_DIR / datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        self.session_dir.mkdir(parents=True, exist_ok=True)
+        self._originals: Dict[str, Optional[bytes]] = {}
+
+    def snapshot(self, rel_path: str) -> None:
+        if rel_path in self._originals:
+            return
+        target = _normalize_rel_path(rel_path)
+        if target is None:
+            return
+        try:
+            if target.exists() and target.is_file():
+                data = target.read_bytes()
+                self._originals[rel_path] = data
+                # Mesma estrutura de diretórios dentro do backup
+                dest = self.session_dir / rel_path
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                dest.write_bytes(data)
+            else:
+                self._originals[rel_path] = None  # arquivo não existia
+        except Exception as exc:
+            log(f"⚠️ Falha ao snapshotar {rel_path}: {exc}", logging.WARNING)
+
+    def rollback_all(self) -> List[str]:
+        restored: List[str] = []
+        for rel_path, data in self._originals.items():
+            target = _normalize_rel_path(rel_path)
+            if target is None:
+                continue
+            try:
+                if data is None:
+                    # Arquivo foi criado pelo agente — remover
+                    if target.exists():
+                        target.unlink()
+                        restored.append(f"rm {rel_path}")
+                else:
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_bytes(data)
+                    restored.append(f"restored {rel_path}")
+            except Exception as exc:
+                log(f"⚠️ Rollback falhou em {rel_path}: {exc}", logging.WARNING)
+        return restored
+
+    @property
+    def changed_files(self) -> List[str]:
+        return list(self._originals.keys())
+
+
+# =============================================================================
+# EXECUÇÃO DE AÇÕES PROPOSTAS
+# =============================================================================
+def run_shell(command: str, timeout: int = MAX_SHELL_TIMEOUT_SEC,
+              cwd: Optional[Path] = None) -> Tuple[int, str]:
+    safe, reason = command_is_safe(command)
+    if not safe:
+        return 2, f"blocked by safety policy: {reason}"
     try:
         proc = subprocess.run(
             command,
-            cwd=str(ROOT_DIR),
+            cwd=str(cwd or ROOT_DIR),
             shell=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
             timeout=timeout,
         )
-        return proc.returncode, proc.stdout[-6000:]
+        return proc.returncode, (proc.stdout or "")[-6000:]
     except subprocess.TimeoutExpired as exc:
-        return 124, f"timeout: {exc}"
+        return 124, f"timeout após {timeout}s: {exc}"
     except Exception as exc:
-        return 1, str(exc)
+        return 1, f"exceção: {exc}"
 
 
-def patch_is_safe(unified_diff: str) -> bool:
-    if not unified_diff or len(unified_diff.encode("utf-8")) > MAX_PATCH_BYTES:
-        return False
-    blocked_paths = [
-        ".git/",
-        "certs/",
-        "db/",
-        "logs/",
-        "scripts/analisador_prontuarios.py",
-    ]
-    low = unified_diff.lower()
-    if any(bp in low for bp in blocked_paths):
-        return False
-    return True
+def _apply_edit_file(action: Dict[str, Any], backup: FileBackup) -> ActionResult:
+    rel = str(action.get("file") or action.get("file_path") or "").strip()
+    description = str(action.get("description", ""))
+    search = action.get("search")
+    replace = action.get("replace")
+    if not rel or not isinstance(search, str) or not isinstance(replace, str):
+        return ActionResult("edit_file", False, description,
+                            "campos 'file', 'search' e 'replace' são obrigatórios")
+
+    ok, reason = is_path_editable(rel)
+    if not ok:
+        return ActionResult("edit_file", False, description, reason)
+
+    target = _normalize_rel_path(rel)
+    if target is None or not target.exists():
+        return ActionResult("edit_file", False, description, f"arquivo inexistente: {rel}")
+
+    try:
+        original = target.read_text(encoding="utf-8", errors="replace")
+    except Exception as exc:
+        return ActionResult("edit_file", False, description, f"falha ao ler: {exc}")
+
+    count = original.count(search)
+    if count == 0:
+        return ActionResult("edit_file", False, description,
+                            "padrão 'search' não encontrado no arquivo atual")
+    if count > 1:
+        return ActionResult("edit_file", False, description,
+                            f"padrão 'search' aparece {count} vezes; exige contexto único")
+
+    new_content = original.replace(search, replace, 1)
+    if len(new_content.encode("utf-8")) > MAX_EDIT_SIZE_BYTES:
+        return ActionResult("edit_file", False, description,
+                            f"arquivo resultante excede {MAX_EDIT_SIZE_BYTES} bytes")
+
+    backup.snapshot(rel)
+    try:
+        target.write_text(new_content, encoding="utf-8")
+    except Exception as exc:
+        return ActionResult("edit_file", False, description, f"falha ao escrever: {exc}")
+    return ActionResult("edit_file", True, description, "edição aplicada", changed_files=[rel])
 
 
-def apply_unified_diff(unified_diff: str) -> tuple[bool, str]:
-    """Aplica diff via git apply --whitespace=nowarn."""
-    if not patch_is_safe(unified_diff):
-        return False, "patch bloqueado por política de segurança"
-    if not ALLOW_UNSAFE_AUTOFIX:
-        return False, "AUTODEV_AGENT_UNSAFE=0: auto patch desabilitado por padrão"
-
-    patch_file = ROOT_DIR / "temp" / "auton_agent.patch"
-    patch_file.parent.mkdir(parents=True, exist_ok=True)
-    patch_file.write_text(unified_diff, encoding="utf-8")
-
-    code, out = run_shell(f'git apply --whitespace=nowarn "{patch_file}"')
-    if code != 0:
-        return False, out
-    return True, "patch aplicado"
-
-
-def quick_checks() -> dict:
-    checks = {}
-    for i, cmd in enumerate(TEST_COMMANDS, start=1):
-        timeout = 240 if i == 1 else 90
-        code, out = run_shell(cmd, timeout=timeout)
-        checks[f"check_{i}"] = {"cmd": cmd, "exit_code": code, "output": out[-2500:]}
-    return checks
-
-
-def checks_ok(checks: dict) -> bool:
-    return all(v.get("exit_code") == 0 for v in checks.values())
+def _apply_create_file(action: Dict[str, Any], backup: FileBackup) -> ActionResult:
+    rel = str(action.get("file") or action.get("file_path") or "").strip()
+    description = str(action.get("description", ""))
+    content = action.get("content")
+    if not rel or not isinstance(content, str):
+        return ActionResult("create_file", False, description,
+                            "campos 'file' e 'content' são obrigatórios")
+    ok, reason = is_path_editable(rel)
+    if not ok:
+        return ActionResult("create_file", False, description, reason)
+    if len(content.encode("utf-8")) > MAX_EDIT_SIZE_BYTES:
+        return ActionResult("create_file", False, description,
+                            f"content excede {MAX_EDIT_SIZE_BYTES} bytes")
+    target = _normalize_rel_path(rel)
+    if target is None:
+        return ActionResult("create_file", False, description, f"path inválido: {rel}")
+    if target.exists():
+        return ActionResult("create_file", False, description,
+                            f"arquivo já existe: {rel} (use edit_file)")
+    backup.snapshot(rel)
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
+    except Exception as exc:
+        return ActionResult("create_file", False, description, f"falha ao criar: {exc}")
+    return ActionResult("create_file", True, description, "arquivo criado", changed_files=[rel])
 
 
-def execute_actions(plan: dict) -> list[dict]:
-    results = []
-    actions = plan.get("actions") if isinstance(plan, dict) else None
+def _apply_shell(action: Dict[str, Any]) -> ActionResult:
+    cmd = str(action.get("command", "")).strip()
+    description = str(action.get("description", ""))
+    if not cmd:
+        return ActionResult("shell", False, description, "comando vazio")
+    code, out = run_shell(cmd)
+    ok = code == 0
+    return ActionResult("shell", ok, description, f"exit={code} out={out[-1500:]}")
+
+
+def _apply_note(action: Dict[str, Any]) -> ActionResult:
+    content = str(action.get("content") or action.get("note") or action.get("description") or "")
+    log(f"📝 Nota do ChatGPT: {content}")
+    return ActionResult("note", True, "nota registrada", content)
+
+
+def execute_plan(plan: Dict[str, Any], backup: FileBackup) -> List[ActionResult]:
+    results: List[ActionResult] = []
+    actions = plan.get("actions") or []
     if not isinstance(actions, list):
-        return [{"ok": False, "reason": "plano sem actions"}]
-
-    for action in actions[:3]:
+        return [ActionResult("invalid", False, "plano sem lista 'actions'", "")]
+    for action in actions[:MAX_ACTIONS_PER_CYCLE]:
         if not isinstance(action, dict):
             continue
         typ = str(action.get("type", "note")).lower().strip()
-        reason = str(action.get("reason", "")).strip()
-        if typ == "shell":
-            cmd = str(action.get("command", "")).strip()
-            code, out = run_shell(cmd)
-            results.append({"type": "shell", "cmd": cmd, "exit_code": code, "output": out, "reason": reason})
-            log(f"shell: {cmd} -> exit={code}")
-        elif typ == "patch":
-            diff = str(action.get("unified_diff", ""))
-            ok, msg = apply_unified_diff(diff)
-            results.append({"type": "patch", "ok": ok, "message": msg, "reason": reason})
-            log(f"patch: ok={ok} msg={msg}")
-        else:
-            note = str(action.get("note", reason or "sem nota"))
-            results.append({"type": "note", "note": note})
-            log(f"note: {note}")
+        try:
+            if typ == "edit_file":
+                if not ENABLE_AUTOFIX:
+                    results.append(ActionResult("edit_file", False,
+                                                str(action.get("description", "")),
+                                                "AUTODEV_AGENT_AUTOFIX=0"))
+                    continue
+                results.append(_apply_edit_file(action, backup))
+            elif typ == "create_file":
+                if not ENABLE_AUTOFIX:
+                    results.append(ActionResult("create_file", False,
+                                                str(action.get("description", "")),
+                                                "AUTODEV_AGENT_AUTOFIX=0"))
+                    continue
+                results.append(_apply_create_file(action, backup))
+            elif typ == "shell":
+                results.append(_apply_shell(action))
+            elif typ == "note":
+                results.append(_apply_note(action))
+            else:
+                results.append(ActionResult(typ, False,
+                                            str(action.get("description", "")),
+                                            f"tipo de ação desconhecido: {typ}"))
+        except Exception as exc:
+            results.append(ActionResult(typ, False,
+                                        str(action.get("description", "")),
+                                        f"exceção: {exc}"))
     return results
 
 
-def summarize_cycle(context: dict, checks: dict, results: list[dict]) -> None:
-    err_count = sum(1 for i in context.get("incidents", []) if i.get("level") == "error")
-    warn_count = sum(1 for i in context.get("incidents", []) if i.get("level") == "warning")
-    changed = any(token in json.dumps(checks, ensure_ascii=False) for token in [" M ", " A ", "?? "])
-    log(
-        "ciclo concluído | "
-        f"errors={err_count} warnings={warn_count} "
-        f"actions={len(results)} changed={changed} checks_ok={checks_ok(checks)}"
+# =============================================================================
+# VALIDAÇÃO PÓS-APLICAÇÃO
+# =============================================================================
+def validate_python_syntax() -> Tuple[bool, List[str]]:
+    """Compila todos os .py editáveis. Retorna (ok, lista_de_erros)."""
+    import py_compile
+    errors: List[str] = []
+    for p in ROOT_DIR.rglob("*.py"):
+        try:
+            rel = p.relative_to(ROOT_DIR).as_posix()
+        except Exception:
+            continue
+        if is_path_blocked(rel):
+            continue
+        try:
+            py_compile.compile(str(p), doraise=True)
+        except py_compile.PyCompileError as exc:
+            errors.append(f"{rel}: {exc.msg.strip()}")
+        except Exception as exc:
+            errors.append(f"{rel}: {exc}")
+    return (len(errors) == 0), errors
+
+
+def validate_changes(changed: Iterable[str]) -> Tuple[bool, Dict[str, Any]]:
+    report: Dict[str, Any] = {"py_compile": None, "changed": list(changed)}
+    ok, errs = validate_python_syntax()
+    report["py_compile"] = {"ok": ok, "errors": errs}
+    return ok, report
+
+
+# =============================================================================
+# GIT — COMMIT + PUSH AUTOMÁTICOS
+# =============================================================================
+def _git_current_branch() -> Optional[str]:
+    code, out = run_shell("git rev-parse --abbrev-ref HEAD", timeout=15)
+    if code == 0:
+        return out.strip().splitlines()[-1].strip() or None
+    return None
+
+
+def _git_has_changes() -> bool:
+    code, out = run_shell("git status --porcelain", timeout=30)
+    return code == 0 and bool(out.strip())
+
+
+def _build_commit_message(plan: Dict[str, Any], results: List[ActionResult]) -> str:
+    analysis = (plan.get("analysis") or "").strip()
+    summary = analysis.splitlines()[0][:90] if analysis else "ajuste automático"
+    body_lines = []
+    for r in results:
+        icon = "✅" if r.ok else "⚠️"
+        desc = (r.description or "").strip()
+        body_lines.append(f"{icon} [{r.action_type}] {desc}")
+    body = "\n".join(body_lines)
+    return f"{COMMIT_PREFIX} {summary}\n\n{body}"
+
+
+def git_commit_and_maybe_push(plan: Dict[str, Any], results: List[ActionResult]) -> None:
+    if not ENABLE_AUTOCOMMIT:
+        return
+    if not _git_has_changes():
+        return
+
+    branch_target = GIT_BRANCH or _git_current_branch() or ""
+    if branch_target and branch_target != (_git_current_branch() or ""):
+        code, out = run_shell(f"git checkout {branch_target}", timeout=30)
+        if code != 0:
+            log(f"⚠️ Falha ao checkout em {branch_target}: {out}", logging.WARNING)
+            return
+
+    run_shell("git add -A", timeout=30)
+    commit_msg = _build_commit_message(plan, results)
+    # Escreve mensagem em arquivo temporário para suportar quebras de linha
+    msg_file = TEMP_DIR / f"commit_msg_{int(time.time())}.txt"
+    try:
+        msg_file.write_text(commit_msg, encoding="utf-8")
+        code, out = run_shell(f'git commit -F "{msg_file.as_posix()}"', timeout=60)
+        if code != 0:
+            log(f"⚠️ git commit falhou: {out}", logging.WARNING)
+            return
+        log(f"📦 Commit efetuado: {commit_msg.splitlines()[0]}")
+    finally:
+        try:
+            msg_file.unlink()
+        except Exception:
+            pass
+
+    if ENABLE_AUTOPUSH:
+        branch = GIT_BRANCH or _git_current_branch() or ""
+        if not branch:
+            log("⚠️ Branch atual indeterminado; push abortado.", logging.WARNING)
+            return
+        # Retry com backoff exponencial
+        delays = [0, 2, 4, 8, 16]
+        for attempt, delay in enumerate(delays, start=1):
+            if delay:
+                time.sleep(delay)
+            code, out = run_shell(f"git push -u {GIT_REMOTE} {branch}", timeout=120)
+            if code == 0:
+                log(f"🚀 Push OK em {GIT_REMOTE}/{branch}")
+                return
+            log(f"⚠️ Push tentativa {attempt} falhou: {out[-400:]}", logging.WARNING)
+        log("❌ Push abortado após retries.", logging.ERROR)
+
+
+# =============================================================================
+# ORQUESTRAÇÃO DE CICLOS
+# =============================================================================
+def _objective_for_cycle(has_errors: bool, incidents_summary: str) -> str:
+    if has_errors:
+        return (
+            "Diagnosticar e corrigir erros de execução detectados recentemente "
+            "nos logs do sistema, preservando comportamento existente. "
+            "Foque em correções cirúrgicas de causa-raiz.\n"
+            f"Principais sintomas:\n{incidents_summary}"
+        )
+    return (
+        "Analisar o estado do sistema e propor UMA melhoria pequena, segura e "
+        "incremental de robustez, performance, observabilidade (logs/métricas) "
+        "ou qualidade de código. Se já estiver tudo estável e não houver algo "
+        "claramente valioso, retorne lista 'actions' vazia com analysis explicando."
     )
 
 
-def run_improvement_round(context: dict, objective: str) -> tuple[list[dict], dict]:
-    """Executa rodada de melhoria com retentativas até validação passar."""
-    attempts = []
-    checks = quick_checks()
-    for attempt in range(1, max(1, IMPROVEMENT_MAX_ATTEMPTS) + 1):
-        plan = ask_llm_for_actions(context, objective=objective)
+def _summarize_incidents(context: Dict[str, Any]) -> str:
+    incs = context.get("incidents") or []
+    if not incs:
+        return "(nenhum incidente recente)"
+    lines = []
+    for inc in incs[-10:]:
+        lines.append(f"- [{inc.get('level')}] {inc.get('source')}: {inc.get('line','')[:180]}")
+    return "\n".join(lines)
+
+
+def run_single_cycle() -> None:
+    _AGENT_STATE.cycles_total += 1
+    context = collect_runtime_context()
+    log_active_services_snapshot(context["services"])
+
+    has_errors = any(i.get("level") == "error" for i in context.get("incidents", []))
+    time_for_suggestion = (time.time() - _AGENT_STATE.last_suggestion_ts) >= SUGGESTION_INTERVAL_SEC
+
+    if not has_errors and not time_for_suggestion:
+        log("⌛ Nenhum incidente e intervalo de sugestão não atingido; pulando consulta.")
+        _save_state()
+        return
+
+    if has_errors:
+        _AGENT_STATE.cycles_with_errors += 1
+    if time_for_suggestion:
+        _AGENT_STATE.last_suggestion_ts = time.time()
+
+    objective = _objective_for_cycle(has_errors, _summarize_incidents(context))
+
+    # Orçamento do prompt: ~50% para código, deixando 50% para contexto+overhead
+    src_budget = max(4000, MAX_CONTEXT_CHARS // 2)
+    source_files = select_relevant_source_files(context, src_budget)
+
+    prior_attempt: Optional[Dict[str, Any]] = None
+    for attempt in range(1, MAX_RETRY_ATTEMPTS + 2):  # 1 tentativa + N retries
+        plan = ask_chatgpt_for_plan(context, objective, source_files, prior_attempt)
         if not plan:
-            attempts.append({"attempt": attempt, "ok": False, "reason": "sem plano"})
-            continue
+            log(f"⚠️ Sem plano do ChatGPT na tentativa {attempt}.", logging.WARNING)
+            break
 
-        results = execute_actions(plan)
-        checks = quick_checks()
-        ok = checks_ok(checks)
-        attempts.append({"attempt": attempt, "ok": ok, "results": results, "checks": checks})
-        if ok:
-            return results, checks
+        actions = plan.get("actions") or []
+        if not actions:
+            log(f"💭 Análise sem ações: {str(plan.get('analysis',''))[:300]}")
+            _save_state()
+            return
 
-        # feedback para próxima tentativa (com erros de validação)
-        context["last_attempt_feedback"] = {
-            "attempt": attempt,
-            "checks": checks,
-            "results": results,
-        }
-        log(f"⚠️ Tentativa {attempt} não validou. Gerando novo plano...")
+        backup = FileBackup()
+        results = execute_plan(plan, backup)
+        changed = backup.changed_files
 
-    last = attempts[-1] if attempts else {"results": []}
-    return last.get("results", []), checks
+        # Se alguma edição aplicou, valida
+        if changed:
+            ok, report = validate_changes(changed)
+            if not ok:
+                log(f"🛑 Validação falhou: {report['py_compile']['errors'][:3]}",
+                    logging.WARNING)
+                restored = backup.rollback_all()
+                log(f"↩️ Rollback: {restored}")
+                # Prepara contexto para próxima tentativa com feedback
+                prior_attempt = {
+                    "attempt": attempt,
+                    "plan_analysis": plan.get("analysis", ""),
+                    "applied_results": [r.__dict__ for r in results],
+                    "validation": report,
+                }
+                continue  # nova tentativa
+            else:
+                log(f"✅ Validação OK em {len(changed)} arquivo(s) alterado(s).")
+
+        # Resumo do ciclo
+        ok_count = sum(1 for r in results if r.ok)
+        err_count = sum(1 for r in results if not r.ok)
+        _AGENT_STATE.total_actions += ok_count
+        if changed and ok_count:
+            _AGENT_STATE.cycles_with_fixes += 1
+        log(f"🧩 Ciclo {_AGENT_STATE.cycles_total}: ações_ok={ok_count} "
+            f"falhas={err_count} alterações={len(changed)}")
+
+        # Commit/push se mudou alguma coisa
+        if changed and ok_count:
+            git_commit_and_maybe_push(plan, results)
+
+        _save_state()
+        return  # terminou o ciclo
+
+    _save_state()
 
 
-def main() -> None:
+def wait_for_simulator() -> None:
+    started = time.time()
+    while not simulator_is_ready():
+        if STARTUP_WAIT_SEC <= 0:
+            return
+        if time.time() - started > STARTUP_WAIT_SEC:
+            log("⏱️ Timeout aguardando Simulator; seguirei em modo monitor.",
+                logging.WARNING)
+            return
+        time.sleep(3)
+
+
+def main_loop() -> None:
     log("🚀 AutoDevAgent iniciando")
     log(f"📄 Log: {AGENT_LOG}")
+    log(f"🔗 Simulator URL: {SIMULATOR_URL}")
+    log(f"🔗 Codex URL: {CODEX_URL or '(novo chat a cada ciclo de conversa)'}")
+    log(f"🧭 Plataforma: {platform.system()} {platform.release()} | Python {sys.version.split(' ',1)[0]}")
+    log(f"⚙️ AUTOFIX={ENABLE_AUTOFIX} AUTOCOMMIT={ENABLE_AUTOCOMMIT} AUTOPUSH={ENABLE_AUTOPUSH}")
     if not API_KEY:
-        log("⚠️ API_KEY ausente no ambiente/config. Requisições ao Simulator podem retornar 401.", level=logging.WARNING)
-    log("🔎 Modo monitor: não inicia servidores automaticamente; apenas detecta e monitora serviços ativos.")
+        log("⚠️ API_KEY ausente; requisições podem retornar 401.", logging.WARNING)
 
-    last_suggestion_ts = 0.0
+    _load_state()
+    wait_for_simulator()
+
     while True:
+        started = time.time()
         try:
-            active_services = discover_active_services()
-            log_active_services_snapshot(active_services)
-            context = collect_runtime_context()
-            context["active_services"] = active_services
-            checks = quick_checks()
-
-            has_error = any(i.get("level") == "error" for i in context.get("incidents", []))
-            time_for_suggestion = (time.time() - last_suggestion_ts) >= SUGGESTION_INTERVAL_SEC
-
-            results: list[dict] = []
-            if has_error or time_for_suggestion:
-                objective = (
-                    "Corrigir erros de execução detectados nos logs, validar testes e estabilizar o sistema."
-                    if has_error
-                    else "Propor e implementar melhorias contínuas de robustez, performance e observabilidade, depois validar testes."
-                )
-                results, checks = run_improvement_round(context, objective=objective)
-                last_suggestion_ts = time.time()
-
-            summarize_cycle(context, checks, results)
-            time.sleep(max(10, SLEEP_BETWEEN_CYCLES))
+            run_single_cycle()
+        except KeyboardInterrupt:
+            raise
         except Exception as exc:
-            log(f"❌ Exceção no loop principal: {exc}", level=logging.ERROR)
-            time.sleep(10)
+            log("❌ Exceção no ciclo: " + repr(exc), logging.ERROR)
+            log(traceback.format_exc(), logging.ERROR)
+
+        elapsed = time.time() - started
+        sleep_for = max(10, CYCLE_INTERVAL_SEC - int(elapsed))
+        time.sleep(sleep_for)
 
 
+# =============================================================================
+# ENTRY POINT
+# =============================================================================
 if __name__ == "__main__":
     try:
-        main()
+        main_loop()
     except KeyboardInterrupt:
         log("🛑 Encerrado por KeyboardInterrupt")
     except Exception as exc:
-        log(f"❌ Erro fatal no auto_dev_agent: {exc}", level=logging.ERROR)
-        time.sleep(10)
+        log(f"❌ Erro fatal: {exc}", logging.ERROR)
+        log(traceback.format_exc(), logging.ERROR)
+        # Preserva o processo para permitir inspeção; exit(1) se CI
+        if os.environ.get("AUTODEV_AGENT_EXIT_ON_FATAL", "0") == "1":
+            sys.exit(1)
+        time.sleep(30)
