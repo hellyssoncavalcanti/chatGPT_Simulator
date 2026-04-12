@@ -710,8 +710,9 @@ Foi adicionado o script `Scripts/auto_dev_agent.py`, que atua como um orquestrad
 2. monitora logs em tempo real por ciclos;
 3. detecta padrões de erro/warning;
 4. consulta a LLM local (`/v1/chat/completions`, via Simulator/browser.py) para obter sugestões;
-5. executa ações de shell seguras e validações rápidas (`py_compile`);
-6. pode aplicar patches automáticos **somente** quando habilitado explicitamente.
+5. mesmo sem erro, entra em ciclo de melhoria contínua no intervalo configurado;
+6. interpreta logs, envia contexto de erros para a LLM, aplica correções, reexecuta testes e tenta novamente até validar (máximo configurável de tentativas por rodada);
+7. executa ações automáticas de shell/patch e validações rápidas (`py_compile`, `git status`).
 
 ### Como executar
 
@@ -732,6 +733,7 @@ python Scripts/auto_dev_agent.py
 - `AUTODEV_AGENT_API_KEY` (opcional)
 - `AUTODEV_AGENT_CYCLE_SEC` (default `60`)
 - `AUTODEV_AGENT_SUGGESTION_SEC` (default `300`)
-- `AUTODEV_AGENT_UNSAFE` (default `0`) → `1` permite auto-apply de patch
+- `AUTODEV_AGENT_MAX_ATTEMPTS` (default `3`) → tentativas de correção por rodada
+- `AUTODEV_AGENT_UNSAFE` (default `1`) → habilita auto-apply de patch
 
-> Segurança: por padrão, o agente **não** aplica patch automaticamente (`AUTODEV_AGENT_UNSAFE=0`).
+> Operação automática: por padrão, o agente aplica correções e valida em loop (`AUTODEV_AGENT_UNSAFE=1`), com bloqueio de comandos destrutivos e restrição de patch por tamanho/caminho.

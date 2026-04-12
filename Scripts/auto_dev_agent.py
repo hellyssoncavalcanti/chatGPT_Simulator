@@ -63,7 +63,12 @@ MAX_CONTEXT_CHARS = int(_env("AUTODEV_AGENT_CONTEXT_CHARS", "12000", "AUTON_AGEN
 
 # segurança de patch
 MAX_PATCH_BYTES = int(_env("AUTODEV_AGENT_MAX_PATCH_BYTES", "120000", "AUTON_AGENT_MAX_PATCH_BYTES"))
-ALLOW_UNSAFE_AUTOFIX = _env("AUTODEV_AGENT_UNSAFE", "0", "AUTON_AGENT_UNSAFE") == "1"
+ALLOW_UNSAFE_AUTOFIX = _env("AUTODEV_AGENT_UNSAFE", "1", "AUTON_AGENT_UNSAFE") == "1"
+IMPROVEMENT_MAX_ATTEMPTS = int(_env("AUTODEV_AGENT_MAX_ATTEMPTS", "3"))
+TEST_COMMANDS = [
+    _env("AUTODEV_AGENT_TEST_CMD_1", "python -m py_compile Scripts/*.py"),
+    _env("AUTODEV_AGENT_TEST_CMD_2", "git status --short"),
+]
 
 # monitoramento
 ERROR_PATTERNS = [
@@ -220,7 +225,7 @@ def _llm_headers() -> dict:
     return headers
 
 
-def ask_llm_for_actions(context: dict) -> Optional[dict]:
+def ask_llm_for_actions(context: dict, objective: str) -> Optional[dict]:
     """Solicita plano de melhoria à LLM local.
 
     A resposta esperada é JSON estrito com o formato:
@@ -244,6 +249,7 @@ def ask_llm_for_actions(context: dict) -> Optional[dict]:
         "Nunca proponha comandos destrutivos (rm -rf, format, shutdown)."
     )
     user_prompt = (
+        f"Objetivo desta rodada: {objective}\n\n"
         "Contexto de execução do sistema:\n"
         f"{json.dumps(context, ensure_ascii=False)}\n\n"
         "Proponha até 3 ações de melhoria/correção. "
@@ -341,12 +347,15 @@ def apply_unified_diff(unified_diff: str) -> tuple[bool, str]:
 
 def quick_checks() -> dict:
     checks = {}
-    code, out = run_shell("python -m py_compile Scripts/*.py", timeout=240)
-    checks["py_compile"] = {"exit_code": code, "output": out[-2500:]}
-
-    code, out = run_shell("git status --short", timeout=60)
-    checks["git_status"] = {"exit_code": code, "output": out[-2500:]}
+    for i, cmd in enumerate(TEST_COMMANDS, start=1):
+        timeout = 240 if i == 1 else 90
+        code, out = run_shell(cmd, timeout=timeout)
+        checks[f"check_{i}"] = {"cmd": cmd, "exit_code": code, "output": out[-2500:]}
     return checks
+
+
+def checks_ok(checks: dict) -> bool:
+    return all(v.get("exit_code") == 0 for v in checks.values())
 
 
 def execute_actions(plan: dict) -> list[dict]:
@@ -380,12 +389,41 @@ def execute_actions(plan: dict) -> list[dict]:
 def summarize_cycle(context: dict, checks: dict, results: list[dict]) -> None:
     err_count = sum(1 for i in context.get("incidents", []) if i.get("level") == "error")
     warn_count = sum(1 for i in context.get("incidents", []) if i.get("level") == "warning")
-    changed = "M" in (checks.get("git_status", {}).get("output", "")) or "A" in (checks.get("git_status", {}).get("output", ""))
+    changed = any(token in json.dumps(checks, ensure_ascii=False) for token in [" M ", " A ", "?? "])
     log(
         "ciclo concluído | "
         f"errors={err_count} warnings={warn_count} "
-        f"actions={len(results)} changed={changed}"
+        f"actions={len(results)} changed={changed} checks_ok={checks_ok(checks)}"
     )
+
+
+def run_improvement_round(context: dict, objective: str) -> tuple[list[dict], dict]:
+    """Executa rodada de melhoria com retentativas até validação passar."""
+    attempts = []
+    checks = quick_checks()
+    for attempt in range(1, max(1, IMPROVEMENT_MAX_ATTEMPTS) + 1):
+        plan = ask_llm_for_actions(context, objective=objective)
+        if not plan:
+            attempts.append({"attempt": attempt, "ok": False, "reason": "sem plano"})
+            continue
+
+        results = execute_actions(plan)
+        checks = quick_checks()
+        ok = checks_ok(checks)
+        attempts.append({"attempt": attempt, "ok": ok, "results": results, "checks": checks})
+        if ok:
+            return results, checks
+
+        # feedback para próxima tentativa (com erros de validação)
+        context["last_attempt_feedback"] = {
+            "attempt": attempt,
+            "checks": checks,
+            "results": results,
+        }
+        log(f"⚠️ Tentativa {attempt} não validou. Gerando novo plano...")
+
+    last = attempts[-1] if attempts else {"results": []}
+    return last.get("results", []), checks
 
 
 def main() -> None:
@@ -403,10 +441,13 @@ def main() -> None:
 
         results: list[dict] = []
         if has_error or time_for_suggestion:
-            plan = ask_llm_for_actions(context)
-            if plan:
-                results = execute_actions(plan)
-                last_suggestion_ts = time.time()
+            objective = (
+                "Corrigir erros de execução detectados nos logs, validar testes e estabilizar o sistema."
+                if has_error
+                else "Propor e implementar melhorias contínuas de robustez, performance e observabilidade, depois validar testes."
+            )
+            results, checks = run_improvement_round(context, objective=objective)
+            last_suggestion_ts = time.time()
 
         summarize_cycle(context, checks, results)
         time.sleep(max(10, SLEEP_BETWEEN_CYCLES))
