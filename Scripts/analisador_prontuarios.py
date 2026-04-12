@@ -645,6 +645,51 @@ def _reativar_esgotados_recuperaveis_no_startup():
     return afetados
 
 
+def _reativar_erros_conexao_no_startup():
+    """
+    No startup, trata erro de conexão como análise interrompida:
+    volta para pendente e limpa datetime_analise_iniciada, respeitando MAX_TENTATIVAS.
+    """
+    resultado = sql_exec(
+        f"""
+        UPDATE {TABELA}
+        SET
+            status = 'pendente',
+            datetime_analise_iniciada = NULL,
+            erro_msg = CONCAT(
+                COALESCE(erro_msg, ''),
+                ' | [AUTO-REQUEUE-CONNECTION] ',
+                NOW(),
+                ' erro de conexão detectado no startup; reencaminhado para pendente'
+            )
+        WHERE
+            id_atendimento IS NOT NULL
+            AND status = 'erro'
+            AND tentativas < {MAX_TENTATIVAS}
+            AND COALESCE(erro_msg, '') NOT LIKE '%[AUTO-REQUEUE-CONNECTION]%'
+            AND (
+                LOWER(COALESCE(erro_msg, '')) LIKE '%connection broken%'
+                OR LOWER(COALESCE(erro_msg, '')) LIKE '%connectionreseterror%'
+                OR LOWER(COALESCE(erro_msg, '')) LIKE '%read timed out%'
+                OR LOWER(COALESCE(erro_msg, '')) LIKE '%max retries exceeded%'
+                OR LOWER(COALESCE(erro_msg, '')) LIKE '%failed to establish a new connection%'
+                OR LOWER(COALESCE(erro_msg, '')) LIKE '%remote end closed connection%'
+                OR LOWER(COALESCE(erro_msg, '')) LIKE '%forçado o cancelamento de uma conexão%'
+                OR LOWER(COALESCE(erro_msg, '')) LIKE '%nenhuma conexão pôde ser feita%'
+                OR LOWER(COALESCE(erro_msg, '')) LIKE '%winerror 10054%'
+                OR LOWER(COALESCE(erro_msg, '')) LIKE '%winerror 10061%'
+            )
+        """,
+        reason="reativar_erros_conexao_startup",
+    )
+    afetados = resultado.get("affected_rows", 0)
+    if afetados:
+        log.warning(
+            f"♻️ {afetados} registro(s) com erro de conexão foram recolocados em pendente no startup (tentativas < {MAX_TENTATIVAS})."
+        )
+    return afetados
+
+
 def _decode_json_string_fragment(value: str) -> str:
     """Decodifica um fragmento de string JSON sem perder caracteres UTF-8."""
     try:
@@ -5582,6 +5627,7 @@ def main():
     garantir_migracoes()                         # corrige tipos de colunas em tabelas pré-existentes
     garantir_tabela_embeddings()                 # garante tabelas de embeddings + casos semelhantes
     resetar_analises_interrompidas_no_startup()  # limpa inícios de análise sem conclusão válida após quedas/interrupções
+    _reativar_erros_conexao_no_startup()         # erro de conexão vira pendente novamente (respeitando MAX_TENTATIVAS)
     _reativar_esgotados_recuperaveis_no_startup() # recoloca erros recuperáveis em pendente para nova tentativa
 
     llm_estava_fora = False   # rastreia se houve queda para logar a reconexão
