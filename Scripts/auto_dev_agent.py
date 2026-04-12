@@ -20,6 +20,7 @@ IMPORTANTE:
 
 from __future__ import annotations
 
+import glob as _glob_mod
 import json
 import logging
 import os
@@ -68,10 +69,6 @@ MAX_CONTEXT_CHARS = int(_env("AUTODEV_AGENT_CONTEXT_CHARS", "12000", "AUTON_AGEN
 MAX_PATCH_BYTES = int(_env("AUTODEV_AGENT_MAX_PATCH_BYTES", "120000", "AUTON_AGENT_MAX_PATCH_BYTES"))
 ALLOW_UNSAFE_AUTOFIX = _env("AUTODEV_AGENT_UNSAFE", "1", "AUTON_AGENT_UNSAFE") == "1"
 IMPROVEMENT_MAX_ATTEMPTS = int(_env("AUTODEV_AGENT_MAX_ATTEMPTS", "3"))
-TEST_COMMANDS = [
-    _env("AUTODEV_AGENT_TEST_CMD_1", "python -m py_compile Scripts/*.py"),
-    _env("AUTODEV_AGENT_TEST_CMD_2", "git status --short"),
-]
 _last_llm_unavailable_log = 0.0
 
 # monitoramento
@@ -92,17 +89,47 @@ WARN_PATTERNS = [
     r"\bretry\b",
 ]
 
-def _python_cmd_for_children() -> str:
-    if VENV_PYTHON.exists():
-        return str(VENV_PYTHON)
+
+def _resolve_python() -> str:
+    """Retorna o caminho do Python da venv, se disponível, ou o Python atual."""
+    if is_windows():
+        venv_py = ROOT_DIR / ".venv" / "Scripts" / "python.exe"
+    else:
+        venv_py = ROOT_DIR / ".venv" / "bin" / "python"
+    if venv_py.exists():
+        return str(venv_py)
     return sys.executable
 
 
-PY_CHILD = _python_cmd_for_children()
-START_COMMANDS = [
-    ["cmd", "/d", "/c", f"\"{PY_CHILD}\" Scripts\\main.py"],
-    ["cmd", "/d", "/c", f"\"{PY_CHILD}\" Scripts\\analisador_prontuarios.py"],
-]
+def _build_start_commands() -> list[list[str]]:
+    """Constrói comandos para iniciar os scripts Python diretamente.
+
+    Evita usar os .bat (que contêm taskkill /F /IM python.exe e pause,
+    matando o próprio agente e travando com stdout piped).
+    """
+    py = _resolve_python()
+    return [
+        [py, str(ROOT_DIR / "Scripts" / "main.py")],
+        [py, str(ROOT_DIR / "Scripts" / "analisador_prontuarios.py")],
+    ]
+
+
+def _build_test_commands() -> list[str]:
+    """Constrói comandos de teste, expandindo globs manualmente."""
+    py_files = sorted(_glob_mod.glob(str(ROOT_DIR / "Scripts" / "*.py")))
+    if py_files:
+        # py_compile aceita um arquivo por vez; encadeia chamadas
+        py = _resolve_python()
+        compile_parts = " && ".join(
+            f'"{py}" -m py_compile "{f}"' for f in py_files
+        )
+        cmd1 = _env("AUTODEV_AGENT_TEST_CMD_1", compile_parts)
+    else:
+        cmd1 = _env("AUTODEV_AGENT_TEST_CMD_1", "echo no .py files found")
+    cmd2 = _env("AUTODEV_AGENT_TEST_CMD_2", "git status --short")
+    return [cmd1, cmd2]
+
+
 CHILD_PROCS: list[dict] = []
 
 
@@ -145,17 +172,16 @@ def is_windows() -> bool:
     return os.name == "nt"
 
 
-def start_bats_if_needed() -> list[subprocess.Popen]:
-    """Inicia os processos declarados, se estiver em ambiente Windows.
+def start_child_scripts() -> list[subprocess.Popen]:
+    """Inicia os scripts Python filhos diretamente (cross-platform).
 
-    Em Linux/macOS, registra aviso e segue somente com monitoramento/sugestões.
+    Não usa os .bat de conveniência porque eles contêm `taskkill /F /IM
+    python.exe` (mata o próprio agente) e `pause` (trava com stdout piped).
     """
     procs: list[subprocess.Popen] = []
-    if not is_windows():
-        log("⚠️ Ambiente não-Windows detectado; start dos .bat foi pulado.")
-        return procs
+    commands = _build_start_commands()
 
-    for cmd in START_COMMANDS:
+    for cmd in commands:
         try:
             proc = subprocess.Popen(
                 cmd,
@@ -434,7 +460,8 @@ def apply_unified_diff(unified_diff: str) -> tuple[bool, str]:
 
 def quick_checks() -> dict:
     checks = {}
-    for i, cmd in enumerate(TEST_COMMANDS, start=1):
+    test_commands = _build_test_commands()
+    for i, cmd in enumerate(test_commands, start=1):
         timeout = 240 if i == 1 else 90
         code, out = run_shell(cmd, timeout=timeout)
         checks[f"check_{i}"] = {"cmd": cmd, "exit_code": code, "output": out[-2500:]}
@@ -516,7 +543,7 @@ def run_improvement_round(context: dict, objective: str) -> tuple[list[dict], di
 def main() -> None:
     log("🚀 AutoDevAgent iniciando")
     log(f"📄 Log: {AGENT_LOG}")
-    start_bats_if_needed()
+    start_child_scripts()
 
     last_suggestion_ts = 0.0
     while True:
