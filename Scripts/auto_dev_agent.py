@@ -69,7 +69,7 @@ MAX_CONTEXT_CHARS = int(_env("AUTODEV_AGENT_CONTEXT_CHARS", "12000", "AUTON_AGEN
 
 # segurança de patch
 MAX_PATCH_BYTES = int(_env("AUTODEV_AGENT_MAX_PATCH_BYTES", "120000", "AUTON_AGENT_MAX_PATCH_BYTES"))
-ALLOW_UNSAFE_AUTOFIX = _env("AUTODEV_AGENT_UNSAFE", "1", "AUTON_AGENT_UNSAFE") == "1"
+ALLOW_UNSAFE_AUTOFIX = _env("AUTODEV_AGENT_UNSAFE", "0", "AUTON_AGENT_UNSAFE") == "1"
 IMPROVEMENT_MAX_ATTEMPTS = int(_env("AUTODEV_AGENT_MAX_ATTEMPTS", "3"))
 TEST_COMMANDS = [
     _env("AUTODEV_AGENT_TEST_CMD_1", "python -m py_compile Scripts/*.py"),
@@ -383,7 +383,13 @@ def run_shell(command: str, timeout: int = 180) -> tuple[int, str]:
 def patch_is_safe(unified_diff: str) -> bool:
     if not unified_diff or len(unified_diff.encode("utf-8")) > MAX_PATCH_BYTES:
         return False
-    blocked_paths = [".git/", "certs/", "db/", "logs/"]
+    blocked_paths = [
+        ".git/",
+        "certs/",
+        "db/",
+        "logs/",
+        "scripts/analisador_prontuarios.py",
+    ]
     low = unified_diff.lower()
     if any(bp in low for bp in blocked_paths):
         return False

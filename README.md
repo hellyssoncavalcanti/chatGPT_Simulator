@@ -735,7 +735,7 @@ python Scripts/auto_dev_agent.py
 - `AUTODEV_AGENT_CYCLE_SEC` (default `60`)
 - `AUTODEV_AGENT_SUGGESTION_SEC` (default `300`)
 - `AUTODEV_AGENT_MAX_ATTEMPTS` (default `3`) → tentativas de correção por rodada
-- `AUTODEV_AGENT_UNSAFE` (default `1`) → habilita auto-apply de patch
+- `AUTODEV_AGENT_UNSAFE` (default `0`) → habilita auto-apply de patch
 
-> Operação automática: por padrão, o agente aplica correções e valida em loop (`AUTODEV_AGENT_UNSAFE=1`), com bloqueio de comandos destrutivos e restrição de patch por tamanho/caminho.
+> Operação automática: por padrão, o agente valida e monitora em loop, mas **não aplica patch automaticamente** (`AUTODEV_AGENT_UNSAFE=0`), com bloqueio adicional para arquivo crítico `Scripts/analisador_prontuarios.py`.
 > Autenticação: se `AUTODEV_AGENT_API_KEY` não for definida, o agente tenta reutilizar `config.API_KEY` automaticamente.
