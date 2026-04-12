@@ -738,3 +738,4 @@ python Scripts/auto_dev_agent.py
 - `AUTODEV_AGENT_UNSAFE` (default `1`) → habilita auto-apply de patch
 
 > Operação automática: por padrão, o agente aplica correções e valida em loop (`AUTODEV_AGENT_UNSAFE=1`), com bloqueio de comandos destrutivos e restrição de patch por tamanho/caminho.
+> Autenticação: se `AUTODEV_AGENT_API_KEY` não for definida, o agente tenta reutilizar `config.API_KEY` automaticamente.
