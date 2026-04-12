@@ -171,6 +171,15 @@ ENABLE_AUTOCOMMIT = _env_bool("AUTODEV_AGENT_AUTOCOMMIT", True)
 ENABLE_AUTOPUSH = _env_bool("AUTODEV_AGENT_AUTOPUSH", False)
 REUSE_CHAT_CONVERSATION = _env_bool("AUTODEV_AGENT_REUSE_CHAT", True)
 
+# Encapsulamento para colagem via clipboard — evita que browser.py digite
+# caractere a caractere (ganho de ordens de grandeza em velocidade).
+# Quando habilitado, o conteúdo de cada mensagem vai entre os marcadores
+# [INICIO_TEXTO_COLADO] ... [FIM_TEXTO_COLADO] que browser.py reconhece e
+# injeta no composer via Ctrl+V.
+USE_PASTE_MARKERS = _env_bool("AUTODEV_AGENT_USE_PASTE_MARKERS", True)
+PASTE_MARKER_START = "[INICIO_TEXTO_COLADO]"
+PASTE_MARKER_END = "[FIM_TEXTO_COLADO]"
+
 MAX_EDIT_SIZE_BYTES = int(_env("AUTODEV_AGENT_MAX_EDIT_BYTES", "200000"))
 MAX_ACTIONS_PER_CYCLE = int(_env("AUTODEV_AGENT_MAX_ACTIONS", "5"))
 MAX_RETRY_ATTEMPTS = int(_env("AUTODEV_AGENT_MAX_RETRIES", "2"))
@@ -1034,6 +1043,28 @@ def _stream_chat_completion(body: Dict[str, Any]) -> Tuple[str, Optional[str], O
     return markdown_buf, chat_id, chat_url
 
 
+def _wrap_for_paste(text: str) -> str:
+    """Encapsula texto nos marcadores que browser.py reconhece como 'colar via Ctrl+V'.
+
+    Quando o texto vai entre [INICIO_TEXTO_COLADO] e [FIM_TEXTO_COLADO],
+    browser.py injeta o bloco inteiro no clipboard e executa Ctrl+V — várias
+    ordens de grandeza mais rápido que digitação caractere a caractere.
+
+    Regras:
+      • Respeita USE_PASTE_MARKERS (env AUTODEV_AGENT_USE_PASTE_MARKERS).
+      • Não re-encapsula texto que já contenha os marcadores (idempotente).
+      • Ignora entradas vazias.
+    """
+    if not text:
+        return text
+    if not USE_PASTE_MARKERS:
+        return text
+    # Idempotência: se já veio encapsulado, não duplica
+    if PASTE_MARKER_START in text and PASTE_MARKER_END in text:
+        return text
+    return f"{PASTE_MARKER_START}{text}{PASTE_MARKER_END}"
+
+
 def ask_chatgpt_for_plan(context: Dict[str, Any],
                          objective: str,
                          source_files: Dict[str, str],
@@ -1043,11 +1074,13 @@ def ask_chatgpt_for_plan(context: Dict[str, Any],
         return None
 
     user_prompt = _build_user_prompt(context, objective, source_files, prior_attempt)
+    system_content = _wrap_for_paste(SYSTEM_PROMPT_BASE)
+    user_content = _wrap_for_paste(user_prompt)
     body: Dict[str, Any] = {
         "model": SIMULATOR_MODEL,
         "messages": [
-            {"role": "system", "content": SYSTEM_PROMPT_BASE},
-            {"role": "user", "content": user_prompt},
+            {"role": "system", "content": system_content},
+            {"role": "user", "content": user_content},
         ],
         "temperature": 0.2,
         "request_source": "auto_dev_agent.py",
