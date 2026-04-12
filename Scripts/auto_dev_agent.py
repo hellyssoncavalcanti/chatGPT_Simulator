@@ -20,7 +20,6 @@ IMPORTANTE:
 
 from __future__ import annotations
 
-import glob as _glob_mod
 import json
 import logging
 import os
@@ -44,7 +43,6 @@ LOGS_DIR = ROOT_DIR / "logs"
 _log_ts = datetime.now().strftime("%d_%m_%Y-%H_%M_%S")
 AGENT_LOG = LOGS_DIR / f"auto_dev_agent-{_log_ts}.log"
 IS_WINDOWS = os.name == "nt"
-VENV_PYTHON = ROOT_DIR / ".venv" / ("Scripts" if IS_WINDOWS else "bin") / ("python.exe" if IS_WINDOWS else "python")
 
 def _env(name_new: str, default: str, legacy_name: str | None = None) -> str:
     """Lê variável nova, com fallback opcional para nome legado."""
@@ -57,21 +55,7 @@ def _env(name_new: str, default: str, legacy_name: str | None = None) -> str:
 
 SIMULATOR_URL = _env("AUTODEV_AGENT_SIMULATOR_URL", "http://127.0.0.1:3003/v1/chat/completions", "AUTON_AGENT_SIMULATOR_URL")
 SIMULATOR_MODEL = _env("AUTODEV_AGENT_MODEL", "ChatGPT Simulator", "AUTON_AGENT_MODEL")
-
-def _resolve_api_key() -> str:
-    """Resolve API key: env var > config.py > vazio."""
-    key = _env("AUTODEV_AGENT_API_KEY", "", "AUTON_AGENT_API_KEY")
-    if key:
-        return key
-    # Tenta ler do config.py do projeto (mesmo diretório)
-    try:
-        sys.path.insert(0, str(ROOT_DIR / "Scripts"))
-        import config as _cfg  # type: ignore
-        return getattr(_cfg, "API_KEY", "")
-    except Exception:
-        return ""
-
-API_KEY = _resolve_api_key()
+API_KEY = _env("AUTODEV_AGENT_API_KEY", "", "AUTON_AGENT_API_KEY")
 
 # janelas de ciclo
 SLEEP_BETWEEN_CYCLES = int(_env("AUTODEV_AGENT_CYCLE_SEC", "60", "AUTON_AGENT_CYCLE_SEC"))
@@ -82,6 +66,10 @@ MAX_CONTEXT_CHARS = int(_env("AUTODEV_AGENT_CONTEXT_CHARS", "12000", "AUTON_AGEN
 MAX_PATCH_BYTES = int(_env("AUTODEV_AGENT_MAX_PATCH_BYTES", "120000", "AUTON_AGENT_MAX_PATCH_BYTES"))
 ALLOW_UNSAFE_AUTOFIX = _env("AUTODEV_AGENT_UNSAFE", "1", "AUTON_AGENT_UNSAFE") == "1"
 IMPROVEMENT_MAX_ATTEMPTS = int(_env("AUTODEV_AGENT_MAX_ATTEMPTS", "3"))
+TEST_COMMANDS = [
+    _env("AUTODEV_AGENT_TEST_CMD_1", "python -m py_compile Scripts/*.py"),
+    _env("AUTODEV_AGENT_TEST_CMD_2", "git status --short"),
+]
 _last_llm_unavailable_log = 0.0
 
 # monitoramento
@@ -89,8 +77,12 @@ ERROR_PATTERNS = [
     r"\btraceback\b",
     r"\bexception\b",
     r"\berror\b",
+    r"\berro\b",
     r"\bfalha\b",
+    r"\bfalhou\b",
     r"\bfatal\b",
+    r"\bcannot access local variable\b",
+    r"\bconnectionreseterror\b",
     r"\bsegmentation fault\b",
 ]
 
@@ -102,47 +94,10 @@ WARN_PATTERNS = [
     r"\bretry\b",
 ]
 
-
-def _resolve_python() -> str:
-    """Retorna o caminho do Python da venv, se disponível, ou o Python atual."""
-    if is_windows():
-        venv_py = ROOT_DIR / ".venv" / "Scripts" / "python.exe"
-    else:
-        venv_py = ROOT_DIR / ".venv" / "bin" / "python"
-    if venv_py.exists():
-        return str(venv_py)
-    return sys.executable
-
-
-def _build_start_commands() -> list[list[str]]:
-    """Constrói comandos para iniciar os scripts Python diretamente.
-
-    Evita usar os .bat (que contêm taskkill /F /IM python.exe e pause,
-    matando o próprio agente e travando com stdout piped).
-    """
-    py = _resolve_python()
-    return [
-        [py, str(ROOT_DIR / "Scripts" / "main.py")],
-        [py, str(ROOT_DIR / "Scripts" / "analisador_prontuarios.py")],
-    ]
-
-
-def _build_test_commands() -> list[str]:
-    """Constrói comandos de teste, expandindo globs manualmente."""
-    py_files = sorted(_glob_mod.glob(str(ROOT_DIR / "Scripts" / "*.py")))
-    if py_files:
-        # py_compile aceita um arquivo por vez; encadeia chamadas
-        py = _resolve_python()
-        compile_parts = " && ".join(
-            f'"{py}" -m py_compile "{f}"' for f in py_files
-        )
-        cmd1 = _env("AUTODEV_AGENT_TEST_CMD_1", compile_parts)
-    else:
-        cmd1 = _env("AUTODEV_AGENT_TEST_CMD_1", "echo no .py files found")
-    cmd2 = _env("AUTODEV_AGENT_TEST_CMD_2", "git status --short")
-    return [cmd1, cmd2]
-
-
+START_COMMANDS = [
+    ["cmd", "/d", "/c", "set AUTODEV_AGENT_SKIP_CLEANUP=1 && 0. start.bat"],
+    ["cmd", "/d", "/c", "1. start_apenas_analisador_prontuarios.bat"],
+]
 CHILD_PROCS: list[dict] = []
 
 
@@ -185,55 +140,23 @@ def is_windows() -> bool:
     return os.name == "nt"
 
 
-def _child_env() -> dict:
-    """Ambiente para processos filhos com encoding UTF-8 forçado."""
-    env = os.environ.copy()
-    env["PYTHONIOENCODING"] = "utf-8"
-    env["PYTHONUTF8"] = "1"
-    return env
+def start_bats_if_needed() -> list[subprocess.Popen]:
+    """Inicia os processos declarados, se estiver em ambiente Windows.
 
-
-def _script_title(cmd: list[str]) -> str:
-    """Extrai nome legível do script para título da janela."""
-    for part in cmd:
-        if part.endswith(".py"):
-            return Path(part).stem
-    return "child"
-
-
-def start_child_scripts() -> list[subprocess.Popen]:
-    """Inicia cada script Python filho em sua própria janela CMD.
-
-    Cada processo ganha uma janela separada (CREATE_NEW_CONSOLE no Windows),
-    mantendo o terminal do agente limpo e permitindo visualizar cada serviço
-    individualmente.
+    Em Linux/macOS, registra aviso e segue somente com monitoramento/sugestões.
     """
     procs: list[subprocess.Popen] = []
-    commands = _build_start_commands()
-    env = _child_env()
+    if not is_windows():
+        log("⚠️ Ambiente não-Windows detectado; start dos .bat foi pulado.")
+        return procs
 
-    for cmd in commands:
-        title = _script_title(cmd)
+    for cmd in START_COMMANDS:
         try:
-            if is_windows():
-                # Abre cada filho em sua própria janela CMD
-                proc = subprocess.Popen(
-                    cmd,
-                    cwd=str(ROOT_DIR),
-                    env=env,
-                    creationflags=subprocess.CREATE_NEW_CONSOLE,
-                )
-            else:
-                proc = subprocess.Popen(
-                    cmd,
-                    cwd=str(ROOT_DIR),
-                    env=env,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                )
+            proc = subprocess.Popen(cmd, cwd=str(ROOT_DIR), creationflags=subprocess.CREATE_NEW_CONSOLE)  # type: ignore[attr-defined]
             procs.append(proc)
             CHILD_PROCS.append({"cmd": cmd, "proc": proc, "started_at": time.time(), "last_restart": 0.0})
-            log(f"✅ Processo iniciado em janela própria: {title} (pid={proc.pid})")
+            label = "main" if "0. start.bat" in " ".join(cmd) else "analisador_prontuarios"
+            log(f"✅ Processo iniciado em janela própria: {label} (pid={proc.pid})")
         except Exception as exc:
             log(f"❌ Falha ao iniciar {' '.join(cmd)}: {exc}")
     return procs
@@ -254,27 +177,12 @@ def keep_child_processes_alive() -> None:
         if now - last_restart < 10:
             continue
 
-        title = _script_title(cmd)
-        log(f"⚠️ Processo filho encerrado (exit={exit_code}): {title}. Reiniciando...")
+        log(f"⚠️ Processo filho encerrado (exit={exit_code}): {' '.join(cmd)}. Reiniciando...")
         try:
-            if is_windows():
-                new_proc = subprocess.Popen(
-                    cmd,
-                    cwd=str(ROOT_DIR),
-                    env=_child_env(),
-                    creationflags=subprocess.CREATE_NEW_CONSOLE,
-                )
-            else:
-                new_proc = subprocess.Popen(
-                    cmd,
-                    cwd=str(ROOT_DIR),
-                    env=_child_env(),
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                )
+            new_proc = subprocess.Popen(cmd, cwd=str(ROOT_DIR), creationflags=subprocess.CREATE_NEW_CONSOLE)  # type: ignore[attr-defined]
             item["proc"] = new_proc
             item["last_restart"] = now
-            log(f"✅ Processo reiniciado em janela própria: {title} (pid={new_proc.pid})")
+            log(f"✅ Processo reiniciado: {' '.join(cmd)} (pid={new_proc.pid})")
         except Exception as exc:
             log(f"❌ Falha ao reiniciar {' '.join(cmd)}: {exc}")
 
@@ -360,16 +268,6 @@ def simulator_is_ready() -> bool:
         return False
 
 
-PASTE_START = "[INICIO_TEXTO_COLADO]"
-PASTE_END = "[FIM_TEXTO_COLADO]"
-
-
-def _wrap_paste(text: str) -> str:
-    """Envolve texto com marcadores de colagem para o browser.py colar
-    via clipboard em vez de digitar caractere por caractere."""
-    return f"{PASTE_START}{text}{PASTE_END}"
-
-
 def ask_llm_for_actions(context: dict, objective: str) -> Optional[dict]:
     """Solicita plano de melhoria à LLM local.
 
@@ -404,8 +302,8 @@ def ask_llm_for_actions(context: dict, objective: str) -> Optional[dict]:
     body = {
         "model": SIMULATOR_MODEL,
         "messages": [
-            {"role": "system", "content": _wrap_paste(system_prompt)},
-            {"role": "user", "content": _wrap_paste(user_prompt)},
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
         ],
         "temperature": 0.2,
         "stream": False,
@@ -418,13 +316,20 @@ def ask_llm_for_actions(context: dict, objective: str) -> Optional[dict]:
         resp = requests.post(SIMULATOR_URL, headers=_llm_headers(), json=body, timeout=180)
         resp.raise_for_status()
         data = resp.json()
-        content = data["choices"][0]["message"]["content"]
+        if isinstance(data, dict) and "choices" in data:
+            content = data["choices"][0]["message"]["content"]
+        elif isinstance(data, dict) and "response" in data:
+            content = data.get("response", "")
+        elif isinstance(data, dict) and "error" in data:
+            raise ValueError(f"Simulator/browser.py retornou erro: {data.get('error')}")
+        else:
+            raise ValueError(f"Resposta inesperada do Simulator/browser.py: chaves={list(data.keys()) if isinstance(data, dict) else type(data)}")
         parsed = json.loads(content)
         if not isinstance(parsed, dict):
             raise ValueError("JSON de resposta não é objeto")
         return parsed
     except Exception as exc:
-        log(f"❌ Falha ao consultar LLM: {exc}")
+        log(f"❌ Falha ao consultar Simulator/browser.py: {exc}")
         return None
 
 
@@ -495,8 +400,7 @@ def apply_unified_diff(unified_diff: str) -> tuple[bool, str]:
 
 def quick_checks() -> dict:
     checks = {}
-    test_commands = _build_test_commands()
-    for i, cmd in enumerate(test_commands, start=1):
+    for i, cmd in enumerate(TEST_COMMANDS, start=1):
         timeout = 240 if i == 1 else 90
         code, out = run_shell(cmd, timeout=timeout)
         checks[f"check_{i}"] = {"cmd": cmd, "exit_code": code, "output": out[-2500:]}
@@ -578,7 +482,7 @@ def run_improvement_round(context: dict, objective: str) -> tuple[list[dict], di
 def main() -> None:
     log("🚀 AutoDevAgent iniciando")
     log(f"📄 Log: {AGENT_LOG}")
-    start_child_scripts()
+    start_bats_if_needed()
 
     last_suggestion_ts = 0.0
     while True:
