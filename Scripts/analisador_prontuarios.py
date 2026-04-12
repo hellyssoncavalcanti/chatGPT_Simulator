@@ -2105,6 +2105,63 @@ def buscar_maior_resumo_texto_paciente(id_paciente: str, id_atendimento_atual=No
     return str(row.get("resumo_texto") or "").strip()
 
 
+def corrigir_erros_texto_insuficiente_no_startup():
+    """
+    Reprocessa erros legados de texto insuficiente sem chamar LLM:
+    cria resumo_fallback e marca como concluído.
+    """
+    rows = sql_exec(f"""
+        SELECT
+            la.id_atendimento,
+            la.id_paciente,
+            la.erro_msg,
+            LEFT(ca.consulta_conteudo, 60000) AS consulta_conteudo,
+            COALESCE(
+                NULLIF(ca.datetime_consulta_inicio, '0000-00-00 00:00:00'),
+                NULLIF(la.datetime_atendimento_inicio, '0000-00-00 00:00:00'),
+                NULLIF(ca.datetime_atualizacao, '0000-00-00 00:00:00'),
+                NULLIF(ca.datetime_consulta_fim, '0000-00-00 00:00:00')
+            ) AS datetime_base
+        FROM {TABELA} la
+        LEFT JOIN clinica_atendimentos ca ON ca.id = la.id_atendimento
+        WHERE
+            la.status = 'erro'
+            AND COALESCE(la.id_criador, '') <> 'analise_compilada_paciente'
+            AND LOWER(COALESCE(la.erro_msg, '')) LIKE '%prontuário ficou insuficiente após limpeza/remoção de html%'
+    """, reason="listar_erros_texto_insuficiente_startup").get("data", [])
+
+    if not rows:
+        return 0
+
+    corrigidos = 0
+    for row in rows:
+        id_atendimento = int(row.get("id_atendimento") or 0)
+        if not id_atendimento:
+            continue
+
+        id_paciente = str(row.get("id_paciente") or "")
+        texto_curto = strip_html(row.get("consulta_conteudo") or "")
+        dt_base = str(row.get("datetime_base") or "").strip()
+        maior_resumo = buscar_maior_resumo_texto_paciente(id_paciente, id_atendimento)
+        sufixo_evolucao = f"Evolução de {dt_base}: {texto_curto}".strip()
+        resumo_fallback = f"{maior_resumo}\n{sufixo_evolucao}".strip() if maior_resumo else sufixo_evolucao
+
+        salvar_resultado(id_atendimento, {
+            "resumo_texto": resumo_fallback,
+            "observacoes_gerais": "Erro legado de texto insuficiente corrigido no startup sem chamada à LLM.",
+            "pontos_chave": [],
+            "condutas_sugeridas": [],
+        })
+        corrigidos += 1
+
+    if corrigidos:
+        log.warning(
+            f"♻️ {corrigidos} registro(s) com erro 'Prontuário ficou insuficiente após limpeza/remoção de HTML' "
+            "foram convertidos para resumo_fallback e marcados como concluídos no startup."
+        )
+    return corrigidos
+
+
 def _stringify_compact(value) -> str:
     try:
         parsed = json.loads(value) if isinstance(value, str) else value
@@ -5629,6 +5686,7 @@ def main():
     resetar_analises_interrompidas_no_startup()  # limpa inícios de análise sem conclusão válida após quedas/interrupções
     _reativar_erros_conexao_no_startup()         # erro de conexão vira pendente novamente (respeitando MAX_TENTATIVAS)
     _reativar_esgotados_recuperaveis_no_startup() # recoloca erros recuperáveis em pendente para nova tentativa
+    corrigir_erros_texto_insuficiente_no_startup() # converte erros legados de texto insuficiente em resumo_fallback concluído
 
     llm_estava_fora = False   # rastreia se houve queda para logar a reconexão
     ciclo = 0
