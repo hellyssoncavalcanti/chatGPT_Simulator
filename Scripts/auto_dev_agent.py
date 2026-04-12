@@ -43,6 +43,8 @@ ROOT_DIR = Path(__file__).resolve().parents[1]
 LOGS_DIR = ROOT_DIR / "logs"
 _log_ts = datetime.now().strftime("%d_%m_%Y-%H_%M_%S")
 AGENT_LOG = LOGS_DIR / f"auto_dev_agent-{_log_ts}.log"
+IS_WINDOWS = os.name == "nt"
+VENV_PYTHON = ROOT_DIR / ".venv" / ("Scripts" if IS_WINDOWS else "bin") / ("python.exe" if IS_WINDOWS else "python")
 
 def _env(name_new: str, default: str, legacy_name: str | None = None) -> str:
     """Lê variável nova, com fallback opcional para nome legado."""
@@ -90,9 +92,16 @@ WARN_PATTERNS = [
     r"\bretry\b",
 ]
 
+def _python_cmd_for_children() -> str:
+    if VENV_PYTHON.exists():
+        return str(VENV_PYTHON)
+    return sys.executable
+
+
+PY_CHILD = _python_cmd_for_children()
 START_COMMANDS = [
-    ["cmd", "/d", "/c", "0. start.bat"],
-    ["cmd", "/d", "/c", "1. start_apenas_analisador_prontuarios.bat"],
+    ["cmd", "/d", "/c", f"\"{PY_CHILD}\" Scripts\\main.py"],
+    ["cmd", "/d", "/c", f"\"{PY_CHILD}\" Scripts\\analisador_prontuarios.py"],
 ]
 CHILD_PROCS: list[dict] = []
 
@@ -137,7 +146,7 @@ def is_windows() -> bool:
 
 
 def start_bats_if_needed() -> list[subprocess.Popen]:
-    """Inicia os .bat declarados, se estiver em ambiente Windows.
+    """Inicia os processos declarados, se estiver em ambiente Windows.
 
     Em Linux/macOS, registra aviso e segue somente com monitoramento/sugestões.
     """

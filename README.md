@@ -706,7 +706,7 @@ Em termos práticos:
 
 Foi adicionado o script `Scripts/auto_dev_agent.py`, que atua como um orquestrador de operação contínua:
 
-1. inicia os arquivos `.bat` de execução (em Windows);
+1. inicia automaticamente os processos principais do sistema (Simulator e analisador) em Windows, sem depender de chamar `0. start.bat` (evita auto-kill de processos Python);
 2. monitora logs em tempo real por ciclos;
 3. detecta padrões de erro/warning;
 4. consulta a LLM local (`/v1/chat/completions`, via Simulator/browser.py) para obter sugestões;
