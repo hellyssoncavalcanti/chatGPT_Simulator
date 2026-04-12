@@ -48,8 +48,112 @@ LÓGICA DE ORDENAÇÃO DA FILA:
 # ─────────────────────────────────────────────────────────────
 # AUTO-INSTALAÇÃO DE DEPENDÊNCIAS
 # ─────────────────────────────────────────────────────────────
-import sys, subprocess
+import os, re, sys, subprocess
 import random
+
+
+def _terminate_previous_same_server_instances(script_name: str) -> None:
+    """Fecha processos antigos do mesmo servidor, incluindo janela CMD/.bat anterior."""
+    if os.name != "nt":
+        return
+
+    current_pid = os.getpid()
+    escaped_script = re.escape(script_name).replace("'", "''")
+    extra_shell_tokens = {
+        "analisador_prontuarios.py": [
+            "1. start_apenas_analisador_prontuarios.bat",
+            "1.start_apenas_analisador_prontuarios.bat",
+            "start_apenas_analisador_prontuarios.bat",
+        ],
+    }
+    shell_tokens = [script_name, *extra_shell_tokens.get(script_name.lower(), [])]
+    shell_regex = "|".join(re.escape(token) for token in shell_tokens).replace("'", "''")
+
+    ps_cmd_shells = (
+        f"$self={current_pid}; "
+        "$selfParent=(Get-CimInstance Win32_Process -Filter \"ProcessId = $self\" | Select-Object -ExpandProperty ParentProcessId); "
+        "Get-CimInstance Win32_Process "
+        "| Where-Object { "
+        "($_.Name -match '^(cmd|powershell|pwsh)\\.exe$') -and "
+        "($_.ProcessId -ne $selfParent) -and "
+        "($_.CommandLine -match '(?i)(" + shell_regex + ")') "
+        "} "
+        "| Select-Object -ExpandProperty ProcessId"
+    )
+
+    ps_cmd_python = (
+        f"$self={current_pid}; "
+        "Get-CimInstance Win32_Process "
+        "| Where-Object { "
+        "($_.Name -match 'python|py') -and "
+        "($_.ProcessId -ne $self) -and "
+        "($_.CommandLine -match '(?i)" + escaped_script + "') "
+        "} "
+        "| Select-Object -ExpandProperty ProcessId"
+    )
+    ps_cmd_ancestors = (
+        f"$p={current_pid}; "
+        "while ($p -and $p -ne 0) { "
+        "  $proc=Get-CimInstance Win32_Process -Filter (\"ProcessId = \" + $p); "
+        "  if (-not $proc) { break }; "
+        "  $pp=$proc.ParentProcessId; "
+        "  if ($pp -and $pp -ne 0) { Write-Output $pp }; "
+        "  $p=$pp "
+        "}"
+    )
+
+    try:
+        ancestors_proc = subprocess.run(
+            ["powershell", "-NoProfile", "-Command", ps_cmd_ancestors],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=15,
+        )
+        protected_pids = {current_pid}
+        protected_pids.update(
+            int(pid_txt.strip())
+            for pid_txt in (ancestors_proc.stdout or "").splitlines()
+            if pid_txt.strip().isdigit()
+        )
+
+        shell_proc = subprocess.run(
+            ["powershell", "-NoProfile", "-Command", ps_cmd_shells],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=15,
+        )
+        shell_targets = {
+            int(pid_txt.strip())
+            for pid_txt in (shell_proc.stdout or "").splitlines()
+            if pid_txt.strip().isdigit()
+        }
+        for pid in sorted(shell_targets):
+            if pid in protected_pids:
+                continue
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+            print(f"[BOOT] Janela CMD anterior do servidor foi finalizada (PID {pid}) para {script_name}.")
+
+        py_proc = subprocess.run(
+            ["powershell", "-NoProfile", "-Command", ps_cmd_python],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=15,
+        )
+        py_targets = {
+            int(pid_txt.strip())
+            for pid_txt in (py_proc.stdout or "").splitlines()
+            if pid_txt.strip().isdigit()
+        }
+        for pid in sorted(py_targets):
+            if pid in protected_pids:
+                continue
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+            print(f"[BOOT] Processo Python anterior finalizado (PID {pid}) para {script_name}.")
+    except Exception as exc:
+        print(f"[BOOT] Aviso: não foi possível substituir instâncias anteriores de {script_name}: {exc}")
 
 def _ensure(pkg, import_name=None):
     """Verifica se pacote esta instalado via find_spec (sem importar o modulo).
@@ -538,6 +642,51 @@ def _reativar_esgotados_recuperaveis_no_startup():
     afetados = resultado.get('affected_rows', 0)
     if afetados:
         log.warning(f"♻️ {afetados} registro(s) esgotado(s) com erro recuperável foram recolocados em pendente no startup.")
+    return afetados
+
+
+def _reativar_erros_conexao_no_startup():
+    """
+    No startup, trata erro de conexão como análise interrompida:
+    volta para pendente e limpa datetime_analise_iniciada, respeitando MAX_TENTATIVAS.
+    """
+    resultado = sql_exec(
+        f"""
+        UPDATE {TABELA}
+        SET
+            status = 'pendente',
+            datetime_analise_iniciada = NULL,
+            erro_msg = CONCAT(
+                COALESCE(erro_msg, ''),
+                ' | [AUTO-REQUEUE-CONNECTION] ',
+                NOW(),
+                ' erro de conexão detectado no startup; reencaminhado para pendente'
+            )
+        WHERE
+            id_atendimento IS NOT NULL
+            AND status = 'erro'
+            AND tentativas < {MAX_TENTATIVAS}
+            AND COALESCE(erro_msg, '') NOT LIKE '%[AUTO-REQUEUE-CONNECTION]%'
+            AND (
+                LOWER(COALESCE(erro_msg, '')) LIKE '%connection broken%'
+                OR LOWER(COALESCE(erro_msg, '')) LIKE '%connectionreseterror%'
+                OR LOWER(COALESCE(erro_msg, '')) LIKE '%read timed out%'
+                OR LOWER(COALESCE(erro_msg, '')) LIKE '%max retries exceeded%'
+                OR LOWER(COALESCE(erro_msg, '')) LIKE '%failed to establish a new connection%'
+                OR LOWER(COALESCE(erro_msg, '')) LIKE '%remote end closed connection%'
+                OR LOWER(COALESCE(erro_msg, '')) LIKE '%forçado o cancelamento de uma conexão%'
+                OR LOWER(COALESCE(erro_msg, '')) LIKE '%nenhuma conexão pôde ser feita%'
+                OR LOWER(COALESCE(erro_msg, '')) LIKE '%winerror 10054%'
+                OR LOWER(COALESCE(erro_msg, '')) LIKE '%winerror 10061%'
+            )
+        """,
+        reason="reativar_erros_conexao_startup",
+    )
+    afetados = resultado.get("affected_rows", 0)
+    if afetados:
+        log.warning(
+            f"♻️ {afetados} registro(s) com erro de conexão foram recolocados em pendente no startup (tentativas < {MAX_TENTATIVAS})."
+        )
     return afetados
 
 
@@ -1930,6 +2079,87 @@ def salvar_resultado(id_atendimento: int, resultado: dict):
     )
     log.debug(f"[salvar_resultado] {len(sets)} campos → id_atendimento={id_atendimento}")
     sql_exec(sql, reason="salvar_resultado_unitario")
+
+
+def buscar_maior_resumo_texto_paciente(id_paciente: str, id_atendimento_atual=None) -> str:
+    """Retorna o maior resumo_texto concluído do paciente para fallback de evolução curta."""
+    if not id_paciente:
+        return ""
+
+    filtro_atual = ""
+    if id_atendimento_atual is not None:
+        filtro_atual = f"AND id_atendimento <> {int(id_atendimento_atual)}"
+
+    row = (sql_exec(f"""
+        SELECT resumo_texto
+        FROM {TABELA}
+        WHERE id_paciente = '{esc(str(id_paciente))}'
+          AND status = 'concluido'
+          AND COALESCE(id_criador, '') <> 'analise_compilada_paciente'
+          AND COALESCE(resumo_texto, '') <> ''
+          {filtro_atual}
+        ORDER BY CHAR_LENGTH(resumo_texto) DESC, datetime_analise_concluida DESC
+        LIMIT 1
+    """, reason="buscar_maior_resumo_texto_paciente").get("data") or [{}])[0]
+
+    return str(row.get("resumo_texto") or "").strip()
+
+
+def corrigir_erros_texto_insuficiente_no_startup():
+    """
+    Reprocessa erros legados de texto insuficiente sem chamar LLM:
+    cria resumo_fallback e marca como concluído.
+    """
+    rows = sql_exec(f"""
+        SELECT
+            la.id_atendimento,
+            la.id_paciente,
+            la.erro_msg,
+            LEFT(ca.consulta_conteudo, 60000) AS consulta_conteudo,
+            COALESCE(
+                NULLIF(ca.datetime_consulta_inicio, '0000-00-00 00:00:00'),
+                NULLIF(la.datetime_atendimento_inicio, '0000-00-00 00:00:00'),
+                NULLIF(ca.datetime_atualizacao, '0000-00-00 00:00:00'),
+                NULLIF(ca.datetime_consulta_fim, '0000-00-00 00:00:00')
+            ) AS datetime_base
+        FROM {TABELA} la
+        LEFT JOIN clinica_atendimentos ca ON ca.id = la.id_atendimento
+        WHERE
+            la.status = 'erro'
+            AND COALESCE(la.id_criador, '') <> 'analise_compilada_paciente'
+            AND LOWER(COALESCE(la.erro_msg, '')) LIKE '%prontuário ficou insuficiente após limpeza/remoção de html%'
+    """, reason="listar_erros_texto_insuficiente_startup").get("data", [])
+
+    if not rows:
+        return 0
+
+    corrigidos = 0
+    for row in rows:
+        id_atendimento = int(row.get("id_atendimento") or 0)
+        if not id_atendimento:
+            continue
+
+        id_paciente = str(row.get("id_paciente") or "")
+        texto_curto = strip_html(row.get("consulta_conteudo") or "")
+        dt_base = str(row.get("datetime_base") or "").strip()
+        maior_resumo = buscar_maior_resumo_texto_paciente(id_paciente, id_atendimento)
+        sufixo_evolucao = f"Evolução de {dt_base}: {texto_curto}".strip()
+        resumo_fallback = f"{maior_resumo}\n{sufixo_evolucao}".strip() if maior_resumo else sufixo_evolucao
+
+        salvar_resultado(id_atendimento, {
+            "resumo_texto": resumo_fallback,
+            "observacoes_gerais": "Erro legado de texto insuficiente corrigido no startup sem chamada à LLM.",
+            "pontos_chave": [],
+            "condutas_sugeridas": [],
+        })
+        corrigidos += 1
+
+    if corrigidos:
+        log.warning(
+            f"♻️ {corrigidos} registro(s) com erro 'Prontuário ficou insuficiente após limpeza/remoção de HTML' "
+            "foram convertidos para resumo_fallback e marcados como concluídos no startup."
+        )
+    return corrigidos
 
 
 def _stringify_compact(value) -> str:
@@ -5201,8 +5431,27 @@ def processar_lote(pendentes: list):
         marcar_processando(row)
 
         if len(texto) < MIN_CHARS:
-            salvar_erro(idat, "Texto insuficiente após remoção de HTML.")
-            log.warning(f"  ID={idat} ignorado: texto muito curto.")
+            id_paciente = str(row.get("id_paciente") or "")
+            dt_evolucao = str(
+                row.get("datetime_consulta_inicio")
+                or row.get("datetime_atendimento_inicio")
+                or row.get("datetime_prontuario_atual")
+                or ""
+            ).strip()
+            maior_resumo = buscar_maior_resumo_texto_paciente(id_paciente, idat)
+            sufixo_evolucao = f"Evolução de {dt_evolucao}: {texto}".strip()
+            resumo_fallback = f"{maior_resumo}\n{sufixo_evolucao}".strip() if maior_resumo else sufixo_evolucao
+
+            salvar_resultado(idat, {
+                "resumo_texto": resumo_fallback,
+                "observacoes_gerais": "Registro curto: fallback sem chamada ao ChatGPT Simulator.",
+                "pontos_chave": [],
+                "condutas_sugeridas": [],
+            })
+            log.warning(
+                f"  ID={idat} sem conteúdo suficiente ({len(texto)} chars). "
+                f"Análise LLM pulada; resumo_fallback salvo ({len(resumo_fallback)} chars)."
+            )
             continue
 
         # Busca contexto clínico (paciente, profissional, hospital)
@@ -5435,7 +5684,9 @@ def main():
     garantir_migracoes()                         # corrige tipos de colunas em tabelas pré-existentes
     garantir_tabela_embeddings()                 # garante tabelas de embeddings + casos semelhantes
     resetar_analises_interrompidas_no_startup()  # limpa inícios de análise sem conclusão válida após quedas/interrupções
+    _reativar_erros_conexao_no_startup()         # erro de conexão vira pendente novamente (respeitando MAX_TENTATIVAS)
     _reativar_esgotados_recuperaveis_no_startup() # recoloca erros recuperáveis em pendente para nova tentativa
+    corrigir_erros_texto_insuficiente_no_startup() # converte erros legados de texto insuficiente em resumo_fallback concluído
 
     llm_estava_fora = False   # rastreia se houve queda para logar a reconexão
     ciclo = 0
@@ -5565,6 +5816,7 @@ def main():
 
 
 if __name__ == "__main__":
+    _terminate_previous_same_server_instances("analisador_prontuarios.py")
     while True:
         try:
             main()
