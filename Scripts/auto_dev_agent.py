@@ -55,7 +55,24 @@ def _env(name_new: str, default: str, legacy_name: str | None = None) -> str:
 
 SIMULATOR_URL = _env("AUTODEV_AGENT_SIMULATOR_URL", "http://127.0.0.1:3003/v1/chat/completions", "AUTON_AGENT_SIMULATOR_URL")
 SIMULATOR_MODEL = _env("AUTODEV_AGENT_MODEL", "ChatGPT Simulator", "AUTON_AGENT_MODEL")
-API_KEY = _env("AUTODEV_AGENT_API_KEY", "", "AUTON_AGENT_API_KEY")
+
+def _resolve_api_key() -> str:
+    """Resolve API key: env var > config.py (parse de texto) > vazio."""
+    key = _env("AUTODEV_AGENT_API_KEY", "", "AUTON_AGENT_API_KEY")
+    if key:
+        return key
+    # Lê config.py como texto e extrai API_KEY via regex (evita import com side-effects)
+    config_path = ROOT_DIR / "Scripts" / "config.py"
+    try:
+        text = config_path.read_text(encoding="utf-8")
+        m = re.search(r'API_KEY\s*=\s*["\']([^"\']+)["\']', text)
+        if m:
+            return m.group(1)
+    except Exception:
+        pass
+    return ""
+
+API_KEY = _resolve_api_key()
 
 # janelas de ciclo
 SLEEP_BETWEEN_CYCLES = int(_env("AUTODEV_AGENT_CYCLE_SEC", "60", "AUTON_AGENT_CYCLE_SEC"))
@@ -247,7 +264,10 @@ def collect_runtime_context() -> dict:
 
 
 def _llm_headers() -> dict:
-    headers = {"Content-Type": "application/json"}
+    headers = {
+        "Content-Type": "application/json",
+        "X-Request-Source": "auto_dev_agent.py",
+    }
     if API_KEY:
         headers["Authorization"] = f"Bearer {API_KEY}"
     return headers
@@ -269,9 +289,14 @@ def simulator_is_ready() -> bool:
 
 
 def ask_llm_for_actions(context: dict, objective: str) -> Optional[dict]:
-    """Solicita plano de melhoria à LLM local.
+    """Solicita plano de melhoria à LLM local via Simulator/server.py.
 
-    A resposta esperada é JSON estrito com o formato:
+    O server.py espera formato próprio (não OpenAI puro):
+      - campo "messages" é concatenado internamente (system prepend + user append)
+      - resposta bloco: {"success": true, "html": "...", "chat_id": "..."}
+      - campo "html" contém a resposta do ChatGPT
+
+    A resposta esperada (dentro de html) é JSON estrito:
     {
       "summary": "...",
       "actions": [
@@ -305,7 +330,7 @@ def ask_llm_for_actions(context: dict, objective: str) -> Optional[dict]:
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
         ],
-        "temperature": 0.2,
+        "request_source": "auto_dev_agent.py",
         "stream": False,
     }
 
@@ -313,18 +338,28 @@ def ask_llm_for_actions(context: dict, objective: str) -> Optional[dict]:
         return None
 
     try:
-        resp = requests.post(SIMULATOR_URL, headers=_llm_headers(), json=body, timeout=180)
+        resp = requests.post(SIMULATOR_URL, headers=_llm_headers(), json=body, timeout=600)
         resp.raise_for_status()
         data = resp.json()
-        if isinstance(data, dict) and "choices" in data:
+
+        # Formato do server.py (modo bloco): {"success": true, "html": "...", ...}
+        if "html" in data:
+            if not data.get("success"):
+                raise ValueError(f"Servidor retornou erro: {data.get('error', 'desconhecido')}")
+            content = data["html"]
+        # Fallback caso algum dia use formato OpenAI
+        elif "choices" in data:
             content = data["choices"][0]["message"]["content"]
-        elif isinstance(data, dict) and "response" in data:
-            content = data.get("response", "")
-        elif isinstance(data, dict) and "error" in data:
-            raise ValueError(f"Simulator/browser.py retornou erro: {data.get('error')}")
         else:
-            raise ValueError(f"Resposta inesperada do Simulator/browser.py: chaves={list(data.keys()) if isinstance(data, dict) else type(data)}")
-        parsed = json.loads(content)
+            raise ValueError(f"Formato de resposta inesperado: {list(data.keys())}")
+
+        # Extrai JSON da resposta (pode vir envolto em markdown ```json ... ```)
+        text = content.strip()
+        if text.startswith("```"):
+            text = re.sub(r"^```(?:json)?\s*", "", text)
+            text = re.sub(r"\s*```$", "", text)
+
+        parsed = json.loads(text)
         if not isinstance(parsed, dict):
             raise ValueError("JSON de resposta não é objeto")
         return parsed
