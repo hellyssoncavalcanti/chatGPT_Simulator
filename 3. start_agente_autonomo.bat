@@ -16,7 +16,4 @@ if not defined PYTHON_BOOTSTRAP (
     )
 )
 
-echo [INFO] Iniciando agente autonomo...
 %PYTHON_BOOTSTRAP% Scripts\auto_dev_agent.py
-
-pause

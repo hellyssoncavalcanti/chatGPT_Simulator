@@ -89,8 +89,8 @@ WARN_PATTERNS = [
 ]
 
 START_COMMANDS = [
-    ["cmd", "/c", "0. start.bat"],
-    ["cmd", "/c", "1. start_apenas_analisador_prontuarios.bat"],
+    ["cmd", "/q", "/d", "/c", "0. start.bat >nul 2>&1"],
+    ["cmd", "/q", "/d", "/c", "1. start_apenas_analisador_prontuarios.bat >nul 2>&1"],
 ]
 
 
@@ -433,24 +433,28 @@ def main() -> None:
 
     last_suggestion_ts = 0.0
     while True:
-        context = collect_runtime_context()
-        checks = quick_checks()
+        try:
+            context = collect_runtime_context()
+            checks = quick_checks()
 
-        has_error = any(i.get("level") == "error" for i in context.get("incidents", []))
-        time_for_suggestion = (time.time() - last_suggestion_ts) >= SUGGESTION_INTERVAL_SEC
+            has_error = any(i.get("level") == "error" for i in context.get("incidents", []))
+            time_for_suggestion = (time.time() - last_suggestion_ts) >= SUGGESTION_INTERVAL_SEC
 
-        results: list[dict] = []
-        if has_error or time_for_suggestion:
-            objective = (
-                "Corrigir erros de execução detectados nos logs, validar testes e estabilizar o sistema."
-                if has_error
-                else "Propor e implementar melhorias contínuas de robustez, performance e observabilidade, depois validar testes."
-            )
-            results, checks = run_improvement_round(context, objective=objective)
-            last_suggestion_ts = time.time()
+            results: list[dict] = []
+            if has_error or time_for_suggestion:
+                objective = (
+                    "Corrigir erros de execução detectados nos logs, validar testes e estabilizar o sistema."
+                    if has_error
+                    else "Propor e implementar melhorias contínuas de robustez, performance e observabilidade, depois validar testes."
+                )
+                results, checks = run_improvement_round(context, objective=objective)
+                last_suggestion_ts = time.time()
 
-        summarize_cycle(context, checks, results)
-        time.sleep(max(10, SLEEP_BETWEEN_CYCLES))
+            summarize_cycle(context, checks, results)
+            time.sleep(max(10, SLEEP_BETWEEN_CYCLES))
+        except Exception as exc:
+            log(f"❌ Exceção no loop principal: {exc}", level=logging.ERROR)
+            time.sleep(10)
 
 
 if __name__ == "__main__":
@@ -460,4 +464,4 @@ if __name__ == "__main__":
         log("🛑 Encerrado por KeyboardInterrupt")
     except Exception as exc:
         log(f"❌ Erro fatal no auto_dev_agent: {exc}", level=logging.ERROR)
-        raise
+        time.sleep(10)
