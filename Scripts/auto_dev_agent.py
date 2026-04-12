@@ -57,17 +57,20 @@ SIMULATOR_URL = _env("AUTODEV_AGENT_SIMULATOR_URL", "http://127.0.0.1:3003/v1/ch
 SIMULATOR_MODEL = _env("AUTODEV_AGENT_MODEL", "ChatGPT Simulator", "AUTON_AGENT_MODEL")
 
 def _resolve_api_key() -> str:
-    """Resolve API key: env var > config.py > vazio."""
+    """Resolve API key: env var > config.py (parse de texto) > vazio."""
     key = _env("AUTODEV_AGENT_API_KEY", "", "AUTON_AGENT_API_KEY")
     if key:
         return key
-    # Tenta ler do config.py do projeto (mesmo diretório)
+    # Lê config.py como texto e extrai API_KEY via regex (evita import com side-effects)
+    config_path = ROOT_DIR / "Scripts" / "config.py"
     try:
-        sys.path.insert(0, str(ROOT_DIR / "Scripts"))
-        import config as _cfg  # type: ignore
-        return getattr(_cfg, "API_KEY", "")
+        text = config_path.read_text(encoding="utf-8")
+        m = re.search(r'API_KEY\s*=\s*["\']([^"\']+)["\']', text)
+        if m:
+            return m.group(1)
     except Exception:
-        return ""
+        pass
+    return ""
 
 API_KEY = _resolve_api_key()
 
@@ -337,7 +340,10 @@ def collect_runtime_context() -> dict:
 
 
 def _llm_headers() -> dict:
-    headers = {"Content-Type": "application/json"}
+    headers = {
+        "Content-Type": "application/json",
+        "X-Request-Source": "auto_dev_agent.py",
+    }
     if API_KEY:
         headers["Authorization"] = f"Bearer {API_KEY}"
     return headers
@@ -369,9 +375,14 @@ def _wrap_paste(text: str) -> str:
 
 
 def ask_llm_for_actions(context: dict, objective: str) -> Optional[dict]:
-    """Solicita plano de melhoria à LLM local.
+    """Solicita plano de melhoria à LLM local via Simulator/server.py.
 
-    A resposta esperada é JSON estrito com o formato:
+    O server.py espera formato próprio (não OpenAI puro):
+      - campo "messages" é concatenado internamente (system prepend + user append)
+      - resposta bloco: {"success": true, "html": "...", "chat_id": "..."}
+      - campo "html" contém a resposta do ChatGPT
+
+    A resposta esperada (dentro de html) é JSON estrito:
     {
       "summary": "...",
       "actions": [
@@ -405,7 +416,7 @@ def ask_llm_for_actions(context: dict, objective: str) -> Optional[dict]:
             {"role": "system", "content": _wrap_paste(system_prompt)},
             {"role": "user", "content": _wrap_paste(user_prompt)},
         ],
-        "temperature": 0.2,
+        "request_source": "auto_dev_agent.py",
         "stream": False,
     }
 
@@ -413,16 +424,33 @@ def ask_llm_for_actions(context: dict, objective: str) -> Optional[dict]:
         return None
 
     try:
-        resp = requests.post(SIMULATOR_URL, headers=_llm_headers(), json=body, timeout=180)
+        resp = requests.post(SIMULATOR_URL, headers=_llm_headers(), json=body, timeout=600)
         resp.raise_for_status()
         data = resp.json()
-        content = data["choices"][0]["message"]["content"]
-        parsed = json.loads(content)
+
+        # Formato do server.py (modo bloco): {"success": true, "html": "...", ...}
+        if "html" in data:
+            if not data.get("success"):
+                raise ValueError(f"Servidor retornou erro: {data.get('error', 'desconhecido')}")
+            content = data["html"]
+        # Fallback caso algum dia use formato OpenAI
+        elif "choices" in data:
+            content = data["choices"][0]["message"]["content"]
+        else:
+            raise ValueError(f"Formato de resposta inesperado: {list(data.keys())}")
+
+        # Extrai JSON da resposta (pode vir envolto em markdown ```json ... ```)
+        text = content.strip()
+        if text.startswith("```"):
+            text = re.sub(r"^```(?:json)?\s*", "", text)
+            text = re.sub(r"\s*```$", "", text)
+
+        parsed = json.loads(text)
         if not isinstance(parsed, dict):
             raise ValueError("JSON de resposta não é objeto")
         return parsed
     except Exception as exc:
-        log(f"❌ Falha ao consultar LLM: {exc}")
+        log(f"❌ Falha ao consultar Simulator/browser.py: {exc}")
         return None
 
 
