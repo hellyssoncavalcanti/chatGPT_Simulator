@@ -2127,7 +2127,10 @@ def corrigir_erros_texto_insuficiente_no_startup():
         WHERE
             la.status = 'erro'
             AND COALESCE(la.id_criador, '') <> 'analise_compilada_paciente'
-            AND LOWER(COALESCE(la.erro_msg, '')) LIKE '%prontuário ficou insuficiente após limpeza/remoção de html%'
+            AND (
+                LOWER(COALESCE(la.erro_msg, '')) LIKE '%texto insuficiente após remoção de html%'
+                OR LOWER(COALESCE(la.erro_msg, '')) LIKE '%prontuário ficou insuficiente após limpeza/remoção de html%'
+            )
     """, reason="listar_erros_texto_insuficiente_startup").get("data", [])
 
     if not rows:
