@@ -827,8 +827,31 @@ estiver pronto — reavalia a saúde a cada ciclo.
 | `AUTODEV_AGENT_REMOTE` | `origin` | Remote Git alvo do push |
 | `AUTODEV_AGENT_COMMIT_PREFIX` | `[auto-dev-agent]` | Prefixo da mensagem de commit |
 | `AUTODEV_AGENT_REUSE_CHAT` | `1` | Mantém a mesma conversa entre ciclos |
+| `AUTODEV_AGENT_USE_PASTE_MARKERS` | `1` | Encapsula mensagens em `[INICIO_TEXTO_COLADO]…[FIM_TEXTO_COLADO]` para que `browser.py` cole via Ctrl+V (rápido) em vez de digitar caractere a caractere |
 | `AUTODEV_AGENT_STARTUP_WAIT_SEC` | `30` | Espera inicial pelo Simulator (s) |
 | `AUTODEV_AGENT_EXIT_ON_FATAL` | `0` | `exit(1)` em erro fatal (para CI) |
+
+### Envio rápido via paste (clipboard)
+
+Para **evitar a digitação realista caractere-a-caractere** do `browser.py`
+(que poderia levar minutos em prompts grandes), o agente **encapsula** cada
+mensagem enviada ao ChatGPT Simulator entre os marcadores:
+
+```
+[INICIO_TEXTO_COLADO]…conteúdo da mensagem…[FIM_TEXTO_COLADO]
+```
+
+O `browser.py` reconhece esses marcadores e injeta o bloco via
+**clipboard + Ctrl+V** (quase instantâneo). Assim:
+
+- Prompt do sistema é encapsulado;
+- Prompt do usuário (contexto + objetivo + código-fonte + feedback) também;
+- Texto fora dos marcadores continuaria sendo digitado realisticamente —
+  por isso o agente *sempre* encapsula todo o payload.
+
+Controle via `AUTODEV_AGENT_USE_PASTE_MARKERS` (default `1`).
+O encapsulamento é **idempotente**: se o texto já contiver os marcadores,
+eles não são duplicados.
 
 ### Contrato de resposta esperado do ChatGPT
 
