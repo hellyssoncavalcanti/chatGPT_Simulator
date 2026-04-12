@@ -699,3 +699,39 @@ Em termos práticos:
 - `utils.py` cuida de infraestrutura;
 - `analisador_prontuarios.py` usa o simulador como engine LLM para um fluxo médico;
 - `acompanhamento_whatsapp.py` monitora respostas de pacientes, gera respostas via ChatGPT Simulator e detecta quando a LLM precisa de intervenção humana (médico ou secretária), criando notificações pendentes no banco e permitindo resposta manual via interface web.
+
+---
+
+## Agente autônomo de melhoria contínua
+
+Foi adicionado o script `Scripts/agente_autonomo.py`, que atua como um orquestrador de operação contínua:
+
+1. inicia os arquivos `.bat` de execução (em Windows);
+2. monitora logs em tempo real por ciclos;
+3. detecta padrões de erro/warning;
+4. consulta a LLM local (`/v1/chat/completions`, via Simulator/browser.py) para obter sugestões;
+5. executa ações de shell seguras e validações rápidas (`py_compile`);
+6. pode aplicar patches automáticos **somente** quando habilitado explicitamente.
+
+### Como executar
+
+```bat
+3. start_agente_autonomo.bat
+```
+
+ou diretamente:
+
+```bash
+python Scripts/agente_autonomo.py
+```
+
+### Variáveis de ambiente úteis
+
+- `AUTON_AGENT_SIMULATOR_URL` (default `http://127.0.0.1:3003/v1/chat/completions`)
+- `AUTON_AGENT_MODEL` (default `ChatGPT Simulator`)
+- `AUTON_AGENT_API_KEY` (opcional)
+- `AUTON_AGENT_CYCLE_SEC` (default `60`)
+- `AUTON_AGENT_SUGGESTION_SEC` (default `300`)
+- `AUTON_AGENT_UNSAFE` (default `0`) → `1` permite auto-apply de patch
+
+> Segurança: por padrão, o agente **não** aplica patch automaticamente (`AUTON_AGENT_UNSAFE=0`).
