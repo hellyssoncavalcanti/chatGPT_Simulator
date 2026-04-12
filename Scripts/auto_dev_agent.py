@@ -1034,6 +1034,10 @@ def _stream_chat_completion(body: Dict[str, Any]) -> Tuple[str, Optional[str], O
             chat_url = c.get("url") or chat_url
         elif t == "error":
             error_msg = str(c)
+            # Detecta rate limit e aplica cooldown ANTES de abortar
+            is_rl, retry_after, reason = _parse_rate_limit(c)
+            if is_rl:
+                _apply_rate_limit_cooldown(retry_after, reason)
             break
         # Hard timeout total
         if time.time() - started > REQUEST_TIMEOUT_SEC:
@@ -1065,6 +1069,64 @@ def _wrap_for_paste(text: str) -> str:
     return f"{PASTE_MARKER_START}{text}{PASTE_MARKER_END}"
 
 
+# =============================================================================
+# RATE LIMIT — cooldown compartilhado entre ciclos
+# =============================================================================
+_rate_limit_lock = threading.Lock()
+_rate_limit_until_ts: float = 0.0
+_last_rate_limit_log_ts: float = 0.0
+
+
+def _apply_rate_limit_cooldown(retry_after: Optional[float], reason: str = "") -> None:
+    """Marca cooldown global para evitar consultas durante rate limit do ChatGPT."""
+    global _rate_limit_until_ts, _last_rate_limit_log_ts
+    wait = 240.0  # default conservador (4 min) — alinhado com server.py
+    try:
+        if retry_after is not None:
+            wait = max(30.0, float(retry_after))
+    except Exception:
+        pass
+    new_ts = time.time() + wait
+    with _rate_limit_lock:
+        if new_ts > _rate_limit_until_ts:
+            _rate_limit_until_ts = new_ts
+    now = time.time()
+    if now - _last_rate_limit_log_ts >= 10:
+        log(f"🧊 Rate-limit do ChatGPT detectado: cooldown de {int(wait)}s "
+            f"({reason.strip()[:160]})", logging.WARNING)
+        _last_rate_limit_log_ts = now
+
+
+def _rate_limit_remaining() -> float:
+    with _rate_limit_lock:
+        return max(0.0, _rate_limit_until_ts - time.time())
+
+
+def _parse_rate_limit(payload: Any) -> Tuple[bool, Optional[float], str]:
+    """Detecta erros de rate limit em objetos/strings. Retorna (is_rl, retry_after, motivo)."""
+    if payload is None:
+        return False, None, ""
+    if isinstance(payload, dict):
+        code = str(payload.get("code", "") or "").lower()
+        msg = str(payload.get("message", "") or "")
+        retry = payload.get("retry_after_seconds") or payload.get("retry_after")
+        combined = f"{code} {msg}".lower()
+        if ("rate" in code and "limit" in code) or "rate_limit" in combined \
+           or "excesso de solicita" in combined:
+            try:
+                retry_f = float(retry) if retry is not None else None
+            except Exception:
+                retry_f = None
+            return True, retry_f, msg or code
+        return False, None, ""
+    text = str(payload).lower()
+    if "rate_limit" in text or "rate limit" in text or "excesso de solicita" in text:
+        retry_match = re.search(r"retry_after[^0-9]*([0-9]+(?:\.[0-9]+)?)", text)
+        retry_f = float(retry_match.group(1)) if retry_match else None
+        return True, retry_f, str(payload)[:200]
+    return False, None, ""
+
+
 def ask_chatgpt_for_plan(context: Dict[str, Any],
                          objective: str,
                          source_files: Dict[str, str],
@@ -1073,14 +1135,29 @@ def ask_chatgpt_for_plan(context: Dict[str, Any],
     if not simulator_is_ready():
         return None
 
+    # Respeita cooldown de rate-limit: não envia nada enquanto estiver em cooldown.
+    remaining = _rate_limit_remaining()
+    if remaining > 0:
+        log(f"⏸️  Em cooldown de rate-limit ({int(remaining)}s restantes); pulando consulta.",
+            logging.INFO)
+        return None
+
     user_prompt = _build_user_prompt(context, objective, source_files, prior_attempt)
-    system_content = _wrap_for_paste(SYSTEM_PROMPT_BASE)
-    user_content = _wrap_for_paste(user_prompt)
+    # Consolida system + user num ÚNICO bloco encapsulado.
+    # Isso garante que todo o payload seja colado via Ctrl+V em UMA operação,
+    # sem texto "entre blocos" que cairia na digitação realista do browser.py.
+    combined = (
+        "=== INSTRUÇÕES DO SISTEMA ===\n"
+        f"{SYSTEM_PROMPT_BASE}\n"
+        "=== FIM DAS INSTRUÇÕES DO SISTEMA ===\n\n"
+        f"{user_prompt}"
+    )
+    wrapped = _wrap_for_paste(combined)
     body: Dict[str, Any] = {
         "model": SIMULATOR_MODEL,
+        "message": wrapped,  # server.py aceita 'message' (string) OU 'messages' (array)
         "messages": [
-            {"role": "system", "content": system_content},
-            {"role": "user", "content": user_content},
+            {"role": "user", "content": wrapped},
         ],
         "temperature": 0.2,
         "request_source": "auto_dev_agent.py",
