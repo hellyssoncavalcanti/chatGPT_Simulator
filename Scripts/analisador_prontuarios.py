@@ -70,7 +70,7 @@ def _terminate_previous_same_server_instances(script_name: str) -> None:
     shell_regex = "|".join(re.escape(token) for token in shell_tokens).replace("'", "''")
 
     ps_cmd_shells = (
-        "$self={pid}; "
+        f"$self={current_pid}; "
         "$selfParent=(Get-CimInstance Win32_Process -Filter \"ProcessId = $self\" | Select-Object -ExpandProperty ParentProcessId); "
         "Get-CimInstance Win32_Process "
         "| Where-Object { "
@@ -79,10 +79,10 @@ def _terminate_previous_same_server_instances(script_name: str) -> None:
         "($_.CommandLine -match '(?i)(" + shell_regex + ")') "
         "} "
         "| Select-Object -ExpandProperty ProcessId"
-    ).format(pid=current_pid)
+    )
 
     ps_cmd_python = (
-        "$self={pid}; "
+        f"$self={current_pid}; "
         "Get-CimInstance Win32_Process "
         "| Where-Object { "
         "($_.Name -match 'python|py') -and "
@@ -90,7 +90,7 @@ def _terminate_previous_same_server_instances(script_name: str) -> None:
         "($_.CommandLine -match '(?i)" + escaped_script + "') "
         "} "
         "| Select-Object -ExpandProperty ProcessId"
-    ).format(pid=current_pid)
+    )
 
     try:
         shell_proc = subprocess.run(
