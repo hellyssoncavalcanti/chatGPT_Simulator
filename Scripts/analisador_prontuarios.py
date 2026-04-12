@@ -2084,7 +2084,8 @@ def salvar_resultado(id_atendimento: int, resultado: dict):
 def buscar_maior_resumo_texto_paciente(id_paciente: str, id_atendimento_atual=None) -> str:
     """Retorna o maior resumo_texto concluído do paciente para fallback de evolução curta.
 
-    Descarta apenas resumos nulos ou vazios.
+    Descarta resumos nulos, vazios ou que são apenas fallbacks
+    reciclados (padrão 'Consulta de ...:') sem conteúdo clínico real.
     """
     if not id_paciente:
         return ""
@@ -2100,6 +2101,7 @@ def buscar_maior_resumo_texto_paciente(id_paciente: str, id_atendimento_atual=No
           AND status = 'concluido'
           AND COALESCE(id_criador, '') <> 'analise_compilada_paciente'
           AND COALESCE(TRIM(resumo_texto), '') <> ''
+          AND LOWER(TRIM(resumo_texto)) NOT LIKE 'consulta de %:%'
           {filtro_atual}
         ORDER BY CHAR_LENGTH(resumo_texto) DESC, datetime_analise_concluida DESC
         LIMIT 1
