@@ -17,10 +17,14 @@ if not defined PYTHON_BOOTSTRAP (
     )
 )
 
-:: Limpeza de processos
-echo [INFO] Limpando processos...
-taskkill /F /IM python.exe >nul 2>&1
-taskkill /F /IM ms-playwright.exe >nul 2>&1
+:: Limpeza de processos (pode ser desativada quando iniciado pelo AutoDevAgent)
+if /I "%AUTODEV_AGENT_SKIP_CLEANUP%"=="1" (
+    echo [INFO] Limpando processos... (ignorado: AUTODEV_AGENT_SKIP_CLEANUP=1)
+) else (
+    echo [INFO] Limpando processos...
+    taskkill /F /IM python.exe >nul 2>&1
+    taskkill /F /IM ms-playwright.exe >nul 2>&1
+)
 
 echo [INFO] Preparando ambiente Python...
 
