@@ -2084,8 +2084,8 @@ def salvar_resultado(id_atendimento: int, resultado: dict):
 def buscar_maior_resumo_texto_paciente(id_paciente: str, id_atendimento_atual=None) -> str:
     """Retorna o maior resumo_texto concluído do paciente para fallback de evolução curta.
 
-    Descarta resumos nulos, vazios, curtos demais ou que são apenas outros
-    fallbacks reciclados (sem conteúdo clínico real).
+    Descarta resumos nulos, vazios ou que são apenas outros fallbacks
+    reciclados (sem conteúdo clínico real).
     """
     if not id_paciente:
         return ""
@@ -2101,17 +2101,13 @@ def buscar_maior_resumo_texto_paciente(id_paciente: str, id_atendimento_atual=No
           AND status = 'concluido'
           AND COALESCE(id_criador, '') <> 'analise_compilada_paciente'
           AND COALESCE(TRIM(resumo_texto), '') <> ''
-          AND CHAR_LENGTH(TRIM(resumo_texto)) >= {MIN_CHARS}
           AND LOWER(TRIM(resumo_texto)) NOT LIKE 'consulta de %:%'
           {filtro_atual}
         ORDER BY CHAR_LENGTH(resumo_texto) DESC, datetime_analise_concluida DESC
         LIMIT 1
     """, reason="buscar_maior_resumo_texto_paciente").get("data") or [{}])[0]
 
-    resultado = str(row.get("resumo_texto") or "").strip()
-    if len(resultado) < MIN_CHARS:
-        return ""
-    return resultado
+    return str(row.get("resumo_texto") or "").strip()
 
 
 def corrigir_erros_texto_insuficiente_no_startup():
@@ -2145,8 +2141,11 @@ def corrigir_erros_texto_insuficiente_no_startup():
     if not rows:
         return 0
 
+    total = len(rows)
+    log.info(f"♻️ Corrigindo {total} registro(s) com erro de texto insuficiente...")
+
     corrigidos = 0
-    for row in rows:
+    for i, row in enumerate(rows, 1):
         id_atendimento = int(row.get("id_atendimento") or 0)
         if not id_atendimento:
             continue
@@ -2166,9 +2165,16 @@ def corrigir_erros_texto_insuficiente_no_startup():
         })
         corrigidos += 1
 
+        # Progresso inline a cada 5 registros ou no último
+        if i % 5 == 0 or i == total:
+            print(f"\r   ♻️ Texto insuficiente: {i}/{total} ({corrigidos} corrigidos)", end="", flush=True)
+
+    if total:
+        print()  # quebra linha após o progresso inline
+
     if corrigidos:
         log.warning(
-            f"♻️ {corrigidos} registro(s) com erro 'Prontuário ficou insuficiente após limpeza/remoção de HTML' "
+            f"♻️ {corrigidos}/{total} registro(s) com erro 'Prontuário ficou insuficiente após limpeza/remoção de HTML' "
             "foram convertidos para resumo_fallback e marcados como concluídos no startup."
         )
     return corrigidos
