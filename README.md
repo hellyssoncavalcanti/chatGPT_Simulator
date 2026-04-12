@@ -702,41 +702,210 @@ Em termos práticos:
 
 ---
 
-## Agente autônomo de melhoria contínua
+## Agente autônomo de desenvolvimento contínuo (`auto_dev_agent.py`)
 
-Foi adicionado o script `Scripts/auto_dev_agent.py`, que atua como um orquestrador de operação contínua:
+O script `Scripts/auto_dev_agent.py` é um **agente verdadeiramente autônomo** —
+um desenvolvedor sênior virtual — que:
 
-1. não inicia servidores automaticamente; detecta a cada ciclo quais processos do ecossistema estão ativos (main, analisador e browser worker) e passa a monitorá-los;
-2. monitora logs em tempo real por ciclos;
-3. detecta padrões de erro/warning;
-4. consulta a LLM local (`/v1/chat/completions`, via Simulator/browser.py) para obter sugestões;
-5. mesmo sem erro, entra em ciclo de melhoria contínua no intervalo configurado;
-6. interpreta logs, envia contexto de erros para a LLM, aplica correções, reexecuta testes e tenta novamente até validar (máximo configurável de tentativas por rodada);
-7. executa ações automáticas de shell/patch e validações rápidas (`py_compile`, `git status`).
-8. registra snapshot de serviços ativos monitorados em cada mudança de estado (ON/OFF por processo alvo).
+1. **Monitora continuamente** o ecossistema (main, browser worker, analisador,
+   whatsapp) de forma **multiplataforma** (Linux via `/proc` ou `ps`, Windows via
+   PowerShell/WMI).
+2. **Detecta incidentes em tempo real** — varre os logs recentes em busca de
+   `Traceback`, `ERROR`, `Exception`, `rate limit`, `timeout`, tracebacks do
+   Python e padrões de falha conhecidos.
+3. **Lê o código-fonte relevante** do próprio projeto — prioriza arquivos
+   citados em tracebacks, depois os módulos core (`main.py`, `server.py`,
+   `browser.py`, `shared.py`, `storage.py`, `auth.py`, `utils.py`) — e monta um
+   **contexto estruturado** para o modelo.
+4. **Consulta o ChatGPT via `browser.py`** usando o endpoint interno
+   `/v1/chat/completions` em **modo streaming** (evita timeouts longos;
+   tolera pausas até `AUTODEV_AGENT_STREAM_IDLE_SEC` entre eventos). A
+   **mesma conversa** é reutilizada entre ciclos (`chat_id` persistido em
+   `temp/auto_dev_agent_state.json`), dando memória de longo prazo ao agente.
+   Se `AUTODEV_AGENT_CODEX_URL` estiver definida, a conversa acontece dentro
+   do Codex no ChatGPT.
+5. **Recebe um plano estruturado em JSON** do ChatGPT com:
+   - `analysis` (diagnóstico/raciocínio);
+   - `actions[]` contendo ações dos tipos:
+     - `edit_file` (com `search`/`replace` exatos e contextuais);
+     - `create_file` (novos módulos/arquivos);
+     - `shell` (comandos utilitários — validados contra lista de bloqueio);
+     - `note` (observação textual para humanos).
+6. **Aplica as ações com segurança**:
+   - **Snapshot/backup** de todos os arquivos afetados em
+     `temp/agent_backups/<timestamp>/` antes de tocar em qualquer coisa.
+   - Bloqueio de caminhos sensíveis (`.git/`, `certs/`, `db/`, `logs/`,
+     `chrome_profile/`, `__pycache__/`, `.venv/`, `node_modules/`).
+   - Bloqueio de arquivos protegidos por negócio (`analisador_prontuarios.py`,
+     `acompanhamento_whatsapp.py`, `config.py`).
+   - Bloqueio de comandos destrutivos via regex (`rm -rf`, `git reset --hard`,
+     `git push --force`, `shutdown`, `mkfs`, `dd if=`, `DROP TABLE`,
+     `chmod -R 777`, `kill -9 1`, fork-bomb, …).
+   - Auto-edição do próprio agente só com `AUTODEV_AGENT_SELF_EDIT=1`.
+   - Limite de ações por ciclo (`AUTODEV_AGENT_MAX_ACTIONS`).
+7. **Valida as alterações** compilando **todos os `.py`** do projeto com
+   `py_compile`. Se qualquer arquivo falhar, dispara **rollback atômico**
+   restaurando os backups.
+8. **Re-consulta o ChatGPT em caso de falha**, enviando o resultado da tentativa
+   anterior como feedback, até `AUTODEV_AGENT_MAX_RETRIES + 1` tentativas.
+9. **Faz commit automático** das alterações validadas (`AUTODEV_AGENT_AUTOCOMMIT`)
+   com mensagem derivada da `analysis` + checklist das ações aplicadas, e
+   **push opcional com retry exponencial** (`AUTODEV_AGENT_AUTOPUSH`).
+10. **Mantém métricas de longo prazo** em `temp/auto_dev_agent_state.json`:
+    ciclos totais, ciclos com erros, ciclos com correções, total de ações, e
+    IDs da conversa ativa com o ChatGPT.
+11. **Sempre que não há erros** e passou o intervalo `AUTODEV_AGENT_SUGGESTION_SEC`,
+    entra em **modo proativo**: pergunta ao ChatGPT por uma melhoria pequena e
+    segura (performance, robustez, observabilidade, qualidade de código) e
+    executa se válida.
 
-### Como executar
+### Arquitetura do ciclo
 
-```bat
-3. start_agente_autonomo.bat
+```
+┌────────────────────── CICLO ──────────────────────┐
+│                                                   │
+│  health-check   logs/incidentes   código-fonte    │
+│        │              │                │          │
+│        └──────────────┼────────────────┘          │
+│                       ▼                           │
+│            context + objective                    │
+│                       │                           │
+│                       ▼                           │
+│   POST /v1/chat/completions (stream=True)         │
+│       │                                           │
+│       │   browser.py → ChatGPT (Codex)            │
+│       ▼                                           │
+│   plan JSON { analysis, actions[] }               │
+│       │                                           │
+│       ▼                                           │
+│   snapshot → apply → py_compile                   │
+│       │           │        │                      │
+│       │           ├── OK → git commit (+ push)    │
+│       │           └── FAIL → rollback → retry     │
+│       ▼                                           │
+│   persist state → sleep CYCLE_INTERVAL_SEC        │
+│                                                   │
+└───────────────────────────────────────────────────┘
 ```
 
-ou diretamente:
+### Como executar
 
 ```bash
 python Scripts/auto_dev_agent.py
 ```
 
-### Variáveis de ambiente úteis
+ou no Windows:
 
-- `AUTODEV_AGENT_SIMULATOR_URL` (default `http://127.0.0.1:3003/v1/chat/completions`)
-- `AUTODEV_AGENT_CODEX_URL` (default `https://chatgpt.com/codex/cloud`)
-- `AUTODEV_AGENT_MODEL` (default `ChatGPT Simulator`)
-- `AUTODEV_AGENT_API_KEY` (opcional)
-- `AUTODEV_AGENT_CYCLE_SEC` (default `60`)
-- `AUTODEV_AGENT_SUGGESTION_SEC` (default `300`)
-- `AUTODEV_AGENT_MAX_ATTEMPTS` (default `3`) → tentativas de correção por rodada
-- `AUTODEV_AGENT_UNSAFE` (default `0`) → habilita auto-apply de patch
+```bat
+3. start_agente_autonomo.bat
+```
 
-> Operação automática: por padrão, o agente valida e monitora em loop, mas **não aplica patch automaticamente** (`AUTODEV_AGENT_UNSAFE=0`), com bloqueio adicional para arquivo crítico `Scripts/analisador_prontuarios.py`.
-> Autenticação: se `AUTODEV_AGENT_API_KEY` não for definida, o agente tenta reutilizar `config.API_KEY` automaticamente.
+O agente espera até `AUTODEV_AGENT_STARTUP_WAIT_SEC` segundos pelo Simulator
+subir. Depois disso entra em modo monitor mesmo se o Simulator ainda não
+estiver pronto — reavalia a saúde a cada ciclo.
+
+### Variáveis de ambiente
+
+| Variável | Default | Descrição |
+|---|---|---|
+| `AUTODEV_AGENT_SIMULATOR_URL` | `http://127.0.0.1:3003/v1/chat/completions` | Endpoint do Simulator |
+| `AUTODEV_AGENT_CODEX_URL` | *(vazio)* | URL da conversa do Codex no ChatGPT; se vazio, usa chat regular novo |
+| `AUTODEV_AGENT_MODEL` | `ChatGPT Simulator` | Nome lógico do modelo (apenas label) |
+| `AUTODEV_AGENT_API_KEY` | `config.API_KEY` | Bearer token para o Simulator |
+| `AUTODEV_AGENT_CYCLE_SEC` | `120` | Intervalo entre ciclos (s) |
+| `AUTODEV_AGENT_SUGGESTION_SEC` | `600` | Intervalo de sugestões proativas (s) |
+| `AUTODEV_AGENT_REQUEST_TIMEOUT` | `900` | Timeout total por consulta ao ChatGPT (s) |
+| `AUTODEV_AGENT_STREAM_IDLE_SEC` | `180` | Idle tolerado entre eventos streaming (s) |
+| `AUTODEV_AGENT_CONTEXT_CHARS` | `28000` | Orçamento máximo do contexto (chars) |
+| `AUTODEV_AGENT_MAX_ACTIONS` | `5` | Ações aplicadas por ciclo (hard cap) |
+| `AUTODEV_AGENT_MAX_RETRIES` | `2` | Retentativas após falha de validação |
+| `AUTODEV_AGENT_AUTOFIX` | `1` | Aplica edit_file/create_file |
+| `AUTODEV_AGENT_AUTOCOMMIT` | `1` | Faz git commit dos sucessos |
+| `AUTODEV_AGENT_AUTOPUSH` | `0` | Faz git push após commit (com retry) |
+| `AUTODEV_AGENT_SELF_EDIT` | `0` | Permite que o agente edite a si próprio |
+| `AUTODEV_AGENT_BRANCH` | *(branch atual)* | Força commit/push em branch específico |
+| `AUTODEV_AGENT_REMOTE` | `origin` | Remote Git alvo do push |
+| `AUTODEV_AGENT_COMMIT_PREFIX` | `[auto-dev-agent]` | Prefixo da mensagem de commit |
+| `AUTODEV_AGENT_REUSE_CHAT` | `1` | Mantém a mesma conversa entre ciclos |
+| `AUTODEV_AGENT_STARTUP_WAIT_SEC` | `30` | Espera inicial pelo Simulator (s) |
+| `AUTODEV_AGENT_EXIT_ON_FATAL` | `0` | `exit(1)` em erro fatal (para CI) |
+
+### Contrato de resposta esperado do ChatGPT
+
+O agente **instrui o ChatGPT** (system prompt) a responder estritamente com
+JSON no seguinte formato (sem markdown, sem prosa extra):
+
+```json
+{
+  "analysis": "raciocínio/diagnóstico",
+  "actions": [
+    {
+      "type": "edit_file",
+      "file": "Scripts/server.py",
+      "description": "O que muda e por quê",
+      "search": "trecho exato hoje no arquivo (contexto único)",
+      "replace": "novo trecho que substituirá o search"
+    },
+    {
+      "type": "create_file",
+      "file": "Scripts/novo_modulo.py",
+      "description": "motivo da criação",
+      "content": "conteúdo completo"
+    },
+    {
+      "type": "shell",
+      "command": "python -m py_compile Scripts/server.py",
+      "description": "validação"
+    },
+    {
+      "type": "note",
+      "content": "observação para humanos"
+    }
+  ]
+}
+```
+
+O parser do agente (`_extract_json_object`) é tolerante a fences de código
+(` ``` ` ou ` ```json `) e a prosa extra — ele procura o primeiro objeto JSON
+balanceado na resposta. Respostas sem JSON válido são ignoradas com warning.
+
+### Arquivos protegidos e caminhos bloqueados
+
+**Nunca** são modificados pelo agente, mesmo se o ChatGPT sugerir:
+
+- Arquivos: `Scripts/analisador_prontuarios.py`, `Scripts/acompanhamento_whatsapp.py`,
+  `Scripts/config.py`, e `Scripts/auto_dev_agent.py` (salvo com `SELF_EDIT=1`).
+- Diretórios: `.git/`, `certs/`, `db/`, `logs/`, `chrome_profile/`, `__pycache__/`,
+  `.venv/`, `node_modules/`, `temp/agent_backups/`.
+- Extensões editáveis: `.py`, `.md`, `.bat`, `.txt`, `.json`, `.ini`, `.cfg`,
+  `.yml`, `.yaml`. Outras são read-only.
+
+### Observabilidade
+
+Logs:
+- `logs/auto_dev_agent-<timestamp>.log` — log detalhado do ciclo atual.
+- `temp/auto_dev_agent_state.json` — estado persistido (chat_id, contadores).
+- `temp/agent_backups/<timestamp>/` — backups atômicos de arquivos alterados.
+
+Mensagens-chave emitidas:
+- `🛰️ Serviços ativos:` — apenas quando a assinatura muda (não polui o log).
+- `⏳ Simulator indisponível` — throttled a cada 30 s.
+- `✅ Validação OK em N arquivo(s) alterado(s).`
+- `🛑 Validação falhou` → `↩️ Rollback`.
+- `📦 Commit efetuado` / `🚀 Push OK`.
+- `💭 Análise sem ações` — ciclo em que o ChatGPT escolheu não agir.
+
+### Como o agente consulta Codex (via `browser.py`)
+
+1. O agente envia `POST /v1/chat/completions` com `stream: True` para o
+   `server.py` (porta 3003).
+2. `server.py` enfileira uma tarefa `CHAT` em `shared.browser_queue`.
+3. `browser.py` consome a tarefa e, se `url` tiver sido passada
+   (p. ex. `AUTODEV_AGENT_CODEX_URL=https://chatgpt.com/codex/...`), navega
+   para lá antes de digitar. Caso contrário, abre um chat novo no ChatGPT
+   regular.
+4. A resposta volta em **eventos streaming** (`status`, `markdown`, `finish`,
+   `chat_id`, `chat_meta`, `error`).
+5. O agente guarda `chat_id` e `url` em `AgentState`, e nas rodadas seguintes
+   reutiliza essa conversa — ou seja, o ChatGPT mantém memória contextual de
+   toda a trajetória de manutenção do projeto.
