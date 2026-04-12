@@ -27,7 +27,6 @@ import os
 import re
 import subprocess
 import sys
-import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -194,53 +193,50 @@ def _child_env() -> dict:
     return env
 
 
-def start_child_scripts() -> list[subprocess.Popen]:
-    """Inicia os scripts Python filhos diretamente (cross-platform).
+def _script_title(cmd: list[str]) -> str:
+    """Extrai nome legível do script para título da janela."""
+    for part in cmd:
+        if part.endswith(".py"):
+            return Path(part).stem
+    return "child"
 
-    Não usa os .bat de conveniência porque eles contêm `taskkill /F /IM
-    python.exe` (mata o próprio agente) e `pause` (trava com stdout piped).
+
+def start_child_scripts() -> list[subprocess.Popen]:
+    """Inicia cada script Python filho em sua própria janela CMD.
+
+    Cada processo ganha uma janela separada (CREATE_NEW_CONSOLE no Windows),
+    mantendo o terminal do agente limpo e permitindo visualizar cada serviço
+    individualmente.
     """
     procs: list[subprocess.Popen] = []
     commands = _build_start_commands()
     env = _child_env()
 
     for cmd in commands:
+        title = _script_title(cmd)
         try:
-            proc = subprocess.Popen(
-                cmd,
-                cwd=str(ROOT_DIR),
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                bufsize=1,
-                env=env,
-                encoding="utf-8",
-                errors="replace",
-            )
+            if is_windows():
+                # Abre cada filho em sua própria janela CMD
+                proc = subprocess.Popen(
+                    cmd,
+                    cwd=str(ROOT_DIR),
+                    env=env,
+                    creationflags=subprocess.CREATE_NEW_CONSOLE,
+                )
+            else:
+                proc = subprocess.Popen(
+                    cmd,
+                    cwd=str(ROOT_DIR),
+                    env=env,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
             procs.append(proc)
             CHILD_PROCS.append({"cmd": cmd, "proc": proc, "started_at": time.time(), "last_restart": 0.0})
-            threading.Thread(
-                target=_pump_child_logs,
-                args=(proc, " ".join(cmd)),
-                daemon=True,
-            ).start()
-            log(f"✅ Processo iniciado: {' '.join(cmd)} (pid={proc.pid})")
+            log(f"✅ Processo iniciado em janela própria: {title} (pid={proc.pid})")
         except Exception as exc:
             log(f"❌ Falha ao iniciar {' '.join(cmd)}: {exc}")
     return procs
-
-
-def _pump_child_logs(proc: subprocess.Popen, cmd_label: str) -> None:
-    """Encaminha stdout/stderr do processo filho para o log do agente."""
-    try:
-        if not proc.stdout:
-            return
-        for line in proc.stdout:
-            txt = (line or "").rstrip()
-            if txt:
-                log(f"[child:{proc.pid}] {txt}")
-    except Exception as exc:
-        log(f"⚠️ Falha ao capturar log do processo {proc.pid}: {exc}")
 
 
 def keep_child_processes_alive() -> None:
@@ -258,27 +254,27 @@ def keep_child_processes_alive() -> None:
         if now - last_restart < 10:
             continue
 
-        log(f"⚠️ Processo filho encerrado (exit={exit_code}): {' '.join(cmd)}. Reiniciando...")
+        title = _script_title(cmd)
+        log(f"⚠️ Processo filho encerrado (exit={exit_code}): {title}. Reiniciando...")
         try:
-            new_proc = subprocess.Popen(
-                cmd,
-                cwd=str(ROOT_DIR),
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                bufsize=1,
-                env=_child_env(),
-                encoding="utf-8",
-                errors="replace",
-            )
+            if is_windows():
+                new_proc = subprocess.Popen(
+                    cmd,
+                    cwd=str(ROOT_DIR),
+                    env=_child_env(),
+                    creationflags=subprocess.CREATE_NEW_CONSOLE,
+                )
+            else:
+                new_proc = subprocess.Popen(
+                    cmd,
+                    cwd=str(ROOT_DIR),
+                    env=_child_env(),
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
             item["proc"] = new_proc
             item["last_restart"] = now
-            threading.Thread(
-                target=_pump_child_logs,
-                args=(new_proc, " ".join(cmd)),
-                daemon=True,
-            ).start()
-            log(f"✅ Processo reiniciado: {' '.join(cmd)} (pid={new_proc.pid})")
+            log(f"✅ Processo reiniciado em janela própria: {title} (pid={new_proc.pid})")
         except Exception as exc:
             log(f"❌ Falha ao reiniciar {' '.join(cmd)}: {exc}")
 
@@ -364,6 +360,16 @@ def simulator_is_ready() -> bool:
         return False
 
 
+PASTE_START = "[INICIO_TEXTO_COLADO]"
+PASTE_END = "[FIM_TEXTO_COLADO]"
+
+
+def _wrap_paste(text: str) -> str:
+    """Envolve texto com marcadores de colagem para o browser.py colar
+    via clipboard em vez de digitar caractere por caractere."""
+    return f"{PASTE_START}{text}{PASTE_END}"
+
+
 def ask_llm_for_actions(context: dict, objective: str) -> Optional[dict]:
     """Solicita plano de melhoria à LLM local.
 
@@ -398,8 +404,8 @@ def ask_llm_for_actions(context: dict, objective: str) -> Optional[dict]:
     body = {
         "model": SIMULATOR_MODEL,
         "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
+            {"role": "system", "content": _wrap_paste(system_prompt)},
+            {"role": "user", "content": _wrap_paste(user_prompt)},
         ],
         "temperature": 0.2,
         "stream": False,
