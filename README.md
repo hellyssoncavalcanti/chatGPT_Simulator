@@ -699,3 +699,36 @@ Em termos práticos:
 - `utils.py` cuida de infraestrutura;
 - `analisador_prontuarios.py` usa o simulador como engine LLM para um fluxo médico;
 - `acompanhamento_whatsapp.py` monitora respostas de pacientes, gera respostas via ChatGPT Simulator e detecta quando a LLM precisa de intervenção humana (médico ou secretária), criando notificações pendentes no banco e permitindo resposta manual via interface web.
+
+---
+
+## Agente autônomo de melhoria contínua (experimental)
+
+Foi adicionado o script `Scripts/auto_dev_agent.py`, que opera como um orquestrador autônomo para dev/debug contínuo.
+
+Capacidades principais:
+
+- inicia um `.bat` do sistema (padrão: `0. start.bat`, em ambiente Windows);
+- monitora logs em tempo real e detecta erros por padrões (`error`, `exception`, `traceback`, etc.);
+- consulta uma LLM (via endpoint compatível com `chat/completions`) para propor plano de ação em JSON;
+- executa comandos de diagnóstico;
+- opcionalmente aplica `patch_diff` via `git apply` (desligado por padrão);
+- roda ciclo de melhoria contínua mesmo sem erro.
+
+### Execução
+
+```bash
+python Scripts/auto_dev_agent.py
+```
+
+### Variáveis de ambiente úteis
+
+- `AUTO_AGENT_BAT` (default: `0. start.bat`)
+- `AUTO_AGENT_LLM_URL` (default: `http://127.0.0.1:3003/v1/chat/completions`)
+- `AUTO_AGENT_LLM_API_KEY`
+- `AUTO_AGENT_MODEL` (default: `gpt-4o-mini`)
+- `AUTO_AGENT_SAFE_MODE` (default: `true`)
+- `AUTO_AGENT_AUTO_APPLY_PATCHES` (default: `false`)
+- `AUTO_AGENT_IMPROVEMENT_INTERVAL` (default: `120` segundos)
+
+> Recomendação: manter `AUTO_AGENT_SAFE_MODE=true` e habilitar `AUTO_AGENT_AUTO_APPLY_PATCHES` apenas em ambiente de staging/controlado.
