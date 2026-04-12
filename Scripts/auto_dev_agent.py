@@ -56,7 +56,21 @@ def _env(name_new: str, default: str, legacy_name: str | None = None) -> str:
 
 SIMULATOR_URL = _env("AUTODEV_AGENT_SIMULATOR_URL", "http://127.0.0.1:3003/v1/chat/completions", "AUTON_AGENT_SIMULATOR_URL")
 SIMULATOR_MODEL = _env("AUTODEV_AGENT_MODEL", "ChatGPT Simulator", "AUTON_AGENT_MODEL")
-API_KEY = _env("AUTODEV_AGENT_API_KEY", "", "AUTON_AGENT_API_KEY")
+
+def _resolve_api_key() -> str:
+    """Resolve API key: env var > config.py > vazio."""
+    key = _env("AUTODEV_AGENT_API_KEY", "", "AUTON_AGENT_API_KEY")
+    if key:
+        return key
+    # Tenta ler do config.py do projeto (mesmo diretório)
+    try:
+        sys.path.insert(0, str(ROOT_DIR / "Scripts"))
+        import config as _cfg  # type: ignore
+        return getattr(_cfg, "API_KEY", "")
+    except Exception:
+        return ""
+
+API_KEY = _resolve_api_key()
 
 # janelas de ciclo
 SLEEP_BETWEEN_CYCLES = int(_env("AUTODEV_AGENT_CYCLE_SEC", "60", "AUTON_AGENT_CYCLE_SEC"))
@@ -170,6 +184,14 @@ def is_windows() -> bool:
     return os.name == "nt"
 
 
+def _child_env() -> dict:
+    """Ambiente para processos filhos com encoding UTF-8 forçado."""
+    env = os.environ.copy()
+    env["PYTHONIOENCODING"] = "utf-8"
+    env["PYTHONUTF8"] = "1"
+    return env
+
+
 def start_child_scripts() -> list[subprocess.Popen]:
     """Inicia os scripts Python filhos diretamente (cross-platform).
 
@@ -178,6 +200,7 @@ def start_child_scripts() -> list[subprocess.Popen]:
     """
     procs: list[subprocess.Popen] = []
     commands = _build_start_commands()
+    env = _child_env()
 
     for cmd in commands:
         try:
@@ -188,6 +211,9 @@ def start_child_scripts() -> list[subprocess.Popen]:
                 stderr=subprocess.STDOUT,
                 text=True,
                 bufsize=1,
+                env=env,
+                encoding="utf-8",
+                errors="replace",
             )
             procs.append(proc)
             CHILD_PROCS.append({"cmd": cmd, "proc": proc, "started_at": time.time(), "last_restart": 0.0})
@@ -239,6 +265,9 @@ def keep_child_processes_alive() -> None:
                 stderr=subprocess.STDOUT,
                 text=True,
                 bufsize=1,
+                env=_child_env(),
+                encoding="utf-8",
+                errors="replace",
             )
             item["proc"] = new_proc
             item["last_restart"] = now
