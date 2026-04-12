@@ -26,6 +26,7 @@ import os
 import re
 import subprocess
 import sys
+import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -69,6 +70,7 @@ TEST_COMMANDS = [
     _env("AUTODEV_AGENT_TEST_CMD_1", "python -m py_compile Scripts/*.py"),
     _env("AUTODEV_AGENT_TEST_CMD_2", "git status --short"),
 ]
+_last_llm_unavailable_log = 0.0
 
 # monitoramento
 ERROR_PATTERNS = [
@@ -89,9 +91,10 @@ WARN_PATTERNS = [
 ]
 
 START_COMMANDS = [
-    ["cmd", "/q", "/d", "/c", "0. start.bat >nul 2>&1"],
-    ["cmd", "/q", "/d", "/c", "1. start_apenas_analisador_prontuarios.bat >nul 2>&1"],
+    ["cmd", "/d", "/c", "0. start.bat"],
+    ["cmd", "/d", "/c", "1. start_apenas_analisador_prontuarios.bat"],
 ]
+CHILD_PROCS: list[dict] = []
 
 
 @dataclass
@@ -148,15 +151,72 @@ def start_bats_if_needed() -> list[subprocess.Popen]:
             proc = subprocess.Popen(
                 cmd,
                 cwd=str(ROOT_DIR),
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                creationflags=subprocess.CREATE_NEW_CONSOLE,  # type: ignore[attr-defined]
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
             )
             procs.append(proc)
+            CHILD_PROCS.append({"cmd": cmd, "proc": proc, "started_at": time.time(), "last_restart": 0.0})
+            threading.Thread(
+                target=_pump_child_logs,
+                args=(proc, " ".join(cmd)),
+                daemon=True,
+            ).start()
             log(f"✅ Processo iniciado: {' '.join(cmd)} (pid={proc.pid})")
         except Exception as exc:
             log(f"❌ Falha ao iniciar {' '.join(cmd)}: {exc}")
     return procs
+
+
+def _pump_child_logs(proc: subprocess.Popen, cmd_label: str) -> None:
+    """Encaminha stdout/stderr do processo filho para o log do agente."""
+    try:
+        if not proc.stdout:
+            return
+        for line in proc.stdout:
+            txt = (line or "").rstrip()
+            if txt:
+                log(f"[child:{proc.pid}] {txt}")
+    except Exception as exc:
+        log(f"⚠️ Falha ao capturar log do processo {proc.pid}: {exc}")
+
+
+def keep_child_processes_alive() -> None:
+    """Reinicia .bat filho se ele terminar inesperadamente."""
+    now = time.time()
+    for item in CHILD_PROCS:
+        proc = item["proc"]
+        if proc.poll() is None:
+            continue
+
+        cmd = item["cmd"]
+        exit_code = proc.returncode
+        last_restart = float(item.get("last_restart", 0.0))
+        # evita loop agressivo de restart
+        if now - last_restart < 10:
+            continue
+
+        log(f"⚠️ Processo filho encerrado (exit={exit_code}): {' '.join(cmd)}. Reiniciando...")
+        try:
+            new_proc = subprocess.Popen(
+                cmd,
+                cwd=str(ROOT_DIR),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+            )
+            item["proc"] = new_proc
+            item["last_restart"] = now
+            threading.Thread(
+                target=_pump_child_logs,
+                args=(new_proc, " ".join(cmd)),
+                daemon=True,
+            ).start()
+            log(f"✅ Processo reiniciado: {' '.join(cmd)} (pid={new_proc.pid})")
+        except Exception as exc:
+            log(f"❌ Falha ao reiniciar {' '.join(cmd)}: {exc}")
 
 
 def tail_last_lines(path: Path, max_lines: int = 80) -> list[str]:
@@ -225,6 +285,21 @@ def _llm_headers() -> dict:
     return headers
 
 
+def simulator_is_ready() -> bool:
+    """Verifica se o Simulator HTTP está respondendo health-check."""
+    global _last_llm_unavailable_log
+    health_url = SIMULATOR_URL.replace("/v1/chat/completions", "/health")
+    try:
+        resp = requests.get(health_url, timeout=5)
+        return resp.status_code == 200
+    except Exception:
+        now = time.time()
+        if now - _last_llm_unavailable_log >= 30:
+            log(f"⏳ Simulator ainda indisponível em {health_url}; aguardando subir...")
+            _last_llm_unavailable_log = now
+        return False
+
+
 def ask_llm_for_actions(context: dict, objective: str) -> Optional[dict]:
     """Solicita plano de melhoria à LLM local.
 
@@ -265,6 +340,9 @@ def ask_llm_for_actions(context: dict, objective: str) -> Optional[dict]:
         "temperature": 0.2,
         "stream": False,
     }
+
+    if not simulator_is_ready():
+        return None
 
     try:
         resp = requests.post(SIMULATOR_URL, headers=_llm_headers(), json=body, timeout=180)
@@ -434,6 +512,7 @@ def main() -> None:
     last_suggestion_ts = 0.0
     while True:
         try:
+            keep_child_processes_alive()
             context = collect_runtime_context()
             checks = quick_checks()
 

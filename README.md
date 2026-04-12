@@ -713,6 +713,7 @@ Foi adicionado o script `Scripts/auto_dev_agent.py`, que atua como um orquestrad
 5. mesmo sem erro, entra em ciclo de melhoria contínua no intervalo configurado;
 6. interpreta logs, envia contexto de erros para a LLM, aplica correções, reexecuta testes e tenta novamente até validar (máximo configurável de tentativas por rodada);
 7. executa ações automáticas de shell/patch e validações rápidas (`py_compile`, `git status`).
+8. captura e agrega no próprio log a saída dos `.bat` filhos iniciados, com auto-restart caso encerrem inesperadamente.
 
 ### Como executar
 
