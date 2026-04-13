@@ -327,8 +327,29 @@ def _setup_logger() -> logging.Logger:
         logger.addHandler(fh)
     except Exception as exc:
         print(f"[auto_dev_agent] ❌ Falha ao abrir log file: {exc}", file=sys.stderr)
+    class _AnsiColorFormatter(logging.Formatter):
+        RESET = "\033[0m"
+        LEVEL_COLORS = {
+            logging.DEBUG: "\033[90m",
+            logging.INFO: "\033[96m",
+            logging.WARNING: "\033[93m",
+            logging.ERROR: "\033[91m",
+            logging.CRITICAL: "\033[95m",
+        }
+
+        def format(self, record: logging.LogRecord) -> str:
+            text = super().format(record)
+            stream = getattr(sys, "stdout", None)
+            is_tty = bool(stream and hasattr(stream, "isatty") and stream.isatty())
+            if os.environ.get("NO_COLOR") or (not is_tty):
+                return text
+            color = self.LEVEL_COLORS.get(record.levelno, "")
+            if not color:
+                return text
+            return f"{color}{text}{self.RESET}"
+
     sh = logging.StreamHandler(sys.stdout)
-    sh.setFormatter(fmt)
+    sh.setFormatter(_AnsiColorFormatter("%(asctime)s [%(levelname)s] %(message)s"))
     logger.addHandler(sh)
     return logger
 
@@ -905,6 +926,7 @@ SYSTEM_PROMPT_BASE = textwrap.dedent("""\
     FORMATO EXATO:
     {
       "analysis": "texto curto com o diagnóstico/raciocínio",
+      "should_forward_to_codex": false,
       "actions": [
         {
           "type": "edit_file",
@@ -930,6 +952,17 @@ SYSTEM_PROMPT_BASE = textwrap.dedent("""\
         }
       ]
     }
+
+    REGRAS PARA "should_forward_to_codex":
+      • Campo OBRIGATÓRIO em TODA resposta.
+      • true  = o auto_dev_agent.py DEVE encaminhar este caso ao Codex para
+                tentar implementação concreta (quando você só trouxe diagnóstico,
+                notas, ou quando as ações propostas tendem a falhar sem contexto
+                adicional de execução no Codex).
+      • true  = também quando houver sugestão de melhoria/alteração de código
+                (ex.: edit_file/create_file ou recomendação equivalente) e você
+                quiser que o agente realmente tente implementar no Codex.
+      • false = não encaminhar ao Codex neste ciclo.
     """)
 
 
@@ -1019,6 +1052,73 @@ def _extract_json_object(text: str) -> Optional[dict]:
     return None
 
 
+def _normalize_plan(plan: Dict[str, Any]) -> Dict[str, Any]:
+    """Normaliza o JSON de plano para contrato mínimo esperado pelo agente."""
+    if not isinstance(plan.get("actions"), list):
+        plan["actions"] = []
+    if "analysis" not in plan:
+        plan["analysis"] = ""
+    if "should_forward_to_codex" not in plan:
+        # Fallback conservador: só sinaliza forward automático quando não há ações.
+        plan["should_forward_to_codex"] = len(plan["actions"]) == 0
+    else:
+        plan["should_forward_to_codex"] = bool(plan.get("should_forward_to_codex"))
+    return plan
+
+
+def _log_plan_decision(plan: Dict[str, Any], origin: str) -> None:
+    """Loga análise completa + decisão de ações/forward para facilitar leitura."""
+    analysis = str(plan.get("analysis") or "").strip()
+    actions = plan.get("actions") or []
+    should_forward = bool(plan.get("should_forward_to_codex"))
+
+    log(f"🧠 [{origin}] analysis completo:\n{analysis or '(vazio)'}")
+    if actions:
+        action_types = [
+            str(a.get("type", "unknown"))
+            for a in actions if isinstance(a, dict)
+        ]
+        log(
+            f"🛠️ [{origin}] ações sugeridas: {len(actions)} "
+            f"({', '.join(action_types) if action_types else 'sem tipo'})"
+        )
+    else:
+        log(f"🛠️ [{origin}] nenhuma ação sugerida (actions=[]).")
+
+    decision_text = "ENCAMINHAR para Codex" if should_forward else "NÃO encaminhar para Codex"
+    log(f"🔁 [{origin}] should_forward_to_codex={should_forward} → {decision_text}")
+
+
+def _plan_has_change_intent(plan: Dict[str, Any]) -> bool:
+    """Detecta intenção de mudança sem depender de busca por palavras-chave."""
+    for action in plan.get("actions") or []:
+        if not isinstance(action, dict):
+            continue
+        if str(action.get("type", "")).lower().strip() in {"edit_file", "create_file"}:
+            return True
+    return False
+
+
+def _should_forward_plan_to_codex(plan: Dict[str, Any],
+                                  results: List[ActionResult],
+                                  changed: List[str]) -> bool:
+    """Decide forward com base no sinal do LLM + fallback estrutural robusto."""
+    if changed:
+        return False
+    if bool(plan.get("should_forward_to_codex")):
+        return True
+    # Fallback robusto: se o plano já trouxe intenção concreta de alteração
+    # mas não houve nenhuma mudança aplicada, encaminha ao Codex.
+    if _plan_has_change_intent(plan):
+        has_failed_change = any(
+            (not r.ok) and r.action_type in {"edit_file", "create_file"}
+            for r in results
+        )
+        if has_failed_change:
+            return True
+    return False
+
+
 def _stream_chat_completion(
     body: Dict[str, Any],
     label: str = "ChatGPT Simulator",
@@ -1088,6 +1188,16 @@ def _stream_chat_completion(
     MARKDOWN_REPORT_MIN_STEP = 1024   # chars
     MARKDOWN_REPORT_MIN_INTERVAL = 3  # segundos
     inline_status_open = False
+    inline_last_len = 0
+    stream = getattr(sys, "stdout", None)
+    inline_can_ansi = bool(
+        stream and hasattr(stream, "isatty") and stream.isatty() and not os.environ.get("NO_COLOR")
+    )
+
+    def _inline_colorize(text: str, color_code: str = "\033[96m") -> str:
+        if not inline_can_ansi:
+            return text
+        return f"{color_code}{text}\033[0m"
 
     def _clean_browser_prefix(text: str) -> str:
         s = (text or "").strip()
@@ -1104,25 +1214,42 @@ def _stream_chat_completion(
         return s
 
     def _print_inline_status(text: str) -> None:
-        nonlocal inline_status_open
+        nonlocal inline_status_open, inline_last_len
         try:
             rendered = f"   ⏳ status: {_normalize_status(text)[:220]}"
-            sys.stdout.write("\r" + rendered + " " * 24)
+            rendered_colored = _inline_colorize(rendered, "\033[93m")
+            clear_pad = max(0, inline_last_len - len(rendered))
+            sys.stdout.write("\r" + rendered_colored + (" " * (clear_pad + 8)))
             sys.stdout.flush()
             inline_status_open = True
+            inline_last_len = len(rendered)
         except Exception:
             log(f"   ⏳ status: {_normalize_status(text)[:220]}")
 
+    def _print_inline_markdown(size: int) -> None:
+        nonlocal inline_status_open, inline_last_len
+        try:
+            rendered = f"   📝 recebendo resposta: {size} chars..."
+            rendered_colored = _inline_colorize(rendered, "\033[96m")
+            clear_pad = max(0, inline_last_len - len(rendered))
+            sys.stdout.write("\r" + rendered_colored + (" " * (clear_pad + 8)))
+            sys.stdout.flush()
+            inline_status_open = True
+            inline_last_len = len(rendered)
+        except Exception:
+            log(f"   📝 recebendo resposta: {size} chars...")
+
     def _close_inline_status() -> None:
-        nonlocal inline_status_open
+        nonlocal inline_status_open, inline_last_len
         if inline_status_open:
             try:
-                sys.stdout.write("\r" + " " * 260 + "\r")
+                sys.stdout.write("\r" + " " * (inline_last_len + 16) + "\r")
                 sys.stdout.flush()
             except Exception:
                 pass
             finally:
                 inline_status_open = False
+                inline_last_len = 0
 
     started = time.time()
     last_event = started
@@ -1176,8 +1303,7 @@ def _stream_chat_completion(
                 or (size != last_markdown_size_reported
                     and now - last_markdown_report_ts >= MARKDOWN_REPORT_MIN_INTERVAL)
             ):
-                _close_inline_status()
-                log(f"   📝 recebendo resposta: {size} chars...")
+                _print_inline_markdown(size)
                 last_markdown_size_reported = size
                 last_markdown_report_ts = now
 
@@ -1428,10 +1554,8 @@ def ask_chatgpt_for_plan(context: Dict[str, Any],
         log("⚠️ ChatGPT respondeu sem JSON válido — resposta ignorada neste ciclo.",
             logging.WARNING)
         return None
-    if not isinstance(plan.get("actions"), list):
-        plan["actions"] = []
-    if "analysis" not in plan:
-        plan["analysis"] = ""
+    plan = _normalize_plan(plan)
+    _log_plan_decision(plan, "ChatGPT")
     return plan
 
 
@@ -2052,10 +2176,8 @@ def forward_to_codex(context: Dict[str, Any],
     if not plan:
         log("⚠️ Forward-to-Codex: resposta sem JSON válido.", logging.WARNING)
         return None
-    if not isinstance(plan.get("actions"), list):
-        plan["actions"] = []
-    if "analysis" not in plan:
-        plan["analysis"] = ""
+    plan = _normalize_plan(plan)
+    _log_plan_decision(plan, "Codex")
     return plan
 
 
@@ -2092,7 +2214,6 @@ def run_single_cycle() -> None:
 
         actions = plan.get("actions") or []
         if not actions:
-            log(f"💭 Análise sem ações: {str(plan.get('analysis',''))[:300]}")
             _save_state()
             return
 
@@ -2122,7 +2243,11 @@ def run_single_cycle() -> None:
         # Se nenhuma mudança de código foi aplicada mas há sugestões úteis
         # (notas / actions que falharam), ENCAMINHA para o Codex pedindo
         # implementação concreta — esse é o "loop autônomo" de fato.
-        if not changed and ENABLE_AUTOFIX:
+        should_forward_to_codex = _should_forward_plan_to_codex(plan, results, changed)
+        if not changed and ENABLE_AUTOFIX and should_forward_to_codex:
+            if not bool(plan.get("should_forward_to_codex")) and _plan_has_change_intent(plan):
+                log("ℹ️ Forward forçado por fallback estrutural: plano trouxe edit/create,"
+                    " mas nada foi aplicado neste ciclo.")
             pending = _collect_pending_suggestions(results, plan)
             forward_attempts = 0
             while pending and forward_attempts < MAX_CODEX_FORWARD_ATTEMPTS:
@@ -2133,8 +2258,7 @@ def run_single_cycle() -> None:
                     break
                 codex_actions = codex_plan.get("actions") or []
                 if not codex_actions:
-                    log(f"💭 Codex (tentativa {forward_attempts}): sem ações — "
-                        f"{str(codex_plan.get('analysis',''))[:220]}")
+                    log(f"💭 Codex (tentativa {forward_attempts}): sem ações.")
                     break
                 codex_backup = FileBackup()
                 codex_results = execute_plan(codex_plan, codex_backup)
@@ -2162,6 +2286,8 @@ def run_single_cycle() -> None:
                 pending = _collect_pending_suggestions(codex_results, codex_plan)
                 if not pending:
                     break
+        elif not changed and ENABLE_AUTOFIX and not should_forward_to_codex:
+            log("ℹ️ Plano sinalizou should_forward_to_codex=false; sem encaminhar ao Codex.")
 
         # Resumo do ciclo
         ok_count = sum(1 for r in results if r.ok)
