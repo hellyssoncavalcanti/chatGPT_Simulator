@@ -3250,19 +3250,45 @@ async def handle_chat_task_inner(task, page, q, stop_event: asyncio.Event, activ
         loop_count += 1
 
         rate_limit_state = await page.evaluate("""() => {
-            const bodyText = (document.body?.innerText || '').replace(/\\s+/g, ' ').trim();
-            const candidates = Array.from(document.querySelectorAll('div,section,article,[role="dialog"],main'));
+            // Restringe candidatos a elementos que realmente são banners/toasts/diálogos,
+            // evitando matchar itens da sidebar cujo título mencione "rate limit".
+            const selectors = [
+                '[role="dialog"]',
+                '[role="alert"]',
+                '[role="alertdialog"]',
+                '[aria-live="polite"]',
+                '[aria-live="assertive"]',
+                '[data-testid*="rate" i]',
+                '[data-testid*="limit" i]',
+                '[data-testid*="toast" i]',
+                '[class*="Toast" i]',
+                '[class*="toast" i]',
+                '[class*="Banner" i]',
+                '[class*="banner" i]',
+                '[class*="RateLimit" i]',
+                '[class*="rate-limit" i]',
+                'main [data-message-author-role="assistant"] .text-token-text-error',
+                'main [data-message-author-role="assistant"] [class*="error" i]'
+            ];
+            const candidates = Array.from(document.querySelectorAll(selectors.join(',')));
+            // Ordena por tamanho do texto (ASC) — prefere o banner mais específico.
+            candidates.sort((a, b) => ((a.innerText || '').length - (b.innerText || '').length));
             const hit = candidates.find(el => {
                 const txt = (el.innerText || '').trim().toLowerCase();
-                if (!txt || txt.length < 10) return false;
-                const hasPt = txt.includes('excesso de solicita') && txt.includes('aguarde alguns minutos');
-                const hasEn = txt.includes('too many requests') || txt.includes('rate limit');
+                if (!txt || txt.length < 10 || txt.length > 800) return false;
+                const hasPt = txt.includes('excesso de solicita') && txt.includes('aguarde');
+                const hasEn = (
+                    (txt.includes('too many requests') && (txt.includes('minute') || txt.includes('wait') || txt.includes('try again'))) ||
+                    (txt.includes('rate limit') && (txt.includes('exceed') || txt.includes('wait') || txt.includes('minute'))) ||
+                    (txt.includes('you\\'ve reached') && (txt.includes('limit') || txt.includes('message'))) ||
+                    (txt.includes('message limit') && txt.includes('reach'))
+                );
                 return hasPt || hasEn;
             });
             if (!hit) {
                 return { detected: false, message: '' };
             }
-            const msg = (hit.innerText || bodyText || '').trim().slice(0, 1200);
+            const msg = (hit.innerText || '').trim().slice(0, 600);
             return { detected: true, message: msg };
         }""")
 
