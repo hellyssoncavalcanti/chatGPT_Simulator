@@ -5459,6 +5459,36 @@ def executar_busca_evidencias(resultado: dict, chat_url: str = None, chat_id: st
 # Intervalo de pausa entre análises (segundos) — vindo de config.py com fallback
 PAUSA_MIN = _cfg("ANALISADOR_PAUSA_MIN", 25)
 PAUSA_MAX = _cfg("ANALISADOR_PAUSA_MAX", 60)
+_ultima_analise_iniciada_ts = 0.0
+
+
+def _aguardar_intervalo_entre_analises(contexto: str = "próxima análise"):
+    """
+    Impõe intervalo humano entre análises para reduzir risco de CHAT_RATE_LIMIT.
+    O intervalo é sorteado entre ANALISADOR_PAUSA_MIN/MAX (config.py) e aplicado
+    globalmente entre qualquer análise LLM (prontuário normal e síntese compilada).
+    """
+    global _ultima_analise_iniciada_ts
+    if _ultima_analise_iniciada_ts <= 0:
+        _ultima_analise_iniciada_ts = time.time()
+        return
+
+    pausa_alvo = int(random.uniform(PAUSA_MIN, PAUSA_MAX))
+    decorrido = int(time.time() - _ultima_analise_iniciada_ts)
+    restante = pausa_alvo - decorrido
+    if restante > 0:
+        log.info(
+            f"  ⏸  Intervalo anti-rate-limit ({contexto}): "
+            f"aguardando {restante}s (alvo {pausa_alvo}s, já decorridos {decorrido}s)."
+        )
+        try:
+            countdown(restante, "intervalo entre análises")
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except Exception:
+            time.sleep(restante)
+
+    _ultima_analise_iniciada_ts = time.time()
 
 def processar_lote(pendentes: list):
     total = len(pendentes)
@@ -5521,6 +5551,7 @@ def processar_lote(pendentes: list):
             log.warning(f"  ⚠️ Falha ao buscar contexto clínico: {e}")
 
         try:
+            _aguardar_intervalo_entre_analises(f"ID={idat}")
             resultado = analisar_prontuario(texto, chat_url=chat_url_prev, chat_id=chat_id_prev, contexto=contexto,  id_atendimento=idat)
 
             # Passo 2: Busca web + enriquecimento de condutas com evidências
@@ -5588,10 +5619,8 @@ def processar_lote(pendentes: list):
             salvar_erro(idat, str(e))
             log.error(f"  ❌ ID={idat} erro: {e}")
 
-        if i < total - 1:
-            pausa = int(random.uniform(PAUSA_MIN, PAUSA_MAX))
-            log.info(f"  ⏸  Pausa antes do próximo prontuário...")
-            countdown(pausa, "próximo prontuário")
+        # intervalo entre análises agora é aplicado globalmente no início de cada análise
+        # via _aguardar_intervalo_entre_analises(), evitando bursts entre lotes/ciclos.
 
 
 def atualizar_analise_compilada_paciente(id_paciente: str):
@@ -5677,6 +5706,7 @@ def atualizar_analise_compilada_paciente(id_paciente: str):
     except Exception as e:
         log.warning(f"  ⚠️ Falha ao buscar contexto do paciente compilado {id_paciente}: {e}")
 
+    _aguardar_intervalo_entre_analises(f"síntese compilada paciente {id_paciente}")
     resultado = analisar_prontuario(texto_compilado[:18000], contexto=contexto)
     try:
         resultado = executar_busca_evidencias(
