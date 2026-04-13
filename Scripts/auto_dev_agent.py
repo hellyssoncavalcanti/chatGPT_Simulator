@@ -61,6 +61,7 @@ import json
 import logging
 import os
 import platform
+import random
 import re
 import shutil
 import subprocess
@@ -169,6 +170,14 @@ REQUEST_TIMEOUT_SEC = int(_env("AUTODEV_AGENT_REQUEST_TIMEOUT", "900"))
 STREAM_IDLE_TIMEOUT_SEC = int(_env("AUTODEV_AGENT_STREAM_IDLE_SEC", "180"))
 STARTUP_WAIT_SEC = int(_env("AUTODEV_AGENT_STARTUP_WAIT_SEC", "30"))
 HEALTH_LOG_THROTTLE_SEC = 30.0
+
+# Intervalo humano entre pedidos ao ChatGPT (alinha com analisador_prontuarios)
+_CFG_PAUSA_MIN = int(getattr(config, "ANALISADOR_PAUSA_MIN", 25) or 25) if config else 25
+_CFG_PAUSA_MAX = int(getattr(config, "ANALISADOR_PAUSA_MAX", 60) or 60) if config else 60
+AUTODEV_CHAT_PAUSA_MIN_SEC = int(_env("AUTODEV_CHAT_PAUSA_MIN_SEC", str(_CFG_PAUSA_MIN)))
+AUTODEV_CHAT_PAUSA_MAX_SEC = int(_env("AUTODEV_CHAT_PAUSA_MAX_SEC", str(_CFG_PAUSA_MAX)))
+if AUTODEV_CHAT_PAUSA_MAX_SEC < AUTODEV_CHAT_PAUSA_MIN_SEC:
+    AUTODEV_CHAT_PAUSA_MAX_SEC = AUTODEV_CHAT_PAUSA_MIN_SEC
 
 # =============================================================================
 # CONFIGURAÇÃO — Contexto e Limites
@@ -1050,6 +1059,8 @@ def _stream_chat_completion(
     log(f"📤 Enviando pedido a {label} "
         f"(~{payload_chars} chars){reuse_hint}...")
 
+    _wait_chat_spacing_if_needed(label)
+
     resp = requests.post(
         SIMULATOR_URL,
         headers=_llm_headers(),
@@ -1226,6 +1237,8 @@ def _wrap_for_paste(text: str) -> str:
 _rate_limit_lock = threading.Lock()
 _rate_limit_until_ts: float = 0.0
 _last_rate_limit_log_ts: float = 0.0
+_chat_spacing_lock = threading.Lock()
+_last_chat_request_ts: float = 0.0
 
 
 def _apply_rate_limit_cooldown(retry_after: Optional[float], reason: str = "") -> None:
@@ -1251,6 +1264,33 @@ def _apply_rate_limit_cooldown(retry_after: Optional[float], reason: str = "") -
 def _rate_limit_remaining() -> float:
     with _rate_limit_lock:
         return max(0.0, _rate_limit_until_ts - time.time())
+
+
+def _wait_chat_spacing_if_needed(label: str = "ChatGPT") -> None:
+    """Impõe intervalo humano entre requisições ao ChatGPT neste agente."""
+    global _last_chat_request_ts
+    pause_min = max(0, int(AUTODEV_CHAT_PAUSA_MIN_SEC))
+    pause_max = max(pause_min, int(AUTODEV_CHAT_PAUSA_MAX_SEC))
+
+    with _chat_spacing_lock:
+        now = time.time()
+        if _last_chat_request_ts <= 0:
+            _last_chat_request_ts = now
+            return
+
+        target_gap = random.uniform(pause_min, pause_max)
+        elapsed = now - _last_chat_request_ts
+        remaining = target_gap - elapsed
+        if remaining > 0:
+            log(
+                f"⏸️  Intervalo anti-rate-limit ({label}): aguardando "
+                f"{int(remaining)}s (alvo {int(target_gap)}s).",
+                logging.INFO,
+            )
+            time.sleep(remaining)
+            now = time.time()
+
+        _last_chat_request_ts = now
 
 
 def _looks_like_false_positive_rate_limit(msg: str) -> bool:

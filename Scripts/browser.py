@@ -38,6 +38,7 @@ import os
 import queue
 import sys
 import contextvars
+import requests
 from playwright.async_api import async_playwright
 import config
 from shared import browser_queue, register_file
@@ -3141,6 +3142,84 @@ def _is_codex_url(url: str) -> bool:
     return ("chatgpt.com/codex" in u)
 
 
+def _build_locator_from_chatgpt(raw: str) -> str:
+    """Extrai um seletor CSS simples de uma resposta do ChatGPT."""
+    txt = (raw or "").strip()
+    if not txt:
+        return ""
+    try:
+        data = json.loads(txt)
+        if isinstance(data, dict):
+            sel = str(data.get("locator") or data.get("selector") or "").strip()
+            if sel:
+                return sel
+            cands = data.get("selectors") or []
+            if isinstance(cands, list):
+                for item in cands:
+                    if isinstance(item, str) and item.strip():
+                        return item.strip()
+    except Exception:
+        pass
+
+    m = re.search(r'([#.\[\]:="\w\- >]+)', txt)
+    return (m.group(1).strip() if m else "")
+
+
+async def _sugerir_locator_placeholder_via_chatgpt(page, q, contexto: str) -> str:
+    """
+    Captura HTML atual e pergunta ao ChatGPT qual seletor deve ser usado quando
+    placeholder vital não é localizado.
+    """
+    try:
+        raw_html = await page.content()
+    except Exception as e_html:
+        emit_log(q, f"⚠️ Codex auto-heal: falha ao capturar HTML para diagnóstico: {e_html}")
+        return ""
+
+    html_amostra = (raw_html or "")[:60000]
+    if not html_amostra.strip():
+        emit_log(q, "⚠️ Codex auto-heal: HTML vazio; não foi possível pedir sugestão de locator.")
+        return ""
+
+    llm_url = getattr(config, "ANALISADOR_LLM_URL", "http://127.0.0.1:3003/v1/chat/completions")
+    model = getattr(config, "ANALISADOR_LLM_MODEL", "ChatGPT Simulator")
+    api_key = getattr(config, "API_KEY", "")
+    prompt = (
+        "Você é especialista em Playwright. Receberá um HTML e deve sugerir UM locator CSS robusto "
+        "para o elemento vital descrito. Responda SOMENTE em JSON válido: "
+        '{"locator":"<css-selector>","justificativa":"curta"}. '
+        f"Contexto do elemento vital: {contexto}.\n\nHTML:\n{html_amostra}"
+    )
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+
+    payload = {
+        "model": model,
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0.1,
+        "stream": False,
+    }
+
+    try:
+        resp = requests.post(llm_url, json=payload, headers=headers, timeout=90)
+        resp.raise_for_status()
+        data = resp.json()
+        content = (
+            (((data or {}).get("choices") or [{}])[0].get("message") or {}).get("content")
+            or ""
+        )
+        locator = _build_locator_from_chatgpt(content)
+        if locator:
+            emit_log(q, f"🛠️ Codex auto-heal: locator sugerido pelo ChatGPT: {locator}")
+        else:
+            emit_log(q, "⚠️ Codex auto-heal: ChatGPT não retornou locator utilizável.")
+        return locator
+    except Exception as e:
+        emit_log(q, f"⚠️ Codex auto-heal: erro ao consultar ChatGPT para locator: {e}")
+        return ""
+
+
 async def _codex_wait_for_composer(page, q, timeout_ms: int = 20000):
     """Aguarda o composer do Codex aparecer. Retorna o handle do elemento."""
     # O composer Codex é um textarea/contenteditable cujo placeholder começa
@@ -3174,7 +3253,31 @@ async def _codex_wait_for_composer(page, q, timeout_ms: int = 20000):
         except Exception:
             pass
         await asyncio.sleep(0.4)
-    raise RuntimeError('Composer do Codex não encontrado (placeholder /plan ausente)')
+
+    emit_log(q, "⚠️ Placeholder do composer Codex não detectado; iniciando auto-heal via HTML + ChatGPT...")
+    locator_sugerido = await _sugerir_locator_placeholder_via_chatgpt(
+        page,
+        q,
+        contexto="composer do Codex (textarea/contenteditable para enviar tarefa)"
+    )
+    if locator_sugerido:
+        try:
+            ok = await page.evaluate(
+                """(sel) => {
+                    const el = document.querySelector(sel);
+                    if (!el) return false;
+                    el.setAttribute('data-autodev-codex-composer', '1');
+                    return true;
+                }""",
+                locator_sugerido,
+            )
+            if ok:
+                emit_log(q, "✅ Codex auto-heal: composer localizado com seletor sugerido e script ajustado automaticamente.")
+                return '[data-autodev-codex-composer="1"]'
+        except Exception as e:
+            emit_log(q, f"⚠️ Codex auto-heal: seletor sugerido falhou na validação: {e}")
+
+    raise RuntimeError('Composer do Codex não encontrado (placeholder /plan ausente, inclusive após auto-heal)')
 
 
 async def _codex_select_repo(page, q, repo: str) -> bool:
