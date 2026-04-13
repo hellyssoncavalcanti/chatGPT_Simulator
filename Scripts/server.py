@@ -1531,7 +1531,11 @@ def chat_completions():
         'request_source':   source_hint or sender_label,
         'attachment_paths': saved_paths,
         'stream_queue':     stream_q,
-        'sender':           sender_label
+        'sender':           sender_label,
+        # Codex: repositório/ambiente a ser selecionado no dropdown de
+        # https://chatgpt.com/codex/cloud antes do paste da mensagem.
+        # Opcional — quando ausente, browser.py usa a seleção atual do UI.
+        'codex_repo':       (data.get('codex_repo') or '').strip() or None,
     }
 
     def _dispatch_chat_task():
