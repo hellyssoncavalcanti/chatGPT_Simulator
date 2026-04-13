@@ -2316,7 +2316,7 @@ def run_single_cycle() -> None:
     _save_state()
 
 
-def _sleep_with_countdown(total_seconds: int) -> None:
+def _sleep_with_countdown(total_seconds: int, suggestion_remaining_sec: Optional[int] = None) -> None:
     """Pausa entre ciclos com countdown INLINE no stdout.
 
     Estratégia:
@@ -2354,11 +2354,24 @@ def _sleep_with_countdown(total_seconds: int) -> None:
     next_cycle_dt = datetime.now() + timedelta(seconds=total_seconds)
     next_hhmmss = next_cycle_dt.strftime("%H:%M:%S")
 
+    suggestion_remaining_sec = (
+        max(0, int(suggestion_remaining_sec))
+        if isinstance(suggestion_remaining_sec, (int, float))
+        else None
+    )
+    suggestion_hint = ""
+    if suggestion_remaining_sec is not None:
+        suggestion_hint = (
+            f" | próxima sugestão em {_fmt(suggestion_remaining_sec)}"
+            if suggestion_remaining_sec > 0
+            else " | sugestão já elegível"
+        )
+
     # 1) Linha logada inicial — persistida no log em arquivo e suficiente
     #    caso o terminal não suporte '\r'.
     log(
         f"⏳ Próximo ciclo às {next_hhmmss} "
-        f"(em {_fmt(total_seconds)}, total {total_seconds}s)"
+        f"(em {_fmt(total_seconds)}, total {total_seconds}s){suggestion_hint}"
     )
 
     if not stream_ok:
@@ -2374,9 +2387,16 @@ def _sleep_with_countdown(total_seconds: int) -> None:
                 break
 
             label = _fmt(remaining)
-            line = (
-                f"⏳ Próximo ciclo às {next_hhmmss} (em {label})"
-            )
+            inline_suggestion = ""
+            if suggestion_remaining_sec is not None:
+                elapsed_sec = max(0, int(round(time.time() - start_mono)))
+                sug_remaining = max(0, suggestion_remaining_sec - elapsed_sec)
+                inline_suggestion = (
+                    f" | sugestão em {_fmt(sug_remaining)}"
+                    if sug_remaining > 0
+                    else " | sugestão elegível"
+                )
+            line = f"⏳ Próximo ciclo às {next_hhmmss} (em {label}){inline_suggestion}"
             try:
                 # Padding generoso para sobrescrever restos da iteração anterior.
                 stream.write("\r" + line + " " * 20)
@@ -2444,7 +2464,11 @@ def main_loop() -> None:
 
         elapsed = time.time() - started
         sleep_for = max(10, CYCLE_INTERVAL_SEC - int(elapsed))
-        _sleep_with_countdown(sleep_for)
+        suggestion_remaining = max(
+            0,
+            SUGGESTION_INTERVAL_SEC - int(time.time() - (_AGENT_STATE.last_suggestion_ts or 0.0)),
+        )
+        _sleep_with_countdown(sleep_for, suggestion_remaining_sec=suggestion_remaining)
 
 
 # =============================================================================
