@@ -3403,6 +3403,64 @@ async def _codex_submit(page, q) -> bool:
     return False
 
 
+async def _codex_wait_and_click_pr_controls(page, q, timeout_s: int = 900) -> tuple[bool, str]:
+    """Mantém a aba do Codex aberta até surgir 'Criar PR'/'Atualizar Branch' e clica.
+
+    Retorna (clicked, label) com label em minúsculas quando clicado.
+    """
+    emit_log(q, "Codex: aguardando botões finais ('Criar PR'/'Atualizar Branch')...")
+    selector_js = """() => {
+        const alvos = ['criar pr', 'atualizar branch'];
+        const isVisible = (el) => {
+            if (!el) return false;
+            const style = window.getComputedStyle(el);
+            if (!style) return false;
+            if (style.visibility === 'hidden' || style.display === 'none') return false;
+            const rect = el.getBoundingClientRect();
+            return rect.width > 0 && rect.height > 0;
+        };
+        const candidates = Array.from(document.querySelectorAll('button, a, div[role="button"], span, summary'));
+        for (const el of candidates) {
+            if (!isVisible(el) || el.disabled) continue;
+            const txt = ((el.innerText || el.textContent || '') + '').trim().toLowerCase().replace(/\\s+/g, ' ');
+            if (!txt) continue;
+            const alvo = alvos.find(a => txt === a || txt.includes(a));
+            if (!alvo) continue;
+            try { el.scrollIntoView({block: 'center', inline: 'center'}); } catch (_) {}
+            try { el.click(); return {clicked: true, label: alvo}; } catch (_) {}
+            try {
+                el.dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true, view: window}));
+                return {clicked: true, label: alvo};
+            } catch (_) {}
+        }
+        return {clicked: false, label: ''};
+    }"""
+
+    deadline = time.time() + max(10, int(timeout_s or 0))
+    last_status_emit = 0.0
+    while time.time() < deadline:
+        if hasattr(page, "is_closed") and page.is_closed():
+            return False, ""
+        try:
+            result = await page.evaluate(selector_js)
+        except Exception:
+            result = {"clicked": False, "label": ""}
+        if isinstance(result, dict) and result.get("clicked"):
+            label = str(result.get("label") or "").strip().lower()
+            emit_log(q, f"✅ Codex: botão detectado e clicado automaticamente ({label or 'ação final'}).")
+            return True, label
+
+        now = time.time()
+        if now - last_status_emit >= 5.0:
+            remaining = max(0, int(deadline - now))
+            emit_event(q, "status", f"Codex: aguardando botão de PR/Branch... {remaining}s")
+            last_status_emit = now
+        await asyncio.sleep(1.0)
+
+    emit_log(q, "⚠️ Codex: timeout aguardando botão 'Criar PR'/'Atualizar Branch'.")
+    return False, ""
+
+
 async def handle_codex_task_inner(task, page, q, stop_event, activityts=None):
     """Fluxo dedicado ao Codex (chatgpt.com/codex/cloud):
       1) Navega para a Codex URL.
@@ -3468,6 +3526,10 @@ async def handle_codex_task_inner(task, page, q, stop_event, activityts=None):
         })
     else:
         emit_log(q, 'Codex: URL da tarefa não detectada em 25s (submissão pode ter sido aceita mesmo assim).')
+
+    # Mantém a aba aberta até aparecer uma das ações finais do Codex para
+    # concluir o fluxo de PR/branch antes de encerrar a tarefa no worker.
+    await _codex_wait_and_click_pr_controls(page, q, timeout_s=900)
 
     # Resposta curta confirmando submissão — o agente parseia JSON; devolvemos
     # um plano vazio com analysis explicando que a tarefa Codex foi enfileirada.
