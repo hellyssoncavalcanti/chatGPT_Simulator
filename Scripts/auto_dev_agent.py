@@ -1102,8 +1102,36 @@ def _rate_limit_remaining() -> float:
         return max(0.0, _rate_limit_until_ts - time.time())
 
 
+def _looks_like_false_positive_rate_limit(msg: str) -> bool:
+    """True se a 'mensagem' de rate-limit parece ter vindo de sidebar/página inteira.
+
+    Sinais de falso positivo do detector do browser.py:
+      • mensagem muito longa (>500 chars): banners reais são curtos;
+      • contém rótulos de UI (ex.: 'Novo chat', 'Busca em chats');
+      • não contém nenhuma frase de ação típica de rate limit.
+    """
+    if not msg:
+        return False
+    m = msg.lower()
+    if len(m) > 500:
+        return True
+    ui_labels = ("novo chat", "busca em chats", "biblioteca", "relatórios de chats",
+                 "new chat", "search chats", "library")
+    if any(label in m for label in ui_labels):
+        action_words = ("aguarde", "minuto", "minute", "wait", "try again",
+                        "exceeded", "reached", "limit reached")
+        if not any(a in m for a in action_words):
+            return True
+    return False
+
+
 def _parse_rate_limit(payload: Any) -> Tuple[bool, Optional[float], str]:
-    """Detecta erros de rate limit em objetos/strings. Retorna (is_rl, retry_after, motivo)."""
+    """Detecta erros de rate limit em objetos/strings. Retorna (is_rl, retry_after, motivo).
+
+    Também filtra falsos positivos do detector heurístico do browser.py — quando
+    a "mensagem" é o texto da sidebar inteira (sem frases de ação típicas), o
+    payload é tratado como erro genérico (não aplica cooldown global).
+    """
     if payload is None:
         return False, None, ""
     if isinstance(payload, dict):
@@ -1111,19 +1139,33 @@ def _parse_rate_limit(payload: Any) -> Tuple[bool, Optional[float], str]:
         msg = str(payload.get("message", "") or "")
         retry = payload.get("retry_after_seconds") or payload.get("retry_after")
         combined = f"{code} {msg}".lower()
-        if ("rate" in code and "limit" in code) or "rate_limit" in combined \
-           or "excesso de solicita" in combined:
+        looks_rl = (
+            ("rate" in code and "limit" in code)
+            or "rate_limit" in combined
+            or "too_many_requests" in combined
+            or "excesso de solicita" in combined
+        )
+        if looks_rl and _looks_like_false_positive_rate_limit(msg):
+            log(f"⚠️ Payload 'rate_limit' parece falso positivo (ignorado): "
+                f"{msg[:160]!r}", logging.WARNING)
+            return False, None, ""
+        if looks_rl:
             try:
                 retry_f = float(retry) if retry is not None else None
             except Exception:
                 retry_f = None
             return True, retry_f, msg or code
         return False, None, ""
-    text = str(payload).lower()
-    if "rate_limit" in text or "rate limit" in text or "excesso de solicita" in text:
-        retry_match = re.search(r"retry_after[^0-9]*([0-9]+(?:\.[0-9]+)?)", text)
+    text = str(payload)
+    t = text.lower()
+    if "rate_limit" in t or "rate limit" in t or "excesso de solicita" in t:
+        if _looks_like_false_positive_rate_limit(text):
+            log(f"⚠️ Texto 'rate_limit' parece falso positivo (ignorado): "
+                f"{text[:160]!r}", logging.WARNING)
+            return False, None, ""
+        retry_match = re.search(r"retry_after[^0-9]*([0-9]+(?:\.[0-9]+)?)", t)
         retry_f = float(retry_match.group(1)) if retry_match else None
-        return True, retry_f, str(payload)[:200]
+        return True, retry_f, text[:200]
     return False, None, ""
 
 
