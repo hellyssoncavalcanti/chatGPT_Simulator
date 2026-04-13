@@ -1059,8 +1059,14 @@ def _normalize_plan(plan: Dict[str, Any]) -> Dict[str, Any]:
     if "analysis" not in plan:
         plan["analysis"] = ""
     if "should_forward_to_codex" not in plan:
-        # Fallback conservador: só sinaliza forward automático quando não há ações.
-        plan["should_forward_to_codex"] = len(plan["actions"]) == 0
+        # Fallback estrutural (sem palavras-chave): se vier sem ações executáveis
+        # (edit/create/shell), assume que deve encaminhar ao Codex.
+        actionable_types = {"edit_file", "create_file", "shell"}
+        has_actionable = any(
+            isinstance(a, dict) and str(a.get("type", "")).lower().strip() in actionable_types
+            for a in (plan.get("actions") or [])
+        )
+        plan["should_forward_to_codex"] = not has_actionable
     else:
         plan["should_forward_to_codex"] = bool(plan.get("should_forward_to_codex"))
     return plan
@@ -1190,15 +1196,6 @@ def _stream_chat_completion(
     inline_status_open = False
     inline_last_len = 0
     stream = getattr(sys, "stdout", None)
-    inline_can_ansi = bool(
-        stream and hasattr(stream, "isatty") and stream.isatty() and not os.environ.get("NO_COLOR")
-    )
-
-    def _inline_colorize(text: str, color_code: str = "\033[96m") -> str:
-        if not inline_can_ansi:
-            return text
-        return f"{color_code}{text}\033[0m"
-
     def _clean_browser_prefix(text: str) -> str:
         s = (text or "").strip()
         s = re.sub(r"^\s*Remetente:\s*[^|]+\|\s*", "", s, flags=re.IGNORECASE)
@@ -1217,9 +1214,8 @@ def _stream_chat_completion(
         nonlocal inline_status_open, inline_last_len
         try:
             rendered = f"   ⏳ status: {_normalize_status(text)[:220]}"
-            rendered_colored = _inline_colorize(rendered, "\033[93m")
             clear_pad = max(0, inline_last_len - len(rendered))
-            sys.stdout.write("\r" + rendered_colored + (" " * (clear_pad + 8)))
+            sys.stdout.write("\r" + rendered + (" " * (clear_pad + 8)))
             sys.stdout.flush()
             inline_status_open = True
             inline_last_len = len(rendered)
@@ -1230,9 +1226,8 @@ def _stream_chat_completion(
         nonlocal inline_status_open, inline_last_len
         try:
             rendered = f"   📝 recebendo resposta: {size} chars..."
-            rendered_colored = _inline_colorize(rendered, "\033[96m")
             clear_pad = max(0, inline_last_len - len(rendered))
-            sys.stdout.write("\r" + rendered_colored + (" " * (clear_pad + 8)))
+            sys.stdout.write("\r" + rendered + (" " * (clear_pad + 8)))
             sys.stdout.flush()
             inline_status_open = True
             inline_last_len = len(rendered)
