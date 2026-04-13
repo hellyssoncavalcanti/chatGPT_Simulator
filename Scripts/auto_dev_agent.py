@@ -329,13 +329,23 @@ def _setup_logger() -> logging.Logger:
         print(f"[auto_dev_agent] ❌ Falha ao abrir log file: {exc}", file=sys.stderr)
     class _AnsiColorFormatter(logging.Formatter):
         RESET = "\033[0m"
-        COLORS = {
+        LEVEL_COLORS = {
             logging.DEBUG: "\033[90m",
             logging.INFO: "\033[96m",
             logging.WARNING: "\033[93m",
             logging.ERROR: "\033[91m",
             logging.CRITICAL: "\033[95m",
         }
+        ACTION_COLORS = [
+            (r"📤|Enviando pedido", "\033[94m"),         # envio
+            (r"📝|recebendo resposta", "\033[96m"),      # progresso resposta
+            (r"✅|Validação OK|resposta concluída", "\033[92m"),
+            (r"❌|erro recebido|Falha", "\033[91m"),
+            (r"⏳|cooldown|aguardando", "\033[93m"),
+            (r"🔧|\[browser\.py\]", "\033[95m"),         # logs técnicos/browser
+            (r"🧠|analysis completo", "\033[36m"),
+            (r"🔁|should_forward_to_codex", "\033[94m"),
+        ]
 
         def format(self, record: logging.LogRecord) -> str:
             text = super().format(record)
@@ -343,7 +353,13 @@ def _setup_logger() -> logging.Logger:
             is_tty = bool(stream and hasattr(stream, "isatty") and stream.isatty())
             if os.environ.get("NO_COLOR") or (not is_tty):
                 return text
-            color = self.COLORS.get(record.levelno, "")
+            color = ""
+            for pattern, action_color in self.ACTION_COLORS:
+                if re.search(pattern, text, flags=re.IGNORECASE):
+                    color = action_color
+                    break
+            if not color:
+                color = self.LEVEL_COLORS.get(record.levelno, "")
             if not color:
                 return text
             return f"{color}{text}{self.RESET}"
@@ -1155,6 +1171,16 @@ def _stream_chat_completion(
     MARKDOWN_REPORT_MIN_STEP = 1024   # chars
     MARKDOWN_REPORT_MIN_INTERVAL = 3  # segundos
     inline_status_open = False
+    inline_last_len = 0
+    stream = getattr(sys, "stdout", None)
+    inline_can_ansi = bool(
+        stream and hasattr(stream, "isatty") and stream.isatty() and not os.environ.get("NO_COLOR")
+    )
+
+    def _inline_colorize(text: str, color_code: str = "\033[96m") -> str:
+        if not inline_can_ansi:
+            return text
+        return f"{color_code}{text}\033[0m"
 
     def _clean_browser_prefix(text: str) -> str:
         s = (text or "").strip()
@@ -1171,25 +1197,42 @@ def _stream_chat_completion(
         return s
 
     def _print_inline_status(text: str) -> None:
-        nonlocal inline_status_open
+        nonlocal inline_status_open, inline_last_len
         try:
             rendered = f"   ⏳ status: {_normalize_status(text)[:220]}"
-            sys.stdout.write("\r" + rendered + " " * 24)
+            rendered_colored = _inline_colorize(rendered, "\033[93m")
+            clear_pad = max(0, inline_last_len - len(rendered))
+            sys.stdout.write("\r" + rendered_colored + (" " * (clear_pad + 8)))
             sys.stdout.flush()
             inline_status_open = True
+            inline_last_len = len(rendered)
         except Exception:
             log(f"   ⏳ status: {_normalize_status(text)[:220]}")
 
+    def _print_inline_markdown(size: int) -> None:
+        nonlocal inline_status_open, inline_last_len
+        try:
+            rendered = f"   📝 recebendo resposta: {size} chars..."
+            rendered_colored = _inline_colorize(rendered, "\033[96m")
+            clear_pad = max(0, inline_last_len - len(rendered))
+            sys.stdout.write("\r" + rendered_colored + (" " * (clear_pad + 8)))
+            sys.stdout.flush()
+            inline_status_open = True
+            inline_last_len = len(rendered)
+        except Exception:
+            log(f"   📝 recebendo resposta: {size} chars...")
+
     def _close_inline_status() -> None:
-        nonlocal inline_status_open
+        nonlocal inline_status_open, inline_last_len
         if inline_status_open:
             try:
-                sys.stdout.write("\r" + " " * 260 + "\r")
+                sys.stdout.write("\r" + " " * (inline_last_len + 16) + "\r")
                 sys.stdout.flush()
             except Exception:
                 pass
             finally:
                 inline_status_open = False
+                inline_last_len = 0
 
     started = time.time()
     last_event = started
@@ -1243,8 +1286,7 @@ def _stream_chat_completion(
                 or (size != last_markdown_size_reported
                     and now - last_markdown_report_ts >= MARKDOWN_REPORT_MIN_INTERVAL)
             ):
-                _close_inline_status()
-                log(f"   📝 recebendo resposta: {size} chars...")
+                _print_inline_markdown(size)
                 last_markdown_size_reported = size
                 last_markdown_report_ts = now
 
