@@ -70,7 +70,7 @@ import threading
 import time
 import traceback
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
@@ -1875,19 +1875,23 @@ def run_single_cycle() -> None:
 def _sleep_with_countdown(total_seconds: int) -> None:
     """Pausa entre ciclos com countdown INLINE no stdout.
 
-    Enquanto o agente está em pausa (sem nenhum script próprio em execução),
-    mostramos o tempo restante sobre a mesma linha do terminal (usando '\\r'),
-    escrevendo direto em stdout para não passar pelo logger (que quebraria a
-    linha). Se stdout não aceitar escrita direta, caímos para time.sleep.
+    Estratégia:
+      1. Logamos UMA linha inicial informando o horário absoluto (hora local
+         do Windows) em que a próxima conferência irá ocorrer, além do
+         intervalo até lá — isso fica persistido no arquivo de log.
+      2. Em seguida atualizamos a MESMA linha do console a cada segundo
+         usando '\\r', escrevendo direto em sys.stdout (sem passar pelo
+         logger, que quebraria a linha).
+      3. Ao final, emitimos '\\n' para que o próximo log do ciclo comece
+         em uma linha limpa, sem colidir com o resto do countdown.
 
-    Adicionalmente, emitimos uma linha logada a cada FALLBACK_LOG_STEP segundos
-    para que o log em arquivo e consoles sem suporte a '\\r' também mostrem o
-    progresso até a próxima conferência.
+    Se stdout não aceitar escrita direta, nos limitamos à linha inicial
+    logada (que já cumpre o requisito mínimo de citar o horário do próximo
+    ciclo) e caímos para um time.sleep silencioso.
     """
     if total_seconds <= 0:
         return
 
-    FALLBACK_LOG_STEP = 30  # segundos entre linhas logadas de progresso
     stream = sys.stdout
     try:
         stream_ok = stream is not None and hasattr(stream, "write")
@@ -1901,11 +1905,24 @@ def _sleep_with_countdown(total_seconds: int) -> None:
             return f"{hh:02d}:{mm:02d}:{ss:02d}"
         return f"{mm:02d}:{ss:02d}"
 
-    # Linha logada inicial (sempre visível, também no log em arquivo).
-    log(f"⏳ Próxima conferência em {_fmt(total_seconds)} (total {total_seconds}s)")
+    # Horário absoluto local (do Windows host) em que o próximo ciclo ocorrerá.
+    start_mono = time.time()
+    next_cycle_dt = datetime.now() + timedelta(seconds=total_seconds)
+    next_hhmmss = next_cycle_dt.strftime("%H:%M:%S")
 
-    end_at = time.time() + total_seconds
-    last_logged_remaining = total_seconds
+    # 1) Linha logada inicial — persistida no log em arquivo e suficiente
+    #    caso o terminal não suporte '\r'.
+    log(
+        f"⏳ Próximo ciclo às {next_hhmmss} "
+        f"(em {_fmt(total_seconds)}, total {total_seconds}s)"
+    )
+
+    if not stream_ok:
+        time.sleep(total_seconds)
+        return
+
+    end_at = start_mono + total_seconds
+    wrote_inline = False
     try:
         while True:
             remaining = int(round(end_at - time.time()))
@@ -1913,31 +1930,29 @@ def _sleep_with_countdown(total_seconds: int) -> None:
                 break
 
             label = _fmt(remaining)
-            line = f"⏳ Próxima conferência em {label} (total {total_seconds}s)"
-
-            # 1) Atualização inline (carriage-return) direto no stdout.
-            if stream_ok:
+            line = (
+                f"⏳ Próximo ciclo às {next_hhmmss} (em {label})"
+            )
+            try:
+                # Padding generoso para sobrescrever restos da iteração anterior.
+                stream.write("\r" + line + " " * 20)
                 try:
-                    # Padding generoso para sobrescrever restos da iteração anterior.
-                    stream.write("\r" + line + " " * 20)
-                    try:
-                        stream.flush()
-                    except Exception:
-                        pass
+                    stream.flush()
                 except Exception:
-                    stream_ok = False
-
-            # 2) Linha logada periódica para logs sem suporte a '\r'.
-            if (last_logged_remaining - remaining) >= FALLBACK_LOG_STEP:
-                log(line)
-                last_logged_remaining = remaining
+                    pass
+                wrote_inline = True
+            except Exception:
+                # Sem stream utilizável; apenas dorme o tempo restante.
+                time.sleep(max(1, remaining))
+                return
 
             time.sleep(1.0)
     except KeyboardInterrupt:
         raise
     finally:
-        # Limpa a linha do countdown e quebra linha para o próximo log.
-        if stream_ok:
+        # Limpa a linha do countdown e quebra linha para que o próximo log
+        # comece em uma linha nova e não "cole" com o último frame inline.
+        if wrote_inline:
             try:
                 stream.write("\r" + " " * 80 + "\r")
                 try:
