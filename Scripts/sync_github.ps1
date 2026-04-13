@@ -16,6 +16,7 @@ $script:InstallTask = $false
 $script:UninstallTask = $false
 $script:RestartRequested = $false
 $script:RestartScope = 'none'
+$script:RestartTargets = New-Object System.Collections.Generic.List[string]
 $script:UpdatedFiles = New-Object System.Collections.Generic.List[string]
 $script:AddedFiles = New-Object System.Collections.Generic.List[string]
 $script:ProtectedFiles = New-Object System.Collections.Generic.List[string]
@@ -111,6 +112,13 @@ function Normalize-RelativePath([string]$PathValue) {
         return ''
     }
     return $PathValue.Trim('"').Replace('/', '\').Replace('\\', '\').TrimStart('.', '\').ToLowerInvariant()
+}
+
+function Add-RestartTarget([string]$Target) {
+    if ([string]::IsNullOrWhiteSpace($Target)) { return }
+    if ($script:RestartTargets -notcontains $Target) {
+        $script:RestartTargets.Add($Target)
+    }
 }
 
 function Initialize-Logging {
@@ -799,10 +807,12 @@ function Sync-FilesFromMirror {
             Write-Info 'Apenas arquivos ignorados para reinicio (README.md e/ou Scripts\sync_github.py) foram alterados neste ciclo. Nenhum reinicio sera executado.' -Color Yellow
         }
 
+        $analyzerRelative = Normalize-RelativePath $script:Config.analyzerPattern
         $onlyPhp = ($changedUnique.Count -gt 0) -and (($changedUnique | Where-Object { -not $_.EndsWith('.php') }).Count -eq 0)
-        $onlyPywa = ($changedUnique.Count -eq 1) -and ($changedUnique[0] -eq $pywaRelative)
-        $onlyAutoDev = ($changedUnique.Count -eq 1) -and ($changedUnique[0] -eq $autoDevRelative)
-        $autoDevChanged = $changedUnique -contains $autoDevRelative
+        $pyChanged = @($changedUnique | Where-Object { $_.EndsWith('.py') })
+        $otherPyChanged = @($pyChanged | Where-Object { $_ -ne $analyzerRelative -and $_ -ne $pywaRelative -and $_ -ne $autoDevRelative })
+
+        $script:RestartTargets.Clear()
 
         if ($changedUnique.Count -eq 0) {
             $script:RestartRequested = $false
@@ -811,19 +821,34 @@ function Sync-FilesFromMirror {
             $script:RestartRequested = $false
             $script:RestartScope = 'none'
             Write-Info "Atualizacao exclusiva de arquivos .php detectada. O reinicio dos processos locais (BATs) sera ignorado." -Color Yellow
-        } elseif ($onlyPywa) {
-            $script:RestartRequested = $true
-            $script:RestartScope = 'pywa_only'
-            Write-Info "Atualizacao exclusiva de $pywaRelative detectada. Reinicio seletivo do servidor WhatsApp sera executado." -Color Yellow
-        } elseif ($onlyAutoDev) {
-            $script:RestartRequested = $true
-            $script:RestartScope = 'autodev_only'
-            Write-Info "Atualizacao exclusiva de $autoDevRelative detectada. Reinicio seletivo do Agente Autonomo sera executado." -Color Yellow
+        } elseif ($pyChanged.Count -eq 0) {
+            $script:RestartRequested = $false
+            $script:RestartScope = 'none'
+            Write-Info "Nenhum arquivo .py alterado neste ciclo. Reinicio dos servidores sera ignorado." -Color Yellow
         } else {
             $script:RestartRequested = $true
-            $script:RestartScope = 'full'
-            if ($autoDevChanged) {
-                Write-Info "Alteracao em $autoDevRelative incluida no reinicio completo." -Color Yellow
+            $script:RestartScope = 'selective'
+
+            if ($pyChanged -contains $analyzerRelative) {
+                Add-RestartTarget 'analyzer'
+                Write-Info "Alteracao em $analyzerRelative detectada. Reinicio seletivo do analisador sera executado." -Color Yellow
+            }
+            if ($pyChanged -contains $pywaRelative) {
+                Add-RestartTarget 'pywa'
+                Write-Info "Alteracao em $pywaRelative detectada. Reinicio seletivo do servidor WhatsApp sera executado." -Color Yellow
+            }
+            if ($pyChanged -contains $autoDevRelative) {
+                Add-RestartTarget 'autodev'
+                Write-Info "Alteracao em $autoDevRelative detectada. Reinicio seletivo do Agente Autonomo sera executado." -Color Yellow
+            }
+            if ($otherPyChanged.Count -gt 0) {
+                Add-RestartTarget 'main'
+                Write-Info "Alteracao em outros arquivos .py detectada. Reinicio seletivo do 0. start.bat sera executado." -Color Yellow
+            }
+
+            if ($script:RestartTargets.Count -eq 0) {
+                $script:RestartRequested = $false
+                $script:RestartScope = 'none'
             }
         }
     }
@@ -1034,12 +1059,16 @@ function Log-RunningProcessesStatus {
 
 function Stop-ManagedProcesses {
     param(
-        [ValidateSet('full', 'pywa_only', 'autodev_only')]
-        [string]$Scope = 'full'
+        [ValidateSet('none', 'selective')]
+        [string]$Scope = 'selective'
     )
 
     Write-Section 'PARANDO PROCESSOS E JANELAS'
     $killed = 0
+    $killMain = $script:RestartTargets -contains 'main'
+    $killAnalyzer = $script:RestartTargets -contains 'analyzer'
+    $killPywa = $script:RestartTargets -contains 'pywa'
+    $killAutoDev = $script:RestartTargets -contains 'autodev'
 
     $whatsappTitle = if ([string]::IsNullOrWhiteSpace($script:Config.whatsappWindowTitle)) { 'WhatsApp Follow-up Server (Web)' } else { $script:Config.whatsappWindowTitle }
     $whatsappTitlePattern = [regex]::Escape($whatsappTitle)
@@ -1056,14 +1085,10 @@ function Stop-ManagedProcesses {
         $isPywaWindow = ($c.CommandLine -match $whatsappBatPattern -or $c.CommandLine -match $pywaScriptPattern -or $c.CommandLine -match $whatsappTitlePattern)
         $isAutoDevWindow = ($c.CommandLine -match $autoDevBatPattern -or $c.CommandLine -match $autoDevTitlePattern)
 
-        $mustKill = $false
-        if ($Scope -eq 'pywa_only') {
-            $mustKill = $isPywaWindow
-        } elseif ($Scope -eq 'autodev_only') {
-            $mustKill = $isAutoDevWindow
-        } else {
-            $mustKill = ($isMainWindow -or $isAnalyzerWindow -or $isPywaWindow -or $isAutoDevWindow)
-        }
+        $mustKill = (($killMain -and $isMainWindow) -or
+                     ($killAnalyzer -and $isAnalyzerWindow) -or
+                     ($killPywa -and $isPywaWindow) -or
+                     ($killAutoDev -and $isAutoDevWindow))
 
         if ($mustKill) {
             try {
@@ -1086,14 +1111,10 @@ function Stop-ManagedProcesses {
         $isPywaPy = $p.CommandLine -match [regex]::Escape($pywaName)
         $isAutoDevPy = $p.CommandLine -match [regex]::Escape($autoDevName)
 
-        $mustKill = $false
-        if ($Scope -eq 'pywa_only') {
-            $mustKill = $isPywaPy
-        } elseif ($Scope -eq 'autodev_only') {
-            $mustKill = $isAutoDevPy
-        } else {
-            $mustKill = ($isMainPy -or $isAnalyzerPy -or $isPywaPy -or $isAutoDevPy)
-        }
+        $mustKill = (($killMain -and $isMainPy) -or
+                     ($killAnalyzer -and $isAnalyzerPy) -or
+                     ($killPywa -and $isPywaPy) -or
+                     ($killAutoDev -and $isAutoDevPy))
 
         if ($mustKill) {
             try {
@@ -1104,7 +1125,7 @@ function Stop-ManagedProcesses {
         }
     }
 
-    if ($Scope -eq 'full') {
+    if ($killMain) {
         $browsers = Get-CimInstance Win32_Process | Where-Object { $_.Name -match 'chrome' -or $_.Name -match 'ms-playwright' -or $_.Name -match 'chromium' }
         foreach ($b in $browsers) {
             if ($b.ExecutablePath -match 'ms-playwright' -or $b.CommandLine -match 'playwright') {
@@ -1122,8 +1143,8 @@ function Stop-ManagedProcesses {
 
 function Start-ManagedProcesses {
     param(
-        [ValidateSet('full', 'pywa_only', 'autodev_only')]
-        [string]$Scope = 'full'
+        [ValidateSet('none', 'selective')]
+        [string]$Scope = 'selective'
     )
 
     Write-Section 'REINICIANDO PROCESSOS'
@@ -1134,42 +1155,34 @@ function Start-ManagedProcesses {
     $autoDevBatName = if ([string]::IsNullOrWhiteSpace($script:Config.autoDevAgentBat)) { '3. start_agente_autonomo.bat' } else { $script:Config.autoDevAgentBat }
     $batAutoDev = Join-Path $script:Config.localDir $autoDevBatName
 
-    if ($Scope -eq 'pywa_only') {
+    if ($script:RestartTargets -contains 'main') {
+        if (-not (Test-Path $batMain)) { throw "Arquivo .bat nao encontrado: $batMain" }
+        Write-Info "Iniciando $batMain..."
+        Start-Process -FilePath $batMain -WorkingDirectory $script:Config.localDir | Out-Null
+        Start-Sleep -Seconds 3
+    }
+
+    if ($script:RestartTargets -contains 'analyzer') {
+        if (-not (Test-Path $batAnalyzer)) { throw "Arquivo .bat nao encontrado: $batAnalyzer" }
+        Write-Info "Iniciando $batAnalyzer..."
+        Start-Process -FilePath $batAnalyzer -WorkingDirectory $script:Config.localDir | Out-Null
+        Start-Sleep -Seconds 2
+    }
+
+    if ($script:RestartTargets -contains 'pywa') {
         if (-not (Test-Path $batWhatsapp)) { throw "Arquivo .bat nao encontrado: $batWhatsapp" }
         Write-Info "Iniciando $batWhatsapp..."
         Start-Process -FilePath $batWhatsapp -WorkingDirectory $script:Config.localDir | Out-Null
-        Write-Ok 'Servidor WhatsApp reiniciado de forma seletiva.'
-        return
+        Start-Sleep -Seconds 2
     }
 
-    if ($Scope -eq 'autodev_only') {
+    if ($script:RestartTargets -contains 'autodev') {
         if (-not (Test-Path $batAutoDev)) { throw "Arquivo .bat nao encontrado: $batAutoDev" }
         Write-Info "Iniciando $batAutoDev..."
         Start-Process -FilePath $batAutoDev -WorkingDirectory $script:Config.localDir | Out-Null
-        Write-Ok 'Agente autonomo de melhoria continua reiniciado de forma seletiva.'
-        return
     }
 
-    if (-not (Test-Path $batMain)) { throw "Arquivo .bat nao encontrado: $batMain" }
-    if (-not (Test-Path $batAnalyzer)) { throw "Arquivo .bat nao encontrado: $batAnalyzer" }
-
-    Write-Info "Iniciando $batMain..."
-    Start-Process -FilePath $batMain -WorkingDirectory $script:Config.localDir | Out-Null
-
-    Start-Sleep -Seconds 5
-
-    Write-Info "Iniciando $batAnalyzer..."
-    Start-Process -FilePath $batAnalyzer -WorkingDirectory $script:Config.localDir | Out-Null
-
-    if (Test-Path $batAutoDev) {
-        Start-Sleep -Seconds 3
-        Write-Info "Iniciando $batAutoDev..."
-        Start-Process -FilePath $batAutoDev -WorkingDirectory $script:Config.localDir | Out-Null
-    } else {
-        Write-Info "Arquivo .bat do agente autonomo nao encontrado (ignorado): $batAutoDev"
-    }
-
-    Write-Ok 'ChatGPT Simulator, analisador de prontuarios e agente autonomo reiniciados via arquivos .bat originais.'
+    Write-Ok ("Reinicio seletivo concluido para: {0}" -f (($script:RestartTargets | Sort-Object) -join ', '))
 }
 
 function Register-AutoSyncTask {
@@ -1214,6 +1227,7 @@ function Show-Summary {
     Write-Host ("Arquivos protegidos:  {0}" -f $script:ProtectedFiles.Count)
     Write-Host ("Reinicio executado:   {0}" -f ($(if ($script:RestartRequested) { 'sim' } else { 'nao' })))
     Write-Host ("Escopo do reinicio:   {0}" -f $script:RestartScope)
+    Write-Host ("Alvos de reinicio:    {0}" -f $(if ($script:RestartTargets.Count -gt 0) { (($script:RestartTargets | Sort-Object) -join ', ') } else { '-' }))
     Write-Host ("Log:                  {0}" -f $script:LogFile)
     Write-Host '========================================' -ForegroundColor White
 }
@@ -1221,6 +1235,7 @@ function Show-Summary {
 function Reset-CycleState {
     $script:RestartRequested = $false
     $script:RestartScope = 'none'
+    $script:RestartTargets = New-Object System.Collections.Generic.List[string]
     $script:UpdatedFiles = New-Object System.Collections.Generic.List[string]
     $script:AddedFiles = New-Object System.Collections.Generic.List[string]
     $script:ProtectedFiles = New-Object System.Collections.Generic.List[string]
@@ -1260,15 +1275,10 @@ function Run-SyncCycle {
         Sync-RemotePhpIfNeeded
 
         if ($script:RestartRequested) {
-            $scope = switch ($script:RestartScope) {
-                'pywa_only'    { 'pywa_only' }
-                'autodev_only' { 'autodev_only' }
-                default         { 'full' }
-            }
-            Stop-ManagedProcesses -Scope $scope
-            Start-ManagedProcesses -Scope $scope
+            Stop-ManagedProcesses -Scope 'selective'
+            Start-ManagedProcesses -Scope 'selective'
         } else {
-            Write-Info 'Nenhum arquivo novo/atualizado. Reinicio nao necessario.'
+            Write-Info 'Nenhum reinicio necessario neste ciclo.'
         }
 
         Show-Summary
