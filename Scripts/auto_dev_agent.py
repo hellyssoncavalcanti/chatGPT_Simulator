@@ -134,9 +134,13 @@ SIMULATOR_URL = _env(
 )
 SIMULATOR_HEALTH_URL = SIMULATOR_URL.replace("/v1/chat/completions", "/health")
 
-# Codex cloud: quando vazio, o agente inicia uma conversa nova no ChatGPT
-# regular (sem URL) e REUSA o chat_id retornado nas rodadas subsequentes.
-CODEX_URL = _env("AUTODEV_AGENT_CODEX_URL", "")
+# Codex cloud: endpoint do ChatGPT Codex. Default aponta para o Codex real
+# (https://chatgpt.com/codex). O agente ABRE UMA CONVERSA NOVA no Codex a
+# cada forward (chat_id/url da conversa regular NÃO são reutilizados no
+# forward — são serviços diferentes).
+CODEX_URL = _env("AUTODEV_AGENT_CODEX_URL", "https://chatgpt.com/codex")
+# Estado persistente da conversa ATIVA no Codex (separado do chat regular).
+CODEX_REUSE_CHAT = _env_bool("AUTODEV_AGENT_CODEX_REUSE_CHAT", True)
 
 SIMULATOR_MODEL = _env("AUTODEV_AGENT_MODEL", "ChatGPT Simulator", "AUTON_AGENT_MODEL")
 _CFG_API_KEY = getattr(config, "API_KEY", "") if config else ""
@@ -332,6 +336,8 @@ class AgentState:
     """Estado persistente entre ciclos."""
     chat_id: Optional[str] = None       # id da conversa com ChatGPT (reuso)
     chat_url: Optional[str] = None      # URL da conversa ativa
+    codex_chat_id: Optional[str] = None # id da conversa ATIVA no Codex
+    codex_chat_url: Optional[str] = None# URL da conversa Codex (chatgpt.com/codex/c/...)
     last_suggestion_ts: float = 0.0     # timestamp da última rodada proativa
     cycles_total: int = 0               # total de ciclos executados
     cycles_with_errors: int = 0         # ciclos que detectaram incidentes
@@ -1669,24 +1675,29 @@ def forward_to_codex(context: Dict[str, Any],
     codex_prompt += "\nResponda APENAS com JSON no formato especificado."
 
     wrapped = _wrap_for_paste(codex_prompt)
+    # IMPORTANTE: o forward vai para o CODEX (chatgpt.com/codex), nunca para
+    # a conversa regular. Mantemos chat_id/url do Codex SEPARADOS dos do chat
+    # regular para evitar contaminação entre as duas sessões do browser.py.
+    codex_target_url = CODEX_URL or "https://chatgpt.com/codex"
     body: Dict[str, Any] = {
         "model": SIMULATOR_MODEL,
         "message": wrapped,
         "messages": [{"role": "user", "content": wrapped}],
         "temperature": 0.2,
-        "request_source": "auto_dev_agent.py",
+        "request_source": "auto_dev_agent.py/codex",
+        "origin_url": codex_target_url,
     }
-    if REUSE_CHAT_CONVERSATION:
-        if _AGENT_STATE.chat_id:
-            body["chat_id"] = _AGENT_STATE.chat_id
-        if _AGENT_STATE.chat_url:
-            body["url"] = _AGENT_STATE.chat_url
-    if CODEX_URL and not body.get("url"):
-        body["url"] = CODEX_URL
-        body["origin_url"] = CODEX_URL
+    if CODEX_REUSE_CHAT and _AGENT_STATE.codex_chat_id and _AGENT_STATE.codex_chat_url \
+            and _AGENT_STATE.codex_chat_url.startswith(codex_target_url):
+        # Continua a MESMA conversa Codex já iniciada.
+        body["chat_id"] = _AGENT_STATE.codex_chat_id
+        body["url"] = _AGENT_STATE.codex_chat_url
+    else:
+        # Força o browser.py a abrir/navegar para o Codex (nova conversa).
+        body["url"] = codex_target_url
 
-    log(f"🔁 Forward-to-Codex: pedindo implementação concreta de "
-        f"{len(pending_suggestions)} sugestão(ões)/falha(s)...")
+    log(f"🔁 Forward-to-Codex ({codex_target_url}): pedindo implementação "
+        f"concreta de {len(pending_suggestions)} sugestão(ões)/falha(s)...")
 
     try:
         markdown, chat_id, chat_url = _stream_chat_completion(body)
@@ -1694,12 +1705,25 @@ def forward_to_codex(context: Dict[str, Any],
         log(f"❌ Forward-to-Codex falhou: {exc}", logging.ERROR)
         return None
 
-    if REUSE_CHAT_CONVERSATION:
-        if chat_id and chat_id != _AGENT_STATE.chat_id:
-            _AGENT_STATE.chat_id = chat_id
-        if chat_url and chat_url != _AGENT_STATE.chat_url:
-            _AGENT_STATE.chat_url = chat_url
-        _save_state()
+    # Persiste estado da conversa ATIVA no Codex (isolada do chat regular).
+    if CODEX_REUSE_CHAT:
+        # Só adota a URL se ela realmente for do Codex; caso contrário, o
+        # browser.py caiu no chat regular (falha de navegação) e não queremos
+        # guardar essa URL como Codex.
+        if chat_url and chat_url.startswith(codex_target_url):
+            _AGENT_STATE.codex_chat_url = chat_url
+            if chat_id:
+                _AGENT_STATE.codex_chat_id = chat_id
+            _save_state()
+        else:
+            if chat_url:
+                log(f"⚠️ Forward-to-Codex: URL retornada ({chat_url}) NÃO é do "
+                    f"Codex ({codex_target_url}). Descartando chat_id Codex "
+                    f"para forçar nova navegação na próxima rodada.",
+                    logging.WARNING)
+            _AGENT_STATE.codex_chat_id = None
+            _AGENT_STATE.codex_chat_url = None
+            _save_state()
 
     plan = _extract_json_object(markdown or "")
     if not plan:
