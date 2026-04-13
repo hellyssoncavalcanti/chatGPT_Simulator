@@ -2278,6 +2278,53 @@ def run_single_cycle() -> None:
 
         actions = plan.get("actions") or []
         if not actions:
+            should_forward_empty = _should_forward_plan_to_codex(plan, [], [])
+            if ENABLE_AUTOFIX and should_forward_empty:
+                log("ℹ️ Plano sem actions, mas com indicação de melhoria; encaminhando ao Codex.")
+                pending = _collect_pending_suggestions([], plan)
+                if not pending:
+                    pending = ["Converter a análise em ações concretas edit_file/create_file."]
+                forward_attempts = 0
+                changed: List[str] = []
+                results: List[ActionResult] = []
+                while pending and forward_attempts < MAX_CODEX_FORWARD_ATTEMPTS:
+                    forward_attempts += 1
+                    codex_plan = forward_to_codex(context, source_files, pending, objective)
+                    if not codex_plan:
+                        break
+                    codex_actions = codex_plan.get("actions") or []
+                    if not codex_actions:
+                        log(f"💭 Codex (tentativa {forward_attempts}): sem ações.")
+                        break
+                    codex_backup = FileBackup()
+                    codex_results = execute_plan(codex_plan, codex_backup)
+                    codex_changed = codex_backup.changed_files
+                    if codex_changed:
+                        ok, report = validate_changes(codex_changed)
+                        if not ok:
+                            log(f"🛑 Codex: validação falhou "
+                                f"({report['py_compile']['errors'][:3]}) — rollback.",
+                                logging.WARNING)
+                            codex_backup.rollback_all()
+                            pending = _collect_pending_suggestions(codex_results, codex_plan)
+                            pending.append(
+                                "Validação py_compile falhou após aplicar o plano anterior; "
+                                "ajuste os trechos exatos e tente novamente."
+                            )
+                            continue
+                        log(f"✅ Codex: validação OK em {len(codex_changed)} arquivo(s).")
+                        results.extend(codex_results)
+                        changed = codex_changed
+                        plan = codex_plan
+                        break
+                    pending = _collect_pending_suggestions(codex_results, codex_plan)
+
+                if changed and any(r.ok for r in results):
+                    _AGENT_STATE.cycles_with_fixes += 1
+                    _AGENT_STATE.total_actions += sum(1 for r in results if r.ok)
+                    git_commit_and_maybe_push(plan, results)
+                _save_state()
+                return
             _save_state()
             return
 
