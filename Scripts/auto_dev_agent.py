@@ -1876,49 +1876,76 @@ def _sleep_with_countdown(total_seconds: int) -> None:
     """Pausa entre ciclos com countdown INLINE no stdout.
 
     Enquanto o agente está em pausa (sem nenhum script próprio em execução),
-    mostramos o tempo restante sobre a mesma linha do terminal (usando '\\r').
-    Ao zerar, a linha é limpa para que o próximo log apareça normalmente.
+    mostramos o tempo restante sobre a mesma linha do terminal (usando '\\r'),
+    escrevendo direto em stdout para não passar pelo logger (que quebraria a
+    linha). Se stdout não aceitar escrita direta, caímos para time.sleep.
 
-    Se stdout não for um TTY (ex.: saída redirecionada para arquivo), só
-    dormimos silenciosamente para não poluir o log.
+    Adicionalmente, emitimos uma linha logada a cada FALLBACK_LOG_STEP segundos
+    para que o log em arquivo e consoles sem suporte a '\\r' também mostrem o
+    progresso até a próxima conferência.
     """
     if total_seconds <= 0:
         return
-    is_tty = False
+
+    FALLBACK_LOG_STEP = 30  # segundos entre linhas logadas de progresso
+    stream = sys.stdout
     try:
-        is_tty = sys.stdout.isatty()
+        stream_ok = stream is not None and hasattr(stream, "write")
     except Exception:
-        is_tty = False
-    if not is_tty:
-        time.sleep(total_seconds)
-        return
+        stream_ok = False
+
+    def _fmt(remaining: int) -> str:
+        mm, ss = divmod(remaining, 60)
+        if mm >= 60:
+            hh, mm = divmod(mm, 60)
+            return f"{hh:02d}:{mm:02d}:{ss:02d}"
+        return f"{mm:02d}:{ss:02d}"
+
+    # Linha logada inicial (sempre visível, também no log em arquivo).
+    log(f"⏳ Próxima conferência em {_fmt(total_seconds)} (total {total_seconds}s)")
 
     end_at = time.time() + total_seconds
+    last_logged_remaining = total_seconds
     try:
         while True:
             remaining = int(round(end_at - time.time()))
             if remaining <= 0:
                 break
-            mm, ss = divmod(remaining, 60)
-            if mm >= 60:
-                hh, mm = divmod(mm, 60)
-                label = f"{hh:02d}:{mm:02d}:{ss:02d}"
-            else:
-                label = f"{mm:02d}:{ss:02d}"
+
+            label = _fmt(remaining)
             line = f"⏳ Próxima conferência em {label} (total {total_seconds}s)"
-            # padding para sobrescrever qualquer resquício anterior
-            sys.stdout.write("\r" + line + " " * 8)
-            sys.stdout.flush()
+
+            # 1) Atualização inline (carriage-return) direto no stdout.
+            if stream_ok:
+                try:
+                    # Padding generoso para sobrescrever restos da iteração anterior.
+                    stream.write("\r" + line + " " * 20)
+                    try:
+                        stream.flush()
+                    except Exception:
+                        pass
+                except Exception:
+                    stream_ok = False
+
+            # 2) Linha logada periódica para logs sem suporte a '\r'.
+            if (last_logged_remaining - remaining) >= FALLBACK_LOG_STEP:
+                log(line)
+                last_logged_remaining = remaining
+
             time.sleep(1.0)
     except KeyboardInterrupt:
         raise
     finally:
-        # Limpa a linha do countdown antes de retornar ao fluxo normal.
-        try:
-            sys.stdout.write("\r" + " " * 80 + "\r")
-            sys.stdout.flush()
-        except Exception:
-            pass
+        # Limpa a linha do countdown e quebra linha para o próximo log.
+        if stream_ok:
+            try:
+                stream.write("\r" + " " * 80 + "\r")
+                try:
+                    stream.flush()
+                except Exception:
+                    pass
+            except Exception:
+                pass
 
 
 def wait_for_simulator() -> None:
