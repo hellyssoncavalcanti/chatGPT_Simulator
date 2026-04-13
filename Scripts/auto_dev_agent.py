@@ -336,16 +336,6 @@ def _setup_logger() -> logging.Logger:
             logging.ERROR: "\033[91m",
             logging.CRITICAL: "\033[95m",
         }
-        ACTION_COLORS = [
-            (r"📤|Enviando pedido", "\033[94m"),         # envio
-            (r"📝|recebendo resposta", "\033[96m"),      # progresso resposta
-            (r"✅|Validação OK|resposta concluída", "\033[92m"),
-            (r"❌|erro recebido|Falha", "\033[91m"),
-            (r"⏳|cooldown|aguardando", "\033[93m"),
-            (r"🔧|\[browser\.py\]", "\033[95m"),         # logs técnicos/browser
-            (r"🧠|analysis completo", "\033[36m"),
-            (r"🔁|should_forward_to_codex", "\033[94m"),
-        ]
 
         def format(self, record: logging.LogRecord) -> str:
             text = super().format(record)
@@ -353,13 +343,7 @@ def _setup_logger() -> logging.Logger:
             is_tty = bool(stream and hasattr(stream, "isatty") and stream.isatty())
             if os.environ.get("NO_COLOR") or (not is_tty):
                 return text
-            color = ""
-            for pattern, action_color in self.ACTION_COLORS:
-                if re.search(pattern, text, flags=re.IGNORECASE):
-                    color = action_color
-                    break
-            if not color:
-                color = self.LEVEL_COLORS.get(record.levelno, "")
+            color = self.LEVEL_COLORS.get(record.levelno, "")
             if not color:
                 return text
             return f"{color}{text}{self.RESET}"
@@ -975,6 +959,9 @@ SYSTEM_PROMPT_BASE = textwrap.dedent("""\
                 tentar implementação concreta (quando você só trouxe diagnóstico,
                 notas, ou quando as ações propostas tendem a falhar sem contexto
                 adicional de execução no Codex).
+      • true  = também quando houver sugestão de melhoria/alteração de código
+                (ex.: edit_file/create_file ou recomendação equivalente) e você
+                quiser que o agente realmente tente implementar no Codex.
       • false = não encaminhar ao Codex neste ciclo.
     """)
 
@@ -1100,6 +1087,36 @@ def _log_plan_decision(plan: Dict[str, Any], origin: str) -> None:
 
     decision_text = "ENCAMINHAR para Codex" if should_forward else "NÃO encaminhar para Codex"
     log(f"🔁 [{origin}] should_forward_to_codex={should_forward} → {decision_text}")
+
+
+def _plan_has_change_intent(plan: Dict[str, Any]) -> bool:
+    """Detecta intenção de mudança sem depender de busca por palavras-chave."""
+    for action in plan.get("actions") or []:
+        if not isinstance(action, dict):
+            continue
+        if str(action.get("type", "")).lower().strip() in {"edit_file", "create_file"}:
+            return True
+    return False
+
+
+def _should_forward_plan_to_codex(plan: Dict[str, Any],
+                                  results: List[ActionResult],
+                                  changed: List[str]) -> bool:
+    """Decide forward com base no sinal do LLM + fallback estrutural robusto."""
+    if changed:
+        return False
+    if bool(plan.get("should_forward_to_codex")):
+        return True
+    # Fallback robusto: se o plano já trouxe intenção concreta de alteração
+    # mas não houve nenhuma mudança aplicada, encaminha ao Codex.
+    if _plan_has_change_intent(plan):
+        has_failed_change = any(
+            (not r.ok) and r.action_type in {"edit_file", "create_file"}
+            for r in results
+        )
+        if has_failed_change:
+            return True
+    return False
 
 
 def _stream_chat_completion(
@@ -2226,8 +2243,11 @@ def run_single_cycle() -> None:
         # Se nenhuma mudança de código foi aplicada mas há sugestões úteis
         # (notas / actions que falharam), ENCAMINHA para o Codex pedindo
         # implementação concreta — esse é o "loop autônomo" de fato.
-        should_forward_to_codex = bool(plan.get("should_forward_to_codex"))
+        should_forward_to_codex = _should_forward_plan_to_codex(plan, results, changed)
         if not changed and ENABLE_AUTOFIX and should_forward_to_codex:
+            if not bool(plan.get("should_forward_to_codex")) and _plan_has_change_intent(plan):
+                log("ℹ️ Forward forçado por fallback estrutural: plano trouxe edit/create,"
+                    " mas nada foi aplicado neste ciclo.")
             pending = _collect_pending_suggestions(results, plan)
             forward_attempts = 0
             while pending and forward_attempts < MAX_CODEX_FORWARD_ATTEMPTS:
