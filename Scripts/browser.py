@@ -79,6 +79,21 @@ def emit_log(q, msg):
         q.put(json.dumps({"type": "log", "content": f"{prefix}{msg}"}) + "\n")
     file_log("browser.py", f"[{sender}] {msg}")
 
+
+class RateLimitDetected(Exception):
+    """Sinaliza que o ChatGPT exibiu banner/toast de rate-limit ou equivalente.
+
+    Permite que o caminho de setup do chat (ex.: aguardar textarea carregar)
+    distinga um timeout genérico de um rate-limit real, para que o agente
+    receba um evento 'rate_limit' em vez de uma falha de 'Timeout ...
+    waiting for locator("#prompt-textarea")'.
+    """
+
+    def __init__(self, message: str = "", retry_after_seconds: int = 240):
+        super().__init__(message or "Excesso de solicitações")
+        self.message = message or "Excesso de solicitações"
+        self.retry_after_seconds = int(retry_after_seconds or 240)
+
 def emit_event(q, type_, content):
     if q:
         # Cria o dicionário e garante que o dumps mantenha tudo em uma linha
@@ -764,18 +779,86 @@ async def _clear_input(page, q=None):
         emit_log(q, f"⚠️ Falha ao limpar input: {e}")
 
 
+RATE_LIMIT_BANNER_JS = """() => {
+    const selectors = [
+        '[role="dialog"]',
+        '[role="alert"]',
+        '[role="alertdialog"]',
+        '[aria-live="polite"]',
+        '[aria-live="assertive"]',
+        '[data-testid*="rate" i]',
+        '[data-testid*="limit" i]',
+        '[data-testid*="toast" i]',
+        '[class*="Toast" i]',
+        '[class*="toast" i]',
+        '[class*="Banner" i]',
+        '[class*="banner" i]',
+        '[class*="RateLimit" i]',
+        '[class*="rate-limit" i]',
+        'main [data-message-author-role="assistant"] .text-token-text-error',
+        'main [data-message-author-role="assistant"] [class*="error" i]'
+    ];
+    const candidates = Array.from(document.querySelectorAll(selectors.join(',')));
+    candidates.sort((a, b) => ((a.innerText || '').length - (b.innerText || '').length));
+    const hit = candidates.find(el => {
+        const txt = (el.innerText || '').trim().toLowerCase();
+        if (!txt || txt.length < 10 || txt.length > 800) return false;
+        const hasPt = txt.includes('excesso de solicita') && txt.includes('aguarde');
+        const hasEn = (
+            (txt.includes('too many requests') && (txt.includes('minute') || txt.includes('wait') || txt.includes('try again'))) ||
+            (txt.includes('rate limit') && (txt.includes('exceed') || txt.includes('wait') || txt.includes('minute'))) ||
+            (txt.includes("you've reached") && (txt.includes('limit') || txt.includes('message'))) ||
+            (txt.includes('message limit') && txt.includes('reach'))
+        );
+        return hasPt || hasEn;
+    });
+    if (!hit) {
+        return { detected: false, message: '' };
+    }
+    return { detected: true, message: (hit.innerText || '').trim().slice(0, 600) };
+}"""
+
+
+async def _detect_rate_limit_banner(page) -> dict:
+    """Retorna {'detected': bool, 'message': str}. Nunca levanta."""
+    try:
+        state = await page.evaluate(RATE_LIMIT_BANNER_JS)
+        if isinstance(state, dict) and state.get("detected"):
+            return {"detected": True, "message": (state.get("message") or "").strip()}
+    except Exception:
+        pass
+    return {"detected": False, "message": ""}
+
+
 async def wait_for_chat_ready(page, url: str, q=None, timeout: int = 30) -> bool:
     """
     Aguarda o ChatGPT terminar de carregar um chat existente.
     Usa múltiplos sinais — o primeiro que confirmar encerra a espera.
+
+    Se detectar banner de rate-limit (antes ou depois do timeout do
+    textarea), levanta `RateLimitDetected` em vez de retornar False para
+    que o caller possa emitir o evento 'rate_limit' adequado.
     """
     emit_log(q, "⏳ Aguardando chat carregar completamente...")
     deadline = asyncio.get_event_loop().time() + timeout
+
+    # 0. Pré-check: já há banner de rate-limit? (evita esperar 10s em vão)
+    pre_rl = await _detect_rate_limit_banner(page)
+    if pre_rl["detected"]:
+        emit_log(q, f"⛔ Rate-limit detectado antes do carregamento: {pre_rl['message'][:220]}")
+        raise RateLimitDetected(pre_rl["message"])
 
     # 1. Textarea presente — pré-requisito mínimo
     try:
         await page.wait_for_selector("#prompt-textarea", timeout=10_000)
     except Exception:
+        # Antes de declarar falha genérica, confere se é rate-limit (causa comum
+        # de sumiço do composer). Isso transforma um "Timeout waiting for
+        # #prompt-textarea" em um erro 'rate_limit' claro para o agente.
+        post_rl = await _detect_rate_limit_banner(page)
+        if post_rl["detected"]:
+            emit_log(q, f"⛔ Rate-limit detectado (textarea indisponível): {post_rl['message'][:220]}")
+            raise RateLimitDetected(post_rl["message"])
         emit_log(q, "❌ prompt-textarea não encontrado.")
         return False
 
@@ -3517,7 +3600,15 @@ async def handle_chat_task_inner(task, page, q, stop_event: asyncio.Event, activ
         except Exception:
             pass
     else:
-        await wait_for_chat_ready(page, url, q, timeout=30)
+        try:
+            await wait_for_chat_ready(page, url, q, timeout=30)
+        except RateLimitDetected as rle:
+            emit_event(q, "error", {
+                "code": "rate_limit",
+                "message": rle.message,
+                "retry_after_seconds": rle.retry_after_seconds,
+            })
+            return
 
     if stop_event.is_set():
         raise RuntimeError('Watchdog sinalizou falha após carregamento da página.')
@@ -3689,7 +3780,15 @@ async def handle_chat_task_inner(task, page, q, stop_event: asyncio.Event, activ
                 emit_event(q, "status", f"Erro interno do ChatGPT detectado. Recarregando página ({chat_error_reload_count}/{max_chat_error_reloads})...")
                 try:
                     await page.goto(current_url, wait_until='domcontentloaded', timeout=30_000)
-                    await wait_for_chat_ready(page, current_url, q, timeout=30)
+                    try:
+                        await wait_for_chat_ready(page, current_url, q, timeout=30)
+                    except RateLimitDetected as rle:
+                        emit_event(q, "error", {
+                            "code": "rate_limit",
+                            "message": rle.message,
+                            "retry_after_seconds": rle.retry_after_seconds,
+                        })
+                        return
                     await asyncio.sleep(1)
                     started = False
                     last_status_text = ""
