@@ -144,6 +144,15 @@ CODEX_REPO = _env("AUTODEV_AGENT_CODEX_REPO", "hellyssoncavalcanti/chatGPT_Simul
 # Reuso de conversa Codex entre rodadas do mesmo ciclo (chat_id separado
 # do chat regular).
 CODEX_REUSE_CHAT = _env_bool("AUTODEV_AGENT_CODEX_REUSE_CHAT", True)
+# Janela mínima (segundos) sem pedir novo trabalho ao Codex após um forward
+# bem-sucedido. Durante esse período, o agente assume que a tarefa anterior
+# ainda está sendo executada no Codex (elaborando o PR) e não envia nada
+# novo, mesmo que detecte sugestões/falhas pendentes.
+CODEX_MIN_WAIT_SEC = int(_env("AUTODEV_AGENT_CODEX_MIN_WAIT_SEC", "600"))
+# Janela máxima (segundos) para aguardar conclusão antes de desbloquear
+# novos forwards mesmo sem evidência de conclusão — evita ficar preso
+# indefinidamente se o Codex travar ou se o PR for fechado manualmente.
+CODEX_MAX_WAIT_SEC = int(_env("AUTODEV_AGENT_CODEX_MAX_WAIT_SEC", "2400"))
 
 SIMULATOR_MODEL = _env("AUTODEV_AGENT_MODEL", "ChatGPT Simulator", "AUTON_AGENT_MODEL")
 _CFG_API_KEY = getattr(config, "API_KEY", "") if config else ""
@@ -341,6 +350,10 @@ class AgentState:
     chat_url: Optional[str] = None      # URL da conversa ativa
     codex_chat_id: Optional[str] = None # id da conversa ATIVA no Codex
     codex_chat_url: Optional[str] = None# URL da conversa Codex (chatgpt.com/codex/c/...)
+    # Tarefa Codex pendente (ainda em execução); o agente evita pedir
+    # novo trabalho ao Codex enquanto houver uma tarefa destas em aberto.
+    codex_pending_task_url: Optional[str] = None
+    codex_pending_started_at: float = 0.0
     last_suggestion_ts: float = 0.0     # timestamp da última rodada proativa
     cycles_total: int = 0               # total de ciclos executados
     cycles_with_errors: int = 0         # ciclos que detectaram incidentes
@@ -1723,6 +1736,130 @@ def _collect_pending_suggestions(results: List[ActionResult],
     return pieces
 
 
+def _codex_task_looks_pending() -> Tuple[bool, str]:
+    """Verifica se a última tarefa enviada ao Codex ainda está em execução.
+
+    Regra:
+      • sem tarefa pendente registrada → não está pendente.
+      • elapsed < CODEX_MIN_WAIT_SEC → SIM, está pendente (janela mínima de
+        espera para dar tempo do Codex elaborar o PR).
+      • CODEX_MIN_WAIT_SEC ≤ elapsed < CODEX_MAX_WAIT_SEC → consulta o git
+        remoto: se houver commits novos em qualquer branch (exceto a do
+        próprio agente/commits que já estavam antes), assumimos que o
+        Codex finalizou. Caso contrário, ainda pendente.
+      • elapsed ≥ CODEX_MAX_WAIT_SEC → desbloqueia (timeout), com aviso.
+
+    Retorna (is_pending, reason_message).
+    """
+    started_at = _AGENT_STATE.codex_pending_started_at or 0.0
+    task_url = _AGENT_STATE.codex_pending_task_url or ""
+    if not started_at or not task_url:
+        return False, ""
+
+    elapsed = max(0.0, time.time() - started_at)
+    if elapsed < CODEX_MIN_WAIT_SEC:
+        restante = int(CODEX_MIN_WAIT_SEC - elapsed)
+        return True, (
+            f"tarefa Codex em andamento há {int(elapsed)}s "
+            f"(janela mínima {CODEX_MIN_WAIT_SEC}s, faltam ~{restante}s) "
+            f"→ {task_url}"
+        )
+
+    if elapsed >= CODEX_MAX_WAIT_SEC:
+        log(
+            f"⏰ Tarefa Codex excedeu janela máxima ({int(elapsed)}s ≥ "
+            f"{CODEX_MAX_WAIT_SEC}s); desbloqueando novos forwards. "
+            f"URL={task_url}",
+            logging.WARNING,
+        )
+        _clear_codex_pending_task(reason="timeout")
+        return False, ""
+
+    # Janela de verificação: consulta git remoto para evidência de conclusão.
+    finished, evidence = _codex_pending_probe_remote(started_at)
+    if finished:
+        log(f"✅ Codex finalizou tarefa anterior ({evidence}); desbloqueado.")
+        _clear_codex_pending_task(reason="finished")
+        return False, ""
+
+    restante = int(CODEX_MAX_WAIT_SEC - elapsed)
+    return True, (
+        f"tarefa Codex ainda em execução após {int(elapsed)}s "
+        f"(sem commits remotos novos; desiste em ~{restante}s) → {task_url}"
+    )
+
+
+def _codex_pending_probe_remote(started_at: float) -> Tuple[bool, str]:
+    """True se há commits remotos novos em qualquer branch desde started_at.
+
+    Estratégia: git fetch --all --quiet, depois for-each-ref listando o
+    committerdate de cada refs/remotes. Se alguma for mais nova que
+    started_at e não for commit do próprio agente (commit message com o
+    COMMIT_PREFIX), consideramos como atividade do Codex.
+    """
+    try:
+        run_shell("git fetch --all --quiet --prune", timeout=60)
+    except Exception:
+        return False, ""
+
+    cmd = (
+        'git for-each-ref --sort=-committerdate refs/remotes '
+        '--format="%(committerdate:unix)|%(refname:short)|%(contents:subject)" '
+        '--count=30'
+    )
+    code, out = run_shell(cmd, timeout=30)
+    if code != 0 or not out:
+        return False, ""
+
+    for line in out.splitlines():
+        line = line.strip().strip('"')
+        if not line or "|" not in line:
+            continue
+        parts = line.split("|", 2)
+        if len(parts) < 3:
+            continue
+        try:
+            ts = int(parts[0])
+        except Exception:
+            continue
+        refname = parts[1].strip()
+        subject = parts[2].strip()
+        if ts <= int(started_at):
+            continue
+        # Ignora HEAD e a própria branch do agente (commits que o agente
+        # acabou de fazer não indicam que o Codex terminou).
+        agent_branch = GIT_BRANCH or ""
+        if agent_branch and agent_branch in refname:
+            continue
+        # Ignora commits cujo subject começa com o prefixo do agente.
+        if COMMIT_PREFIX and subject.startswith(COMMIT_PREFIX.strip()):
+            continue
+        return True, f"commit em {refname} @ {ts}: {subject[:80]}"
+    return False, ""
+
+
+def _record_codex_pending_task(chat_url: Optional[str]) -> None:
+    """Registra que há uma tarefa Codex em execução (para gate do próximo forward)."""
+    if not chat_url:
+        return
+    # Só considera URLs que realmente indicam uma tarefa Codex em execução.
+    if "/codex/cloud/tasks/" not in chat_url and "/codex/" not in chat_url:
+        return
+    _AGENT_STATE.codex_pending_task_url = chat_url
+    _AGENT_STATE.codex_pending_started_at = time.time()
+    _save_state()
+    log(f"📌 Tarefa Codex registrada como pendente: {chat_url} "
+        f"(min {CODEX_MIN_WAIT_SEC}s / max {CODEX_MAX_WAIT_SEC}s)")
+
+
+def _clear_codex_pending_task(reason: str = "") -> None:
+    if not _AGENT_STATE.codex_pending_task_url and not _AGENT_STATE.codex_pending_started_at:
+        return
+    _AGENT_STATE.codex_pending_task_url = None
+    _AGENT_STATE.codex_pending_started_at = 0.0
+    _save_state()
+
+
 def forward_to_codex(context: Dict[str, Any],
                      source_files: Dict[str, str],
                      pending_suggestions: List[str],
@@ -1739,6 +1876,13 @@ def forward_to_codex(context: Dict[str, Any],
     if remaining > 0:
         log(f"⏸️  Codex-forward pulado: cooldown de {int(remaining)}s.",
             logging.INFO)
+        return None
+
+    # Gate: não envia nova tarefa ao Codex enquanto a anterior estiver em
+    # execução. Evita empilhar PRs em paralelo que podem conflitar.
+    is_pending, reason = _codex_task_looks_pending()
+    if is_pending:
+        log(f"⏸️  Codex-forward pulado: {reason}")
         return None
 
     suggestions_block = "\n".join(f"- {s}" for s in pending_suggestions[:20])
@@ -1821,6 +1965,11 @@ def forward_to_codex(context: Dict[str, Any],
             _AGENT_STATE.codex_chat_id = None
             _AGENT_STATE.codex_chat_url = None
             _save_state()
+
+    # Se o Codex retornou uma URL de tarefa (/codex/cloud/tasks/<id>),
+    # registramos como pendente: o próximo ciclo não vai empilhar outra
+    # solicitação enquanto esta não terminar (ver _codex_task_looks_pending).
+    _record_codex_pending_task(chat_url)
 
     plan = _extract_json_object(markdown or "")
     if not plan:
