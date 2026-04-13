@@ -1395,6 +1395,7 @@ _rate_limit_until_ts: float = 0.0
 _last_rate_limit_log_ts: float = 0.0
 _chat_spacing_lock = threading.Lock()
 _last_chat_request_ts: float = 0.0
+_chat_spacing_backoff_level: int = 0
 
 
 def _apply_rate_limit_cooldown(retry_after: Optional[float], reason: str = "") -> None:
@@ -1424,7 +1425,7 @@ def _rate_limit_remaining() -> float:
 
 def _wait_chat_spacing_if_needed(label: str = "ChatGPT") -> None:
     """Impõe intervalo humano entre requisições ao ChatGPT neste agente."""
-    global _last_chat_request_ts
+    global _last_chat_request_ts, _chat_spacing_backoff_level
     pause_min = max(0, int(AUTODEV_CHAT_PAUSA_MIN_SEC))
     pause_max = max(pause_min, int(AUTODEV_CHAT_PAUSA_MAX_SEC))
 
@@ -1438,13 +1439,20 @@ def _wait_chat_spacing_if_needed(label: str = "ChatGPT") -> None:
         elapsed = now - _last_chat_request_ts
         remaining = target_gap - elapsed
         if remaining > 0:
+            backoff_multiplier = 2 ** min(3, max(0, _chat_spacing_backoff_level))
+            adjusted_wait = min(300.0, remaining * backoff_multiplier)
             log(
-                f"⏸️  Intervalo anti-rate-limit ({label}): aguardando "
-                f"{int(remaining)}s (alvo {int(target_gap)}s).",
+                f"⏸️  Intervalo anti-rate-limit ({label}, backoff x{backoff_multiplier}): "
+                f"aguardando {int(adjusted_wait)}s "
+                f"(alvo {int(target_gap)}s, já decorridos {int(elapsed)}s).",
                 logging.INFO,
             )
-            time.sleep(remaining)
+            time.sleep(adjusted_wait)
             now = time.time()
+            _chat_spacing_backoff_level = min(6, _chat_spacing_backoff_level + 1)
+        else:
+            # Se a janela já foi respeitada naturalmente, zera o backoff.
+            _chat_spacing_backoff_level = 0
 
         _last_chat_request_ts = now
 
