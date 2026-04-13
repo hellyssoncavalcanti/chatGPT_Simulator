@@ -75,6 +75,7 @@ CHAT_RATE_LIMIT_DEFAULT_COOLDOWN_SEC = 240
 CHAT_RATE_LIMIT_PROGRESS_TICK_SEC = 1.0
 _chat_rate_limit_lock = threading.Lock()
 _chat_rate_limit_until = 0.0
+ACTIVE_CHAT_STALE_SEC = 900
 
 
 def _cleanup_active_chats():
@@ -206,8 +207,16 @@ def _wait_chat_rate_limit_if_needed(stream_queue=None):
 
 
 def _has_active_remote_user_chat():
+    now = time.time()
     for _chat_id, meta in list(ACTIVE_CHATS.items()):
         if meta.get('finished'):
+            continue
+        last_event_at = float(meta.get('last_event_at') or 0.0)
+        if last_event_at and (now - last_event_at) > ACTIVE_CHAT_STALE_SEC:
+            meta['finished'] = True
+            meta['finished_at'] = now
+            log(f"[ACTIVE_CHATS] chat {_chat_id} marcado como finalizado por inatividade "
+                f"({int(now - last_event_at)}s).")
             continue
         if meta.get('is_analyzer'):
             continue
@@ -1519,6 +1528,7 @@ def chat_completions():
         'markdown':    '',
         'finished':    False,
         'finished_at': None,
+        'last_event_at': time.time(),
         'is_analyzer': bool(is_analyzer)
     }
 
@@ -1576,6 +1586,7 @@ def chat_completions():
                     if raw_msg is None:
                         ACTIVE_CHATS[chat_id]['finished']    = True
                         ACTIVE_CHATS[chat_id]['finished_at'] = time.time()
+                        ACTIVE_CHATS[chat_id]['last_event_at'] = time.time()
                         break
 
                     try:
@@ -1588,8 +1599,10 @@ def chat_completions():
                                 raw_msg = json.dumps(msg_obj, ensure_ascii=False)
                         if t == 'status':
                             ACTIVE_CHATS[chat_id]['status'] = msg_obj['content']
+                            ACTIVE_CHATS[chat_id]['last_event_at'] = time.time()
                         elif t == 'markdown':
                             ACTIVE_CHATS[chat_id]['markdown'] = msg_obj['content']
+                            ACTIVE_CHATS[chat_id]['last_event_at'] = time.time()
                         elif t == 'chat_meta':
                             fin = msg_obj.get('content', {}) or {}
                             early_url = fin.get('url') or ''
@@ -1609,6 +1622,7 @@ def chat_completions():
                         elif t == 'finish':
                             ACTIVE_CHATS[chat_id]['finished']    = True
                             ACTIVE_CHATS[chat_id]['finished_at'] = time.time()
+                            ACTIVE_CHATS[chat_id]['last_event_at'] = time.time()
                             # [FIX Bug 1] Persiste no storage ao terminar (stream nunca escrevia)
                             try:
                                 fin = msg_obj.get('content', {})
@@ -1621,6 +1635,7 @@ def chat_completions():
                             is_rate_limited, err_msg, retry_after = _extract_rate_limit_details(msg_obj.get('content'))
                             if is_rate_limited:
                                 _register_chat_rate_limit(retry_after, reason=err_msg)
+                            ACTIVE_CHATS[chat_id]['last_event_at'] = time.time()
                     except Exception:
                         pass
 
@@ -1631,7 +1646,10 @@ def chat_completions():
             except GeneratorExit:
                 # PHP abortou por timeout — tarefa background continua;
                 # fila fica intacta para /api/sync recolher via TAKEOVER mode
-                pass
+                ACTIVE_CHATS[chat_id]['finished'] = True
+                ACTIVE_CHATS[chat_id]['finished_at'] = time.time()
+                ACTIVE_CHATS[chat_id]['last_event_at'] = time.time()
+                log(f"[ACTIVE_CHATS] stream encerrado pelo cliente; chat {chat_id} liberado para novas filas.")
 
         return Response(generate(), mimetype="application/x-ndjson")
 
@@ -1656,6 +1674,9 @@ def chat_completions():
                     })
 
                 if raw_msg is None:
+                    ACTIVE_CHATS[chat_id]['finished'] = True
+                    ACTIVE_CHATS[chat_id]['finished_at'] = time.time()
+                    ACTIVE_CHATS[chat_id]['last_event_at'] = time.time()
                     break
 
                 try:
@@ -1666,20 +1687,24 @@ def chat_completions():
                 t = msg.get('type')
                 if t == 'status':
                     ACTIVE_CHATS[chat_id]['status'] = msg['content']
+                    ACTIVE_CHATS[chat_id]['last_event_at'] = time.time()
                 elif t == 'markdown':
                     final_html = msg['content']
                     ACTIVE_CHATS[chat_id]['markdown'] = msg['content']
+                    ACTIVE_CHATS[chat_id]['last_event_at'] = time.time()
                 elif t == 'finish':
                     final_url   = msg['content'].get('url',   final_url)
                     final_title = msg['content'].get('title', final_title)
                     ACTIVE_CHATS[chat_id]['finished']    = True
                     ACTIVE_CHATS[chat_id]['finished_at'] = time.time()
+                    ACTIVE_CHATS[chat_id]['last_event_at'] = time.time()
                 elif t == 'error':
                     is_rate_limited, err_msg, retry_after = _extract_rate_limit_details(msg.get('content'))
                     if is_rate_limited:
                         _register_chat_rate_limit(retry_after, reason=err_msg)
                     ACTIVE_CHATS[chat_id]['finished']    = True
                     ACTIVE_CHATS[chat_id]['finished_at'] = time.time()
+                    ACTIVE_CHATS[chat_id]['last_event_at'] = time.time()
                     return jsonify({"success": False, "error": msg['content'], "chat_id": chat_id})
 
         except Exception as e:
