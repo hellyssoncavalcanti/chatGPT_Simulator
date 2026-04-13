@@ -214,6 +214,7 @@ MAX_EDIT_SIZE_BYTES = int(_env("AUTODEV_AGENT_MAX_EDIT_BYTES", "200000"))
 MAX_ACTIONS_PER_CYCLE = int(_env("AUTODEV_AGENT_MAX_ACTIONS", "5"))
 MAX_RETRY_ATTEMPTS = int(_env("AUTODEV_AGENT_MAX_RETRIES", "2"))
 MAX_SHELL_TIMEOUT_SEC = int(_env("AUTODEV_AGENT_SHELL_TIMEOUT", "180"))
+STREAM_REQUEST_RETRIES = int(_env("AUTODEV_AGENT_STREAM_RETRIES", "2"))
 
 GIT_BRANCH = _env("AUTODEV_AGENT_BRANCH", "").strip()
 GIT_REMOTE = _env("AUTODEV_AGENT_REMOTE", "origin")
@@ -1062,13 +1063,23 @@ def _normalize_plan(plan: Dict[str, Any]) -> Dict[str, Any]:
         # Fallback estrutural (sem palavras-chave): se vier sem ações executáveis
         # (edit/create/shell), assume que deve encaminhar ao Codex.
         actionable_types = {"edit_file", "create_file", "shell"}
+        change_types = {"edit_file", "create_file"}
         has_actionable = any(
             isinstance(a, dict) and str(a.get("type", "")).lower().strip() in actionable_types
             for a in (plan.get("actions") or [])
         )
-        plan["should_forward_to_codex"] = not has_actionable
+        has_change_intent = any(
+            isinstance(a, dict) and str(a.get("type", "")).lower().strip() in change_types
+            for a in (plan.get("actions") or [])
+        )
+        # Na ausência do campo obrigatório, privilegia encaminhar quando há
+        # intenção explícita de alteração de código OU quando não há ações
+        # executáveis locais.
+        plan["should_forward_to_codex"] = has_change_intent or (not has_actionable)
+        plan["_forward_autofilled"] = True
     else:
         plan["should_forward_to_codex"] = bool(plan.get("should_forward_to_codex"))
+        plan["_forward_autofilled"] = False
     return plan
 
 
@@ -1077,6 +1088,9 @@ def _log_plan_decision(plan: Dict[str, Any], origin: str) -> None:
     analysis = str(plan.get("analysis") or "").strip()
     actions = plan.get("actions") or []
     should_forward = bool(plan.get("should_forward_to_codex"))
+    if bool(plan.get("_forward_autofilled")):
+        log(f"⚠️ [{origin}] should_forward_to_codex ausente no JSON; decisão foi auto-preenchida.",
+            logging.WARNING)
 
     log(f"🧠 [{origin}] analysis completo:\n{analysis or '(vazio)'}")
     if actions:
@@ -1167,13 +1181,34 @@ def _stream_chat_completion(
 
     _wait_chat_spacing_if_needed(label)
 
-    resp = requests.post(
-        SIMULATOR_URL,
-        headers=_llm_headers(),
-        json=body,
-        stream=True,
-        timeout=(30, STREAM_IDLE_TIMEOUT_SEC),
-    )
+    resp = None
+    post_error: Optional[Exception] = None
+    backoff_base = 5
+    for attempt in range(1, max(1, STREAM_REQUEST_RETRIES) + 1):
+        try:
+            resp = requests.post(
+                SIMULATOR_URL,
+                headers=_llm_headers(),
+                json=body,
+                stream=True,
+                timeout=(30, STREAM_IDLE_TIMEOUT_SEC),
+            )
+            post_error = None
+            break
+        except (requests.Timeout, requests.ConnectionError) as exc:
+            post_error = exc
+            if attempt >= max(1, STREAM_REQUEST_RETRIES):
+                break
+            wait_s = backoff_base * (2 ** (attempt - 1))
+            log(
+                f"⚠️ erro ao consultar ChatGPT ({label}) [tentativa {attempt}/"
+                f"{max(1, STREAM_REQUEST_RETRIES)}]: {exc}. "
+                f"Backoff exponencial: aguardando {wait_s}s...",
+                logging.WARNING,
+            )
+            time.sleep(wait_s)
+    if resp is None:
+        raise RuntimeError(f"falha ao consultar ChatGPT após retries: {post_error}")
     try:
         resp.raise_for_status()
     except Exception as exc:
@@ -1360,6 +1395,7 @@ _rate_limit_until_ts: float = 0.0
 _last_rate_limit_log_ts: float = 0.0
 _chat_spacing_lock = threading.Lock()
 _last_chat_request_ts: float = 0.0
+_chat_spacing_backoff_level: int = 0
 
 
 def _apply_rate_limit_cooldown(retry_after: Optional[float], reason: str = "") -> None:
@@ -1389,7 +1425,7 @@ def _rate_limit_remaining() -> float:
 
 def _wait_chat_spacing_if_needed(label: str = "ChatGPT") -> None:
     """Impõe intervalo humano entre requisições ao ChatGPT neste agente."""
-    global _last_chat_request_ts
+    global _last_chat_request_ts, _chat_spacing_backoff_level
     pause_min = max(0, int(AUTODEV_CHAT_PAUSA_MIN_SEC))
     pause_max = max(pause_min, int(AUTODEV_CHAT_PAUSA_MAX_SEC))
 
@@ -1403,13 +1439,20 @@ def _wait_chat_spacing_if_needed(label: str = "ChatGPT") -> None:
         elapsed = now - _last_chat_request_ts
         remaining = target_gap - elapsed
         if remaining > 0:
+            backoff_multiplier = 2 ** min(3, max(0, _chat_spacing_backoff_level))
+            adjusted_wait = min(300.0, remaining * backoff_multiplier)
             log(
-                f"⏸️  Intervalo anti-rate-limit ({label}): aguardando "
-                f"{int(remaining)}s (alvo {int(target_gap)}s).",
+                f"⏸️  Intervalo anti-rate-limit ({label}, backoff x{backoff_multiplier}): "
+                f"aguardando {int(adjusted_wait)}s "
+                f"(alvo {int(target_gap)}s, já decorridos {int(elapsed)}s).",
                 logging.INFO,
             )
-            time.sleep(remaining)
+            time.sleep(adjusted_wait)
             now = time.time()
+            _chat_spacing_backoff_level = min(6, _chat_spacing_backoff_level + 1)
+        else:
+            # Se a janela já foi respeitada naturalmente, zera o backoff.
+            _chat_spacing_backoff_level = 0
 
         _last_chat_request_ts = now
 
@@ -2134,12 +2177,37 @@ def forward_to_codex(context: Dict[str, Any],
     log(f"🔁 Forward-to-Codex ({codex_target_url}): pedindo implementação "
         f"concreta de {len(pending_suggestions)} sugestão(ões)/falha(s)...")
 
-    try:
-        markdown, chat_id, chat_url = _stream_chat_completion(
-            body, label="ChatGPT Codex (implementação)"
-        )
-    except Exception as exc:
-        log(f"❌ Forward-to-Codex falhou: {exc}", logging.ERROR)
+    markdown = ""
+    chat_id = None
+    chat_url = None
+    last_exc: Optional[Exception] = None
+    for codex_try in range(1, 3):
+        try:
+            markdown, chat_id, chat_url = _stream_chat_completion(
+                body, label="ChatGPT Codex (implementação)"
+            )
+            last_exc = None
+            break
+        except Exception as exc:
+            last_exc = exc
+            exc_txt = str(exc)
+            composer_missing = (
+                "Composer do Codex não encontrado" in exc_txt
+                or "placeholder /plan ausente" in exc_txt
+            )
+            if composer_missing and codex_try < 2:
+                log("⚠️ Composer do Codex ausente; limpando sessão Codex e tentando reconexão.",
+                    logging.WARNING)
+                _AGENT_STATE.codex_chat_id = None
+                _AGENT_STATE.codex_chat_url = None
+                _save_state()
+                body.pop("chat_id", None)
+                body["url"] = codex_target_url
+                time.sleep(3)
+                continue
+            break
+    if last_exc is not None:
+        log(f"❌ Forward-to-Codex falhou: {last_exc}", logging.ERROR)
         return None
 
     # Persiste estado da conversa ATIVA no Codex (isolada do chat regular).
@@ -2303,7 +2371,7 @@ def run_single_cycle() -> None:
     _save_state()
 
 
-def _sleep_with_countdown(total_seconds: int) -> None:
+def _sleep_with_countdown(total_seconds: int, suggestion_remaining_sec: Optional[int] = None) -> None:
     """Pausa entre ciclos com countdown INLINE no stdout.
 
     Estratégia:
@@ -2341,11 +2409,24 @@ def _sleep_with_countdown(total_seconds: int) -> None:
     next_cycle_dt = datetime.now() + timedelta(seconds=total_seconds)
     next_hhmmss = next_cycle_dt.strftime("%H:%M:%S")
 
+    suggestion_remaining_sec = (
+        max(0, int(suggestion_remaining_sec))
+        if isinstance(suggestion_remaining_sec, (int, float))
+        else None
+    )
+    suggestion_hint = ""
+    if suggestion_remaining_sec is not None:
+        suggestion_hint = (
+            f" | próxima sugestão em {_fmt(suggestion_remaining_sec)}"
+            if suggestion_remaining_sec > 0
+            else " | sugestão já elegível"
+        )
+
     # 1) Linha logada inicial — persistida no log em arquivo e suficiente
     #    caso o terminal não suporte '\r'.
     log(
         f"⏳ Próximo ciclo às {next_hhmmss} "
-        f"(em {_fmt(total_seconds)}, total {total_seconds}s)"
+        f"(em {_fmt(total_seconds)}, total {total_seconds}s){suggestion_hint}"
     )
 
     if not stream_ok:
@@ -2361,9 +2442,16 @@ def _sleep_with_countdown(total_seconds: int) -> None:
                 break
 
             label = _fmt(remaining)
-            line = (
-                f"⏳ Próximo ciclo às {next_hhmmss} (em {label})"
-            )
+            inline_suggestion = ""
+            if suggestion_remaining_sec is not None:
+                elapsed_sec = max(0, int(round(time.time() - start_mono)))
+                sug_remaining = max(0, suggestion_remaining_sec - elapsed_sec)
+                inline_suggestion = (
+                    f" | sugestão em {_fmt(sug_remaining)}"
+                    if sug_remaining > 0
+                    else " | sugestão elegível"
+                )
+            line = f"⏳ Próximo ciclo às {next_hhmmss} (em {label}){inline_suggestion}"
             try:
                 # Padding generoso para sobrescrever restos da iteração anterior.
                 stream.write("\r" + line + " " * 20)
@@ -2431,7 +2519,11 @@ def main_loop() -> None:
 
         elapsed = time.time() - started
         sleep_for = max(10, CYCLE_INTERVAL_SEC - int(elapsed))
-        _sleep_with_countdown(sleep_for)
+        suggestion_remaining = max(
+            0,
+            SUGGESTION_INTERVAL_SEC - int(time.time() - (_AGENT_STATE.last_suggestion_ts or 0.0)),
+        )
+        _sleep_with_countdown(sleep_for, suggestion_remaining_sec=suggestion_remaining)
 
 
 # =============================================================================
