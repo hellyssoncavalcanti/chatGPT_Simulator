@@ -75,6 +75,7 @@ CHAT_RATE_LIMIT_DEFAULT_COOLDOWN_SEC = 240
 CHAT_RATE_LIMIT_PROGRESS_TICK_SEC = 1.0
 _chat_rate_limit_lock = threading.Lock()
 _chat_rate_limit_until = 0.0
+_chat_rate_limit_strikes = 0
 ACTIVE_CHAT_STALE_SEC = 900
 
 
@@ -162,12 +163,21 @@ def _extract_rate_limit_details(error_payload):
 
 
 def _register_chat_rate_limit(retry_after_seconds=None, reason=""):
-    global _chat_rate_limit_until
+    global _chat_rate_limit_until, _chat_rate_limit_strikes
     cooldown = retry_after_seconds or CHAT_RATE_LIMIT_DEFAULT_COOLDOWN_SEC
     cooldown = max(1, int(cooldown))
-    until_ts = time.time() + cooldown
+    now = time.time()
     with _chat_rate_limit_lock:
+        remaining = max(0.0, _chat_rate_limit_until - now)
+        if remaining > 0:
+            _chat_rate_limit_strikes = min(6, _chat_rate_limit_strikes + 1)
+        else:
+            _chat_rate_limit_strikes = 0
+        backoff_multiplier = 2 ** _chat_rate_limit_strikes
+        adjusted_cooldown = min(1800, int(cooldown * backoff_multiplier))
+        until_ts = now + adjusted_cooldown
         _chat_rate_limit_until = max(_chat_rate_limit_until, until_ts)
+    cooldown = adjusted_cooldown
     if reason:
         log(f"[CHAT_RATE_LIMIT] cooldown de {cooldown}s registrado. Motivo: {reason}")
     else:
