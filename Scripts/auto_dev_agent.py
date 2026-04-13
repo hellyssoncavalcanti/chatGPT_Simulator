@@ -2126,6 +2126,7 @@ def forward_to_codex(context: Dict[str, Any],
 
     suggestions_block = "\n".join(f"- {s}" for s in pending_suggestions[:20])
     codex_prompt = (
+        "/plan\n"
         "=== INSTRUÇÕES DO SISTEMA ===\n"
         f"{SYSTEM_PROMPT_BASE}\n"
         "=== FIM DAS INSTRUÇÕES DO SISTEMA ===\n\n"
