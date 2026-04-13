@@ -214,6 +214,7 @@ MAX_EDIT_SIZE_BYTES = int(_env("AUTODEV_AGENT_MAX_EDIT_BYTES", "200000"))
 MAX_ACTIONS_PER_CYCLE = int(_env("AUTODEV_AGENT_MAX_ACTIONS", "5"))
 MAX_RETRY_ATTEMPTS = int(_env("AUTODEV_AGENT_MAX_RETRIES", "2"))
 MAX_SHELL_TIMEOUT_SEC = int(_env("AUTODEV_AGENT_SHELL_TIMEOUT", "180"))
+STREAM_REQUEST_RETRIES = int(_env("AUTODEV_AGENT_STREAM_RETRIES", "2"))
 
 GIT_BRANCH = _env("AUTODEV_AGENT_BRANCH", "").strip()
 GIT_REMOTE = _env("AUTODEV_AGENT_REMOTE", "origin")
@@ -1180,13 +1181,34 @@ def _stream_chat_completion(
 
     _wait_chat_spacing_if_needed(label)
 
-    resp = requests.post(
-        SIMULATOR_URL,
-        headers=_llm_headers(),
-        json=body,
-        stream=True,
-        timeout=(30, STREAM_IDLE_TIMEOUT_SEC),
-    )
+    resp = None
+    post_error: Optional[Exception] = None
+    backoff_base = 5
+    for attempt in range(1, max(1, STREAM_REQUEST_RETRIES) + 1):
+        try:
+            resp = requests.post(
+                SIMULATOR_URL,
+                headers=_llm_headers(),
+                json=body,
+                stream=True,
+                timeout=(30, STREAM_IDLE_TIMEOUT_SEC),
+            )
+            post_error = None
+            break
+        except (requests.Timeout, requests.ConnectionError) as exc:
+            post_error = exc
+            if attempt >= max(1, STREAM_REQUEST_RETRIES):
+                break
+            wait_s = backoff_base * (2 ** (attempt - 1))
+            log(
+                f"⚠️ erro ao consultar ChatGPT ({label}) [tentativa {attempt}/"
+                f"{max(1, STREAM_REQUEST_RETRIES)}]: {exc}. "
+                f"Backoff exponencial: aguardando {wait_s}s...",
+                logging.WARNING,
+            )
+            time.sleep(wait_s)
+    if resp is None:
+        raise RuntimeError(f"falha ao consultar ChatGPT após retries: {post_error}")
     try:
         resp.raise_for_status()
     except Exception as exc:
@@ -2147,12 +2169,37 @@ def forward_to_codex(context: Dict[str, Any],
     log(f"🔁 Forward-to-Codex ({codex_target_url}): pedindo implementação "
         f"concreta de {len(pending_suggestions)} sugestão(ões)/falha(s)...")
 
-    try:
-        markdown, chat_id, chat_url = _stream_chat_completion(
-            body, label="ChatGPT Codex (implementação)"
-        )
-    except Exception as exc:
-        log(f"❌ Forward-to-Codex falhou: {exc}", logging.ERROR)
+    markdown = ""
+    chat_id = None
+    chat_url = None
+    last_exc: Optional[Exception] = None
+    for codex_try in range(1, 3):
+        try:
+            markdown, chat_id, chat_url = _stream_chat_completion(
+                body, label="ChatGPT Codex (implementação)"
+            )
+            last_exc = None
+            break
+        except Exception as exc:
+            last_exc = exc
+            exc_txt = str(exc)
+            composer_missing = (
+                "Composer do Codex não encontrado" in exc_txt
+                or "placeholder /plan ausente" in exc_txt
+            )
+            if composer_missing and codex_try < 2:
+                log("⚠️ Composer do Codex ausente; limpando sessão Codex e tentando reconexão.",
+                    logging.WARNING)
+                _AGENT_STATE.codex_chat_id = None
+                _AGENT_STATE.codex_chat_url = None
+                _save_state()
+                body.pop("chat_id", None)
+                body["url"] = codex_target_url
+                time.sleep(3)
+                continue
+            break
+    if last_exc is not None:
+        log(f"❌ Forward-to-Codex falhou: {last_exc}", logging.ERROR)
         return None
 
     # Persiste estado da conversa ATIVA no Codex (isolada do chat regular).
