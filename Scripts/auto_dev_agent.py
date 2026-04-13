@@ -997,11 +997,19 @@ def _extract_json_object(text: str) -> Optional[dict]:
     return None
 
 
-def _stream_chat_completion(body: Dict[str, Any]) -> Tuple[str, Optional[str], Optional[str]]:
+def _stream_chat_completion(
+    body: Dict[str, Any],
+    label: str = "ChatGPT Simulator",
+) -> Tuple[str, Optional[str], Optional[str]]:
     """Envia mensagem em modo streaming e coleta (markdown_final, chat_id, url).
 
     Usa stream=True para evitar timeouts longos do servidor (que pode aguardar
     cooldown de rate-limit) e tolera pausas até STREAM_IDLE_TIMEOUT_SEC.
+
+    Agora também emite logs ao longo do ciclo de vida da requisição — envio,
+    status, mensagens do browser, chat_id/url, progresso da resposta e fim
+    ou erro — espelhando o padrão usado por analisador_prontuarios.py para
+    dar ao usuário visibilidade em tempo real no CMD do agente.
     """
     body = dict(body)
     body["stream"] = True
@@ -1009,6 +1017,25 @@ def _stream_chat_completion(body: Dict[str, Any]) -> Tuple[str, Optional[str], O
     chat_id: Optional[str] = None
     chat_url: Optional[str] = None
     error_msg: Optional[str] = None
+
+    # Tamanho aproximado do payload em chars (útil para correlacionar com
+    # o tempo de envio/colagem no browser).
+    try:
+        payload_chars = len(str(body.get("message") or ""))
+        if not payload_chars and isinstance(body.get("messages"), list):
+            payload_chars = sum(
+                len(str(m.get("content") or "")) for m in body["messages"]
+            )
+    except Exception:
+        payload_chars = 0
+
+    reuse_hint = ""
+    if body.get("chat_id") or body.get("url"):
+        ref = str(body.get("chat_id") or body.get("url") or "")[-12:]
+        reuse_hint = f" [continuando ...{ref}]"
+
+    log(f"📤 Enviando pedido a {label} "
+        f"(~{payload_chars} chars){reuse_hint}...")
 
     resp = requests.post(
         SIMULATOR_URL,
@@ -1027,6 +1054,22 @@ def _stream_chat_completion(body: Dict[str, Any]) -> Tuple[str, Optional[str], O
             pass
         raise RuntimeError(f"HTTP {resp.status_code} no Simulator: {exc} | {detail}")
 
+    log(f"📡 Conexão com {label} aberta (HTTP {resp.status_code}); "
+        f"aguardando eventos do stream...")
+
+    # Controle de verbosidade para eventos repetitivos (status/markdown).
+    last_status_logged: str = ""
+    last_markdown_size_reported = -1
+    last_markdown_report_ts = 0.0
+    MARKDOWN_REPORT_MIN_STEP = 1024   # chars
+    MARKDOWN_REPORT_MIN_INTERVAL = 3  # segundos
+
+    def _clean_browser_prefix(text: str) -> str:
+        s = (text or "").strip()
+        s = re.sub(r"^\s*Remetente:\s*[^|]+\|\s*", "", s, flags=re.IGNORECASE)
+        s = re.sub(r"(\[browser\.py\])\s+\[[^\]]+\]\s+", r"\1 ", s, flags=re.IGNORECASE)
+        return s
+
     started = time.time()
     last_event = started
     for raw_line in resp.iter_lines(decode_unicode=True):
@@ -1044,25 +1087,62 @@ def _stream_chat_completion(body: Dict[str, Any]) -> Tuple[str, Optional[str], O
             continue
         t = msg.get("type")
         c = msg.get("content")
-        if t == "chat_id" and isinstance(c, str):
+
+        if t == "status":
+            text = (str(c) if c is not None else "").strip()
+            if text and text != last_status_logged:
+                log(f"   ⏳ status: {text[:220]}")
+                last_status_logged = text
+
+        elif t == "log":
+            text = (str(c) if c is not None else "").strip()
+            if text and "screenshot stream" not in text.lower():
+                log(f"   🔧 {_clean_browser_prefix(text)[:320]}")
+
+        elif t == "chat_id" and isinstance(c, str):
             chat_id = c
+            log(f"   📎 chat_id: {c}")
+
         elif t == "chat_meta" and isinstance(c, dict):
             chat_url = c.get("url") or chat_url
             chat_id = c.get("chat_id") or chat_id
+            if c.get("url"):
+                log(f"   🔗 chat_url: {c.get('url')}")
+
         elif t == "markdown" and isinstance(c, str):
             markdown_buf = c
+            size = len(c)
+            now = time.time()
+            if (
+                size == 0
+                or size - last_markdown_size_reported >= MARKDOWN_REPORT_MIN_STEP
+                or (size != last_markdown_size_reported
+                    and now - last_markdown_report_ts >= MARKDOWN_REPORT_MIN_INTERVAL)
+            ):
+                log(f"   📝 recebendo resposta: {size} chars...")
+                last_markdown_size_reported = size
+                last_markdown_report_ts = now
+
         elif t == "finish" and isinstance(c, dict):
             chat_url = c.get("url") or chat_url
+            total_chars = len(markdown_buf)
+            elapsed = time.time() - started
+            log(f"   ✅ resposta concluída: {total_chars} chars "
+                f"em {elapsed:.1f}s | url={chat_url}")
+
         elif t == "error":
             error_msg = str(c)
+            log(f"   ❌ erro recebido: {error_msg[:260]}", logging.WARNING)
             # Detecta rate limit e aplica cooldown ANTES de abortar
             is_rl, retry_after, reason = _parse_rate_limit(c)
             if is_rl:
                 _apply_rate_limit_cooldown(retry_after, reason)
             break
+
         # Hard timeout total
         if time.time() - started > REQUEST_TIMEOUT_SEC:
             raise TimeoutError("timeout total excedido aguardando resposta do ChatGPT")
+
     if error_msg and not markdown_buf:
         raise RuntimeError(f"ChatGPT retornou erro: {error_msg}")
     return markdown_buf, chat_id, chat_url
@@ -1238,7 +1318,9 @@ def ask_chatgpt_for_plan(context: Dict[str, Any],
         body["origin_url"] = CODEX_URL
 
     try:
-        markdown, chat_id, chat_url = _stream_chat_completion(body)
+        markdown, chat_id, chat_url = _stream_chat_completion(
+            body, label="ChatGPT Simulator (diagnóstico)"
+        )
     except Exception as exc:
         log(f"❌ Falha na comunicação com Simulator/ChatGPT: {exc}", logging.ERROR)
         return None
@@ -1713,7 +1795,9 @@ def forward_to_codex(context: Dict[str, Any],
         f"concreta de {len(pending_suggestions)} sugestão(ões)/falha(s)...")
 
     try:
-        markdown, chat_id, chat_url = _stream_chat_completion(body)
+        markdown, chat_id, chat_url = _stream_chat_completion(
+            body, label="ChatGPT Codex (implementação)"
+        )
     except Exception as exc:
         log(f"❌ Forward-to-Codex falhou: {exc}", logging.ERROR)
         return None
