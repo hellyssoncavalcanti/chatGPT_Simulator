@@ -3050,7 +3050,361 @@ async def handle_chat_task(context, task):
             _CURRENT_TASK_SENDER.reset(sender_token)
 
 
+def _is_codex_url(url: str) -> bool:
+    """Detecta se uma URL aponta para o Codex (chatgpt.com/codex...)."""
+    if not url:
+        return False
+    u = str(url).lower()
+    return ("chatgpt.com/codex" in u)
+
+
+async def _codex_wait_for_composer(page, q, timeout_ms: int = 20000):
+    """Aguarda o composer do Codex aparecer. Retorna o handle do elemento."""
+    # O composer Codex é um textarea/contenteditable cujo placeholder começa
+    # com 'Faça uma pergunta' (pt-BR) ou 'Ask' / 'Describe' (en-US). Fazemos
+    # busca por JS para aceitar múltiplas formas.
+    js = """() => {
+        const candidates = Array.from(document.querySelectorAll(
+            'textarea, [contenteditable="true"], [contenteditable=""]'
+        ));
+        const hit = candidates.find(el => {
+            const ph = (el.getAttribute('placeholder') || el.getAttribute('data-placeholder') || '').toLowerCase();
+            const txt = (el.innerText || el.textContent || '').toLowerCase();
+            // O placeholder do Codex contém "/plan" no final
+            if (ph.includes('/plan')) return true;
+            if (ph.startsWith('fa\\u00e7a uma pergunta')) return true;
+            if (ph.startsWith('ask ')) return true;
+            if (ph.startsWith('describe ')) return true;
+            return false;
+        });
+        if (!hit) return null;
+        // Marca elemento para querySelector posterior
+        hit.setAttribute('data-autodev-codex-composer', '1');
+        return true;
+    }"""
+    deadline = time.time() + (timeout_ms / 1000.0)
+    while time.time() < deadline:
+        try:
+            ok = await page.evaluate(js)
+            if ok:
+                return '[data-autodev-codex-composer="1"]'
+        except Exception:
+            pass
+        await asyncio.sleep(0.4)
+    raise RuntimeError('Composer do Codex não encontrado (placeholder /plan ausente)')
+
+
+async def _codex_select_repo(page, q, repo: str) -> bool:
+    """Abre o dropdown de ambientes/repositórios do Codex e seleciona `repo`.
+
+    Retorna True se a seleção foi confirmada (checkmark apareceu ao lado do item).
+    """
+    if not repo:
+        return False
+    # 1) Encontra e clica no botão de seleção (o que exibe o repo atual). O
+    # texto pode estar truncado (ex.: "hellyssoncavalcanti/ch..."), então
+    # procuramos qualquer botão visível cujo texto contenha '/' e esteja
+    # próximo ao composer.
+    open_js = """(repo) => {
+        const [owner, name] = repo.split('/');
+        const ownerPrefix = owner ? owner.slice(0, 6).toLowerCase() : '';
+        const buttons = Array.from(document.querySelectorAll('button'));
+        // Heurística: botão que já exibe um "owner/..." (pode estar truncado)
+        const hit = buttons.find(b => {
+            if (b.offsetParent === null) return false; // invisível
+            const t = (b.innerText || '').trim().toLowerCase();
+            if (!t) return false;
+            if (t.includes('/') && (t.includes(ownerPrefix) || t.includes(owner.toLowerCase()))) return true;
+            // Botão que mostra só "Selecionar ambiente" / "Choose environment"
+            if (t.includes('selecion') && t.includes('ambiente')) return true;
+            if (t.includes('choose') && (t.includes('environment') || t.includes('repo'))) return true;
+            return false;
+        });
+        if (!hit) return false;
+        hit.scrollIntoView({block: 'center'});
+        hit.click();
+        return true;
+    }"""
+    opened = False
+    for _try in range(3):
+        try:
+            opened = await page.evaluate(open_js, repo)
+        except Exception:
+            opened = False
+        if opened:
+            break
+        await asyncio.sleep(0.5)
+    if not opened:
+        emit_log(q, f'⚠️ Codex: botão de ambiente/repo não localizado para "{repo}".')
+        return False
+    await asyncio.sleep(0.6)
+
+    # 2) Digita o nome do repo no campo de busca do dropdown.
+    search_js = """(repo) => {
+        const inputs = Array.from(document.querySelectorAll(
+            'input[placeholder], input[type="search"], input[type="text"]'
+        ));
+        const hit = inputs.find(el => {
+            if (el.offsetParent === null) return false;
+            const ph = (el.getAttribute('placeholder') || '').toLowerCase();
+            return ph.includes('ambient') || ph.includes('repo') || ph.includes('search') || ph.includes('buscar');
+        });
+        if (!hit) return false;
+        hit.focus();
+        hit.value = '';
+        hit.dispatchEvent(new Event('input', {bubbles: true}));
+        // Type per-char simulation via InputEvent for React controlled inputs
+        const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+        setter.call(hit, repo);
+        hit.dispatchEvent(new Event('input', {bubbles: true}));
+        return true;
+    }"""
+    try:
+        await page.evaluate(search_js, repo)
+    except Exception:
+        pass
+    await asyncio.sleep(0.6)
+
+    # 3) Clica na opção cujo texto bate com `repo` (ou começa com ele).
+    pick_js = """(repo) => {
+        const target = repo.toLowerCase();
+        const targetShort = target.split('/').slice(-1)[0];
+        // Candidatos: qualquer elemento clicável listado no dropdown aberto.
+        const nodes = Array.from(document.querySelectorAll(
+            '[role="option"], [role="menuitem"], li, button, a, div'
+        ));
+        const visible = nodes.filter(n => {
+            if (!n.offsetParent) return false;
+            const t = (n.innerText || n.textContent || '').trim().toLowerCase();
+            return t === target || t.startsWith(target) || t.includes('/' + targetShort);
+        });
+        // Pega o elemento mais específico (menor texto) para evitar pegar
+        // um container que contenha vários repos.
+        visible.sort((a, b) => (a.innerText || '').length - (b.innerText || '').length);
+        const hit = visible[0];
+        if (!hit) return false;
+        hit.scrollIntoView({block: 'center'});
+        hit.click();
+        return true;
+    }"""
+    picked = False
+    for _try in range(4):
+        try:
+            picked = await page.evaluate(pick_js, repo)
+        except Exception:
+            picked = False
+        if picked:
+            break
+        await asyncio.sleep(0.4)
+    if not picked:
+        emit_log(q, f'⚠️ Codex: opção "{repo}" não localizada no dropdown.')
+        # Fecha o dropdown clicando fora
+        try:
+            await page.keyboard.press('Escape')
+        except Exception:
+            pass
+        return False
+    emit_log(q, f'✅ Codex: ambiente/repo selecionado: {repo}')
+    await asyncio.sleep(0.5)
+    return True
+
+
+async def _codex_paste_message(page, composer_selector: str, message: str, q, activityts):
+    """Cola a mensagem no composer do Codex via clipboard.
+
+    Reutiliza os mesmos marcadores [INICIO_TEXTO_COLADO]...[FIM_TEXTO_COLADO]
+    enviados pelo agente (apenas descarta os marcadores antes de colar).
+    """
+    start_marker = "[INICIO_TEXTO_COLADO]"
+    end_marker = "[FIM_TEXTO_COLADO]"
+    text = message or ""
+    if start_marker in text and end_marker in text:
+        i = text.find(start_marker) + len(start_marker)
+        j = text.rfind(end_marker)
+        text = text[i:j]
+    text = text.replace('\r\n', '\n').replace('\r', '\n')
+
+    # Clica no composer para focar.
+    try:
+        await page.click(composer_selector, timeout=5000)
+    except Exception:
+        # Fallback via JS
+        await page.evaluate(
+            "(sel) => { const el = document.querySelector(sel); if (el) el.focus(); }",
+            composer_selector,
+        )
+    await asyncio.sleep(0.2)
+
+    paste_chunk_size = 3500
+    chunks = [text[i:i + paste_chunk_size] for i in range(0, len(text), paste_chunk_size)] or ['']
+    total = len(text)
+    emit_log(q, f'Codex: colando bloco ({total} chars) em {len(chunks)} parte(s)...')
+    for idx, chunk in enumerate(chunks, 1):
+        emit_log(q, f'Codex: colando parte {idx}/{len(chunks)}: {len(chunk)} chars via clipboard...')
+        if activityts:
+            activityts[0] = time.time()
+        try:
+            await page.evaluate("(t) => navigator.clipboard.writeText(t)", chunk)
+        except Exception as clip_err:
+            emit_log(q, f'Codex: clipboard.writeText falhou ({clip_err}); usando execCommand fallback.')
+            await page.evaluate(
+                """(args) => {
+                    const el = document.querySelector(args.sel);
+                    if (!el) throw new Error('composer codex ausente');
+                    el.focus();
+                    if (el.isContentEditable) {
+                        document.execCommand('insertText', false, args.text);
+                    } else {
+                        const setter = Object.getOwnPropertyDescriptor(
+                            window.HTMLTextAreaElement.prototype, 'value').set;
+                        setter.call(el, (el.value || '') + args.text);
+                        el.dispatchEvent(new InputEvent('input', {bubbles: true, inputType: 'insertText', data: args.text}));
+                    }
+                }""",
+                {"sel": composer_selector, "text": chunk},
+            )
+            await asyncio.sleep(0.1)
+            continue
+        await asyncio.sleep(0.1)
+        # Foca e Ctrl+V
+        await page.evaluate(
+            "(sel) => { const el = document.querySelector(sel); if (el) el.focus(); }",
+            composer_selector,
+        )
+        await page.keyboard.press('Control+V')
+        await asyncio.sleep(0.2)
+
+
+async def _codex_submit(page, q) -> bool:
+    """Clica no botão de envio do Codex (seta para cima / Enviar)."""
+    submit_js = """() => {
+        const buttons = Array.from(document.querySelectorAll('button'));
+        // Procura botão de submit (aria-label com Send/Enviar, ou tipo submit, próximo ao composer)
+        const composer = document.querySelector('[data-autodev-codex-composer="1"]');
+        let closestForm = null;
+        if (composer) {
+            closestForm = composer.closest('form') || composer.parentElement?.closest('[class*="composer" i]');
+        }
+        const scoped = closestForm ? Array.from(closestForm.querySelectorAll('button')) : buttons;
+        const hit = scoped.find(b => {
+            if (b.disabled) return false;
+            if (b.offsetParent === null) return false;
+            const al = (b.getAttribute('aria-label') || '').toLowerCase();
+            const tt = (b.getAttribute('title') || '').toLowerCase();
+            if (al.includes('send') || al.includes('enviar') || al.includes('submit')) return true;
+            if (tt.includes('send') || tt.includes('enviar')) return true;
+            // Botão com ícone de seta-para-cima: muitas vezes tem data-testid=send-button
+            const dt = (b.getAttribute('data-testid') || '').toLowerCase();
+            if (dt.includes('send')) return true;
+            return false;
+        }) || scoped.find(b => b.type === 'submit' && !b.disabled);
+        if (!hit) return false;
+        hit.scrollIntoView({block: 'center'});
+        hit.click();
+        return true;
+    }"""
+    for _try in range(5):
+        try:
+            ok = await page.evaluate(submit_js)
+        except Exception:
+            ok = False
+        if ok:
+            return True
+        # Fallback: Ctrl+Enter no composer
+        try:
+            await page.keyboard.press('Control+Enter')
+            return True
+        except Exception:
+            pass
+        await asyncio.sleep(0.4)
+    return False
+
+
+async def handle_codex_task_inner(task, page, q, stop_event, activityts=None):
+    """Fluxo dedicado ao Codex (chatgpt.com/codex/cloud):
+      1) Navega para a Codex URL.
+      2) Seleciona o ambiente/repositório correto.
+      3) Cola a mensagem no composer (Ctrl+V).
+      4) Submete e captura a URL da tarefa criada.
+    """
+    url = task.get('url') or 'https://chatgpt.com/codex/cloud'
+    msg = task.get('message') or ''
+    codex_repo = task.get('codex_repo')
+
+    emit_log(q, f'Codex: abrindo {url}')
+    await page.goto(url, wait_until='domcontentloaded', timeout=30000)
+    await asyncio.sleep(1.2)
+
+    if stop_event.is_set():
+        raise RuntimeError('Watchdog sinalizou falha antes do composer Codex.')
+
+    # Seletor do composer — marca o elemento para reuso nos passos seguintes.
+    composer_sel = await _codex_wait_for_composer(page, q, timeout_ms=20000)
+
+    if codex_repo:
+        try:
+            await _codex_select_repo(page, q, codex_repo)
+        except Exception as exc:
+            emit_log(q, f'⚠️ Codex: erro ao selecionar repo "{codex_repo}": {exc}')
+        # Depois de selecionar o repo o composer pode ter sido re-renderizado;
+        # refaz a marcação.
+        try:
+            composer_sel = await _codex_wait_for_composer(page, q, timeout_ms=10000)
+        except Exception:
+            pass
+
+    if stop_event.is_set():
+        raise RuntimeError('Watchdog sinalizou falha antes do paste Codex.')
+
+    await _codex_paste_message(page, composer_sel, msg, q, activityts)
+    await asyncio.sleep(0.4)
+
+    submitted = await _codex_submit(page, q)
+    if not submitted:
+        emit_event(q, 'error', 'Codex: não foi possível clicar em Enviar.')
+        return
+
+    emit_log(q, 'Codex: mensagem enviada. Aguardando criação da tarefa...')
+    # Aguarda redirecionamento para /codex/cloud/tasks/<id>
+    task_url = None
+    deadline = time.time() + 25.0
+    while time.time() < deadline:
+        cur = (page.url or '')
+        m = re.search(r"https://chatgpt\.com/codex/cloud/tasks/([A-Za-z0-9_\-]+)", cur)
+        if m:
+            task_url = cur
+            break
+        await asyncio.sleep(0.5)
+
+    if task_url:
+        emit_log(q, f'Codex: tarefa criada → {task_url}')
+        emit_event(q, 'chat_meta', {
+            'chat_id': task.get('chat_id'),
+            'url': task_url,
+            'source': 'codex_task_url',
+        })
+    else:
+        emit_log(q, 'Codex: URL da tarefa não detectada em 25s (submissão pode ter sido aceita mesmo assim).')
+
+    # Resposta curta confirmando submissão — o agente parseia JSON; devolvemos
+    # um plano vazio com analysis explicando que a tarefa Codex foi enfileirada.
+    confirmation = (
+        '{"analysis": "Tarefa enviada ao ChatGPT Codex ('
+        + (task_url or url)
+        + '). A implementação concreta será feita pelo Codex em background; '
+        + 'o agente consultará o PR resultante em ciclos futuros.", "actions": []}'
+    )
+    emit_event(q, 'markdown', confirmation)
+    emit_event(q, 'finish', {'url': task_url or url, 'title': 'Codex Task'})
+
+
 async def handle_chat_task_inner(task, page, q, stop_event: asyncio.Event, activityts: list = None):
+    # Roteia para o fluxo dedicado do Codex quando a URL aponta para ele.
+    _url_for_routing = task.get('url') or ''
+    if _is_codex_url(_url_for_routing):
+        await handle_codex_task_inner(task, page, q, stop_event, activityts)
+        return
+
     url    = task.get('url')
     chat_id = task.get('chat_id')
     msg    = task.get('message')

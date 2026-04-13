@@ -134,12 +134,15 @@ SIMULATOR_URL = _env(
 )
 SIMULATOR_HEALTH_URL = SIMULATOR_URL.replace("/v1/chat/completions", "/health")
 
-# Codex cloud: endpoint do ChatGPT Codex. Default aponta para o Codex real
-# (https://chatgpt.com/codex). O agente ABRE UMA CONVERSA NOVA no Codex a
-# cada forward (chat_id/url da conversa regular NÃO são reutilizados no
-# forward — são serviços diferentes).
-CODEX_URL = _env("AUTODEV_AGENT_CODEX_URL", "https://chatgpt.com/codex")
-# Estado persistente da conversa ATIVA no Codex (separado do chat regular).
+# Codex cloud: endpoint do ChatGPT Codex. Default aponta para a home do
+# Codex cloud (https://chatgpt.com/codex/cloud), onde ficam o composer e o
+# seletor de ambiente/repositório.
+CODEX_URL = _env("AUTODEV_AGENT_CODEX_URL", "https://chatgpt.com/codex/cloud")
+# Repositório/ambiente a ser selecionado no dropdown antes do paste.
+# Deve bater com o texto exibido na lista de ambientes do Codex.
+CODEX_REPO = _env("AUTODEV_AGENT_CODEX_REPO", "hellyssoncavalcanti/chatGPT_Simulator")
+# Reuso de conversa Codex entre rodadas do mesmo ciclo (chat_id separado
+# do chat regular).
 CODEX_REUSE_CHAT = _env_bool("AUTODEV_AGENT_CODEX_REUSE_CHAT", True)
 
 SIMULATOR_MODEL = _env("AUTODEV_AGENT_MODEL", "ChatGPT Simulator", "AUTON_AGENT_MODEL")
@@ -1675,10 +1678,12 @@ def forward_to_codex(context: Dict[str, Any],
     codex_prompt += "\nResponda APENAS com JSON no formato especificado."
 
     wrapped = _wrap_for_paste(codex_prompt)
-    # IMPORTANTE: o forward vai para o CODEX (chatgpt.com/codex), nunca para
-    # a conversa regular. Mantemos chat_id/url do Codex SEPARADOS dos do chat
-    # regular para evitar contaminação entre as duas sessões do browser.py.
-    codex_target_url = CODEX_URL or "https://chatgpt.com/codex"
+    # IMPORTANTE: o forward vai para o CODEX (chatgpt.com/codex/cloud), nunca
+    # para a conversa regular. Mantemos chat_id/url do Codex SEPARADOS dos
+    # do chat regular para evitar contaminação entre as duas sessões do
+    # browser.py. Enviamos também o codex_repo para que browser.py selecione
+    # o ambiente/repositório correto no dropdown antes do paste.
+    codex_target_url = CODEX_URL or "https://chatgpt.com/codex/cloud"
     body: Dict[str, Any] = {
         "model": SIMULATOR_MODEL,
         "message": wrapped,
@@ -1686,6 +1691,7 @@ def forward_to_codex(context: Dict[str, Any],
         "temperature": 0.2,
         "request_source": "auto_dev_agent.py/codex",
         "origin_url": codex_target_url,
+        "codex_repo": CODEX_REPO,
     }
     if CODEX_REUSE_CHAT and _AGENT_STATE.codex_chat_id and _AGENT_STATE.codex_chat_url \
             and _AGENT_STATE.codex_chat_url.startswith(codex_target_url):
