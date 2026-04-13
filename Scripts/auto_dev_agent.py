@@ -327,8 +327,27 @@ def _setup_logger() -> logging.Logger:
         logger.addHandler(fh)
     except Exception as exc:
         print(f"[auto_dev_agent] ❌ Falha ao abrir log file: {exc}", file=sys.stderr)
+    class _AnsiColorFormatter(logging.Formatter):
+        RESET = "\033[0m"
+        COLORS = {
+            logging.DEBUG: "\033[90m",
+            logging.INFO: "\033[96m",
+            logging.WARNING: "\033[93m",
+            logging.ERROR: "\033[91m",
+            logging.CRITICAL: "\033[95m",
+        }
+
+        def format(self, record: logging.LogRecord) -> str:
+            text = super().format(record)
+            if os.environ.get("NO_COLOR"):
+                return text
+            color = self.COLORS.get(record.levelno, "")
+            if not color:
+                return text
+            return f"{color}{text}{self.RESET}"
+
     sh = logging.StreamHandler(sys.stdout)
-    sh.setFormatter(fmt)
+    sh.setFormatter(_AnsiColorFormatter("%(asctime)s [%(levelname)s] %(message)s"))
     logger.addHandler(sh)
     return logger
 
@@ -1042,6 +1061,29 @@ def _normalize_plan(plan: Dict[str, Any]) -> Dict[str, Any]:
     return plan
 
 
+def _log_plan_decision(plan: Dict[str, Any], origin: str) -> None:
+    """Loga análise completa + decisão de ações/forward para facilitar leitura."""
+    analysis = str(plan.get("analysis") or "").strip()
+    actions = plan.get("actions") or []
+    should_forward = bool(plan.get("should_forward_to_codex"))
+
+    log(f"🧠 [{origin}] analysis completo:\n{analysis or '(vazio)'}")
+    if actions:
+        action_types = [
+            str(a.get("type", "unknown"))
+            for a in actions if isinstance(a, dict)
+        ]
+        log(
+            f"🛠️ [{origin}] ações sugeridas: {len(actions)} "
+            f"({', '.join(action_types) if action_types else 'sem tipo'})"
+        )
+    else:
+        log(f"🛠️ [{origin}] nenhuma ação sugerida (actions=[]).")
+
+    decision_text = "ENCAMINHAR para Codex" if should_forward else "NÃO encaminhar para Codex"
+    log(f"🔁 [{origin}] should_forward_to_codex={should_forward} → {decision_text}")
+
+
 def _stream_chat_completion(
     body: Dict[str, Any],
     label: str = "ChatGPT Simulator",
@@ -1451,7 +1493,9 @@ def ask_chatgpt_for_plan(context: Dict[str, Any],
         log("⚠️ ChatGPT respondeu sem JSON válido — resposta ignorada neste ciclo.",
             logging.WARNING)
         return None
-    return _normalize_plan(plan)
+    plan = _normalize_plan(plan)
+    _log_plan_decision(plan, "ChatGPT")
+    return plan
 
 
 # =============================================================================
@@ -2071,7 +2115,9 @@ def forward_to_codex(context: Dict[str, Any],
     if not plan:
         log("⚠️ Forward-to-Codex: resposta sem JSON válido.", logging.WARNING)
         return None
-    return _normalize_plan(plan)
+    plan = _normalize_plan(plan)
+    _log_plan_decision(plan, "Codex")
+    return plan
 
 
 def run_single_cycle() -> None:
@@ -2107,7 +2153,6 @@ def run_single_cycle() -> None:
 
         actions = plan.get("actions") or []
         if not actions:
-            log(f"💭 Análise sem ações: {str(plan.get('analysis',''))[:300]}")
             _save_state()
             return
 
@@ -2149,8 +2194,7 @@ def run_single_cycle() -> None:
                     break
                 codex_actions = codex_plan.get("actions") or []
                 if not codex_actions:
-                    log(f"💭 Codex (tentativa {forward_attempts}): sem ações — "
-                        f"{str(codex_plan.get('analysis',''))[:220]}")
+                    log(f"💭 Codex (tentativa {forward_attempts}): sem ações.")
                     break
                 codex_backup = FileBackup()
                 codex_results = execute_plan(codex_plan, codex_backup)
