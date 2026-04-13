@@ -1524,7 +1524,9 @@ async def _scan_file_cards(page):
     """
     try:
         return await page.evaluate("""() => {
-            const fileExts = /\\.(xlsx|xls|csv|pdf|docx|doc|pptx|ppt|zip|rar|json|xml|txt|png|jpg|jpeg|gif|svg)$/i;
+            // Mantém foco em artefatos realmente "baixáveis" do code interpreter.
+            // Evita tratar imagens/ícones genéricos do DOM como arquivo.
+            const fileExts = /\\.(xlsx|xls|csv|pdf|docx|doc|pptx|ppt|zip|rar|json|xml|txt|md|py|log)$/i;
             const selectors = [
                 'div.group.my-4.w-full.rounded-2xl',
                 'div[class*="corner-superellipse"]'
@@ -1536,6 +1538,10 @@ async def _scan_file_cards(page):
                 document.querySelectorAll(sel).forEach((card, idx) => {
                     if (seen.has(card)) return;
                     seen.add(card);
+
+                    // Só considera cards dentro de mensagens do assistant.
+                    const assistantRoot = card.closest('[data-message-author-role="assistant"]');
+                    if (!assistantRoot) return;
 
                     // Tenta encontrar o filename via seletor direto;
                     // fallback: qualquer texto dentro do card que termine com extensão conhecida.
@@ -1550,6 +1556,21 @@ async def _scan_file_cards(page):
                         if (m) name = m[0].trim();
                     }
                     if (!name) return;
+
+                    // Exige evidência forte de download no card para reduzir falso positivo.
+                    const hasDownloadLink = !!card.querySelector(
+                        'a[href*="/backend-api/files/"], a[href*="/interpreter/download"], a[download]'
+                    );
+                    const hasDownloadButton = Array.from(card.querySelectorAll('button, [role="button"]')).some(btn => {
+                        const label = (
+                            (btn.getAttribute('aria-label') || '') + ' ' +
+                            (btn.getAttribute('title') || '') + ' ' +
+                            (btn.getAttribute('data-testid') || '') + ' ' +
+                            (btn.textContent || '')
+                        ).toLowerCase();
+                        return /(download|baixar|file-download|icon-download|save-file|file-save|transferir)/.test(label);
+                    });
+                    if (!(hasDownloadLink || hasDownloadButton)) return;
 
                     // Preview image (base64 ou URL)
                     let preview = '';
@@ -1604,12 +1625,15 @@ async def _click_chatgpt_download_elements(page, q=None):
         download_elements = await page.evaluate("""() => {
             const results = [];
             // Padrão 1: links com texto contendo extensões de arquivo comuns
-            const fileExts = /\.(xlsx|xls|csv|pdf|docx|doc|pptx|ppt|zip|rar|json|xml|txt|png|jpg|jpeg|gif|svg)$/i;
+            const fileExts = /\.(xlsx|xls|csv|pdf|docx|doc|pptx|ppt|zip|rar|json|xml|txt|md|py|log)$/i;
             document.querySelectorAll('a').forEach((a, i) => {
                 const text = (a.textContent || '').trim();
                 const href = a.getAttribute('href') || '';
                 const dl = a.getAttribute('download') || '';
-                if ((fileExts.test(text) || fileExts.test(dl) || fileExts.test(href)) && !href.startsWith('#')) {
+                const hasDownloadHint = href.includes('/backend-api/files/')
+                    || href.includes('/interpreter/download')
+                    || !!a.getAttribute('download');
+                if (hasDownloadHint && (fileExts.test(text) || fileExts.test(dl) || fileExts.test(href)) && !href.startsWith('#')) {
                     results.push({index: i, text: text || dl || href.split('/').pop(), selector: 'a'});
                 }
             });
@@ -1661,7 +1685,7 @@ async def _click_chatgpt_download_elements(page, q=None):
                             (btn.textContent || '')
                         ).toLowerCase();
                         const explicitDownload = /(download|baixar|file-download|icon-download|transferir|save-file|file-save)/.test(label);
-                        const likelyHeaderIcon = looksIconButton && btnIdx < 3;
+                        const likelyHeaderIcon = looksIconButton && btnIdx < 3 && explicitDownload;
                         if (!(explicitDownload || likelyHeaderIcon)) return;
                         results.push({
                             cardIndex: cardIdx,
