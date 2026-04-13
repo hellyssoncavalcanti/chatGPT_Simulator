@@ -563,15 +563,22 @@ def discover_active_services() -> Dict[str, List[int]]:
 
 
 def log_active_services_snapshot(svc_map: Dict[str, List[int]]) -> None:
-    """Só registra em log quando a assinatura muda — evita spam."""
+    """Registra a lista de serviços ativos — SEMPRE logado a cada ciclo.
+
+    A descoberta real acontece em collect_runtime_context() a cada ciclo,
+    então esta função apenas renderiza o snapshot atual. Mantemos também a
+    assinatura anterior em _AGENT_STATE para detectar mudanças (∆), mas a
+    linha é emitida em todo ciclo para dar visibilidade contínua do estado
+    do ambiente.
+    """
     signature = json.dumps(svc_map, sort_keys=True, ensure_ascii=False)
-    if signature == _AGENT_STATE.last_services_signature:
-        return
+    changed = signature != _AGENT_STATE.last_services_signature
     _AGENT_STATE.last_services_signature = signature
     parts = []
     for name, pids in svc_map.items():
         parts.append(f"{name}={pids}" if pids else f"{name}=OFF")
-    log("🛰️ Serviços ativos: " + " | ".join(parts))
+    marker = " (mudou)" if changed else ""
+    log("🛰️ Serviços ativos: " + " | ".join(parts) + marker)
 
 
 # =============================================================================
@@ -1865,6 +1872,55 @@ def run_single_cycle() -> None:
     _save_state()
 
 
+def _sleep_with_countdown(total_seconds: int) -> None:
+    """Pausa entre ciclos com countdown INLINE no stdout.
+
+    Enquanto o agente está em pausa (sem nenhum script próprio em execução),
+    mostramos o tempo restante sobre a mesma linha do terminal (usando '\\r').
+    Ao zerar, a linha é limpa para que o próximo log apareça normalmente.
+
+    Se stdout não for um TTY (ex.: saída redirecionada para arquivo), só
+    dormimos silenciosamente para não poluir o log.
+    """
+    if total_seconds <= 0:
+        return
+    is_tty = False
+    try:
+        is_tty = sys.stdout.isatty()
+    except Exception:
+        is_tty = False
+    if not is_tty:
+        time.sleep(total_seconds)
+        return
+
+    end_at = time.time() + total_seconds
+    try:
+        while True:
+            remaining = int(round(end_at - time.time()))
+            if remaining <= 0:
+                break
+            mm, ss = divmod(remaining, 60)
+            if mm >= 60:
+                hh, mm = divmod(mm, 60)
+                label = f"{hh:02d}:{mm:02d}:{ss:02d}"
+            else:
+                label = f"{mm:02d}:{ss:02d}"
+            line = f"⏳ Próxima conferência em {label} (total {total_seconds}s)"
+            # padding para sobrescrever qualquer resquício anterior
+            sys.stdout.write("\r" + line + " " * 8)
+            sys.stdout.flush()
+            time.sleep(1.0)
+    except KeyboardInterrupt:
+        raise
+    finally:
+        # Limpa a linha do countdown antes de retornar ao fluxo normal.
+        try:
+            sys.stdout.write("\r" + " " * 80 + "\r")
+            sys.stdout.flush()
+        except Exception:
+            pass
+
+
 def wait_for_simulator() -> None:
     started = time.time()
     while not simulator_is_ready():
@@ -1902,7 +1958,7 @@ def main_loop() -> None:
 
         elapsed = time.time() - started
         sleep_for = max(10, CYCLE_INTERVAL_SEC - int(elapsed))
-        time.sleep(sleep_for)
+        _sleep_with_countdown(sleep_for)
 
 
 # =============================================================================
