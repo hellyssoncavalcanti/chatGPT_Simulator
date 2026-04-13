@@ -376,20 +376,48 @@ def _post_llm(payload: dict, timeout: int = 300) -> requests.Response:
     Garante intervalo mínimo entre envios e, se o ChatGPT responder com
     mensagem de rate limit, faz retry com backoff exponencial.
     """
+    ultimo_erro: Exception | None = None
     for tentativa in range(1, LLM_RATE_LIMIT_RETRY_MAX + 1):
-        _aguardar_throttle_llm()
-        _registrar_envio_llm()
-        resp = requests.post(
-            LLM_URL,
-            json=payload,
-            headers=_headers_llm(),
-            stream=True,
-            timeout=timeout,
-        )
-        resp.raise_for_status()
-        return resp
+        try:
+            _aguardar_throttle_llm()
+            _registrar_envio_llm()
+            resp = requests.post(
+                LLM_URL,
+                json=payload,
+                headers=_headers_llm(),
+                stream=True,
+                timeout=timeout,
+            )
+            resp.raise_for_status()
+            return resp
+        except (requests.Timeout, requests.ConnectionError) as exc:
+            ultimo_erro = exc
+            if tentativa >= LLM_RATE_LIMIT_RETRY_MAX:
+                break
+            espera = int(LLM_RATE_LIMIT_RETRY_BASE_S * (LLM_RATE_LIMIT_RETRY_MULT ** (tentativa - 1)))
+            espera = max(2, min(180, espera))
+            log.warning(
+                f"  ⚠️ Falha de conexão com ChatGPT Simulator "
+                f"(tentativa {tentativa}/{LLM_RATE_LIMIT_RETRY_MAX}): {exc}. "
+                f"Nova tentativa em {espera}s."
+            )
+            try:
+                countdown(espera, "reconexão LLM")
+            except Exception:
+                time.sleep(espera)
+        except requests.HTTPError as exc:
+            # Mantém comportamento atual para rate-limit/erro HTTP: quem chama
+            # decide como tratar via fluxo de exceções já existente.
+            ultimo_erro = exc
+            raise
+        except requests.RequestException as exc:
+            ultimo_erro = exc
+            raise
     # Nunca deve chegar aqui, mas por segurança:
-    raise ChatGPTRateLimitError("Rate limit: todas as tentativas esgotadas.")
+    raise ChatGPTRateLimitError(
+        f"Falha de conexão com ChatGPT Simulator após {LLM_RATE_LIMIT_RETRY_MAX} tentativas: "
+        f"{ultimo_erro}"
+    )
 
 
 def _verificar_rate_limit_no_markdown(markdown: str, tentativa_atual: int = 0):
