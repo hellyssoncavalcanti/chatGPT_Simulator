@@ -905,6 +905,7 @@ SYSTEM_PROMPT_BASE = textwrap.dedent("""\
     FORMATO EXATO:
     {
       "analysis": "texto curto com o diagnóstico/raciocínio",
+      "should_forward_to_codex": false,
       "actions": [
         {
           "type": "edit_file",
@@ -930,6 +931,14 @@ SYSTEM_PROMPT_BASE = textwrap.dedent("""\
         }
       ]
     }
+
+    REGRAS PARA "should_forward_to_codex":
+      • Campo OBRIGATÓRIO em TODA resposta.
+      • true  = o auto_dev_agent.py DEVE encaminhar este caso ao Codex para
+                tentar implementação concreta (quando você só trouxe diagnóstico,
+                notas, ou quando as ações propostas tendem a falhar sem contexto
+                adicional de execução no Codex).
+      • false = não encaminhar ao Codex neste ciclo.
     """)
 
 
@@ -1017,6 +1026,20 @@ def _extract_json_object(text: str) -> Optional[dict]:
                         break
         start = raw.find("{", start + 1)
     return None
+
+
+def _normalize_plan(plan: Dict[str, Any]) -> Dict[str, Any]:
+    """Normaliza o JSON de plano para contrato mínimo esperado pelo agente."""
+    if not isinstance(plan.get("actions"), list):
+        plan["actions"] = []
+    if "analysis" not in plan:
+        plan["analysis"] = ""
+    if "should_forward_to_codex" not in plan:
+        # Fallback conservador: só sinaliza forward automático quando não há ações.
+        plan["should_forward_to_codex"] = len(plan["actions"]) == 0
+    else:
+        plan["should_forward_to_codex"] = bool(plan.get("should_forward_to_codex"))
+    return plan
 
 
 def _stream_chat_completion(
@@ -1428,11 +1451,7 @@ def ask_chatgpt_for_plan(context: Dict[str, Any],
         log("⚠️ ChatGPT respondeu sem JSON válido — resposta ignorada neste ciclo.",
             logging.WARNING)
         return None
-    if not isinstance(plan.get("actions"), list):
-        plan["actions"] = []
-    if "analysis" not in plan:
-        plan["analysis"] = ""
-    return plan
+    return _normalize_plan(plan)
 
 
 # =============================================================================
@@ -2052,11 +2071,7 @@ def forward_to_codex(context: Dict[str, Any],
     if not plan:
         log("⚠️ Forward-to-Codex: resposta sem JSON válido.", logging.WARNING)
         return None
-    if not isinstance(plan.get("actions"), list):
-        plan["actions"] = []
-    if "analysis" not in plan:
-        plan["analysis"] = ""
-    return plan
+    return _normalize_plan(plan)
 
 
 def run_single_cycle() -> None:
@@ -2122,7 +2137,8 @@ def run_single_cycle() -> None:
         # Se nenhuma mudança de código foi aplicada mas há sugestões úteis
         # (notas / actions que falharam), ENCAMINHA para o Codex pedindo
         # implementação concreta — esse é o "loop autônomo" de fato.
-        if not changed and ENABLE_AUTOFIX:
+        should_forward_to_codex = bool(plan.get("should_forward_to_codex"))
+        if not changed and ENABLE_AUTOFIX and should_forward_to_codex:
             pending = _collect_pending_suggestions(results, plan)
             forward_attempts = 0
             while pending and forward_attempts < MAX_CODEX_FORWARD_ATTEMPTS:
@@ -2162,6 +2178,8 @@ def run_single_cycle() -> None:
                 pending = _collect_pending_suggestions(codex_results, codex_plan)
                 if not pending:
                     break
+        elif not changed and ENABLE_AUTOFIX and not should_forward_to_codex:
+            log("ℹ️ Plano sinalizou should_forward_to_codex=false; sem encaminhar ao Codex.")
 
         # Resumo do ciclo
         ok_count = sum(1 for r in results if r.ok)
