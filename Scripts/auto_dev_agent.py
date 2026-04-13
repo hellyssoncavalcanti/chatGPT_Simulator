@@ -163,6 +163,11 @@ MAX_LOG_LINES_PER_FILE = int(_env("AUTODEV_AGENT_MAX_LOG_LINES", "120"))
 MAX_LOG_FILES = int(_env("AUTODEV_AGENT_MAX_LOG_FILES", "6"))
 MAX_INCIDENTS_IN_CONTEXT = 60
 
+# Quantas vezes o agente pede ao ChatGPT/Codex para TRANSFORMAR uma sugestão
+# em ações concretas (edit_file/create_file) quando o plano inicial só tem
+# notas ou quando as ações concretas falharam neste ciclo.
+MAX_CODEX_FORWARD_ATTEMPTS = int(_env("AUTODEV_AGENT_CODEX_FORWARD_MAX", "2"))
+
 # =============================================================================
 # CONFIGURAÇÃO — Segurança e Políticas
 # =============================================================================
@@ -1582,6 +1587,131 @@ def _summarize_incidents(context: Dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _collect_pending_suggestions(results: List[ActionResult],
+                                 plan: Dict[str, Any]) -> List[str]:
+    """Reúne texto útil do plano para reenviar ao Codex como pedido de implementação.
+
+    Fonte (em ordem):
+      1) 'analysis' do plano (diagnóstico do ChatGPT),
+      2) actions do tipo 'note' (recomendações humanas),
+      3) 'description' das ações concretas que falharam (edit_file/create_file/shell),
+         junto com o 'details' retornado (motivo da falha) — isso permite que o
+         ChatGPT entenda POR QUE falhou e reescreva 'search' com trecho correto.
+    """
+    pieces: List[str] = []
+    analysis = str(plan.get("analysis") or "").strip()
+    if analysis:
+        pieces.append(f"Diagnóstico anterior: {analysis}")
+    # Notas explícitas
+    for action in plan.get("actions", []) or []:
+        if not isinstance(action, dict):
+            continue
+        if str(action.get("type", "")).lower() == "note":
+            note_text = str(action.get("content") or action.get("note") or
+                            action.get("description") or "").strip()
+            if note_text:
+                pieces.append(f"Sugestão: {note_text}")
+    # Ações concretas que falharam (forneça motivo para que o ChatGPT corrija)
+    for r in results:
+        if not r.ok and r.action_type in {"edit_file", "create_file", "shell"}:
+            desc = (r.description or "").strip()
+            det = (r.details or "").strip()
+            head = f"Ação {r.action_type} falhou"
+            if desc:
+                head += f" — {desc}"
+            if det:
+                head += f" (motivo: {det[:240]})"
+            pieces.append(head)
+    return pieces
+
+
+def forward_to_codex(context: Dict[str, Any],
+                     source_files: Dict[str, str],
+                     pending_suggestions: List[str],
+                     original_objective: str) -> Optional[Dict[str, Any]]:
+    """Envia um pedido de IMPLEMENTAÇÃO ao ChatGPT (via browser.py = Codex) com
+    base nas sugestões pendentes e motivos de falha. Pede resposta com ações
+    concretas (edit_file/create_file) usando trechos EXATOS do código fornecido.
+    """
+    if not pending_suggestions:
+        return None
+    if not simulator_is_ready():
+        return None
+    remaining = _rate_limit_remaining()
+    if remaining > 0:
+        log(f"⏸️  Codex-forward pulado: cooldown de {int(remaining)}s.",
+            logging.INFO)
+        return None
+
+    suggestions_block = "\n".join(f"- {s}" for s in pending_suggestions[:20])
+    codex_prompt = (
+        "=== INSTRUÇÕES DO SISTEMA ===\n"
+        f"{SYSTEM_PROMPT_BASE}\n"
+        "=== FIM DAS INSTRUÇÕES DO SISTEMA ===\n\n"
+        "OBJETIVO DESTE CICLO (IMPLEMENTAÇÃO CONCRETA):\n"
+        f"{original_objective}\n\n"
+        "Você já produziu um diagnóstico/sugestões na rodada anterior. "
+        "Agora CONVERTA essas sugestões em ações CONCRETAS do tipo "
+        "'edit_file' ou 'create_file'. REGRAS:\n"
+        "  • Use 'search' com trecho EXATO do código-fonte abaixo — "
+        "copie caractere por caractere, preservando indentação.\n"
+        "  • 'search' deve ser ÚNICO no arquivo (inclua contexto suficiente).\n"
+        "  • Respeite arquivos protegidos (Scripts/config.py, "
+        "Scripts/analisador_prontuarios.py, Scripts/acompanhamento_whatsapp.py).\n"
+        "  • NÃO responda apenas com 'note'. Se honestamente não houver como "
+        "implementar com segurança, retorne actions=[] com analysis justificando.\n\n"
+        "SUGESTÕES/FALHAS PENDENTES:\n"
+        f"{suggestions_block}\n\n"
+        "CÓDIGO-FONTE RELEVANTE (use trechos daqui em 'search'):\n"
+    )
+    for rel, content in (source_files or {}).items():
+        codex_prompt += f"--- BEGIN FILE: {rel} ---\n{content}\n--- END FILE: {rel} ---\n"
+    codex_prompt += "\nResponda APENAS com JSON no formato especificado."
+
+    wrapped = _wrap_for_paste(codex_prompt)
+    body: Dict[str, Any] = {
+        "model": SIMULATOR_MODEL,
+        "message": wrapped,
+        "messages": [{"role": "user", "content": wrapped}],
+        "temperature": 0.2,
+        "request_source": "auto_dev_agent.py",
+    }
+    if REUSE_CHAT_CONVERSATION:
+        if _AGENT_STATE.chat_id:
+            body["chat_id"] = _AGENT_STATE.chat_id
+        if _AGENT_STATE.chat_url:
+            body["url"] = _AGENT_STATE.chat_url
+    if CODEX_URL and not body.get("url"):
+        body["url"] = CODEX_URL
+        body["origin_url"] = CODEX_URL
+
+    log(f"🔁 Forward-to-Codex: pedindo implementação concreta de "
+        f"{len(pending_suggestions)} sugestão(ões)/falha(s)...")
+
+    try:
+        markdown, chat_id, chat_url = _stream_chat_completion(body)
+    except Exception as exc:
+        log(f"❌ Forward-to-Codex falhou: {exc}", logging.ERROR)
+        return None
+
+    if REUSE_CHAT_CONVERSATION:
+        if chat_id and chat_id != _AGENT_STATE.chat_id:
+            _AGENT_STATE.chat_id = chat_id
+        if chat_url and chat_url != _AGENT_STATE.chat_url:
+            _AGENT_STATE.chat_url = chat_url
+        _save_state()
+
+    plan = _extract_json_object(markdown or "")
+    if not plan:
+        log("⚠️ Forward-to-Codex: resposta sem JSON válido.", logging.WARNING)
+        return None
+    if not isinstance(plan.get("actions"), list):
+        plan["actions"] = []
+    if "analysis" not in plan:
+        plan["analysis"] = ""
+    return plan
+
+
 def run_single_cycle() -> None:
     _AGENT_STATE.cycles_total += 1
     context = collect_runtime_context()
@@ -1641,6 +1771,50 @@ def run_single_cycle() -> None:
                 continue  # nova tentativa
             else:
                 log(f"✅ Validação OK em {len(changed)} arquivo(s) alterado(s).")
+
+        # Se nenhuma mudança de código foi aplicada mas há sugestões úteis
+        # (notas / actions que falharam), ENCAMINHA para o Codex pedindo
+        # implementação concreta — esse é o "loop autônomo" de fato.
+        if not changed and ENABLE_AUTOFIX:
+            pending = _collect_pending_suggestions(results, plan)
+            forward_attempts = 0
+            while pending and forward_attempts < MAX_CODEX_FORWARD_ATTEMPTS:
+                forward_attempts += 1
+                codex_plan = forward_to_codex(context, source_files,
+                                              pending, objective)
+                if not codex_plan:
+                    break
+                codex_actions = codex_plan.get("actions") or []
+                if not codex_actions:
+                    log(f"💭 Codex (tentativa {forward_attempts}): sem ações — "
+                        f"{str(codex_plan.get('analysis',''))[:220]}")
+                    break
+                codex_backup = FileBackup()
+                codex_results = execute_plan(codex_plan, codex_backup)
+                codex_changed = codex_backup.changed_files
+                if codex_changed:
+                    ok, report = validate_changes(codex_changed)
+                    if not ok:
+                        log(f"🛑 Codex: validação falhou "
+                            f"({report['py_compile']['errors'][:3]}) — rollback.",
+                            logging.WARNING)
+                        codex_backup.rollback_all()
+                        # Realimenta motivo do erro para próxima rodada
+                        pending = _collect_pending_suggestions(codex_results, codex_plan)
+                        pending.append(
+                            "Validação py_compile falhou após aplicar o plano anterior; "
+                            "ajuste os trechos exatos e tente novamente."
+                        )
+                        continue
+                    log(f"✅ Codex: validação OK em {len(codex_changed)} arquivo(s).")
+                    results.extend(codex_results)
+                    changed = codex_changed
+                    plan = codex_plan  # usa este plano para commit message
+                    break
+                # Sem mudanças: pode ter falhado de novo — prepara próxima rodada
+                pending = _collect_pending_suggestions(codex_results, codex_plan)
+                if not pending:
+                    break
 
         # Resumo do ciclo
         ok_count = sum(1 for r in results if r.ok)
