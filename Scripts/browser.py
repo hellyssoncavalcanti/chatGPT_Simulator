@@ -1097,7 +1097,7 @@ async def _detect_and_register_files(page, markdown_text, q=None, allow_click_fa
     if not matches:
         # Fallback: tenta detectar links de download na página via múltiplos seletores
         try:
-            page_links = await page.evaluate("""() => {
+            page_links = await page.evaluate(r"""() => {
                 const links = [];
                 const seen = new Set();
                 // Seletor 1: links com /backend-api/files/
@@ -1622,7 +1622,7 @@ async def _click_chatgpt_download_elements(page, q=None):
     """
     try:
         # Procura elementos clicáveis que representam downloads de arquivo do code interpreter
-        download_elements = await page.evaluate("""() => {
+        download_elements = await page.evaluate(r"""() => {
             const results = [];
             // Padrão 1: links com texto contendo extensões de arquivo comuns
             const fileExts = /\.(xlsx|xls|csv|pdf|docx|doc|pptx|ppt|zip|rar|json|xml|txt|md|py|log)$/i;
@@ -4018,7 +4018,7 @@ async def handle_chat_task_inner(task, page, q, stop_event: asyncio.Event, activ
                 emit_event(q, "error", f"Falha no ChatGPT após {max_chat_error_reloads} recarga(s): {err_msg[:300]}")
                 break
 
-        status_txt = await page.evaluate("""() => {
+        status_txt = await page.evaluate(r"""() => {
             const asstMsgs = document.querySelectorAll('div[data-message-author-role="assistant"]');
             if (asstMsgs.length > 0) {
                 const lastAsst = asstMsgs[asstMsgs.length - 1];
