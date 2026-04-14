@@ -1552,7 +1552,7 @@ async def _scan_file_cards(page):
                     }
                     if (!name || !fileExts.test(name)) {
                         const text = (card.innerText || '').trim();
-                        const m = text.match(/[\\w\\-. ]+\\.(xlsx|xls|csv|pdf|docx|doc|pptx|ppt|zip|rar|json|xml|txt|png|jpg|jpeg|gif|svg)/i);
+                        const m = text.match(/[-\\w. ]+\\.(xlsx|xls|csv|pdf|docx|doc|pptx|ppt|zip|rar|json|xml|txt|png|jpg|jpeg|gif|svg)/i);
                         if (m) name = m[0].trim();
                     }
                     if (!name) return;

@@ -899,8 +899,10 @@ JSON no seguinte formato (sem markdown, sem prosa extra):
 ```
 
 O parser do agente (`_extract_json_object`) é tolerante a fences de código
-(` ``` ` ou ` ```json `) e a prosa extra — ele procura o primeiro objeto JSON
-balanceado na resposta. Respostas sem JSON válido são ignoradas com warning.
+(` ``` ` ou ` ```json `), marcadores como `RESPOSTA:` e prosa extra. Ele
+varre múltiplos candidatos JSON e prioriza o objeto que mais se parece com o
+schema de plano (`analysis`, `actions`, `should_forward_to_codex`), reduzindo
+falsos negativos quando o modelo repete contexto antes da resposta final.
 
 ### Arquivos protegidos e caminhos bloqueados
 

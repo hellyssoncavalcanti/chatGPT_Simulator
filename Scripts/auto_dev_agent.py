@@ -1114,49 +1114,82 @@ def _strip_code_fences(text: str) -> str:
 
 
 def _extract_json_object(text: str) -> Optional[dict]:
-    """Extrai o primeiro objeto JSON válido a partir de 'text'."""
+    """Extrai o objeto JSON mais provável de plano dentro de texto misto.
+
+    Estratégia:
+      1) tenta parse direto;
+      2) tenta parse após marcadores como "RESPOSTA:";
+      3) varre candidatos com json.JSONDecoder().raw_decode() a partir de '{';
+      4) ranqueia candidatos privilegiando schema do plano (analysis/actions/forward).
+    """
     if not text:
         return None
     raw = _strip_code_fences(text)
+    decoder = json.JSONDecoder()
+
+    def _score_candidate(data: dict) -> int:
+        score = 0
+        if isinstance(data.get("analysis"), str):
+            score += 3
+        if isinstance(data.get("actions"), list):
+            score += 4
+        if "should_forward_to_codex" in data:
+            score += 4
+        if "type" in data and "file" in data:
+            score -= 2
+        return score
+
+    candidates: List[dict] = []
+
     # Tentativa direta
     try:
         data = json.loads(raw)
-        return data if isinstance(data, dict) else None
+        if isinstance(data, dict):
+            candidates.append(data)
     except Exception:
         pass
-    # Busca por chave JSON balanceada iniciando no primeiro '{'
+
+    # Tenta parse após marcadores frequentes.
+    marker_candidates = ["\nRESPOSTA:", "\nResposta:", "\nJSON:", "responda apenas com json"]
+    lower_raw = raw.lower()
+    for marker in marker_candidates:
+        pos = lower_raw.rfind(marker.lower())
+        if pos == -1:
+            continue
+        chunk = raw[pos + len(marker):].strip()
+        if not chunk:
+            continue
+        try:
+            data = json.loads(chunk)
+            if isinstance(data, dict):
+                candidates.append(data)
+                continue
+        except Exception:
+            pass
+        brace = chunk.find("{")
+        if brace != -1:
+            try:
+                obj, _end = decoder.raw_decode(chunk[brace:])
+                if isinstance(obj, dict):
+                    candidates.append(obj)
+            except Exception:
+                pass
+
+    # Varrida geral por objetos JSON possíveis.
     start = raw.find("{")
     while start != -1:
-        depth = 0
-        in_str = False
-        esc = False
-        for idx in range(start, len(raw)):
-            ch = raw[idx]
-            if esc:
-                esc = False
-                continue
-            if ch == "\\":
-                esc = True
-                continue
-            if ch == '"':
-                in_str = not in_str
-                continue
-            if in_str:
-                continue
-            if ch == "{":
-                depth += 1
-            elif ch == "}":
-                depth -= 1
-                if depth == 0:
-                    candidate = raw[start:idx + 1]
-                    try:
-                        data = json.loads(candidate)
-                        if isinstance(data, dict):
-                            return data
-                    except Exception:
-                        break
+        try:
+            obj, _end = decoder.raw_decode(raw[start:])
+            if isinstance(obj, dict):
+                candidates.append(obj)
+        except Exception:
+            pass
         start = raw.find("{", start + 1)
-    return None
+
+    if not candidates:
+        return None
+    candidates.sort(key=_score_candidate, reverse=True)
+    return candidates[0]
 
 
 def _normalize_plan(plan: Dict[str, Any]) -> Dict[str, Any]:
