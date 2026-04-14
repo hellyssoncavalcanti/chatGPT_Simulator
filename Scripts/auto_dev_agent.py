@@ -29,8 +29,8 @@
 #  14. Sleep e repetição indefinida — mesmo em caso de exceção fatal no ciclo.
 #
 # PRINCÍPIOS DE SEGURANÇA:
-#   • Arquivos protegidos (certs/, db/, .git/, logs/, analisador_prontuarios.py,
-#     acompanhamento_whatsapp.py) jamais são modificados.
+#   • Arquivos protegidos (certs/, db/, .git/, logs/, config.py)
+#     jamais são modificados.
 #   • Comandos destrutivos (rm -rf, git reset --hard, shutdown, mkfs, dd, …)
 #     são bloqueados por allowlist explícita.
 #   • Toda edição cria backup em temp/agent_backups/<timestamp>/ antes de atuar.
@@ -238,8 +238,6 @@ BLOCKED_PATH_SEGMENTS = [
 
 # Arquivos protegidos contra edição (negócio crítico)
 PROTECTED_FILES = {
-    "Scripts/analisador_prontuarios.py",
-    "Scripts/acompanhamento_whatsapp.py",
     "Scripts/config.py",  # Configurações críticas — só altera sob supervisão
 }
 
@@ -914,8 +912,6 @@ SYSTEM_PROMPT_BASE = textwrap.dedent("""\
       2) Nunca proponha comandos destrutivos (rm -rf, git reset --hard,
          shutdown, format, dd, DROP TABLE, kill -9 1, chmod 777 -R).
       3) NUNCA edite arquivos protegidos:
-         - Scripts/analisador_prontuarios.py
-         - Scripts/acompanhamento_whatsapp.py
          - Scripts/config.py
          - qualquer caminho em .git/, certs/, db/, logs/, chrome_profile/
       4) Em edições use 'search/replace' com trechos EXATOS do código atual.
@@ -2138,8 +2134,7 @@ def forward_to_codex(context: Dict[str, Any],
         "  • Use 'search' com trecho EXATO do código-fonte abaixo — "
         "copie caractere por caractere, preservando indentação.\n"
         "  • 'search' deve ser ÚNICO no arquivo (inclua contexto suficiente).\n"
-        "  • Respeite arquivos protegidos (Scripts/config.py, "
-        "Scripts/analisador_prontuarios.py, Scripts/acompanhamento_whatsapp.py).\n"
+        "  • Respeite arquivos protegidos (Scripts/config.py).\n"
         "  • NÃO responda apenas com 'note'. Se honestamente não houver como "
         "implementar com segurança, retorne actions=[] com analysis justificando.\n\n"
         "SUGESTÕES/FALHAS PENDENTES:\n"
