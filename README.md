@@ -734,10 +734,12 @@ um desenvolvedor sênior virtual — que:
 6. **Aplica as ações com segurança**:
    - **Snapshot/backup** de todos os arquivos afetados em
      `temp/agent_backups/<timestamp>/` antes de tocar em qualquer coisa.
+   - **Lock de instância única** em `temp/auto_dev_agent.lock` para impedir
+     duas instâncias do agente alterando o mesmo repositório ao mesmo tempo.
    - Bloqueio de caminhos sensíveis (`.git/`, `certs/`, `db/`, `logs/`,
      `chrome_profile/`, `__pycache__/`, `.venv/`, `node_modules/`).
-   - Bloqueio de arquivos protegidos por negócio (`analisador_prontuarios.py`,
-     `acompanhamento_whatsapp.py`, `config.py`).
+   - Bloqueio de arquivos protegidos por negócio (`Scripts/config.py` e o
+     próprio `Scripts/auto_dev_agent.py`, salvo com `AUTODEV_AGENT_SELF_EDIT=1`).
    - Bloqueio de comandos destrutivos via regex (`rm -rf`, `git reset --hard`,
      `git push --force`, `shutdown`, `mkfs`, `dd if=`, `DROP TABLE`,
      `chmod -R 777`, `kill -9 1`, fork-bomb, …).
@@ -804,12 +806,16 @@ O agente espera até `AUTODEV_AGENT_STARTUP_WAIT_SEC` segundos pelo Simulator
 subir. Depois disso entra em modo monitor mesmo se o Simulator ainda não
 estiver pronto — reavalia a saúde a cada ciclo.
 
+Se `AUTODEV_AGENT_AUTOSTART_CMD` estiver configurada, o agente também tenta
+**iniciar automaticamente o Simulator** quando o health-check falhar, com
+cooldown para evitar loops agressivos de restart.
+
 ### Variáveis de ambiente
 
 | Variável | Default | Descrição |
 |---|---|---|
 | `AUTODEV_AGENT_SIMULATOR_URL` | `http://127.0.0.1:3003/v1/chat/completions` | Endpoint do Simulator |
-| `AUTODEV_AGENT_CODEX_URL` | *(vazio)* | URL da conversa do Codex no ChatGPT; se vazio, usa chat regular novo |
+| `AUTODEV_AGENT_CODEX_URL` | `https://chatgpt.com/codex/cloud` | URL base da conversa do Codex no ChatGPT |
 | `AUTODEV_AGENT_MODEL` | `ChatGPT Simulator` | Nome lógico do modelo (apenas label) |
 | `AUTODEV_AGENT_API_KEY` | `config.API_KEY` | Bearer token para o Simulator |
 | `AUTODEV_AGENT_CYCLE_SEC` | `120` | Intervalo entre ciclos (s) |
@@ -829,6 +835,10 @@ estiver pronto — reavalia a saúde a cada ciclo.
 | `AUTODEV_AGENT_REUSE_CHAT` | `1` | Mantém a mesma conversa entre ciclos |
 | `AUTODEV_AGENT_USE_PASTE_MARKERS` | `1` | Encapsula mensagens em `[INICIO_TEXTO_COLADO]…[FIM_TEXTO_COLADO]` para que `browser.py` cole via Ctrl+V (rápido) em vez de digitar caractere a caractere |
 | `AUTODEV_AGENT_STARTUP_WAIT_SEC` | `30` | Espera inicial pelo Simulator (s) |
+| `AUTODEV_AGENT_HEALTH_RETRIES` | `2` | Quantidade de tentativas por health-check antes de marcar indisponível |
+| `AUTODEV_AGENT_HEALTH_RETRY_DELAY_SEC` | `2` | Intervalo entre tentativas de health-check (s) |
+| `AUTODEV_AGENT_AUTOSTART_CMD` | *(vazio)* | Comando para subir o Simulator automaticamente quando indisponível |
+| `AUTODEV_AGENT_AUTOSTART_COOLDOWN_SEC` | `180` | Cooldown mínimo entre tentativas de auto-start (s) |
 | `AUTODEV_AGENT_EXIT_ON_FATAL` | `0` | `exit(1)` em erro fatal (para CI) |
 
 ### Envio rápido via paste (clipboard)
@@ -889,15 +899,17 @@ JSON no seguinte formato (sem markdown, sem prosa extra):
 ```
 
 O parser do agente (`_extract_json_object`) é tolerante a fences de código
-(` ``` ` ou ` ```json `) e a prosa extra — ele procura o primeiro objeto JSON
-balanceado na resposta. Respostas sem JSON válido são ignoradas com warning.
+(` ``` ` ou ` ```json `), marcadores como `RESPOSTA:` e prosa extra. Ele
+varre múltiplos candidatos JSON e prioriza o objeto que mais se parece com o
+schema de plano (`analysis`, `actions`, `should_forward_to_codex`), reduzindo
+falsos negativos quando o modelo repete contexto antes da resposta final.
 
 ### Arquivos protegidos e caminhos bloqueados
 
 **Nunca** são modificados pelo agente, mesmo se o ChatGPT sugerir:
 
-- Arquivos: `Scripts/analisador_prontuarios.py`, `Scripts/acompanhamento_whatsapp.py`,
-  `Scripts/config.py`, e `Scripts/auto_dev_agent.py` (salvo com `SELF_EDIT=1`).
+- Arquivos: `Scripts/config.py`, e `Scripts/auto_dev_agent.py`
+  (salvo com `SELF_EDIT=1`).
 - Diretórios: `.git/`, `certs/`, `db/`, `logs/`, `chrome_profile/`, `__pycache__/`,
   `.venv/`, `node_modules/`, `temp/agent_backups/`.
 - Extensões editáveis: `.py`, `.md`, `.bat`, `.txt`, `.json`, `.ini`, `.cfg`,
@@ -917,6 +929,14 @@ Mensagens-chave emitidas:
 - `🛑 Validação falhou` → `↩️ Rollback`.
 - `📦 Commit efetuado` / `🚀 Push OK`.
 - `💭 Análise sem ações` — ciclo em que o ChatGPT escolheu não agir.
+- `ℹ️ should_forward_to_codex ausente` — fallback de contrato (informativo),
+  sem elevar para warning.
+
+Detecção de incidentes:
+- Quando a linha de log traz nível explícito (`[INFO]`, `[WARNING]`, `[ERROR]`),
+  o agente prioriza esse nível para reduzir falso-positivo.
+- Linhas informativas conhecidas do `sync_github` (ex.: branches sem commits
+  novos) são ignoradas no classificador de incidentes.
 
 ### Como o agente consulta Codex (via `browser.py`)
 
