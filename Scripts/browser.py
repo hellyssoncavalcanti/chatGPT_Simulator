@@ -3688,17 +3688,40 @@ async def _codex_wait_and_click_pr_controls(page, q, timeout_s: int = 900) -> tu
 
 
 async def _codex_try_open_fresh_task(page):
-    """Se estiver na home do Codex, tenta abrir a tarefa mais recente visível."""
+    """Na home do Codex, tenta abrir a tarefa mais recente ainda em execução.
+
+    Critério prioritário: primeira tarefa visível que contenha botão
+    `aria-label="Cancelar tarefa"` (ou equivalente em inglês), pois isso
+    indica que é a tarefa ativa recém-submetida.
+    """
     js = """() => {
-        const links = Array.from(document.querySelectorAll('a[href*="/codex/cloud/tasks/"]'));
-        const visible = links.filter(a => {
-            if (!a || !a.href) return false;
-            const r = a.getBoundingClientRect();
+        const isVisible = (el) => {
+            if (!el) return false;
+            const st = window.getComputedStyle(el);
+            if (!st || st.display === 'none' || st.visibility === 'hidden') return false;
+            const r = el.getBoundingClientRect();
             return r.width > 0 && r.height > 0;
-        });
-        if (!visible.length) return null;
-        const first = visible[0];
-        return first.href || first.getAttribute('href') || null;
+        };
+
+        const links = Array.from(document.querySelectorAll('a[href*="/codex/cloud/tasks/"]'))
+            .filter(a => a && (a.href || a.getAttribute('href')) && isVisible(a));
+        if (!links.length) return null;
+
+        const hasCancelInTask = (link) => {
+            const scope = link.closest('.task-row-container, .group, li, article, div') || link;
+            const btn = scope.querySelector('button[aria-label], [data-testid="stop-button"]');
+            if (!btn || !isVisible(btn)) return false;
+            const label = ((btn.getAttribute('aria-label') || btn.innerText || btn.textContent || '') + '')
+                .trim().toLowerCase();
+            return label.includes('cancelar tarefa') || label.includes('cancel task');
+        };
+
+        // IMPORTANTE: seleciona a primeira tarefa visível que esteja ativa
+        // (com botão de cancelar), evitando abrir tarefa antiga da lista.
+        for (const a of links) {
+            if (hasCancelInTask(a)) return a.href || a.getAttribute('href');
+        }
+        return null;
     }"""
     try:
         href = await page.evaluate(js)
@@ -3763,6 +3786,7 @@ async def handle_codex_task_inner(task, page, q, stop_event, activityts=None):
     # Aguarda redirecionamento para /codex/cloud/tasks/<id>
     task_url = None
     deadline = time.time() + 25.0
+    last_wait_log = 0.0
     while time.time() < deadline:
         cur = (page.url or '')
         m = re.search(r"https://chatgpt\.com/codex/cloud/tasks/([A-Za-z0-9_\-]+)", cur)
@@ -3770,11 +3794,16 @@ async def handle_codex_task_inner(task, page, q, stop_event, activityts=None):
             task_url = cur
             break
         # Se o Codex voltou para /codex/cloud, tenta abrir imediatamente a
-        # tarefa recém-criada pela lista "Tarefas" (primeiro item visível).
+        # tarefa recém-criada pela lista "Tarefas" (primeira ativa com
+        # botão "Cancelar tarefa"; enquanto há skeleton/loading, aguarda).
         opened = await _codex_try_open_fresh_task(page)
         if opened:
             task_url = opened
             break
+        now = time.time()
+        if now - last_wait_log >= 5.0:
+            emit_log(q, "Codex: aguardando tarefa ativa aparecer na lista (pode haver skeleton/loading).")
+            last_wait_log = now
         await asyncio.sleep(0.5)
 
     if task_url:
