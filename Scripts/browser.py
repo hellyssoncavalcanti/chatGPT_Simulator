@@ -116,6 +116,11 @@ def _extract_task_sender(task: dict | None) -> str:
     sender = str(sender or "").strip()
     return sender or "usuario_remoto"
 
+
+def _is_python_sender(sender_hint: str) -> bool:
+    src = str(sender_hint or "").strip().lower()
+    return src.endswith(".py") or ".py/" in src or src.startswith("python:")
+
 async def close_ephemeral_pages(context, baseline_pages, q=None, keep_pages=None):
     """
     Fecha abas criadas durante uma tarefa (popups/abas órfãs), preservando
@@ -260,16 +265,24 @@ async def _emit_browser_screenshot(page, q, label: str = "browser"):
         return
 
 
-async def _stream_browser_screenshots(page, q, stop_event: asyncio.Event, label: str = "browser"):
+async def _stream_browser_screenshots(page,
+                                      q,
+                                      stop_event: asyncio.Event,
+                                      label: str = "browser",
+                                      activity_ts: list = None):
     if not q:
         return
     try:
         await _emit_browser_screenshot(page, q, label=label)
+        if activity_ts:
+            activity_ts[0] = time.time()
         while not stop_event.is_set():
             try:
                 await asyncio.wait_for(stop_event.wait(), timeout=SCREENSHOT_STREAM_INTERVAL_SEC)
             except asyncio.TimeoutError:
                 await _emit_browser_screenshot(page, q, label=label)
+                if activity_ts:
+                    activity_ts[0] = time.time()
     except asyncio.CancelledError:
         raise
 
@@ -537,6 +550,45 @@ def _response_requests_followup_actions(markdown_text: str) -> bool:
         '"tool_name"', '"tool_calls"', '"function_call"',
     )
     return any(h in texto for h in hints)
+
+
+def _replace_inline_base64_payloads(text: str) -> tuple[str, int]:
+    """Substitui blobs base64 inline (principalmente imagens) por placeholder."""
+    if not text:
+        return text, 0
+    out = str(text)
+    replaced = 0
+
+    # data:image/...;base64,AAAA...
+    out, n1 = re.subn(
+        r"data:image/[a-zA-Z0-9.+-]+;base64,[A-Za-z0-9+/=\s]{120,}",
+        "[BASE64_IMAGE_REMOVIDA]",
+        out,
+        flags=re.IGNORECASE,
+    )
+    replaced += n1
+
+    # Campos JSON comuns com payload base64 gigante.
+    out, n2 = re.subn(
+        r'("(?:data_base64|image_base64|base64|image_data)"\s*:\s*")[A-Za-z0-9+/=\s]{120,}(")',
+        r'\1[BASE64_IMAGE_REMOVIDA]\2',
+        out,
+        flags=re.IGNORECASE,
+    )
+    replaced += n2
+
+    return out, replaced
+
+
+def _ensure_paste_wrappers(text: str) -> tuple[str, bool]:
+    start_marker = "[INICIO_TEXTO_COLADO]"
+    end_marker = "[FIM_TEXTO_COLADO]"
+    content = str(text or "")
+    if not content.strip():
+        return content, False
+    if start_marker in content and end_marker in content:
+        return content, False
+    return f"{start_marker}{content}{end_marker}", True
 
 
 async def smart_input(page, message, q=None, activityts=None):
@@ -2540,6 +2592,7 @@ async def handle_sync_task(context, task):
 async def watchdog_page(page, q, stop_event: asyncio.Event,
                         check_interval: int = 15,
                         activity_ts: list = None):
+    consecutive_failures = 0
     while not stop_event.is_set():
         try:
             await asyncio.wait_for(asyncio.sleep(check_interval), timeout=check_interval + 1)
@@ -2551,7 +2604,13 @@ async def watchdog_page(page, q, stop_event: asyncio.Event,
             continue
         try:
             await asyncio.wait_for(page.evaluate("1"), timeout=20.0)
+            consecutive_failures = 0
         except Exception as e:
+            consecutive_failures += 1
+            if consecutive_failures < 3:
+                emit_log(q, f"⚠️ Watchdog: ping da aba falhou ({consecutive_failures}/3): {e}")
+                await asyncio.sleep(2.0)
+                continue
             emit_event(q, "error", f"⏱️ Watchdog: aba não respondeu ({e}). Abortando.")
             stop_event.set()
             return
@@ -3316,6 +3375,15 @@ async def _codex_wait_for_composer(page, q, timeout_ms: int = 20000):
         const directCandidates = Array.from(document.querySelectorAll(
             '#prompt-textarea[contenteditable="true"], [contenteditable="true"], [contenteditable=""], textarea[name="prompt-textarea"], textarea[aria-label*="Codex" i]'
         ));
+        // Em páginas de task do Codex, o #prompt-textarea pode existir sem
+        // placeholder /plan visível. Se estiver visível, aceita diretamente.
+        const directPrompt = directCandidates.find(el =>
+            isVisible(el) && ((el.id || '').toLowerCase() === 'prompt-textarea')
+        );
+        if (directPrompt) {
+            directPrompt.setAttribute('data-autodev-codex-composer', '1');
+            return true;
+        }
         let hit = directCandidates.find(el => {
             if (!isVisible(el)) return false;
             const ph = (el.getAttribute('placeholder') || el.getAttribute('data-placeholder') || '');
@@ -3749,6 +3817,16 @@ async def handle_codex_task_inner(task, page, q, stop_event, activityts=None):
     msg = task.get('message') or ''
     codex_repo = task.get('codex_repo')
 
+    sender = _extract_task_sender(task)
+    if _is_python_sender(sender):
+        msg, wrapped = _ensure_paste_wrappers(msg)
+        if wrapped:
+            emit_log(q, "Codex: mensagem Python encapsulada com [INICIO_TEXTO_COLADO]...[FIM_TEXTO_COLADO].")
+
+    msg, replaced_b64 = _replace_inline_base64_payloads(msg)
+    if replaced_b64:
+        emit_log(q, f"Codex: {replaced_b64} payload(s) base64 inline substituído(s) por placeholder.")
+
     emit_log(q, f'Codex: abrindo {url}')
     await page.goto(url, wait_until='domcontentloaded', timeout=30000)
     await asyncio.sleep(1.2)
@@ -3757,7 +3835,37 @@ async def handle_codex_task_inner(task, page, q, stop_event, activityts=None):
         raise RuntimeError('Watchdog sinalizou falha antes do composer Codex.')
 
     # Seletor do composer — marca o elemento para reuso nos passos seguintes.
-    composer_sel = await _codex_wait_for_composer(page, q, timeout_ms=20000)
+    try:
+        composer_sel = await _codex_wait_for_composer(page, q, timeout_ms=20000)
+    except Exception:
+        composer_sel = None
+
+    # Se caiu numa tarefa prévia do Codex e não encontrou composer pelo caminho
+    # padrão, tenta usar diretamente o #prompt-textarea da task atual.
+    if not composer_sel and "/codex/cloud/tasks/" in (page.url or ""):
+        try:
+            ok_prompt = await page.evaluate("""() => {
+                const el = document.querySelector('#prompt-textarea');
+                if (!el) return false;
+                const st = window.getComputedStyle(el);
+                if (!st || st.display === 'none' || st.visibility === 'hidden') return false;
+                const r = el.getBoundingClientRect();
+                if (r.width <= 0 || r.height <= 0) return false;
+                el.setAttribute('data-autodev-codex-composer', '1');
+                return true;
+            }""")
+            if ok_prompt:
+                emit_log(q, "Codex: reaproveitando #prompt-textarea da tarefa atual.")
+                composer_sel = '[data-autodev-codex-composer=\"1\"]'
+        except Exception:
+            pass
+
+    # Último fallback: voltar para a home /codex/cloud para abrir nova tarefa.
+    if not composer_sel:
+        emit_log(q, "⚠️ Codex: composer não encontrado na tarefa atual. Voltando para /codex/cloud...")
+        await page.goto("https://chatgpt.com/codex/cloud", wait_until='domcontentloaded', timeout=30000)
+        await asyncio.sleep(1.0)
+        composer_sel = await _codex_wait_for_composer(page, q, timeout_ms=20000)
 
     if codex_repo:
         try:
@@ -3852,6 +3960,16 @@ async def handle_chat_task_inner(task, page, q, stop_event: asyncio.Event, activ
     chat_id = task.get('chat_id')
     msg    = task.get('message')
     atts   = task.get('attachment_paths')
+
+    sender = _extract_task_sender(task)
+    if _is_python_sender(sender):
+        msg, wrapped = _ensure_paste_wrappers(msg)
+        if wrapped:
+            emit_log(q, "Mensagem Python encapsulada com [INICIO_TEXTO_COLADO]...[FIM_TEXTO_COLADO].")
+
+    msg, replaced_b64 = _replace_inline_base64_payloads(msg)
+    if replaced_b64:
+        emit_log(q, f"{replaced_b64} payload(s) base64 inline substituído(s) por placeholder.")
 
     # Handler para capturar downloads automáticos do ChatGPT (code interpreter, etc.)
     # Sem salvar em disco: payload em memória (ou URL fallback).
@@ -4031,7 +4149,7 @@ async def handle_chat_task_inner(task, page, q, stop_event: asyncio.Event, activ
     # Inicia streaming de screenshots em background durante a resposta
     screenshot_stop = asyncio.Event()
     screenshot_task = asyncio.create_task(
-        _stream_browser_screenshots(page, q, screenshot_stop, label="chat")
+        _stream_browser_screenshots(page, q, screenshot_stop, label="chat", activity_ts=activityts)
     )
 
     start_time  = time.time()

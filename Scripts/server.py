@@ -1595,6 +1595,12 @@ def chat_completions():
     is_codex_request = _is_codex_chat_request(source_hint_norm, data.get("url"), origin_url)
     use_python_queue = bool(is_python_source and not is_codex_request)
 
+    # Todos os pedidos oriundos de scripts Python devem usar encapsulamento de
+    # texto colado para evitar typing realista (lento) no browser.py.
+    if is_python_source and isinstance(message, str) and message.strip():
+        if "[INICIO_TEXTO_COLADO]" not in message or "[FIM_TEXTO_COLADO]" not in message:
+            message = f"[INICIO_TEXTO_COLADO]{message}[FIM_TEXTO_COLADO]"
+
     # --- 2. PROCESSAMENTO DE ANEXOS ---
     saved_paths = []
     if attachments:
@@ -1773,12 +1779,14 @@ def chat_completions():
                         break
 
             except GeneratorExit:
-                # PHP abortou por timeout — tarefa background continua;
-                # fila fica intacta para /api/sync recolher via TAKEOVER mode
-                ACTIVE_CHATS[chat_id]['finished'] = True
-                ACTIVE_CHATS[chat_id]['finished_at'] = time.time()
+                # Conexão de stream foi interrompida pelo lado cliente/proxy.
+                # NÃO marca como finalizado aqui: a tarefa no browser pode
+                # continuar em progresso e será recuperável via /api/sync.
                 ACTIVE_CHATS[chat_id]['last_event_at'] = time.time()
-                log(f"[ACTIVE_CHATS] stream encerrado pelo cliente; chat {chat_id} liberado para novas filas.")
+                log(
+                    f"[ACTIVE_CHATS] stream interrompido (cliente/proxy) para chat {chat_id}; "
+                    "mantendo tarefa ativa para retomada."
+                )
 
         return Response(generate(), mimetype="application/x-ndjson")
 
