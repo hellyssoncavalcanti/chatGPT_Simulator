@@ -1283,6 +1283,7 @@ def _should_forward_plan_to_codex(plan: Dict[str, Any],
 def _stream_chat_completion(
     body: Dict[str, Any],
     label: str = "ChatGPT Simulator",
+    apply_chat_spacing: bool = True,
 ) -> Tuple[str, Optional[str], Optional[str]]:
     """Envia mensagem em modo streaming e coleta (markdown_final, chat_id, url).
 
@@ -1320,7 +1321,8 @@ def _stream_chat_completion(
     log(f"📤 Enviando pedido a {label} "
         f"(~{payload_chars} chars){reuse_hint}...")
 
-    _wait_chat_spacing_if_needed(label)
+    if apply_chat_spacing:
+        _wait_chat_spacing_if_needed(label)
 
     resp = None
     post_error: Optional[Exception] = None
@@ -2252,11 +2254,6 @@ def forward_to_codex(context: Dict[str, Any],
         return None
     if not simulator_is_ready():
         return None
-    remaining = _rate_limit_remaining()
-    if remaining > 0:
-        log(f"⏸️  Codex-forward pulado: cooldown de {int(remaining)}s.",
-            logging.INFO)
-        return None
 
     # Gate: não envia nova tarefa ao Codex enquanto a anterior estiver em
     # execução. Evita empilhar PRs em paralelo que podem conflitar.
@@ -2325,7 +2322,9 @@ def forward_to_codex(context: Dict[str, Any],
     for codex_try in range(1, 3):
         try:
             markdown, chat_id, chat_url = _stream_chat_completion(
-                body, label="ChatGPT Codex (implementação)"
+                body,
+                label="ChatGPT Codex (implementação)",
+                apply_chat_spacing=False,
             )
             last_exc = None
             break

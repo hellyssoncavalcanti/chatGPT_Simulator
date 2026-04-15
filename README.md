@@ -953,3 +953,6 @@ Detecção de incidentes:
 5. O agente guarda `chat_id` e `url` em `AgentState`, e nas rodadas seguintes
    reutiliza essa conversa — ou seja, o ChatGPT mantém memória contextual de
    toda a trajetória de manutenção do projeto.
+6. O intervalo anti-rate-limit humano é aplicado ao fluxo de diagnóstico no
+   ChatGPT Simulator, mas **não bloqueia** o forward de implementação para o
+   Codex (canal separado).
