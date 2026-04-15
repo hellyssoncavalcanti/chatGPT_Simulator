@@ -3110,51 +3110,96 @@ async def handle_uptodate_search_task(context, task):
 
 async def handle_chat_task(context, task):
     async with tab_semaphore:
-        sender_token = None
+        q = task.get('stream_queue')
         sender = _extract_task_sender(task)
-        if sender:
-            sender_token = _CURRENT_TASK_SENDER.set(sender)
-        q          = task.get('stream_queue')
-        sender     = _extract_task_sender(task)
-        sender_token = _CURRENT_TASK_SENDER.set(sender)
-        stop_event = asyncio.Event()
-        activityts = [time.time()]
+        sender_token = _CURRENT_TASK_SENDER.set(sender) if sender else None
+        max_attempts = 2
+        handled = False
         page = None
         try:
-            emit_log(q, "Iniciando tarefa CHAT no browser.")
-            page = await context.new_page()
-            watchdog_task = asyncio.create_task(
-                watchdog_page(page, q, stop_event,
-                              check_interval=15,
-                              activity_ts=activityts)  # ✅ era activityts=, corrigido para activity_ts=
-            )
-            try:
-                await asyncio.wait_for(
-                    handle_chat_task_inner(task, page, q, stop_event, activityts),
-                    timeout=660
-                )
-            except asyncio.TimeoutError:
-                emit_event(q, 'error', 'Timeout externo 660s — tarefa abortada.')
-            finally:
-                stop_event.set()
-                watchdog_task.cancel()
+            for attempt in range(1, max_attempts + 1):
+                stop_event = asyncio.Event()
+                activityts = [time.time()]
+                watchdog_task = None
                 try:
-                    await watchdog_task
-                except (asyncio.CancelledError, Exception):
-                    pass
-        except Exception as e:
-            emit_log(q, f'ERRO Chat: {e}')
-            emit_event(q, 'error', f'Falha no navegador: {str(e)}')
+                    emit_log(q, f"Iniciando tarefa CHAT no browser (tentativa {attempt}/{max_attempts}).")
+                    page = await context.new_page()
+                    watchdog_task = asyncio.create_task(
+                        watchdog_page(page, q, stop_event, check_interval=15, activity_ts=activityts)
+                    )
+                    await asyncio.wait_for(
+                        handle_chat_task_inner(task, page, q, stop_event, activityts),
+                        timeout=660
+                    )
+                    handled = True
+                    break
+                except asyncio.TimeoutError:
+                    emit_event(q, 'error', 'Timeout externo 660s — tarefa abortada.')
+                except Exception as e:
+                    err = str(e)
+                    recoverable = (
+                        "watchdog_abort_before_response" in err
+                        or "target page, context or browser has been closed" in err.lower()
+                        or "stream encerrado pelo cliente" in err.lower()
+                    )
+                    if recoverable and attempt < max_attempts:
+                        emit_log(q, "⚠️ Interrupção detectada. Reabrindo aba para verificar status/resposta...")
+                        probe_ok = False
+                        probe_page = None
+                        try:
+                            probe_page = await context.new_page()
+                            probe_url = task.get('url') or page.url or "https://chatgpt.com"
+                            await probe_page.goto(probe_url, wait_until='domcontentloaded', timeout=30000)
+                            await asyncio.sleep(1.2)
+                            snap = await _read_last_assistant_snapshot(probe_page)
+                            probe_html = clean_html(snap.get("html", ""))
+                            probe_md = md(probe_html, heading_style="ATX").strip()
+                            probe_md = probe_md.replace("\\_", "_").replace("\\*", "*")
+                            if probe_md:
+                                emit_log(q, "✅ Resposta recuperada após reabrir aba; concluindo sem reenvio.")
+                                emit_event(q, "markdown", probe_md)
+                                final_title = await get_chat_title(probe_page)
+                                emit_event(q, "finish", {"chat_id": task.get("chat_id"), "title": final_title, "url": probe_page.url})
+                                probe_ok = True
+                                handled = True
+                        except Exception as probe_err:
+                            emit_log(q, f"⚠️ Falha ao verificar resposta após interrupção: {probe_err}")
+                        finally:
+                            try:
+                                await probe_page.close()
+                            except Exception:
+                                pass
+                        if probe_ok:
+                            break
+                        emit_log(q, "🔁 Sem resposta recuperável; reenviando pedido...")
+                        await asyncio.sleep(1.2)
+                        continue
+                    emit_log(q, f'ERRO Chat: {e}')
+                    emit_event(q, 'error', f'Falha no navegador: {str(e)}')
+                    break
+                finally:
+                    stop_event.set()
+                    if watchdog_task is not None:
+                        watchdog_task.cancel()
+                        try:
+                            await watchdog_task
+                        except (asyncio.CancelledError, Exception):
+                            pass
+                    if page:
+                        try:
+                            await page.close()
+                        except Exception:
+                            pass
+                    page = None
+
+            if not handled:
+                emit_log(q, "⚠️ Tarefa CHAT finalizada sem confirmação de resposta conclusiva.")
         finally:
             emit_log(q, 'Finalizando tarefa.')
-            if page:
-                try:
-                    await page.close()
-                except:
-                    pass
             if q:
                 q.put(None)
-            _CURRENT_TASK_SENDER.reset(sender_token)
+            if sender_token is not None:
+                _CURRENT_TASK_SENDER.reset(sender_token)
 
 
 def _is_codex_url(url: str) -> bool:
@@ -3976,6 +4021,8 @@ async def handle_chat_task_inner(task, page, q, stop_event: asyncio.Event, activ
 
         if stop_event.is_set():
             emit_event(q, "error", "⚠️ Aba travada detectada durante recepção da resposta.")
+            if not response_started:
+                raise RuntimeError("watchdog_abort_before_response")
             break
 
         loop_count += 1
