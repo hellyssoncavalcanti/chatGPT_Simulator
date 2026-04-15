@@ -175,7 +175,14 @@ CYCLE_INTERVAL_SEC = int(_env("AUTODEV_AGENT_CYCLE_SEC", "120", "AUTON_AGENT_CYC
 SUGGESTION_INTERVAL_SEC = int(
     _env("AUTODEV_AGENT_SUGGESTION_SEC", "600", "AUTON_AGENT_SUGGESTION_SEC")
 )
-REQUEST_TIMEOUT_SEC = int(_env("AUTODEV_AGENT_REQUEST_TIMEOUT", "900"))
+_CFG_REQUEST_TIMEOUT = int(
+    getattr(
+        config,
+        "REQUEST_TIMEOUT_SEC",
+        getattr(config, "AUTODEV_AGENT_REQUEST_TIMEOUT", 900)
+    ) or 900
+) if config else 900
+REQUEST_TIMEOUT_SEC = int(_env("AUTODEV_AGENT_REQUEST_TIMEOUT", str(_CFG_REQUEST_TIMEOUT)))
 STREAM_IDLE_TIMEOUT_SEC = int(_env("AUTODEV_AGENT_STREAM_IDLE_SEC", "180"))
 STARTUP_WAIT_SEC = int(_env("AUTODEV_AGENT_STARTUP_WAIT_SEC", "30"))
 HEALTH_LOG_THROTTLE_SEC = 30.0
@@ -813,7 +820,9 @@ def list_project_files() -> List[Tuple[str, int]]:
     return results
 
 
-def read_source_file(rel_path: str, max_lines: Optional[int] = None) -> Optional[str]:
+def read_source_file(rel_path: str,
+                     max_lines: Optional[int] = None,
+                     focus_terms: Optional[List[str]] = None) -> Optional[str]:
     """Lê o conteúdo do arquivo; aplica truncagem de linhas se solicitado."""
     target = _normalize_rel_path(rel_path)
     if target is None:
@@ -829,10 +838,58 @@ def read_source_file(rel_path: str, max_lines: Optional[int] = None) -> Optional
     if max_lines and max_lines > 0:
         lines = text.splitlines()
         if len(lines) > max_lines:
-            head = lines[: max_lines // 2]
-            tail = lines[-max_lines // 2 :]
-            omitted = len(lines) - len(head) - len(tail)
-            text = "\n".join(head) + f"\n... [{omitted} linhas omitidas] ...\n" + "\n".join(tail)
+            lowered_terms = [
+                str(t).strip().lower()
+                for t in (focus_terms or [])
+                if str(t).strip()
+            ]
+            # Remove termos curtos/genéricos demais.
+            lowered_terms = [t for t in lowered_terms if len(t) >= 4]
+
+            if lowered_terms:
+                window = 40
+                # Mantém também topo para contexto estrutural.
+                intervals: List[Tuple[int, int]] = [(0, min(len(lines), 80))]
+                for i, line in enumerate(lines):
+                    low = line.lower()
+                    if any(term in low for term in lowered_terms):
+                        intervals.append((max(0, i - window), min(len(lines), i + window + 1)))
+
+                # Merge de intervalos
+                intervals.sort(key=lambda x: x[0])
+                merged: List[List[int]] = []
+                for start, end in intervals:
+                    if not merged or start > merged[-1][1]:
+                        merged.append([start, end])
+                    else:
+                        merged[-1][1] = max(merged[-1][1], end)
+
+                chunks: List[str] = []
+                kept = 0
+                prev_end = 0
+                for start, end in merged:
+                    if kept >= max_lines:
+                        break
+                    if start > prev_end:
+                        omitted = start - prev_end
+                        chunks.append(f"... [{omitted} linhas omitidas] ...")
+                    take = min(end - start, max_lines - kept)
+                    if take > 0:
+                        chunks.append("\n".join(lines[start:start + take]))
+                        kept += take
+                    prev_end = end
+
+                if prev_end < len(lines) and kept < max_lines:
+                    tail_take = min(max_lines - kept, len(lines) - prev_end)
+                    if tail_take > 0:
+                        chunks.append(f"... [{len(lines) - prev_end} linhas omitidas] ...")
+                        chunks.append("\n".join(lines[prev_end:prev_end + tail_take]))
+                text = "\n".join(chunks)
+            else:
+                head = lines[: max_lines // 2]
+                tail = lines[-max_lines // 2 :]
+                omitted = len(lines) - len(head) - len(tail)
+                text = "\n".join(head) + f"\n... [{omitted} linhas omitidas] ...\n" + "\n".join(tail)
     return text
 
 
@@ -962,9 +1019,28 @@ def select_relevant_source_files(context: Dict[str, Any], budget_chars: int) -> 
                 out.append(h)
         return out
 
+    def _focus_terms_from_context() -> List[str]:
+        seed = {
+            "watchdog", "timeout", "timed out", "request_timeout",
+            "browser_worker", "codex", "stream", "fila", "queue",
+            "chat_completions", "simulator", "abort", "abortar",
+        }
+        for inc in (context.get("incidents") or []):
+            if not isinstance(inc, dict):
+                continue
+            line = str(inc.get("line") or "")
+            # termos alfanuméricos relevantes do próprio incidente
+            for tok in re.findall(r"[A-Za-z_][A-Za-z0-9_\\-]{3,}", line):
+                low = tok.lower()
+                if low.endswith((".py", ".log")):
+                    continue
+                seed.add(low)
+        return sorted(seed)
+
     selected: Dict[str, str] = {}
     budget = max(2000, budget_chars)
     picks: List[str] = []
+    focus_terms = _focus_terms_from_context()
 
     picks.extend(context.get("traceback_files", []))
     picks.extend(_incident_file_hints())
@@ -981,16 +1057,20 @@ def select_relevant_source_files(context: Dict[str, Any], budget_chars: int) -> 
             continue
         if is_path_blocked(rel):
             continue
-        content = read_source_file(rel, max_lines=MAX_FILE_LINES_IN_CONTEXT)
+        per_file_max_lines = MAX_FILE_LINES_IN_CONTEXT
+        if rel in {"Scripts/auto_dev_agent.py", "Scripts/server.py", "Scripts/browser.py"}:
+            per_file_max_lines = max(MAX_FILE_LINES_IN_CONTEXT, 900)
+        content = read_source_file(rel, max_lines=per_file_max_lines, focus_terms=focus_terms)
         if not content:
             continue
         snippet = content
-        # Orçamento dinâmico: usa até metade do restante por arquivo
-        allowed = min(len(snippet), max(1500, budget // 2))
-        if len(snippet) > allowed:
-            head = snippet[: allowed // 2]
-            tail = snippet[-allowed // 2 :]
-            snippet = head + "\n... [conteúdo truncado] ...\n" + tail
+        # Evita segunda truncagem agressiva em head/tail, para não perder o
+        # trecho central relevante (ex.: watchdog/timeout no meio do arquivo).
+        if len(snippet) > budget:
+            if not selected:
+                snippet = snippet[:budget]
+            else:
+                break
         if len(snippet) > budget:
             break
         selected[rel] = snippet
@@ -2479,8 +2559,9 @@ def run_single_cycle() -> None:
 
     objective = _objective_for_cycle(has_errors, _summarize_incidents(context))
 
-    # Orçamento do prompt: ~50% para código, deixando 50% para contexto+overhead
-    src_budget = max(4000, MAX_CONTEXT_CHARS // 2)
+    # Orçamento do prompt: prioriza mais código quando houver diagnóstico
+    # complexo (watchdog/timeout/race), reduzindo chance de contexto insuficiente.
+    src_budget = max(8000, int(MAX_CONTEXT_CHARS * 0.8))
     source_files = select_relevant_source_files(context, src_budget)
 
     prior_attempt: Optional[Dict[str, Any]] = None
