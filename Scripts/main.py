@@ -337,23 +337,29 @@ def start_http_server(config_module, server_module):
     server_module.app.run(host="0.0.0.0", port=http_port, debug=False, use_reloader=False)
 
 
-def _wait_for_port(host: str, port: int, timeout: int = 180, interval: float = 0.5) -> bool:
+def _wait_for_port(host: str, port: int, timeout: int = 180, interval: float = 0.5) -> tuple[bool, float]:
+    started_at = time.time()
     deadline = time.time() + timeout
     while time.time() < deadline:
         try:
             with socket.create_connection((host, port), timeout=2):
-                return True
+                return True, (time.time() - started_at)
         except OSError:
             time.sleep(interval)
-    return False
+    return False, (time.time() - started_at)
 
 
 def open_urls_when_server_is_ready(port: int, urls: list, startup_timeout: int = 180):
     def _worker():
-        if not _wait_for_port("127.0.0.1", port, timeout=startup_timeout):
-            print(f"[BOOT] Aviso: servidor HTTPS na porta {port} não ficou pronto a tempo; navegador não será aberto automaticamente.")
+        is_ready, waited_seconds = _wait_for_port("127.0.0.1", port, timeout=startup_timeout)
+        if not is_ready:
+            print(
+                f"[BOOT] Aviso: servidor HTTPS na porta {port} não ficou pronto após "
+                f"{waited_seconds:.1f}s; navegador não será aberto automaticamente."
+            )
             return
 
+        print(f"[BOOT] Servidor HTTPS na porta {port} ficou pronto após {waited_seconds:.1f}s.")
         time.sleep(1.0)
         for url in urls:
             try:
