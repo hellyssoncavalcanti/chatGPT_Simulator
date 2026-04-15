@@ -1103,33 +1103,6 @@ SYSTEM_PROMPT_BASE = textwrap.dedent("""\
       • false = não encaminhar ao Codex neste ciclo.
     """)
 
-CODEX_MAX_REASONING_PREFIX = textwrap.dedent("""\
-    SYSTEM MODE: PERMANENT MAX REASONING
-
-    Use maximum reasoning effort (xhigh).
-    Take more time to think.
-    Do not optimize for speed.
-    Optimize for correctness and robustness.
-
-    PROCESS:
-    1. Analyze deeply
-    2. Plan architecture
-    3. Implement full solution
-    4. Review as senior engineer
-    5. Fix issues
-    6. Output final result only
-
-    RULES:
-    - No partial solutions
-    - No placeholders
-    - No truncated code
-    - Always full implementation
-    - Consider edge cases
-    - Consider failures
-    - Consider performance
-    """).strip()
-
-
 def _build_user_prompt(context: Dict[str, Any],
                        objective: str,
                        source_files: Dict[str, str],
@@ -1428,6 +1401,7 @@ def _stream_chat_completion(
     last_markdown_report_ts = 0.0
     MARKDOWN_REPORT_MIN_STEP = 1024   # chars
     MARKDOWN_REPORT_MIN_INTERVAL = 3  # segundos
+    stream_verbose = "codex" in (label or "").lower()
     inline_status_open = False
     inline_last_len = 0
     stream = getattr(sys, "stdout", None)
@@ -1502,7 +1476,11 @@ def _stream_chat_completion(
         if t == "status":
             text = (str(c) if c is not None else "").strip()
             if text and text != last_status_logged:
-                _print_inline_status(text)
+                if stream_verbose:
+                    _close_inline_status()
+                    log(f"   ⏳ {_normalize_status(text)[:320]}")
+                else:
+                    _print_inline_status(text)
                 last_status_logged = text
 
         elif t == "log":
@@ -1533,7 +1511,11 @@ def _stream_chat_completion(
                 or (size != last_markdown_size_reported
                     and now - last_markdown_report_ts >= MARKDOWN_REPORT_MIN_INTERVAL)
             ):
-                _print_inline_markdown(size)
+                if stream_verbose:
+                    _close_inline_status()
+                    log(f"   📝 recebendo resposta: {size} chars...")
+                else:
+                    _print_inline_markdown(size)
                 last_markdown_size_reported = size
                 last_markdown_report_ts = now
 

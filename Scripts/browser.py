@@ -3452,6 +3452,28 @@ async def _codex_paste_message(page, composer_selector: str, message: str, q, ac
     Reutiliza os mesmos marcadores [INICIO_TEXTO_COLADO]...[FIM_TEXTO_COLADO]
     enviados pelo agente (apenas descarta os marcadores antes de colar).
     """
+    codex_reasoning_prefix = (
+        "SYSTEM MODE: PERMANENT MAX REASONING\n\n"
+        "Use maximum reasoning effort (xhigh).\n"
+        "Take more time to think.\n"
+        "Do not optimize for speed.\n"
+        "Optimize for correctness and robustness.\n\n"
+        "PROCESS:\n"
+        "1. Analyze deeply\n"
+        "2. Plan architecture\n"
+        "3. Implement full solution\n"
+        "4. Review as senior engineer\n"
+        "5. Fix issues\n"
+        "6. Output final result only\n\n"
+        "RULES:\n"
+        "- No partial solutions\n"
+        "- No placeholders\n"
+        "- No truncated code\n"
+        "- Always full implementation\n"
+        "- Consider edge cases\n"
+        "- Consider failures\n"
+        "- Consider performance"
+    )
     start_marker = "[INICIO_TEXTO_COLADO]"
     end_marker = "[FIM_TEXTO_COLADO]"
     text = message or ""
@@ -3460,6 +3482,11 @@ async def _codex_paste_message(page, composer_selector: str, message: str, q, ac
         j = text.rfind(end_marker)
         text = text[i:j]
     text = text.replace('\r\n', '\n').replace('\r', '\n')
+
+    # Injeta prefixo de raciocínio máximo para qualquer pedido enviado ao Codex,
+    # independentemente do cliente Python que originou a requisição.
+    if "SYSTEM MODE: PERMANENT MAX REASONING" not in text:
+        text = f"{codex_reasoning_prefix}\n\n{text.lstrip()}"
 
     # Clica no composer para focar.
     try:

@@ -936,6 +936,8 @@ Mensagens-chave emitidas:
 - `💭 Análise sem ações` — ciclo em que o ChatGPT escolheu não agir.
 - `ℹ️ should_forward_to_codex ausente` — fallback de contrato (informativo),
   sem elevar para warning.
+- Em forwards Codex, o agente imprime também status de progresso do browser
+  (`⏳`, `📝`, `🔧`) em linhas persistentes para facilitar auditoria passo a passo.
 
 Detecção de incidentes:
 - Quando a linha de log traz nível explícito (`[INFO]`, `[WARNING]`, `[ERROR]`),
@@ -952,8 +954,9 @@ Detecção de incidentes:
    (p. ex. `AUTODEV_AGENT_CODEX_URL=https://chatgpt.com/codex/...`), navega
    para lá antes de digitar. Caso contrário, abre um chat novo no ChatGPT
    regular.
-4. O prompt enviado ao Codex recebe um prefixo fixo de **MAX REASONING**
-   antes das instruções do ciclo, para manter o modo de execução aprofundado.
+4. O `browser.py` injeta automaticamente um prefixo fixo de **MAX REASONING**
+   em qualquer mensagem enviada ao Codex (independente de qual cliente Python
+   originou a requisição), para manter o modo de execução aprofundado.
 5. Após enviar a tarefa, o `browser.py` tenta abrir imediatamente a URL da
    tarefa recém-criada (`/codex/cloud/tasks/...`) a partir da lista visível de
    tarefas, em vez de aguardar longamente na home `/codex/cloud`.
