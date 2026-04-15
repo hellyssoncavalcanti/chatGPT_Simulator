@@ -147,6 +147,10 @@ CODEX_REPO = _env("AUTODEV_AGENT_CODEX_REPO", "hellyssoncavalcanti/chatGPT_Simul
 # Reuso de conversa Codex entre rodadas do mesmo ciclo (chat_id separado
 # do chat regular).
 CODEX_REUSE_CHAT = _env_bool("AUTODEV_AGENT_CODEX_REUSE_CHAT", True)
+# Compat legado: o prefixo "MAX REASONING" é injetado EXCLUSIVAMENTE no
+# browser.py (fluxo Codex). Mantemos esta constante como no-op apenas para
+# evitar NameError caso algum template antigo ainda referencie este nome.
+CODEX_MAX_REASONING_PREFIX = ""
 # Quando False (padrão), o agente NÃO bloqueia novos forwards enquanto uma
 # tarefa anterior do Codex parece pendente. O Codex suporta filas paralelas.
 CODEX_BLOCK_WHILE_PENDING = _env_bool("AUTODEV_AGENT_CODEX_BLOCK_WHILE_PENDING", False)
@@ -2353,6 +2357,8 @@ def forward_to_codex(context: Dict[str, Any],
         codex_prompt += f"--- BEGIN FILE: {rel} ---\n{content}\n--- END FILE: {rel} ---\n"
     codex_prompt += "\nResponda APENAS com JSON no formato especificado."
 
+    # IMPORTANTE: NÃO injeta prefixo de "MAX REASONING" aqui.
+    # Esse ajuste é aplicado somente no browser.py no momento do paste.
     wrapped = _wrap_for_paste(codex_prompt)
     # IMPORTANTE: o forward vai para o CODEX (chatgpt.com/codex/cloud), nunca
     # para a conversa regular. Mantemos chat_id/url do Codex SEPARADOS dos
