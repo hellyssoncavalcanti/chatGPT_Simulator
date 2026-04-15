@@ -936,6 +936,8 @@ Mensagens-chave emitidas:
 - `💭 Análise sem ações` — ciclo em que o ChatGPT escolheu não agir.
 - `ℹ️ should_forward_to_codex ausente` — fallback de contrato (informativo),
   sem elevar para warning.
+- Em forwards Codex, o agente imprime também status de progresso do browser
+  (`⏳`, `📝`, `🔧`) em linhas persistentes para facilitar auditoria passo a passo.
 
 Detecção de incidentes:
 - Quando a linha de log traz nível explícito (`[INFO]`, `[WARNING]`, `[ERROR]`),

@@ -1401,6 +1401,7 @@ def _stream_chat_completion(
     last_markdown_report_ts = 0.0
     MARKDOWN_REPORT_MIN_STEP = 1024   # chars
     MARKDOWN_REPORT_MIN_INTERVAL = 3  # segundos
+    stream_verbose = "codex" in (label or "").lower()
     inline_status_open = False
     inline_last_len = 0
     stream = getattr(sys, "stdout", None)
@@ -1475,7 +1476,11 @@ def _stream_chat_completion(
         if t == "status":
             text = (str(c) if c is not None else "").strip()
             if text and text != last_status_logged:
-                _print_inline_status(text)
+                if stream_verbose:
+                    _close_inline_status()
+                    log(f"   ⏳ {_normalize_status(text)[:320]}")
+                else:
+                    _print_inline_status(text)
                 last_status_logged = text
 
         elif t == "log":
@@ -1506,7 +1511,11 @@ def _stream_chat_completion(
                 or (size != last_markdown_size_reported
                     and now - last_markdown_report_ts >= MARKDOWN_REPORT_MIN_INTERVAL)
             ):
-                _print_inline_markdown(size)
+                if stream_verbose:
+                    _close_inline_status()
+                    log(f"   📝 recebendo resposta: {size} chars...")
+                else:
+                    _print_inline_markdown(size)
                 last_markdown_size_reported = size
                 last_markdown_report_ts = now
 
