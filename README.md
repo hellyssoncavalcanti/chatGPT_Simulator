@@ -952,11 +952,16 @@ Detecção de incidentes:
    (p. ex. `AUTODEV_AGENT_CODEX_URL=https://chatgpt.com/codex/...`), navega
    para lá antes de digitar. Caso contrário, abre um chat novo no ChatGPT
    regular.
-4. A resposta volta em **eventos streaming** (`status`, `markdown`, `finish`,
+4. O prompt enviado ao Codex recebe um prefixo fixo de **MAX REASONING**
+   antes das instruções do ciclo, para manter o modo de execução aprofundado.
+5. Após enviar a tarefa, o `browser.py` tenta abrir imediatamente a URL da
+   tarefa recém-criada (`/codex/cloud/tasks/...`) a partir da lista visível de
+   tarefas, em vez de aguardar longamente na home `/codex/cloud`.
+6. A resposta volta em **eventos streaming** (`status`, `markdown`, `finish`,
    `chat_id`, `chat_meta`, `error`).
-5. O agente guarda `chat_id` e `url` em `AgentState`, e nas rodadas seguintes
+7. O agente guarda `chat_id` e `url` em `AgentState`, e nas rodadas seguintes
    reutiliza essa conversa — ou seja, o ChatGPT mantém memória contextual de
    toda a trajetória de manutenção do projeto.
-6. O intervalo anti-rate-limit humano é aplicado ao fluxo de diagnóstico no
+8. O intervalo anti-rate-limit humano é aplicado ao fluxo de diagnóstico no
    ChatGPT Simulator, mas **não bloqueia** o forward de implementação para o
    Codex (canal separado).

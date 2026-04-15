@@ -1662,7 +1662,7 @@ async def _click_chatgpt_download_elements(page, q=None):
                     seenCards.add(card);
 
                     const headerText = (card.innerText || '').trim();
-                    const m = headerText.match(/[\\w.\\- ]+\\.(xlsx|xls|csv|pdf|docx|doc|pptx|ppt|zip|rar|json|xml|txt|png|jpg|jpeg|gif|svg)/i);
+                    const m = headerText.match(/[-\\w. ]+\\.(xlsx|xls|csv|pdf|docx|doc|pptx|ppt|zip|rar|json|xml|txt|png|jpg|jpeg|gif|svg)/i);
                     if (!m) return;
                     const filename = m[0].trim();
 
@@ -3615,6 +3615,34 @@ async def _codex_wait_and_click_pr_controls(page, q, timeout_s: int = 900) -> tu
     return False, ""
 
 
+async def _codex_try_open_fresh_task(page):
+    """Se estiver na home do Codex, tenta abrir a tarefa mais recente visível."""
+    js = """() => {
+        const links = Array.from(document.querySelectorAll('a[href*="/codex/cloud/tasks/"]'));
+        const visible = links.filter(a => {
+            if (!a || !a.href) return false;
+            const r = a.getBoundingClientRect();
+            return r.width > 0 && r.height > 0;
+        });
+        if (!visible.length) return null;
+        const first = visible[0];
+        return first.href || first.getAttribute('href') || null;
+    }"""
+    try:
+        href = await page.evaluate(js)
+    except Exception:
+        href = None
+    if not href:
+        return None
+    if href.startswith("/"):
+        href = "https://chatgpt.com" + href
+    try:
+        await page.goto(href, wait_until='domcontentloaded', timeout=15000)
+        return href
+    except Exception:
+        return None
+
+
 async def handle_codex_task_inner(task, page, q, stop_event, activityts=None):
     """Fluxo dedicado ao Codex (chatgpt.com/codex/cloud):
       1) Navega para a Codex URL.
@@ -3668,6 +3696,12 @@ async def handle_codex_task_inner(task, page, q, stop_event, activityts=None):
         m = re.search(r"https://chatgpt\.com/codex/cloud/tasks/([A-Za-z0-9_\-]+)", cur)
         if m:
             task_url = cur
+            break
+        # Se o Codex voltou para /codex/cloud, tenta abrir imediatamente a
+        # tarefa recém-criada pela lista "Tarefas" (primeiro item visível).
+        opened = await _codex_try_open_fresh_task(page)
+        if opened:
+            task_url = opened
             break
         await asyncio.sleep(0.5)
 

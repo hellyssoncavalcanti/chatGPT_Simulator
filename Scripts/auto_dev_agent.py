@@ -1103,6 +1103,32 @@ SYSTEM_PROMPT_BASE = textwrap.dedent("""\
       • false = não encaminhar ao Codex neste ciclo.
     """)
 
+CODEX_MAX_REASONING_PREFIX = textwrap.dedent("""\
+    SYSTEM MODE: PERMANENT MAX REASONING
+
+    Use maximum reasoning effort (xhigh).
+    Take more time to think.
+    Do not optimize for speed.
+    Optimize for correctness and robustness.
+
+    PROCESS:
+    1. Analyze deeply
+    2. Plan architecture
+    3. Implement full solution
+    4. Review as senior engineer
+    5. Fix issues
+    6. Output final result only
+
+    RULES:
+    - No partial solutions
+    - No placeholders
+    - No truncated code
+    - Always full implementation
+    - Consider edge cases
+    - Consider failures
+    - Consider performance
+    """).strip()
+
 
 def _build_user_prompt(context: Dict[str, Any],
                        objective: str,
@@ -2295,6 +2321,7 @@ def forward_to_codex(context: Dict[str, Any],
 
     suggestions_block = "\n".join(f"- {s}" for s in pending_suggestions[:20])
     codex_prompt = (
+        f"{CODEX_MAX_REASONING_PREFIX}\n\n"
         "/plan\n"
         "=== INSTRUÇÕES DO SISTEMA ===\n"
         f"{SYSTEM_PROMPT_BASE}\n"
