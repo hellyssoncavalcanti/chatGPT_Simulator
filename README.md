@@ -128,6 +128,8 @@ python Scripts/acompanhamento_whatsapp.py
 ```
 
 > No primeiro uso, a janela do navegador abrirá em `https://web.whatsapp.com/` para login via QR Code.
+> Se o servidor HTTP do acompanhamento falhar/retornar inesperadamente,
+> o processo tenta reiniciar automaticamente em loop.
 
 ### Endpoints auxiliares
 
@@ -810,6 +812,12 @@ ou no Windows:
 O agente espera até `AUTODEV_AGENT_STARTUP_WAIT_SEC` segundos pelo Simulator
 subir. Depois disso entra em modo monitor mesmo se o Simulator ainda não
 estiver pronto — reavalia a saúde a cada ciclo.
+Se ocorrer erro fatal fora do loop principal, o processo entra em
+auto-restart com espera de 30 segundos e tenta retomar automaticamente.
+
+Se `AUTODEV_AGENT_AUTOSTART_CMD` estiver configurada, o agente também tenta
+**iniciar automaticamente o Simulator** quando o health-check falhar, com
+cooldown para evitar loops agressivos de restart.
 
 Se `AUTODEV_AGENT_AUTOSTART_CMD` estiver configurada, o agente também tenta
 **iniciar automaticamente o Simulator** quando o health-check falhar, com

@@ -2763,14 +2763,21 @@ def main_loop() -> None:
 # ENTRY POINT
 # =============================================================================
 if __name__ == "__main__":
-    try:
-        main_loop()
-    except KeyboardInterrupt:
-        log("🛑 Encerrado por KeyboardInterrupt")
-    except Exception as exc:
-        log(f"❌ Erro fatal: {exc}", logging.ERROR)
-        log(traceback.format_exc(), logging.ERROR)
-        # Preserva o processo para permitir inspeção; exit(1) se CI
-        if os.environ.get("AUTODEV_AGENT_EXIT_ON_FATAL", "0") == "1":
-            sys.exit(1)
-        time.sleep(30)
+    while True:
+        try:
+            main_loop()
+        except KeyboardInterrupt:
+            log("🛑 Encerrado por KeyboardInterrupt")
+            break
+        except Exception as exc:
+            log(f"❌ Erro fatal: {exc}", logging.ERROR)
+            log(traceback.format_exc(), logging.ERROR)
+            # Preserva o processo para permitir inspeção; exit(1) se CI
+            if os.environ.get("AUTODEV_AGENT_EXIT_ON_FATAL", "0") == "1":
+                sys.exit(1)
+            log("🔄 Reiniciando AutoDevAgent em 30 segundos...")
+            try:
+                time.sleep(30)
+            except KeyboardInterrupt:
+                log("🛑 Encerrado por KeyboardInterrupt")
+                break
