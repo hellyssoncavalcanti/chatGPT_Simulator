@@ -114,6 +114,19 @@ function Normalize-RelativePath([string]$PathValue) {
     return $PathValue.Trim('"').Replace('/', '\').Replace('\\', '\').TrimStart('.', '\').ToLowerInvariant()
 }
 
+function Test-IsRestartIgnoredPath([string]$NormalizedPath) {
+    if ([string]::IsNullOrWhiteSpace($NormalizedPath)) { return $false }
+    $p = Normalize-RelativePath $NormalizedPath
+    if ([string]::IsNullOrWhiteSpace($p)) { return $false }
+
+    # README.md (em qualquer pasta) e scripts do próprio sync não devem,
+    # sozinhos, disparar reinício local.
+    if ($p -match '(^|\\)readme\.md$') { return $true }
+    if ($p -eq (Normalize-RelativePath 'scripts\sync_github.py')) { return $true }
+    if ($p -eq (Normalize-RelativePath 'scripts\sync_github.ps1')) { return $true }
+    return $false
+}
+
 function Add-RestartTarget([string]$Target) {
     if ([string]::IsNullOrWhiteSpace($Target)) { return }
     if ($script:RestartTargets -notcontains $Target) {
@@ -822,21 +835,17 @@ function Sync-FilesFromMirror {
     if ($added -gt 0 -or $updated -gt 0) {
         $pywaRelative = Normalize-RelativePath $script:Config.pywaPattern
         $autoDevRelative = Normalize-RelativePath $script:Config.autoDevAgentPattern
-        $readmeRelative = Normalize-RelativePath 'README.md'
-        $syncPythonRelative = Normalize-RelativePath 'Scripts\sync_github.py'
-        $restartIgnoredFiles = @($readmeRelative, $syncPythonRelative)
-
         # Junta todos os arquivos novos e atualizados numa única lista (normalizada e sem duplicatas)
         $changedFiles = @($script:AddedFiles) + @($script:UpdatedFiles) | ForEach-Object { Normalize-RelativePath $_ }
         $changedUnique = @(
             $changedFiles |
-            Where-Object { -not [string]::IsNullOrWhiteSpace($_) -and $_ -notin $restartIgnoredFiles } |
+            Where-Object { -not [string]::IsNullOrWhiteSpace($_) -and -not (Test-IsRestartIgnoredPath $_) } |
             Select-Object -Unique
         )
 
-        $ignoredOnlyChanged = ($changedFiles.Count -gt 0) -and (($changedFiles | Where-Object { $_ -notin $restartIgnoredFiles }).Count -eq 0)
+        $ignoredOnlyChanged = ($changedFiles.Count -gt 0) -and (($changedFiles | Where-Object { -not (Test-IsRestartIgnoredPath $_) }).Count -eq 0)
         if ($ignoredOnlyChanged) {
-            Write-Info 'Apenas arquivos ignorados para reinicio (README.md e/ou Scripts\sync_github.py) foram alterados neste ciclo. Nenhum reinicio sera executado.' -Color Yellow
+            Write-Info 'Apenas arquivos ignorados para reinicio (README.md e/ou scripts de sync) foram alterados neste ciclo. Nenhum reinicio sera executado.' -Color Yellow
         }
 
         $analyzerRelative = Normalize-RelativePath $script:Config.analyzerPattern
@@ -856,7 +865,7 @@ function Sync-FilesFromMirror {
         } elseif ($pyChanged.Count -eq 0) {
             $script:RestartRequested = $false
             $script:RestartScope = 'none'
-            Write-Info "Nenhum arquivo .py alterado neste ciclo. Reinicio dos servidores sera ignorado." -Color Yellow
+            Write-Info "Somente README.md/PHP/outros nao-.py alterados neste ciclo. Reinicio dos servidores sera ignorado." -Color Yellow
         } else {
             $script:RestartRequested = $true
             $script:RestartScope = 'selective'
