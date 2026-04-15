@@ -4667,6 +4667,8 @@ if __name__ == "__main__":
         except KeyboardInterrupt:
             log.info("👋 Servidor de acompanhamento encerrado por KeyboardInterrupt.")
             break
+        except SystemExit as e:
+            log.warning("⚠️ SystemExit capturado (%s). Mantendo serviço ativo.", e)
         except Exception:
             log.exception("Falha fatal no servidor de acompanhamento. Reiniciando em 15s...")
 

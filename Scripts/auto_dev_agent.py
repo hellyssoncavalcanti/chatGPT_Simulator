@@ -1201,6 +1201,12 @@ SYSTEM_PROMPT_BASE = textwrap.dedent("""\
                 tentar implementação concreta (quando você só trouxe diagnóstico,
                 notas, ou quando as ações propostas tendem a falhar sem contexto
                 adicional de execução no Codex).
+      • true  = OBRIGATÓRIO quando faltar contexto/trecho de código para uma
+                análise segura (ex.: "não foi fornecido trecho de X.py",
+                "contexto insuficiente", "não tenho trecho exato para patch").
+                NESTE CASO, inclua também uma action do tipo "note" pedindo
+                explicitamente que o auto_dev_agent envie tal trecho faltante no
+                próximo ciclo (arquivo/função/bloco específico).
       • true  = também quando houver sugestão de melhoria/alteração de código
                 (ex.: edit_file/create_file ou recomendação equivalente) e você
                 quiser que o agente realmente tente implementar no Codex.
@@ -1353,6 +1359,39 @@ def _normalize_plan(plan: Dict[str, Any]) -> Dict[str, Any]:
     else:
         plan["should_forward_to_codex"] = bool(plan.get("should_forward_to_codex"))
         plan["_forward_autofilled"] = False
+
+    analysis_text = str(plan.get("analysis") or "").lower()
+    missing_context_patterns = [
+        "não foi fornecido trecho",
+        "nao foi fornecido trecho",
+        "contexto insuficiente",
+        "não há como propor",
+        "nao ha como propor",
+        "trecho exato",
+        "não foi incluído",
+        "nao foi incluido",
+    ]
+    requests_more_context = any(p in analysis_text for p in missing_context_patterns)
+    if requests_more_context and not bool(plan.get("should_forward_to_codex")):
+        plan["should_forward_to_codex"] = True
+        plan["_forward_autofilled"] = True
+
+    if requests_more_context:
+        notes = [a for a in (plan.get("actions") or []) if isinstance(a, dict) and str(a.get("type", "")).lower() == "note"]
+        has_context_request_note = any(
+            "trecho" in str(n.get("content") or "").lower()
+            or "contexto" in str(n.get("content") or "").lower()
+            for n in notes
+        )
+        if not has_context_request_note:
+            plan.setdefault("actions", []).append({
+                "type": "note",
+                "content": (
+                    "Contexto insuficiente para patch seguro. Encaminhar ao Codex e "
+                    "incluir no próximo envio os trechos exatos faltantes "
+                    "(arquivo/função/bloco citado na análise)."
+                )
+            })
     return plan
 
 
@@ -2826,14 +2865,9 @@ def _sleep_with_countdown(total_seconds: int, suggestion_remaining_sec: Optional
 
 
 def wait_for_simulator() -> None:
-    started = time.time()
     while not simulator_is_ready():
-        if STARTUP_WAIT_SEC <= 0:
-            return
-        if time.time() - started > STARTUP_WAIT_SEC:
-            log("⏱️ Timeout aguardando Simulator; seguirei em modo monitor.",
-                logging.WARNING)
-            return
+        # Reconexão resiliente: não encerra o agente enquanto o Simulator
+        # estiver indisponível; aguarda e tenta novamente até recuperar.
         time.sleep(3)
 
 
@@ -2885,6 +2919,14 @@ if __name__ == "__main__":
         except KeyboardInterrupt:
             log("🛑 Encerrado por KeyboardInterrupt")
             break
+        except SystemExit as exc:
+            log(f"⚠️ SystemExit capturado ({exc}); mantendo agente ativo.", logging.WARNING)
+            log("🔄 Reiniciando AutoDevAgent em 30 segundos...")
+            try:
+                time.sleep(30)
+            except KeyboardInterrupt:
+                log("🛑 Encerrado por KeyboardInterrupt")
+                break
         except Exception as exc:
             log(f"❌ Erro fatal: {exc}", logging.ERROR)
             log(traceback.format_exc(), logging.ERROR)
