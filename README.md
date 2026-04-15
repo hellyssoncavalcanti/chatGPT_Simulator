@@ -605,7 +605,7 @@ Esta automação existe para manter a pasta `C:\chatgpt_simulator` alinhada com 
 2. O PowerShell carrega primeiro `Scripts\sync_github_settings.ps1`; por compatibilidade, também aceita o nome antigo `Scripts\sync_github.settings.ps1`.
 3. O script cria um lock para evitar duas execuções simultâneas quando a tarefa agendada roda a cada 10 minutos.
 4. Se houver token GitHub configurado, ele lista PRs abertos na branch alvo, fecha os mais antigos e tenta mergear o PR aberto mais recente.
-5. Em seguida ele faz um clone temporário da branch principal, compara os arquivos rastreados e copia apenas os novos/alterados para `C:\chatgpt_simulator`.
+5. Em seguida ele faz um clone temporário da branch principal, compara os arquivos rastreados e copia apenas os novos/alterados para `C:\chatgpt_simulator`, **ignorando artefatos de cache** (ex.: `__pycache__`, `.pyc`, `.pyo`, `.pyd`, `.pytest_cache`, `.mypy_cache`, `.ruff_cache`).
 6. Se algo realmente mudou, ele encerra os processos correspondentes a `Scripts\main.py` e `Scripts\analisador_prontuarios.py` e os inicia novamente em sequência.
 7. Se nada mudou, ele apenas registra em log e encerra sem reiniciar nada.
 
@@ -618,6 +618,7 @@ Para evitar perda de estado local, o sync **não deve sobrescrever** estes itens
 - `Scripts\sync_github_settings.ps1`
 - `Scripts\sync_github.settings.ps1` *(compatibilidade com nome antigo)*
 - toda a pasta `chrome_profile\`
+- artefatos de cache Python/linters (`__pycache__`, `*.pyc`, `*.pyo`, `*.pyd`, `.pytest_cache`, `.mypy_cache`, `.ruff_cache`)
 
 ### Arquivos exatos desta automação no repositório
 
