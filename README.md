@@ -488,6 +488,8 @@ A pesquisa web é uma feature nativa do simulador.
 - roda como daemon;
 - consulta dados clínicos via um endpoint PHP externo (`chatgpt_integracao_criado_pelo_gemini.js.php`);
 - chama `POST /v1/chat/completions` do simulador como backend LLM local;
+- se o ChatGPT Simulator cair/ficar indisponível, **não encerra o processo**:
+  permanece em loop de reconexão e retoma automaticamente quando o serviço volta;
 - opcionalmente chama `POST /api/web_search` para buscar evidências;
 - enriquece condutas clínicas com referências extraídas da web;
 - grava/atualiza análises em uma tabela SQL remota via PHP.
