@@ -61,6 +61,7 @@ import json
 import logging
 import os
 import platform
+import atexit
 import random
 import re
 import shutil
@@ -96,6 +97,7 @@ LOGS_DIR = ROOT_DIR / "logs"
 TEMP_DIR = ROOT_DIR / "temp"
 BACKUP_DIR = TEMP_DIR / "agent_backups"
 STATE_FILE = TEMP_DIR / "auto_dev_agent_state.json"
+LOCK_FILE = TEMP_DIR / "auto_dev_agent.lock"
 
 for _d in (LOGS_DIR, TEMP_DIR, BACKUP_DIR):
     try:
@@ -170,6 +172,10 @@ REQUEST_TIMEOUT_SEC = int(_env("AUTODEV_AGENT_REQUEST_TIMEOUT", "900"))
 STREAM_IDLE_TIMEOUT_SEC = int(_env("AUTODEV_AGENT_STREAM_IDLE_SEC", "180"))
 STARTUP_WAIT_SEC = int(_env("AUTODEV_AGENT_STARTUP_WAIT_SEC", "30"))
 HEALTH_LOG_THROTTLE_SEC = 30.0
+HEALTHCHECK_RETRIES = max(1, int(_env("AUTODEV_AGENT_HEALTH_RETRIES", "2")))
+HEALTHCHECK_RETRY_DELAY_SEC = max(1, int(_env("AUTODEV_AGENT_HEALTH_RETRY_DELAY_SEC", "2")))
+AUTOSTART_SIMULATOR_CMD = _env("AUTODEV_AGENT_AUTOSTART_CMD", "").strip()
+AUTOSTART_COOLDOWN_SEC = max(10, int(_env("AUTODEV_AGENT_AUTOSTART_COOLDOWN_SEC", "180")))
 
 # Intervalo humano entre pedidos ao ChatGPT (alinha com analisador_prontuarios)
 _CFG_PAUSA_MIN = int(getattr(config, "ANALISADOR_PAUSA_MIN", 25) or 25) if config else 25
@@ -309,6 +315,15 @@ WARN_PATTERNS = [
     r"\bexcesso de solicita",
 ]
 
+# Linhas informativas conhecidas que não devem virar incidente mesmo contendo
+# termos ambíguos (ex.: "timeout" no nome da branch).
+BENIGN_INCIDENT_PATTERNS = [
+    r"sem commits novos em relacao ao base\. pulando\.",
+    r"processando branch 'codex/",
+]
+
+_LOG_LEVEL_TAG_RE = re.compile(r"\[(DEBUG|INFO|WARNING|ERROR|CRITICAL)\]", re.IGNORECASE)
+
 
 # =============================================================================
 # LOGGER
@@ -402,6 +417,57 @@ class ActionResult:
 
 
 _AGENT_STATE = AgentState()
+_last_autostart_attempt = 0.0
+
+
+def _pid_is_running(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except Exception:
+        return False
+
+
+def _release_single_instance_lock() -> None:
+    try:
+        if LOCK_FILE.exists():
+            data = json.loads(LOCK_FILE.read_text(encoding="utf-8"))
+            if int(data.get("pid") or 0) == os.getpid():
+                LOCK_FILE.unlink()
+    except Exception:
+        pass
+
+
+def _ensure_single_instance_lock() -> None:
+    """Evita duas instâncias do auto_dev_agent concorrendo no mesmo repo."""
+    LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
+    if LOCK_FILE.exists():
+        try:
+            data = json.loads(LOCK_FILE.read_text(encoding="utf-8"))
+        except Exception:
+            data = {}
+        existing_pid = int(data.get("pid") or 0)
+        if existing_pid and existing_pid != os.getpid() and _pid_is_running(existing_pid):
+            raise RuntimeError(
+                f"Já existe outra instância ativa do auto_dev_agent (pid={existing_pid})."
+            )
+        try:
+            LOCK_FILE.unlink()
+        except Exception:
+            pass
+
+    payload = {
+        "pid": os.getpid(),
+        "started_at_utc": _now_utc_iso(),
+    }
+    LOCK_FILE.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    atexit.register(_release_single_instance_lock)
 
 
 def _load_state() -> None:
@@ -662,9 +728,23 @@ def _scan_incidents(lines: Iterable[str], source: str) -> List[Incident]:
     out: List[Incident] = []
     for raw in lines:
         low = raw.lower()
+        if any(re.search(p, low) for p in BENIGN_INCIDENT_PATTERNS):
+            continue
+
+        level_match = _LOG_LEVEL_TAG_RE.search(raw)
+        declared_level = (level_match.group(1).lower() if level_match else "")
+        if declared_level in {"error", "critical"}:
+            out.append(Incident("error", source, raw.strip()[:1000], _now_utc_iso()))
+            continue
+        if declared_level == "warning":
+            out.append(Incident("warning", source, raw.strip()[:1000], _now_utc_iso()))
+            continue
+
         if any(re.search(p, raw) or re.search(p, low) for p in ERROR_PATTERNS):
             out.append(Incident("error", source, raw.strip()[:1000], _now_utc_iso()))
-        elif any(re.search(p, raw) or re.search(p, low) for p in WARN_PATTERNS):
+        elif declared_level not in {"info", "debug"} and any(
+            re.search(p, raw) or re.search(p, low) for p in WARN_PATTERNS
+        ):
             out.append(Incident("warning", source, raw.strip()[:1000], _now_utc_iso()))
     return out
 
@@ -871,15 +951,45 @@ def select_relevant_source_files(context: Dict[str, Any], budget_chars: int) -> 
 _last_health_log = 0.0
 
 
+def _maybe_autostart_simulator() -> None:
+    """Tenta subir o Simulator automaticamente quando indisponível."""
+    global _last_autostart_attempt
+    if not AUTOSTART_SIMULATOR_CMD:
+        return
+    now = time.time()
+    remaining = AUTOSTART_COOLDOWN_SEC - (now - _last_autostart_attempt)
+    if remaining > 0:
+        return
+    _last_autostart_attempt = now
+    try:
+        subprocess.Popen(
+            AUTOSTART_SIMULATOR_CMD,
+            cwd=str(ROOT_DIR),
+            shell=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        log(
+            f"🚀 Auto-start acionado para o Simulator com comando: "
+            f"{AUTOSTART_SIMULATOR_CMD!r}"
+        )
+    except Exception as exc:
+        log(f"⚠️ Falha no auto-start do Simulator: {exc}", logging.WARNING)
+
+
 def simulator_is_ready() -> bool:
     """Health-check do Simulator. Faz log throttle para não poluir."""
     global _last_health_log
-    try:
-        r = requests.get(SIMULATOR_HEALTH_URL, timeout=5)
-        if r.status_code == 200:
-            return True
-    except Exception:
-        pass
+    for _ in range(HEALTHCHECK_RETRIES):
+        try:
+            r = requests.get(SIMULATOR_HEALTH_URL, timeout=5)
+            if r.status_code == 200:
+                return True
+        except Exception:
+            pass
+        time.sleep(HEALTHCHECK_RETRY_DELAY_SEC)
+
+    _maybe_autostart_simulator()
     now = time.time()
     if now - _last_health_log >= HEALTH_LOG_THROTTLE_SEC:
         log(f"⏳ Simulator indisponível em {SIMULATOR_HEALTH_URL}; aguardando...")
@@ -1004,49 +1114,82 @@ def _strip_code_fences(text: str) -> str:
 
 
 def _extract_json_object(text: str) -> Optional[dict]:
-    """Extrai o primeiro objeto JSON válido a partir de 'text'."""
+    """Extrai o objeto JSON mais provável de plano dentro de texto misto.
+
+    Estratégia:
+      1) tenta parse direto;
+      2) tenta parse após marcadores como "RESPOSTA:";
+      3) varre candidatos com json.JSONDecoder().raw_decode() a partir de '{';
+      4) ranqueia candidatos privilegiando schema do plano (analysis/actions/forward).
+    """
     if not text:
         return None
     raw = _strip_code_fences(text)
+    decoder = json.JSONDecoder()
+
+    def _score_candidate(data: dict) -> int:
+        score = 0
+        if isinstance(data.get("analysis"), str):
+            score += 3
+        if isinstance(data.get("actions"), list):
+            score += 4
+        if "should_forward_to_codex" in data:
+            score += 4
+        if "type" in data and "file" in data:
+            score -= 2
+        return score
+
+    candidates: List[dict] = []
+
     # Tentativa direta
     try:
         data = json.loads(raw)
-        return data if isinstance(data, dict) else None
+        if isinstance(data, dict):
+            candidates.append(data)
     except Exception:
         pass
-    # Busca por chave JSON balanceada iniciando no primeiro '{'
+
+    # Tenta parse após marcadores frequentes.
+    marker_candidates = ["\nRESPOSTA:", "\nResposta:", "\nJSON:", "responda apenas com json"]
+    lower_raw = raw.lower()
+    for marker in marker_candidates:
+        pos = lower_raw.rfind(marker.lower())
+        if pos == -1:
+            continue
+        chunk = raw[pos + len(marker):].strip()
+        if not chunk:
+            continue
+        try:
+            data = json.loads(chunk)
+            if isinstance(data, dict):
+                candidates.append(data)
+                continue
+        except Exception:
+            pass
+        brace = chunk.find("{")
+        if brace != -1:
+            try:
+                obj, _end = decoder.raw_decode(chunk[brace:])
+                if isinstance(obj, dict):
+                    candidates.append(obj)
+            except Exception:
+                pass
+
+    # Varrida geral por objetos JSON possíveis.
     start = raw.find("{")
     while start != -1:
-        depth = 0
-        in_str = False
-        esc = False
-        for idx in range(start, len(raw)):
-            ch = raw[idx]
-            if esc:
-                esc = False
-                continue
-            if ch == "\\":
-                esc = True
-                continue
-            if ch == '"':
-                in_str = not in_str
-                continue
-            if in_str:
-                continue
-            if ch == "{":
-                depth += 1
-            elif ch == "}":
-                depth -= 1
-                if depth == 0:
-                    candidate = raw[start:idx + 1]
-                    try:
-                        data = json.loads(candidate)
-                        if isinstance(data, dict):
-                            return data
-                    except Exception:
-                        break
+        try:
+            obj, _end = decoder.raw_decode(raw[start:])
+            if isinstance(obj, dict):
+                candidates.append(obj)
+        except Exception:
+            pass
         start = raw.find("{", start + 1)
-    return None
+
+    if not candidates:
+        return None
+    candidates.sort(key=_score_candidate, reverse=True)
+    return candidates[0]
 
 
 def _normalize_plan(plan: Dict[str, Any]) -> Dict[str, Any]:
@@ -1085,8 +1228,10 @@ def _log_plan_decision(plan: Dict[str, Any], origin: str) -> None:
     actions = plan.get("actions") or []
     should_forward = bool(plan.get("should_forward_to_codex"))
     if bool(plan.get("_forward_autofilled")):
-        log(f"⚠️ [{origin}] should_forward_to_codex ausente no JSON; decisão foi auto-preenchida.",
-            logging.WARNING)
+        log(
+            f"ℹ️ [{origin}] should_forward_to_codex ausente no JSON; decisão foi auto-preenchida.",
+            logging.INFO,
+        )
 
     log(f"🧠 [{origin}] analysis completo:\n{analysis or '(vazio)'}")
     if actions:
@@ -1138,6 +1283,7 @@ def _should_forward_plan_to_codex(plan: Dict[str, Any],
 def _stream_chat_completion(
     body: Dict[str, Any],
     label: str = "ChatGPT Simulator",
+    apply_chat_spacing: bool = True,
 ) -> Tuple[str, Optional[str], Optional[str]]:
     """Envia mensagem em modo streaming e coleta (markdown_final, chat_id, url).
 
@@ -1175,7 +1321,8 @@ def _stream_chat_completion(
     log(f"📤 Enviando pedido a {label} "
         f"(~{payload_chars} chars){reuse_hint}...")
 
-    _wait_chat_spacing_if_needed(label)
+    if apply_chat_spacing:
+        _wait_chat_spacing_if_needed(label)
 
     resp = None
     post_error: Optional[Exception] = None
@@ -2107,11 +2254,6 @@ def forward_to_codex(context: Dict[str, Any],
         return None
     if not simulator_is_ready():
         return None
-    remaining = _rate_limit_remaining()
-    if remaining > 0:
-        log(f"⏸️  Codex-forward pulado: cooldown de {int(remaining)}s.",
-            logging.INFO)
-        return None
 
     # Gate: não envia nova tarefa ao Codex enquanto a anterior estiver em
     # execução. Evita empilhar PRs em paralelo que podem conflitar.
@@ -2180,7 +2322,9 @@ def forward_to_codex(context: Dict[str, Any],
     for codex_try in range(1, 3):
         try:
             markdown, chat_id, chat_url = _stream_chat_completion(
-                body, label="ChatGPT Codex (implementação)"
+                body,
+                label="ChatGPT Codex (implementação)",
+                apply_chat_spacing=False,
             )
             last_exc = None
             break
@@ -2538,12 +2682,18 @@ def wait_for_simulator() -> None:
 
 
 def main_loop() -> None:
+    _ensure_single_instance_lock()
     log("🚀 AutoDevAgent iniciando")
     log(f"📄 Log: {AGENT_LOG}")
     log(f"🔗 Simulator URL: {SIMULATOR_URL}")
     log(f"🔗 Codex URL: {CODEX_URL or '(novo chat a cada ciclo de conversa)'}")
     log(f"🧭 Plataforma: {platform.system()} {platform.release()} | Python {sys.version.split(' ',1)[0]}")
     log(f"⚙️ AUTOFIX={ENABLE_AUTOFIX} AUTOCOMMIT={ENABLE_AUTOCOMMIT} AUTOPUSH={ENABLE_AUTOPUSH}")
+    if AUTOSTART_SIMULATOR_CMD:
+        log(
+            "🩺 Auto-start do Simulator habilitado "
+            f"(cooldown={AUTOSTART_COOLDOWN_SEC}s)."
+        )
     if not API_KEY:
         log("⚠️ API_KEY ausente; requisições podem retornar 401.", logging.WARNING)
 
