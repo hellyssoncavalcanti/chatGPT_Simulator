@@ -381,6 +381,7 @@ if __name__ == "__main__":
 
     print(f"\n=== CHATGPT SIMULATOR v{config.VERSION} (Async Tabs) ===")
     print("[INFO] Inicializando sistema...")
+    print(f"[INFO] Processo atual: PID={os.getpid()} PPID={os.getppid()}")
 
     utils.ensure_certificates()
 
