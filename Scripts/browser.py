@@ -1097,7 +1097,7 @@ async def _detect_and_register_files(page, markdown_text, q=None, allow_click_fa
     if not matches:
         # Fallback: tenta detectar links de download na página via múltiplos seletores
         try:
-            page_links = await page.evaluate("""() => {
+            page_links = await page.evaluate(r"""() => {
                 const links = [];
                 const seen = new Set();
                 // Seletor 1: links com /backend-api/files/
@@ -1552,7 +1552,7 @@ async def _scan_file_cards(page):
                     }
                     if (!name || !fileExts.test(name)) {
                         const text = (card.innerText || '').trim();
-                        const m = text.match(/[\\w\\-. ]+\\.(xlsx|xls|csv|pdf|docx|doc|pptx|ppt|zip|rar|json|xml|txt|png|jpg|jpeg|gif|svg)/i);
+                        const m = text.match(/[-\\w. ]+\\.(xlsx|xls|csv|pdf|docx|doc|pptx|ppt|zip|rar|json|xml|txt|png|jpg|jpeg|gif|svg)/i);
                         if (m) name = m[0].trim();
                     }
                     if (!name) return;
@@ -1622,7 +1622,7 @@ async def _click_chatgpt_download_elements(page, q=None):
     """
     try:
         # Procura elementos clicáveis que representam downloads de arquivo do code interpreter
-        download_elements = await page.evaluate("""() => {
+        download_elements = await page.evaluate(r"""() => {
             const results = [];
             // Padrão 1: links com texto contendo extensões de arquivo comuns
             const fileExts = /\.(xlsx|xls|csv|pdf|docx|doc|pptx|ppt|zip|rar|json|xml|txt|md|py|log)$/i;
@@ -1662,7 +1662,7 @@ async def _click_chatgpt_download_elements(page, q=None):
                     seenCards.add(card);
 
                     const headerText = (card.innerText || '').trim();
-                    const m = headerText.match(/[\\w\\-. ]+\\.(xlsx|xls|csv|pdf|docx|doc|pptx|ppt|zip|rar|json|xml|txt|png|jpg|jpeg|gif|svg)/i);
+                    const m = headerText.match(/[-\\w. ]+\\.(xlsx|xls|csv|pdf|docx|doc|pptx|ppt|zip|rar|json|xml|txt|png|jpg|jpeg|gif|svg)/i);
                     if (!m) return;
                     const filename = m[0].trim();
 
@@ -3110,51 +3110,96 @@ async def handle_uptodate_search_task(context, task):
 
 async def handle_chat_task(context, task):
     async with tab_semaphore:
-        sender_token = None
+        q = task.get('stream_queue')
         sender = _extract_task_sender(task)
-        if sender:
-            sender_token = _CURRENT_TASK_SENDER.set(sender)
-        q          = task.get('stream_queue')
-        sender     = _extract_task_sender(task)
-        sender_token = _CURRENT_TASK_SENDER.set(sender)
-        stop_event = asyncio.Event()
-        activityts = [time.time()]
+        sender_token = _CURRENT_TASK_SENDER.set(sender) if sender else None
+        max_attempts = 2
+        handled = False
         page = None
         try:
-            emit_log(q, "Iniciando tarefa CHAT no browser.")
-            page = await context.new_page()
-            watchdog_task = asyncio.create_task(
-                watchdog_page(page, q, stop_event,
-                              check_interval=15,
-                              activity_ts=activityts)  # ✅ era activityts=, corrigido para activity_ts=
-            )
-            try:
-                await asyncio.wait_for(
-                    handle_chat_task_inner(task, page, q, stop_event, activityts),
-                    timeout=660
-                )
-            except asyncio.TimeoutError:
-                emit_event(q, 'error', 'Timeout externo 660s — tarefa abortada.')
-            finally:
-                stop_event.set()
-                watchdog_task.cancel()
+            for attempt in range(1, max_attempts + 1):
+                stop_event = asyncio.Event()
+                activityts = [time.time()]
+                watchdog_task = None
                 try:
-                    await watchdog_task
-                except (asyncio.CancelledError, Exception):
-                    pass
-        except Exception as e:
-            emit_log(q, f'ERRO Chat: {e}')
-            emit_event(q, 'error', f'Falha no navegador: {str(e)}')
+                    emit_log(q, f"Iniciando tarefa CHAT no browser (tentativa {attempt}/{max_attempts}).")
+                    page = await context.new_page()
+                    watchdog_task = asyncio.create_task(
+                        watchdog_page(page, q, stop_event, check_interval=15, activity_ts=activityts)
+                    )
+                    await asyncio.wait_for(
+                        handle_chat_task_inner(task, page, q, stop_event, activityts),
+                        timeout=660
+                    )
+                    handled = True
+                    break
+                except asyncio.TimeoutError:
+                    emit_event(q, 'error', 'Timeout externo 660s — tarefa abortada.')
+                except Exception as e:
+                    err = str(e)
+                    recoverable = (
+                        "watchdog_abort_before_response" in err
+                        or "target page, context or browser has been closed" in err.lower()
+                        or "stream encerrado pelo cliente" in err.lower()
+                    )
+                    if recoverable and attempt < max_attempts:
+                        emit_log(q, "⚠️ Interrupção detectada. Reabrindo aba para verificar status/resposta...")
+                        probe_ok = False
+                        probe_page = None
+                        try:
+                            probe_page = await context.new_page()
+                            probe_url = task.get('url') or page.url or "https://chatgpt.com"
+                            await probe_page.goto(probe_url, wait_until='domcontentloaded', timeout=30000)
+                            await asyncio.sleep(1.2)
+                            snap = await _read_last_assistant_snapshot(probe_page)
+                            probe_html = clean_html(snap.get("html", ""))
+                            probe_md = md(probe_html, heading_style="ATX").strip()
+                            probe_md = probe_md.replace("\\_", "_").replace("\\*", "*")
+                            if probe_md:
+                                emit_log(q, "✅ Resposta recuperada após reabrir aba; concluindo sem reenvio.")
+                                emit_event(q, "markdown", probe_md)
+                                final_title = await get_chat_title(probe_page)
+                                emit_event(q, "finish", {"chat_id": task.get("chat_id"), "title": final_title, "url": probe_page.url})
+                                probe_ok = True
+                                handled = True
+                        except Exception as probe_err:
+                            emit_log(q, f"⚠️ Falha ao verificar resposta após interrupção: {probe_err}")
+                        finally:
+                            try:
+                                await probe_page.close()
+                            except Exception:
+                                pass
+                        if probe_ok:
+                            break
+                        emit_log(q, "🔁 Sem resposta recuperável; reenviando pedido...")
+                        await asyncio.sleep(1.2)
+                        continue
+                    emit_log(q, f'ERRO Chat: {e}')
+                    emit_event(q, 'error', f'Falha no navegador: {str(e)}')
+                    break
+                finally:
+                    stop_event.set()
+                    if watchdog_task is not None:
+                        watchdog_task.cancel()
+                        try:
+                            await watchdog_task
+                        except (asyncio.CancelledError, Exception):
+                            pass
+                    if page:
+                        try:
+                            await page.close()
+                        except Exception:
+                            pass
+                    page = None
+
+            if not handled:
+                emit_log(q, "⚠️ Tarefa CHAT finalizada sem confirmação de resposta conclusiva.")
         finally:
             emit_log(q, 'Finalizando tarefa.')
-            if page:
-                try:
-                    await page.close()
-                except:
-                    pass
             if q:
                 q.put(None)
-            _CURRENT_TASK_SENDER.reset(sender_token)
+            if sender_token is not None:
+                _CURRENT_TASK_SENDER.reset(sender_token)
 
 
 def _is_codex_url(url: str) -> bool:
@@ -3452,6 +3497,28 @@ async def _codex_paste_message(page, composer_selector: str, message: str, q, ac
     Reutiliza os mesmos marcadores [INICIO_TEXTO_COLADO]...[FIM_TEXTO_COLADO]
     enviados pelo agente (apenas descarta os marcadores antes de colar).
     """
+    codex_reasoning_prefix = (
+        "SYSTEM MODE: PERMANENT MAX REASONING\n\n"
+        "Use maximum reasoning effort (xhigh).\n"
+        "Take more time to think.\n"
+        "Do not optimize for speed.\n"
+        "Optimize for correctness and robustness.\n\n"
+        "PROCESS:\n"
+        "1. Analyze deeply\n"
+        "2. Plan architecture\n"
+        "3. Implement full solution\n"
+        "4. Review as senior engineer\n"
+        "5. Fix issues\n"
+        "6. Output final result only\n\n"
+        "RULES:\n"
+        "- No partial solutions\n"
+        "- No placeholders\n"
+        "- No truncated code\n"
+        "- Always full implementation\n"
+        "- Consider edge cases\n"
+        "- Consider failures\n"
+        "- Consider performance"
+    )
     start_marker = "[INICIO_TEXTO_COLADO]"
     end_marker = "[FIM_TEXTO_COLADO]"
     text = message or ""
@@ -3460,6 +3527,11 @@ async def _codex_paste_message(page, composer_selector: str, message: str, q, ac
         j = text.rfind(end_marker)
         text = text[i:j]
     text = text.replace('\r\n', '\n').replace('\r', '\n')
+
+    # Injeta prefixo de raciocínio máximo para qualquer pedido enviado ao Codex,
+    # independentemente do cliente Python que originou a requisição.
+    if "SYSTEM MODE: PERMANENT MAX REASONING" not in text:
+        text = f"{codex_reasoning_prefix}\n\n{text.lstrip()}"
 
     # Clica no composer para focar.
     try:
@@ -3615,6 +3687,34 @@ async def _codex_wait_and_click_pr_controls(page, q, timeout_s: int = 900) -> tu
     return False, ""
 
 
+async def _codex_try_open_fresh_task(page):
+    """Se estiver na home do Codex, tenta abrir a tarefa mais recente visível."""
+    js = """() => {
+        const links = Array.from(document.querySelectorAll('a[href*="/codex/cloud/tasks/"]'));
+        const visible = links.filter(a => {
+            if (!a || !a.href) return false;
+            const r = a.getBoundingClientRect();
+            return r.width > 0 && r.height > 0;
+        });
+        if (!visible.length) return null;
+        const first = visible[0];
+        return first.href || first.getAttribute('href') || null;
+    }"""
+    try:
+        href = await page.evaluate(js)
+    except Exception:
+        href = None
+    if not href:
+        return None
+    if href.startswith("/"):
+        href = "https://chatgpt.com" + href
+    try:
+        await page.goto(href, wait_until='domcontentloaded', timeout=15000)
+        return href
+    except Exception:
+        return None
+
+
 async def handle_codex_task_inner(task, page, q, stop_event, activityts=None):
     """Fluxo dedicado ao Codex (chatgpt.com/codex/cloud):
       1) Navega para a Codex URL.
@@ -3669,6 +3769,12 @@ async def handle_codex_task_inner(task, page, q, stop_event, activityts=None):
         if m:
             task_url = cur
             break
+        # Se o Codex voltou para /codex/cloud, tenta abrir imediatamente a
+        # tarefa recém-criada pela lista "Tarefas" (primeiro item visível).
+        opened = await _codex_try_open_fresh_task(page)
+        if opened:
+            task_url = opened
+            break
         await asyncio.sleep(0.5)
 
     if task_url:
@@ -3683,15 +3789,24 @@ async def handle_codex_task_inner(task, page, q, stop_event, activityts=None):
 
     # Mantém a aba aberta até aparecer uma das ações finais do Codex para
     # concluir o fluxo de PR/branch antes de encerrar a tarefa no worker.
-    await _codex_wait_and_click_pr_controls(page, q, timeout_s=900)
+    clicked_final, clicked_label = await _codex_wait_and_click_pr_controls(page, q, timeout_s=900)
 
     # Resposta curta confirmando submissão — o agente parseia JSON; devolvemos
     # um plano vazio com analysis explicando que a tarefa Codex foi enfileirada.
+    flow_status = "final_controls_clicked" if clicked_final else "final_controls_timeout"
+    final_hint = (
+        f"Botão final acionado ({clicked_label or 'ação final'})."
+        if clicked_final
+        else "Botão final não apareceu dentro do timeout; tarefa pode continuar em background."
+    )
     confirmation = (
         '{"analysis": "Tarefa enviada ao ChatGPT Codex ('
         + (task_url or url)
-        + '). A implementação concreta será feita pelo Codex em background; '
-        + 'o agente consultará o PR resultante em ciclos futuros.", "actions": []}'
+        + '). '
+        + final_hint
+        + '", "codex_flow_status": "'
+        + flow_status
+        + '", "actions": []}'
     )
     emit_event(q, 'markdown', confirmation)
     emit_event(q, 'finish', {'url': task_url or url, 'title': 'Codex Task'})
@@ -3906,6 +4021,8 @@ async def handle_chat_task_inner(task, page, q, stop_event: asyncio.Event, activ
 
         if stop_event.is_set():
             emit_event(q, "error", "⚠️ Aba travada detectada durante recepção da resposta.")
+            if not response_started:
+                raise RuntimeError("watchdog_abort_before_response")
             break
 
         loop_count += 1
@@ -4018,7 +4135,7 @@ async def handle_chat_task_inner(task, page, q, stop_event: asyncio.Event, activ
                 emit_event(q, "error", f"Falha no ChatGPT após {max_chat_error_reloads} recarga(s): {err_msg[:300]}")
                 break
 
-        status_txt = await page.evaluate("""() => {
+        status_txt = await page.evaluate(r"""() => {
             const asstMsgs = document.querySelectorAll('div[data-message-author-role="assistant"]');
             if (asstMsgs.length > 0) {
                 const lastAsst = asstMsgs[asstMsgs.length - 1];
