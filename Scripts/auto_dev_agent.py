@@ -905,16 +905,47 @@ def select_relevant_source_files(context: Dict[str, Any], budget_chars: int) -> 
 
     Prioriza:
       1) Arquivos aparecendo em tracebacks recentes.
-      2) Arquivos core do sistema (main, server, browser, shared, utils, storage, auth).
-      3) O próprio auto_dev_agent.py (só como referência, nunca para editar).
+      2) Arquivos citados nos incidentes (ex.: [browser.py], [server.py], etc.).
+      3) Arquivos core do sistema (main, server, browser, shared, utils, storage, auth).
+      4) O próprio auto_dev_agent.py (só como referência, nunca para editar).
     """
+
+    def _incident_file_hints() -> List[str]:
+        hints: List[str] = []
+        for inc in (context.get("incidents") or []):
+            if not isinstance(inc, dict):
+                continue
+            line = str(inc.get("line") or "")
+            low = line.lower()
+            if "[browser.py]" in low:
+                hints.append("Scripts/browser.py")
+            if "[server.py]" in low:
+                hints.append("Scripts/server.py")
+            if "[storage.py]" in low:
+                hints.append("Scripts/storage.py")
+            if "[main.py]" in low:
+                hints.append("Scripts/main.py")
+            if "[auto_dev_agent.py]" in low:
+                hints.append("Scripts/auto_dev_agent.py")
+            if "[analisador_prontuarios.py]" in low:
+                hints.append("Scripts/analisador_prontuarios.py")
+        # Dedup mantendo ordem
+        out: List[str] = []
+        seen = set()
+        for h in hints:
+            if h not in seen:
+                seen.add(h)
+                out.append(h)
+        return out
+
     selected: Dict[str, str] = {}
     budget = max(2000, budget_chars)
     picks: List[str] = []
 
     picks.extend(context.get("traceback_files", []))
+    picks.extend(_incident_file_hints())
     core = [
-        "Scripts/main.py", "Scripts/server.py", "Scripts/shared.py",
+        "Scripts/main.py", "Scripts/server.py", "Scripts/browser.py", "Scripts/shared.py",
         "Scripts/utils.py", "Scripts/storage.py", "Scripts/auth.py",
     ]
     for c in core:

@@ -715,9 +715,11 @@ um desenvolvedor sênior virtual — que:
    `Traceback`, `ERROR`, `Exception`, `rate limit`, `timeout`, tracebacks do
    Python e padrões de falha conhecidos.
 3. **Lê o código-fonte relevante** do próprio projeto — prioriza arquivos
-   citados em tracebacks, depois os módulos core (`main.py`, `server.py`,
-   `browser.py`, `shared.py`, `storage.py`, `auth.py`, `utils.py`) — e monta um
-   **contexto estruturado** para o modelo.
+   citados em tracebacks e também módulos sugeridos pelos próprios incidentes
+   (ex.: linhas com `[browser.py]`, `[server.py]`, `[storage.py]`), depois os
+   módulos core (`main.py`, `server.py`, `browser.py`, `shared.py`,
+   `storage.py`, `auth.py`, `utils.py`) — e monta um **contexto estruturado**
+   para o modelo.
 4. **Consulta o ChatGPT via `browser.py`** usando o endpoint interno
    `/v1/chat/completions` em **modo streaming** (evita timeouts longos;
    tolera pausas até `AUTODEV_AGENT_STREAM_IDLE_SEC` entre eventos). A
