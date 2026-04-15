@@ -819,10 +819,6 @@ Se `AUTODEV_AGENT_AUTOSTART_CMD` estiver configurada, o agente também tenta
 **iniciar automaticamente o Simulator** quando o health-check falhar, com
 cooldown para evitar loops agressivos de restart.
 
-Se `AUTODEV_AGENT_AUTOSTART_CMD` estiver configurada, o agente também tenta
-**iniciar automaticamente o Simulator** quando o health-check falhar, com
-cooldown para evitar loops agressivos de restart.
-
 ### Variáveis de ambiente
 
 | Variável | Default | Descrição |

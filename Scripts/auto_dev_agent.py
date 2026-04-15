@@ -147,6 +147,9 @@ CODEX_REPO = _env("AUTODEV_AGENT_CODEX_REPO", "hellyssoncavalcanti/chatGPT_Simul
 # Reuso de conversa Codex entre rodadas do mesmo ciclo (chat_id separado
 # do chat regular).
 CODEX_REUSE_CHAT = _env_bool("AUTODEV_AGENT_CODEX_REUSE_CHAT", True)
+# Quando False (padrão), o agente NÃO bloqueia novos forwards enquanto uma
+# tarefa anterior do Codex parece pendente. O Codex suporta filas paralelas.
+CODEX_BLOCK_WHILE_PENDING = _env_bool("AUTODEV_AGENT_CODEX_BLOCK_WHILE_PENDING", False)
 # Janela mínima (segundos) sem pedir novo trabalho ao Codex após um forward
 # bem-sucedido. Durante esse período, o agente assume que a tarefa anterior
 # ainda está sendo executada no Codex (elaborando o PR) e não envia nada
@@ -2294,12 +2297,18 @@ def forward_to_codex(context: Dict[str, Any],
     if not simulator_is_ready():
         return None
 
-    # Gate: não envia nova tarefa ao Codex enquanto a anterior estiver em
-    # execução. Evita empilhar PRs em paralelo que podem conflitar.
+    # Gate opcional: quando habilitado, bloqueia novos forwards enquanto
+    # houver tarefa anterior pendente. Por padrão, DESABILITADO para permitir
+    # pedidos simultâneos ao Codex.
     is_pending, reason = _codex_task_looks_pending()
-    if is_pending:
+    if is_pending and CODEX_BLOCK_WHILE_PENDING:
         log(f"⏸️  Codex-forward pulado: {reason}")
         return None
+    if is_pending and not CODEX_BLOCK_WHILE_PENDING:
+        log(
+            "ℹ️ Tarefa Codex anterior ainda parece pendente, "
+            "mas envio paralelo está habilitado; encaminhando novo pedido."
+        )
 
     suggestions_block = "\n".join(f"- {s}" for s in pending_suggestions[:20])
     codex_prompt = (
@@ -2410,15 +2419,18 @@ def forward_to_codex(context: Dict[str, Any],
             _AGENT_STATE.codex_chat_url = None
             _save_state()
 
-    # Se o Codex retornou uma URL de tarefa (/codex/cloud/tasks/<id>),
-    # registramos como pendente: o próximo ciclo não vai empilhar outra
-    # solicitação enquanto esta não terminar (ver _codex_task_looks_pending).
-    _record_codex_pending_task(chat_url)
-
     plan = _extract_json_object(markdown or "")
     if not plan:
         log("⚠️ Forward-to-Codex: resposta sem JSON válido.", logging.WARNING)
+        _record_codex_pending_task(chat_url)
         return None
+
+    codex_flow_status = str(plan.get("codex_flow_status") or "").strip().lower()
+    if codex_flow_status in {"final_controls_clicked", "final_controls_detected"}:
+        _clear_codex_pending_task(reason=codex_flow_status)
+    else:
+        _record_codex_pending_task(chat_url)
+
     plan = _normalize_plan(plan)
     _log_plan_decision(plan, "Codex")
     return plan
