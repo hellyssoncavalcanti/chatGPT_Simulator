@@ -1662,7 +1662,7 @@ async def _click_chatgpt_download_elements(page, q=None):
                     seenCards.add(card);
 
                     const headerText = (card.innerText || '').trim();
-                    const m = headerText.match(/[\\w\\-. ]+\\.(xlsx|xls|csv|pdf|docx|doc|pptx|ppt|zip|rar|json|xml|txt|png|jpg|jpeg|gif|svg)/i);
+                    const m = headerText.match(/[\\w.\\- ]+\\.(xlsx|xls|csv|pdf|docx|doc|pptx|ppt|zip|rar|json|xml|txt|png|jpg|jpeg|gif|svg)/i);
                     if (!m) return;
                     const filename = m[0].trim();
 
