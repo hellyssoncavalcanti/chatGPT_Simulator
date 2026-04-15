@@ -669,8 +669,25 @@ def discover_active_services() -> Dict[str, List[int]]:
         svc = _discover_services_windows()
     else:
         svc = _discover_services_posix()
+
+    # browser_worker roda como THREAD dentro do processo main.py; em muitos
+    # ambientes ele não aparece como processo separado no ps/WMI. Para evitar
+    # falso "OFF", aplica heurística: se main.py está ativo e o /health do
+    # Simulator responde 200, considera o browser worker funcional no mesmo PID.
+    if not svc.get("browser_worker") and svc.get("main") and _simulator_health_quick():
+        svc["browser_worker"] = list(svc.get("main") or [])
+
     # Deduplica e ordena
     return {k: sorted(set(v)) for k, v in svc.items()}
+
+
+def _simulator_health_quick(timeout_sec: float = 1.5) -> bool:
+    """Ping curto no /health sem efeitos colaterais (sem autostart/retries longos)."""
+    try:
+        r = requests.get(SIMULATOR_HEALTH_URL, timeout=max(0.5, float(timeout_sec)))
+        return r.status_code == 200
+    except Exception:
+        return False
 
 
 def log_active_services_snapshot(svc_map: Dict[str, List[int]]) -> None:
