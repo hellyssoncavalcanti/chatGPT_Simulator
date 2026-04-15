@@ -61,6 +61,7 @@ import json
 import logging
 import os
 import platform
+import atexit
 import random
 import re
 import shutil
@@ -96,6 +97,7 @@ LOGS_DIR = ROOT_DIR / "logs"
 TEMP_DIR = ROOT_DIR / "temp"
 BACKUP_DIR = TEMP_DIR / "agent_backups"
 STATE_FILE = TEMP_DIR / "auto_dev_agent_state.json"
+LOCK_FILE = TEMP_DIR / "auto_dev_agent.lock"
 
 for _d in (LOGS_DIR, TEMP_DIR, BACKUP_DIR):
     try:
@@ -145,6 +147,9 @@ CODEX_REPO = _env("AUTODEV_AGENT_CODEX_REPO", "hellyssoncavalcanti/chatGPT_Simul
 # Reuso de conversa Codex entre rodadas do mesmo ciclo (chat_id separado
 # do chat regular).
 CODEX_REUSE_CHAT = _env_bool("AUTODEV_AGENT_CODEX_REUSE_CHAT", True)
+# Quando False (padrão), o agente NÃO bloqueia novos forwards enquanto uma
+# tarefa anterior do Codex parece pendente. O Codex suporta filas paralelas.
+CODEX_BLOCK_WHILE_PENDING = _env_bool("AUTODEV_AGENT_CODEX_BLOCK_WHILE_PENDING", False)
 # Janela mínima (segundos) sem pedir novo trabalho ao Codex após um forward
 # bem-sucedido. Durante esse período, o agente assume que a tarefa anterior
 # ainda está sendo executada no Codex (elaborando o PR) e não envia nada
@@ -170,6 +175,10 @@ REQUEST_TIMEOUT_SEC = int(_env("AUTODEV_AGENT_REQUEST_TIMEOUT", "900"))
 STREAM_IDLE_TIMEOUT_SEC = int(_env("AUTODEV_AGENT_STREAM_IDLE_SEC", "180"))
 STARTUP_WAIT_SEC = int(_env("AUTODEV_AGENT_STARTUP_WAIT_SEC", "30"))
 HEALTH_LOG_THROTTLE_SEC = 30.0
+HEALTHCHECK_RETRIES = max(1, int(_env("AUTODEV_AGENT_HEALTH_RETRIES", "2")))
+HEALTHCHECK_RETRY_DELAY_SEC = max(1, int(_env("AUTODEV_AGENT_HEALTH_RETRY_DELAY_SEC", "2")))
+AUTOSTART_SIMULATOR_CMD = _env("AUTODEV_AGENT_AUTOSTART_CMD", "").strip()
+AUTOSTART_COOLDOWN_SEC = max(10, int(_env("AUTODEV_AGENT_AUTOSTART_COOLDOWN_SEC", "180")))
 
 # Intervalo humano entre pedidos ao ChatGPT (alinha com analisador_prontuarios)
 _CFG_PAUSA_MIN = int(getattr(config, "ANALISADOR_PAUSA_MIN", 25) or 25) if config else 25
@@ -309,6 +318,15 @@ WARN_PATTERNS = [
     r"\bexcesso de solicita",
 ]
 
+# Linhas informativas conhecidas que não devem virar incidente mesmo contendo
+# termos ambíguos (ex.: "timeout" no nome da branch).
+BENIGN_INCIDENT_PATTERNS = [
+    r"sem commits novos em relacao ao base\. pulando\.",
+    r"processando branch 'codex/",
+]
+
+_LOG_LEVEL_TAG_RE = re.compile(r"\[(DEBUG|INFO|WARNING|ERROR|CRITICAL)\]", re.IGNORECASE)
+
 
 # =============================================================================
 # LOGGER
@@ -402,6 +420,57 @@ class ActionResult:
 
 
 _AGENT_STATE = AgentState()
+_last_autostart_attempt = 0.0
+
+
+def _pid_is_running(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except Exception:
+        return False
+
+
+def _release_single_instance_lock() -> None:
+    try:
+        if LOCK_FILE.exists():
+            data = json.loads(LOCK_FILE.read_text(encoding="utf-8"))
+            if int(data.get("pid") or 0) == os.getpid():
+                LOCK_FILE.unlink()
+    except Exception:
+        pass
+
+
+def _ensure_single_instance_lock() -> None:
+    """Evita duas instâncias do auto_dev_agent concorrendo no mesmo repo."""
+    LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
+    if LOCK_FILE.exists():
+        try:
+            data = json.loads(LOCK_FILE.read_text(encoding="utf-8"))
+        except Exception:
+            data = {}
+        existing_pid = int(data.get("pid") or 0)
+        if existing_pid and existing_pid != os.getpid() and _pid_is_running(existing_pid):
+            raise RuntimeError(
+                f"Já existe outra instância ativa do auto_dev_agent (pid={existing_pid})."
+            )
+        try:
+            LOCK_FILE.unlink()
+        except Exception:
+            pass
+
+    payload = {
+        "pid": os.getpid(),
+        "started_at_utc": _now_utc_iso(),
+    }
+    LOCK_FILE.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    atexit.register(_release_single_instance_lock)
 
 
 def _load_state() -> None:
@@ -600,8 +669,25 @@ def discover_active_services() -> Dict[str, List[int]]:
         svc = _discover_services_windows()
     else:
         svc = _discover_services_posix()
+
+    # browser_worker roda como THREAD dentro do processo main.py; em muitos
+    # ambientes ele não aparece como processo separado no ps/WMI. Para evitar
+    # falso "OFF", aplica heurística: se main.py está ativo e o /health do
+    # Simulator responde 200, considera o browser worker funcional no mesmo PID.
+    if not svc.get("browser_worker") and svc.get("main") and _simulator_health_quick():
+        svc["browser_worker"] = list(svc.get("main") or [])
+
     # Deduplica e ordena
     return {k: sorted(set(v)) for k, v in svc.items()}
+
+
+def _simulator_health_quick(timeout_sec: float = 1.5) -> bool:
+    """Ping curto no /health sem efeitos colaterais (sem autostart/retries longos)."""
+    try:
+        r = requests.get(SIMULATOR_HEALTH_URL, timeout=max(0.5, float(timeout_sec)))
+        return r.status_code == 200
+    except Exception:
+        return False
 
 
 def log_active_services_snapshot(svc_map: Dict[str, List[int]]) -> None:
@@ -662,9 +748,23 @@ def _scan_incidents(lines: Iterable[str], source: str) -> List[Incident]:
     out: List[Incident] = []
     for raw in lines:
         low = raw.lower()
+        if any(re.search(p, low) for p in BENIGN_INCIDENT_PATTERNS):
+            continue
+
+        level_match = _LOG_LEVEL_TAG_RE.search(raw)
+        declared_level = (level_match.group(1).lower() if level_match else "")
+        if declared_level in {"error", "critical"}:
+            out.append(Incident("error", source, raw.strip()[:1000], _now_utc_iso()))
+            continue
+        if declared_level == "warning":
+            out.append(Incident("warning", source, raw.strip()[:1000], _now_utc_iso()))
+            continue
+
         if any(re.search(p, raw) or re.search(p, low) for p in ERROR_PATTERNS):
             out.append(Incident("error", source, raw.strip()[:1000], _now_utc_iso()))
-        elif any(re.search(p, raw) or re.search(p, low) for p in WARN_PATTERNS):
+        elif declared_level not in {"info", "debug"} and any(
+            re.search(p, raw) or re.search(p, low) for p in WARN_PATTERNS
+        ):
             out.append(Incident("warning", source, raw.strip()[:1000], _now_utc_iso()))
     return out
 
@@ -825,16 +925,47 @@ def select_relevant_source_files(context: Dict[str, Any], budget_chars: int) -> 
 
     Prioriza:
       1) Arquivos aparecendo em tracebacks recentes.
-      2) Arquivos core do sistema (main, server, browser, shared, utils, storage, auth).
-      3) O próprio auto_dev_agent.py (só como referência, nunca para editar).
+      2) Arquivos citados nos incidentes (ex.: [browser.py], [server.py], etc.).
+      3) Arquivos core do sistema (main, server, browser, shared, utils, storage, auth).
+      4) O próprio auto_dev_agent.py (só como referência, nunca para editar).
     """
+
+    def _incident_file_hints() -> List[str]:
+        hints: List[str] = []
+        for inc in (context.get("incidents") or []):
+            if not isinstance(inc, dict):
+                continue
+            line = str(inc.get("line") or "")
+            low = line.lower()
+            if "[browser.py]" in low:
+                hints.append("Scripts/browser.py")
+            if "[server.py]" in low:
+                hints.append("Scripts/server.py")
+            if "[storage.py]" in low:
+                hints.append("Scripts/storage.py")
+            if "[main.py]" in low:
+                hints.append("Scripts/main.py")
+            if "[auto_dev_agent.py]" in low:
+                hints.append("Scripts/auto_dev_agent.py")
+            if "[analisador_prontuarios.py]" in low:
+                hints.append("Scripts/analisador_prontuarios.py")
+        # Dedup mantendo ordem
+        out: List[str] = []
+        seen = set()
+        for h in hints:
+            if h not in seen:
+                seen.add(h)
+                out.append(h)
+        return out
+
     selected: Dict[str, str] = {}
     budget = max(2000, budget_chars)
     picks: List[str] = []
 
     picks.extend(context.get("traceback_files", []))
+    picks.extend(_incident_file_hints())
     core = [
-        "Scripts/main.py", "Scripts/server.py", "Scripts/shared.py",
+        "Scripts/main.py", "Scripts/server.py", "Scripts/browser.py", "Scripts/shared.py",
         "Scripts/utils.py", "Scripts/storage.py", "Scripts/auth.py",
     ]
     for c in core:
@@ -871,15 +1002,45 @@ def select_relevant_source_files(context: Dict[str, Any], budget_chars: int) -> 
 _last_health_log = 0.0
 
 
+def _maybe_autostart_simulator() -> None:
+    """Tenta subir o Simulator automaticamente quando indisponível."""
+    global _last_autostart_attempt
+    if not AUTOSTART_SIMULATOR_CMD:
+        return
+    now = time.time()
+    remaining = AUTOSTART_COOLDOWN_SEC - (now - _last_autostart_attempt)
+    if remaining > 0:
+        return
+    _last_autostart_attempt = now
+    try:
+        subprocess.Popen(
+            AUTOSTART_SIMULATOR_CMD,
+            cwd=str(ROOT_DIR),
+            shell=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        log(
+            f"🚀 Auto-start acionado para o Simulator com comando: "
+            f"{AUTOSTART_SIMULATOR_CMD!r}"
+        )
+    except Exception as exc:
+        log(f"⚠️ Falha no auto-start do Simulator: {exc}", logging.WARNING)
+
+
 def simulator_is_ready() -> bool:
     """Health-check do Simulator. Faz log throttle para não poluir."""
     global _last_health_log
-    try:
-        r = requests.get(SIMULATOR_HEALTH_URL, timeout=5)
-        if r.status_code == 200:
-            return True
-    except Exception:
-        pass
+    for _ in range(HEALTHCHECK_RETRIES):
+        try:
+            r = requests.get(SIMULATOR_HEALTH_URL, timeout=5)
+            if r.status_code == 200:
+                return True
+        except Exception:
+            pass
+        time.sleep(HEALTHCHECK_RETRY_DELAY_SEC)
+
+    _maybe_autostart_simulator()
     now = time.time()
     if now - _last_health_log >= HEALTH_LOG_THROTTLE_SEC:
         log(f"⏳ Simulator indisponível em {SIMULATOR_HEALTH_URL}; aguardando...")
@@ -962,7 +1123,6 @@ SYSTEM_PROMPT_BASE = textwrap.dedent("""\
       • false = não encaminhar ao Codex neste ciclo.
     """)
 
-
 def _build_user_prompt(context: Dict[str, Any],
                        objective: str,
                        source_files: Dict[str, str],
@@ -1004,49 +1164,82 @@ def _strip_code_fences(text: str) -> str:
 
 
 def _extract_json_object(text: str) -> Optional[dict]:
-    """Extrai o primeiro objeto JSON válido a partir de 'text'."""
+    """Extrai o objeto JSON mais provável de plano dentro de texto misto.
+
+    Estratégia:
+      1) tenta parse direto;
+      2) tenta parse após marcadores como "RESPOSTA:";
+      3) varre candidatos com json.JSONDecoder().raw_decode() a partir de '{';
+      4) ranqueia candidatos privilegiando schema do plano (analysis/actions/forward).
+    """
     if not text:
         return None
     raw = _strip_code_fences(text)
+    decoder = json.JSONDecoder()
+
+    def _score_candidate(data: dict) -> int:
+        score = 0
+        if isinstance(data.get("analysis"), str):
+            score += 3
+        if isinstance(data.get("actions"), list):
+            score += 4
+        if "should_forward_to_codex" in data:
+            score += 4
+        if "type" in data and "file" in data:
+            score -= 2
+        return score
+
+    candidates: List[dict] = []
+
     # Tentativa direta
     try:
         data = json.loads(raw)
-        return data if isinstance(data, dict) else None
+        if isinstance(data, dict):
+            candidates.append(data)
     except Exception:
         pass
-    # Busca por chave JSON balanceada iniciando no primeiro '{'
+
+    # Tenta parse após marcadores frequentes.
+    marker_candidates = ["\nRESPOSTA:", "\nResposta:", "\nJSON:", "responda apenas com json"]
+    lower_raw = raw.lower()
+    for marker in marker_candidates:
+        pos = lower_raw.rfind(marker.lower())
+        if pos == -1:
+            continue
+        chunk = raw[pos + len(marker):].strip()
+        if not chunk:
+            continue
+        try:
+            data = json.loads(chunk)
+            if isinstance(data, dict):
+                candidates.append(data)
+                continue
+        except Exception:
+            pass
+        brace = chunk.find("{")
+        if brace != -1:
+            try:
+                obj, _end = decoder.raw_decode(chunk[brace:])
+                if isinstance(obj, dict):
+                    candidates.append(obj)
+            except Exception:
+                pass
+
+    # Varrida geral por objetos JSON possíveis.
     start = raw.find("{")
     while start != -1:
-        depth = 0
-        in_str = False
-        esc = False
-        for idx in range(start, len(raw)):
-            ch = raw[idx]
-            if esc:
-                esc = False
-                continue
-            if ch == "\\":
-                esc = True
-                continue
-            if ch == '"':
-                in_str = not in_str
-                continue
-            if in_str:
-                continue
-            if ch == "{":
-                depth += 1
-            elif ch == "}":
-                depth -= 1
-                if depth == 0:
-                    candidate = raw[start:idx + 1]
-                    try:
-                        data = json.loads(candidate)
-                        if isinstance(data, dict):
-                            return data
-                    except Exception:
-                        break
+        try:
+            obj, _end = decoder.raw_decode(raw[start:])
+            if isinstance(obj, dict):
+                candidates.append(obj)
+        except Exception:
+            pass
         start = raw.find("{", start + 1)
-    return None
+
+    if not candidates:
+        return None
+    candidates.sort(key=_score_candidate, reverse=True)
+    return candidates[0]
 
 
 def _normalize_plan(plan: Dict[str, Any]) -> Dict[str, Any]:
@@ -1085,8 +1278,10 @@ def _log_plan_decision(plan: Dict[str, Any], origin: str) -> None:
     actions = plan.get("actions") or []
     should_forward = bool(plan.get("should_forward_to_codex"))
     if bool(plan.get("_forward_autofilled")):
-        log(f"⚠️ [{origin}] should_forward_to_codex ausente no JSON; decisão foi auto-preenchida.",
-            logging.WARNING)
+        log(
+            f"ℹ️ [{origin}] should_forward_to_codex ausente no JSON; decisão foi auto-preenchida.",
+            logging.INFO,
+        )
 
     log(f"🧠 [{origin}] analysis completo:\n{analysis or '(vazio)'}")
     if actions:
@@ -1138,6 +1333,7 @@ def _should_forward_plan_to_codex(plan: Dict[str, Any],
 def _stream_chat_completion(
     body: Dict[str, Any],
     label: str = "ChatGPT Simulator",
+    apply_chat_spacing: bool = True,
 ) -> Tuple[str, Optional[str], Optional[str]]:
     """Envia mensagem em modo streaming e coleta (markdown_final, chat_id, url).
 
@@ -1175,7 +1371,8 @@ def _stream_chat_completion(
     log(f"📤 Enviando pedido a {label} "
         f"(~{payload_chars} chars){reuse_hint}...")
 
-    _wait_chat_spacing_if_needed(label)
+    if apply_chat_spacing:
+        _wait_chat_spacing_if_needed(label)
 
     resp = None
     post_error: Optional[Exception] = None
@@ -1224,6 +1421,7 @@ def _stream_chat_completion(
     last_markdown_report_ts = 0.0
     MARKDOWN_REPORT_MIN_STEP = 1024   # chars
     MARKDOWN_REPORT_MIN_INTERVAL = 3  # segundos
+    stream_verbose = "codex" in (label or "").lower()
     inline_status_open = False
     inline_last_len = 0
     stream = getattr(sys, "stdout", None)
@@ -1298,7 +1496,11 @@ def _stream_chat_completion(
         if t == "status":
             text = (str(c) if c is not None else "").strip()
             if text and text != last_status_logged:
-                _print_inline_status(text)
+                if stream_verbose:
+                    _close_inline_status()
+                    log(f"   ⏳ {_normalize_status(text)[:320]}")
+                else:
+                    _print_inline_status(text)
                 last_status_logged = text
 
         elif t == "log":
@@ -1329,7 +1531,11 @@ def _stream_chat_completion(
                 or (size != last_markdown_size_reported
                     and now - last_markdown_report_ts >= MARKDOWN_REPORT_MIN_INTERVAL)
             ):
-                _print_inline_markdown(size)
+                if stream_verbose:
+                    _close_inline_status()
+                    log(f"   📝 recebendo resposta: {size} chars...")
+                else:
+                    _print_inline_markdown(size)
                 last_markdown_size_reported = size
                 last_markdown_report_ts = now
 
@@ -2107,18 +2313,19 @@ def forward_to_codex(context: Dict[str, Any],
         return None
     if not simulator_is_ready():
         return None
-    remaining = _rate_limit_remaining()
-    if remaining > 0:
-        log(f"⏸️  Codex-forward pulado: cooldown de {int(remaining)}s.",
-            logging.INFO)
-        return None
 
-    # Gate: não envia nova tarefa ao Codex enquanto a anterior estiver em
-    # execução. Evita empilhar PRs em paralelo que podem conflitar.
+    # Gate opcional: quando habilitado, bloqueia novos forwards enquanto
+    # houver tarefa anterior pendente. Por padrão, DESABILITADO para permitir
+    # pedidos simultâneos ao Codex.
     is_pending, reason = _codex_task_looks_pending()
-    if is_pending:
+    if is_pending and CODEX_BLOCK_WHILE_PENDING:
         log(f"⏸️  Codex-forward pulado: {reason}")
         return None
+    if is_pending and not CODEX_BLOCK_WHILE_PENDING:
+        log(
+            "ℹ️ Tarefa Codex anterior ainda parece pendente, "
+            "mas envio paralelo está habilitado; encaminhando novo pedido."
+        )
 
     suggestions_block = "\n".join(f"- {s}" for s in pending_suggestions[:20])
     codex_prompt = (
@@ -2180,7 +2387,9 @@ def forward_to_codex(context: Dict[str, Any],
     for codex_try in range(1, 3):
         try:
             markdown, chat_id, chat_url = _stream_chat_completion(
-                body, label="ChatGPT Codex (implementação)"
+                body,
+                label="ChatGPT Codex (implementação)",
+                apply_chat_spacing=False,
             )
             last_exc = None
             break
@@ -2226,15 +2435,18 @@ def forward_to_codex(context: Dict[str, Any],
             _AGENT_STATE.codex_chat_url = None
             _save_state()
 
-    # Se o Codex retornou uma URL de tarefa (/codex/cloud/tasks/<id>),
-    # registramos como pendente: o próximo ciclo não vai empilhar outra
-    # solicitação enquanto esta não terminar (ver _codex_task_looks_pending).
-    _record_codex_pending_task(chat_url)
-
     plan = _extract_json_object(markdown or "")
     if not plan:
         log("⚠️ Forward-to-Codex: resposta sem JSON válido.", logging.WARNING)
+        _record_codex_pending_task(chat_url)
         return None
+
+    codex_flow_status = str(plan.get("codex_flow_status") or "").strip().lower()
+    if codex_flow_status in {"final_controls_clicked", "final_controls_detected"}:
+        _clear_codex_pending_task(reason=codex_flow_status)
+    else:
+        _record_codex_pending_task(chat_url)
+
     plan = _normalize_plan(plan)
     _log_plan_decision(plan, "Codex")
     return plan
@@ -2538,12 +2750,18 @@ def wait_for_simulator() -> None:
 
 
 def main_loop() -> None:
+    _ensure_single_instance_lock()
     log("🚀 AutoDevAgent iniciando")
     log(f"📄 Log: {AGENT_LOG}")
     log(f"🔗 Simulator URL: {SIMULATOR_URL}")
     log(f"🔗 Codex URL: {CODEX_URL or '(novo chat a cada ciclo de conversa)'}")
     log(f"🧭 Plataforma: {platform.system()} {platform.release()} | Python {sys.version.split(' ',1)[0]}")
     log(f"⚙️ AUTOFIX={ENABLE_AUTOFIX} AUTOCOMMIT={ENABLE_AUTOCOMMIT} AUTOPUSH={ENABLE_AUTOPUSH}")
+    if AUTOSTART_SIMULATOR_CMD:
+        log(
+            "🩺 Auto-start do Simulator habilitado "
+            f"(cooldown={AUTOSTART_COOLDOWN_SEC}s)."
+        )
     if not API_KEY:
         log("⚠️ API_KEY ausente; requisições podem retornar 401.", logging.WARNING)
 
@@ -2573,14 +2791,21 @@ def main_loop() -> None:
 # ENTRY POINT
 # =============================================================================
 if __name__ == "__main__":
-    try:
-        main_loop()
-    except KeyboardInterrupt:
-        log("🛑 Encerrado por KeyboardInterrupt")
-    except Exception as exc:
-        log(f"❌ Erro fatal: {exc}", logging.ERROR)
-        log(traceback.format_exc(), logging.ERROR)
-        # Preserva o processo para permitir inspeção; exit(1) se CI
-        if os.environ.get("AUTODEV_AGENT_EXIT_ON_FATAL", "0") == "1":
-            sys.exit(1)
-        time.sleep(30)
+    while True:
+        try:
+            main_loop()
+        except KeyboardInterrupt:
+            log("🛑 Encerrado por KeyboardInterrupt")
+            break
+        except Exception as exc:
+            log(f"❌ Erro fatal: {exc}", logging.ERROR)
+            log(traceback.format_exc(), logging.ERROR)
+            # Preserva o processo para permitir inspeção; exit(1) se CI
+            if os.environ.get("AUTODEV_AGENT_EXIT_ON_FATAL", "0") == "1":
+                sys.exit(1)
+            log("🔄 Reiniciando AutoDevAgent em 30 segundos...")
+            try:
+                time.sleep(30)
+            except KeyboardInterrupt:
+                log("🛑 Encerrado por KeyboardInterrupt")
+                break
