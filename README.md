@@ -488,6 +488,8 @@ A pesquisa web é uma feature nativa do simulador.
 - roda como daemon;
 - consulta dados clínicos via um endpoint PHP externo (`chatgpt_integracao_criado_pelo_gemini.js.php`);
 - chama `POST /v1/chat/completions` do simulador como backend LLM local;
+- se o ChatGPT Simulator cair/ficar indisponível, **não encerra o processo**:
+  permanece em loop de reconexão e retoma automaticamente quando o serviço volta;
 - opcionalmente chama `POST /api/web_search` para buscar evidências;
 - enriquece condutas clínicas com referências extraídas da web;
 - grava/atualiza análises em uma tabela SQL remota via PHP.
@@ -605,7 +607,7 @@ Esta automação existe para manter a pasta `C:\chatgpt_simulator` alinhada com 
 2. O PowerShell carrega primeiro `Scripts\sync_github_settings.ps1`; por compatibilidade, também aceita o nome antigo `Scripts\sync_github.settings.ps1`.
 3. O script cria um lock para evitar duas execuções simultâneas quando a tarefa agendada roda a cada 10 minutos.
 4. Se houver token GitHub configurado, ele lista PRs abertos na branch alvo, fecha os mais antigos e tenta mergear o PR aberto mais recente.
-5. Em seguida ele faz um clone temporário da branch principal, compara os arquivos rastreados e copia apenas os novos/alterados para `C:\chatgpt_simulator`.
+5. Em seguida ele faz um clone temporário da branch principal, compara os arquivos rastreados e copia apenas os novos/alterados para `C:\chatgpt_simulator`, **ignorando artefatos de cache** (ex.: `__pycache__`, `.pyc`, `.pyo`, `.pyd`, `.pytest_cache`, `.mypy_cache`, `.ruff_cache`).
 6. Se algo realmente mudou, ele encerra os processos correspondentes a `Scripts\main.py` e `Scripts\analisador_prontuarios.py` e os inicia novamente em sequência.
 7. Se nada mudou, ele apenas registra em log e encerra sem reiniciar nada.
 
@@ -618,6 +620,7 @@ Para evitar perda de estado local, o sync **não deve sobrescrever** estes itens
 - `Scripts\sync_github_settings.ps1`
 - `Scripts\sync_github.settings.ps1` *(compatibilidade com nome antigo)*
 - toda a pasta `chrome_profile\`
+- artefatos de cache Python/linters (`__pycache__`, `*.pyc`, `*.pyo`, `*.pyd`, `.pytest_cache`, `.mypy_cache`, `.ruff_cache`)
 
 ### Arquivos exatos desta automação no repositório
 
@@ -714,9 +717,11 @@ um desenvolvedor sênior virtual — que:
    `Traceback`, `ERROR`, `Exception`, `rate limit`, `timeout`, tracebacks do
    Python e padrões de falha conhecidos.
 3. **Lê o código-fonte relevante** do próprio projeto — prioriza arquivos
-   citados em tracebacks, depois os módulos core (`main.py`, `server.py`,
-   `browser.py`, `shared.py`, `storage.py`, `auth.py`, `utils.py`) — e monta um
-   **contexto estruturado** para o modelo.
+   citados em tracebacks e também módulos sugeridos pelos próprios incidentes
+   (ex.: linhas com `[browser.py]`, `[server.py]`, `[storage.py]`), depois os
+   módulos core (`main.py`, `server.py`, `browser.py`, `shared.py`,
+   `storage.py`, `auth.py`, `utils.py`) — e monta um **contexto estruturado**
+   para o modelo.
 4. **Consulta o ChatGPT via `browser.py`** usando o endpoint interno
    `/v1/chat/completions` em **modo streaming** (evita timeouts longos;
    tolera pausas até `AUTODEV_AGENT_STREAM_IDLE_SEC` entre eventos). A
@@ -734,10 +739,12 @@ um desenvolvedor sênior virtual — que:
 6. **Aplica as ações com segurança**:
    - **Snapshot/backup** de todos os arquivos afetados em
      `temp/agent_backups/<timestamp>/` antes de tocar em qualquer coisa.
+   - **Lock de instância única** em `temp/auto_dev_agent.lock` para impedir
+     duas instâncias do agente alterando o mesmo repositório ao mesmo tempo.
    - Bloqueio de caminhos sensíveis (`.git/`, `certs/`, `db/`, `logs/`,
      `chrome_profile/`, `__pycache__/`, `.venv/`, `node_modules/`).
-   - Bloqueio de arquivos protegidos por negócio (`analisador_prontuarios.py`,
-     `acompanhamento_whatsapp.py`, `config.py`).
+   - Bloqueio de arquivos protegidos por negócio (`Scripts/config.py` e o
+     próprio `Scripts/auto_dev_agent.py`, salvo com `AUTODEV_AGENT_SELF_EDIT=1`).
    - Bloqueio de comandos destrutivos via regex (`rm -rf`, `git reset --hard`,
      `git push --force`, `shutdown`, `mkfs`, `dd if=`, `DROP TABLE`,
      `chmod -R 777`, `kill -9 1`, fork-bomb, …).
@@ -804,12 +811,16 @@ O agente espera até `AUTODEV_AGENT_STARTUP_WAIT_SEC` segundos pelo Simulator
 subir. Depois disso entra em modo monitor mesmo se o Simulator ainda não
 estiver pronto — reavalia a saúde a cada ciclo.
 
+Se `AUTODEV_AGENT_AUTOSTART_CMD` estiver configurada, o agente também tenta
+**iniciar automaticamente o Simulator** quando o health-check falhar, com
+cooldown para evitar loops agressivos de restart.
+
 ### Variáveis de ambiente
 
 | Variável | Default | Descrição |
 |---|---|---|
 | `AUTODEV_AGENT_SIMULATOR_URL` | `http://127.0.0.1:3003/v1/chat/completions` | Endpoint do Simulator |
-| `AUTODEV_AGENT_CODEX_URL` | *(vazio)* | URL da conversa do Codex no ChatGPT; se vazio, usa chat regular novo |
+| `AUTODEV_AGENT_CODEX_URL` | `https://chatgpt.com/codex/cloud` | URL base da conversa do Codex no ChatGPT |
 | `AUTODEV_AGENT_MODEL` | `ChatGPT Simulator` | Nome lógico do modelo (apenas label) |
 | `AUTODEV_AGENT_API_KEY` | `config.API_KEY` | Bearer token para o Simulator |
 | `AUTODEV_AGENT_CYCLE_SEC` | `120` | Intervalo entre ciclos (s) |
@@ -829,6 +840,10 @@ estiver pronto — reavalia a saúde a cada ciclo.
 | `AUTODEV_AGENT_REUSE_CHAT` | `1` | Mantém a mesma conversa entre ciclos |
 | `AUTODEV_AGENT_USE_PASTE_MARKERS` | `1` | Encapsula mensagens em `[INICIO_TEXTO_COLADO]…[FIM_TEXTO_COLADO]` para que `browser.py` cole via Ctrl+V (rápido) em vez de digitar caractere a caractere |
 | `AUTODEV_AGENT_STARTUP_WAIT_SEC` | `30` | Espera inicial pelo Simulator (s) |
+| `AUTODEV_AGENT_HEALTH_RETRIES` | `2` | Quantidade de tentativas por health-check antes de marcar indisponível |
+| `AUTODEV_AGENT_HEALTH_RETRY_DELAY_SEC` | `2` | Intervalo entre tentativas de health-check (s) |
+| `AUTODEV_AGENT_AUTOSTART_CMD` | *(vazio)* | Comando para subir o Simulator automaticamente quando indisponível |
+| `AUTODEV_AGENT_AUTOSTART_COOLDOWN_SEC` | `180` | Cooldown mínimo entre tentativas de auto-start (s) |
 | `AUTODEV_AGENT_EXIT_ON_FATAL` | `0` | `exit(1)` em erro fatal (para CI) |
 
 ### Envio rápido via paste (clipboard)
@@ -889,15 +904,17 @@ JSON no seguinte formato (sem markdown, sem prosa extra):
 ```
 
 O parser do agente (`_extract_json_object`) é tolerante a fences de código
-(` ``` ` ou ` ```json `) e a prosa extra — ele procura o primeiro objeto JSON
-balanceado na resposta. Respostas sem JSON válido são ignoradas com warning.
+(` ``` ` ou ` ```json `), marcadores como `RESPOSTA:` e prosa extra. Ele
+varre múltiplos candidatos JSON e prioriza o objeto que mais se parece com o
+schema de plano (`analysis`, `actions`, `should_forward_to_codex`), reduzindo
+falsos negativos quando o modelo repete contexto antes da resposta final.
 
 ### Arquivos protegidos e caminhos bloqueados
 
 **Nunca** são modificados pelo agente, mesmo se o ChatGPT sugerir:
 
-- Arquivos: `Scripts/analisador_prontuarios.py`, `Scripts/acompanhamento_whatsapp.py`,
-  `Scripts/config.py`, e `Scripts/auto_dev_agent.py` (salvo com `SELF_EDIT=1`).
+- Arquivos: `Scripts/config.py`, e `Scripts/auto_dev_agent.py`
+  (salvo com `SELF_EDIT=1`).
 - Diretórios: `.git/`, `certs/`, `db/`, `logs/`, `chrome_profile/`, `__pycache__/`,
   `.venv/`, `node_modules/`, `temp/agent_backups/`.
 - Extensões editáveis: `.py`, `.md`, `.bat`, `.txt`, `.json`, `.ini`, `.cfg`,
@@ -917,6 +934,14 @@ Mensagens-chave emitidas:
 - `🛑 Validação falhou` → `↩️ Rollback`.
 - `📦 Commit efetuado` / `🚀 Push OK`.
 - `💭 Análise sem ações` — ciclo em que o ChatGPT escolheu não agir.
+- `ℹ️ should_forward_to_codex ausente` — fallback de contrato (informativo),
+  sem elevar para warning.
+
+Detecção de incidentes:
+- Quando a linha de log traz nível explícito (`[INFO]`, `[WARNING]`, `[ERROR]`),
+  o agente prioriza esse nível para reduzir falso-positivo.
+- Linhas informativas conhecidas do `sync_github` (ex.: branches sem commits
+  novos) são ignoradas no classificador de incidentes.
 
 ### Como o agente consulta Codex (via `browser.py`)
 
@@ -927,8 +952,17 @@ Mensagens-chave emitidas:
    (p. ex. `AUTODEV_AGENT_CODEX_URL=https://chatgpt.com/codex/...`), navega
    para lá antes de digitar. Caso contrário, abre um chat novo no ChatGPT
    regular.
-4. A resposta volta em **eventos streaming** (`status`, `markdown`, `finish`,
+4. O `browser.py` injeta automaticamente um prefixo fixo de **MAX REASONING**
+   em qualquer mensagem enviada ao Codex (independente de qual cliente Python
+   originou a requisição), para manter o modo de execução aprofundado.
+5. Após enviar a tarefa, o `browser.py` tenta abrir imediatamente a URL da
+   tarefa recém-criada (`/codex/cloud/tasks/...`) a partir da lista visível de
+   tarefas, em vez de aguardar longamente na home `/codex/cloud`.
+6. A resposta volta em **eventos streaming** (`status`, `markdown`, `finish`,
    `chat_id`, `chat_meta`, `error`).
-5. O agente guarda `chat_id` e `url` em `AgentState`, e nas rodadas seguintes
+7. O agente guarda `chat_id` e `url` em `AgentState`, e nas rodadas seguintes
    reutiliza essa conversa — ou seja, o ChatGPT mantém memória contextual de
    toda a trajetória de manutenção do projeto.
+8. O intervalo anti-rate-limit humano é aplicado ao fluxo de diagnóstico no
+   ChatGPT Simulator, mas **não bloqueia** o forward de implementação para o
+   Codex (canal separado).

@@ -5938,8 +5938,16 @@ if __name__ == "__main__":
         except KeyboardInterrupt:
             log.info("\n👋 Analisador encerrado pelo usuário (Ctrl+C).")
             break
-        except SystemExit:
-            break
+        except SystemExit as e:
+            # O analisador é daemon resiliente: não deve morrer por SystemExit
+            # transitório (ex.: falha de conexão/ambiente). Só encerra com Ctrl+C.
+            log.warning(f"⚠️ SystemExit capturado ({e}); mantendo daemon ativo.")
+            log.info("🔄 Reiniciando main() em 30 segundos...")
+            try:
+                time.sleep(30)
+            except KeyboardInterrupt:
+                log.info("\n👋 Analisador encerrado pelo usuário (Ctrl+C).")
+                break
         except Exception as e:
             # Último recurso: NUNCA deixar o processo morrer
             log.critical(f"💀 Erro fatal inesperado: {e}")
