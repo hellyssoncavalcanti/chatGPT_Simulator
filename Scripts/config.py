@@ -94,6 +94,18 @@ BASE_DIR = _env(
 # Debug: exibe todas as queries SQL no console (útil para auditoria)
 DEBUG_LOG = _env_bool("SIMULATOR_DEBUG_LOG", False)   # Altere para True para ativar o debug
 
+# Timeout universal (segundos) para requisições longas de automações Python.
+# Prioridade:
+#   1) REQUEST_TIMEOUT_SEC
+#   2) AUTODEV_AGENT_REQUEST_TIMEOUT (legado)
+#   3) default 900s
+REQUEST_TIMEOUT_SEC = _env_int(
+    "REQUEST_TIMEOUT_SEC",
+    _env_int("AUTODEV_AGENT_REQUEST_TIMEOUT", 900)
+)
+# Alias explícito para manter compatibilidade com scripts legados.
+AUTODEV_AGENT_REQUEST_TIMEOUT = REQUEST_TIMEOUT_SEC
+
 
 DIRS = {
     "certs": os.path.join(BASE_DIR, "certs"),

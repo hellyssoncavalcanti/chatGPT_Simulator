@@ -81,7 +81,11 @@ PYTHON_CHAT_QUEUE_TICK_SEC = 1.0
 PYTHON_CHAT_QUEUE_TIMEOUT_SEC = max(
     30,
     int(
-        os.getenv(
+        getattr(
+            config,
+            "REQUEST_TIMEOUT_SEC",
+            getattr(config, "AUTODEV_AGENT_REQUEST_TIMEOUT", 900)
+        ) or os.getenv(
             "REQUEST_TIMEOUT_SEC",
             os.getenv("AUTODEV_AGENT_REQUEST_TIMEOUT", "900")
         )
