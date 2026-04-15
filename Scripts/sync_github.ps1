@@ -713,6 +713,33 @@ function Test-IsProtectedPath([string]$RelativePath) {
     return $false
 }
 
+function Test-IsCachePath([string]$RelativePath) {
+    $pathLower = Normalize-RelativePath $RelativePath
+    if ([string]::IsNullOrWhiteSpace($pathLower)) {
+        return $false
+    }
+
+    $cachePatterns = @(
+        '__pycache__\',
+        '.pytest_cache\',
+        '.mypy_cache\',
+        '.ruff_cache\',
+        'node_modules\.cache\'
+    )
+    foreach ($pattern in $cachePatterns) {
+        if ($pathLower.Contains($pattern)) {
+            return $true
+        }
+    }
+
+    $fileName = [System.IO.Path]::GetFileName($pathLower)
+    if ($fileName -match '\.pyc$' -or $fileName -match '\.pyo$' -or $fileName -match '\.pyd$') {
+        return $true
+    }
+
+    return $false
+}
+
 function Get-FileHashSafe([string]$Path) {
     return (Get-FileHash -Path $Path -Algorithm SHA256).Hash
 }
@@ -729,6 +756,7 @@ function Sync-FilesFromMirror {
     $updated = 0
     $unchanged = 0
     $protectedCount = 0
+    $cacheIgnoredCount = 0
 
     foreach ($relPathGitRaw in $gitFiles) {
         $relativePath = $relPathGitRaw.Trim('"').Replace('/', '\').Replace('\\', '\')
@@ -736,6 +764,10 @@ function Sync-FilesFromMirror {
         if (Test-IsProtectedPath -RelativePath $relativePath) {
             $protectedCount++
             $script:ProtectedFiles.Add($relativePath)
+            continue
+        }
+        if (Test-IsCachePath -RelativePath $relativePath) {
+            $cacheIgnoredCount++
             continue
         }
 
@@ -853,7 +885,7 @@ function Sync-FilesFromMirror {
         }
     }
 
-    Write-Ok ("Resumo: $added novo(s), $updated atualizado(s), $unchanged inalterado(s), $protectedCount protegido(s)")
+    Write-Ok ("Resumo: $added novo(s), $updated atualizado(s), $unchanged inalterado(s), $protectedCount protegido(s), $cacheIgnoredCount cache ignorado(s)")
 }
 
 function Sync-RemotePhpIfNeeded {

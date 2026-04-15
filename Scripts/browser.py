@@ -1097,7 +1097,7 @@ async def _detect_and_register_files(page, markdown_text, q=None, allow_click_fa
     if not matches:
         # Fallback: tenta detectar links de download na página via múltiplos seletores
         try:
-            page_links = await page.evaluate("""() => {
+            page_links = await page.evaluate(r"""() => {
                 const links = [];
                 const seen = new Set();
                 // Seletor 1: links com /backend-api/files/
@@ -1552,7 +1552,7 @@ async def _scan_file_cards(page):
                     }
                     if (!name || !fileExts.test(name)) {
                         const text = (card.innerText || '').trim();
-                        const m = text.match(/[\\w\\-. ]+\\.(xlsx|xls|csv|pdf|docx|doc|pptx|ppt|zip|rar|json|xml|txt|png|jpg|jpeg|gif|svg)/i);
+                        const m = text.match(/[-\\w. ]+\\.(xlsx|xls|csv|pdf|docx|doc|pptx|ppt|zip|rar|json|xml|txt|png|jpg|jpeg|gif|svg)/i);
                         if (m) name = m[0].trim();
                     }
                     if (!name) return;
@@ -1622,7 +1622,7 @@ async def _click_chatgpt_download_elements(page, q=None):
     """
     try:
         # Procura elementos clicáveis que representam downloads de arquivo do code interpreter
-        download_elements = await page.evaluate("""() => {
+        download_elements = await page.evaluate(r"""() => {
             const results = [];
             // Padrão 1: links com texto contendo extensões de arquivo comuns
             const fileExts = /\.(xlsx|xls|csv|pdf|docx|doc|pptx|ppt|zip|rar|json|xml|txt|md|py|log)$/i;
@@ -1662,7 +1662,7 @@ async def _click_chatgpt_download_elements(page, q=None):
                     seenCards.add(card);
 
                     const headerText = (card.innerText || '').trim();
-                    const m = headerText.match(/[\\w\\-. ]+\\.(xlsx|xls|csv|pdf|docx|doc|pptx|ppt|zip|rar|json|xml|txt|png|jpg|jpeg|gif|svg)/i);
+                    const m = headerText.match(/[-\\w. ]+\\.(xlsx|xls|csv|pdf|docx|doc|pptx|ppt|zip|rar|json|xml|txt|png|jpg|jpeg|gif|svg)/i);
                     if (!m) return;
                     const filename = m[0].trim();
 
@@ -3452,6 +3452,28 @@ async def _codex_paste_message(page, composer_selector: str, message: str, q, ac
     Reutiliza os mesmos marcadores [INICIO_TEXTO_COLADO]...[FIM_TEXTO_COLADO]
     enviados pelo agente (apenas descarta os marcadores antes de colar).
     """
+    codex_reasoning_prefix = (
+        "SYSTEM MODE: PERMANENT MAX REASONING\n\n"
+        "Use maximum reasoning effort (xhigh).\n"
+        "Take more time to think.\n"
+        "Do not optimize for speed.\n"
+        "Optimize for correctness and robustness.\n\n"
+        "PROCESS:\n"
+        "1. Analyze deeply\n"
+        "2. Plan architecture\n"
+        "3. Implement full solution\n"
+        "4. Review as senior engineer\n"
+        "5. Fix issues\n"
+        "6. Output final result only\n\n"
+        "RULES:\n"
+        "- No partial solutions\n"
+        "- No placeholders\n"
+        "- No truncated code\n"
+        "- Always full implementation\n"
+        "- Consider edge cases\n"
+        "- Consider failures\n"
+        "- Consider performance"
+    )
     start_marker = "[INICIO_TEXTO_COLADO]"
     end_marker = "[FIM_TEXTO_COLADO]"
     text = message or ""
@@ -3460,6 +3482,11 @@ async def _codex_paste_message(page, composer_selector: str, message: str, q, ac
         j = text.rfind(end_marker)
         text = text[i:j]
     text = text.replace('\r\n', '\n').replace('\r', '\n')
+
+    # Injeta prefixo de raciocínio máximo para qualquer pedido enviado ao Codex,
+    # independentemente do cliente Python que originou a requisição.
+    if "SYSTEM MODE: PERMANENT MAX REASONING" not in text:
+        text = f"{codex_reasoning_prefix}\n\n{text.lstrip()}"
 
     # Clica no composer para focar.
     try:
@@ -3615,6 +3642,34 @@ async def _codex_wait_and_click_pr_controls(page, q, timeout_s: int = 900) -> tu
     return False, ""
 
 
+async def _codex_try_open_fresh_task(page):
+    """Se estiver na home do Codex, tenta abrir a tarefa mais recente visível."""
+    js = """() => {
+        const links = Array.from(document.querySelectorAll('a[href*="/codex/cloud/tasks/"]'));
+        const visible = links.filter(a => {
+            if (!a || !a.href) return false;
+            const r = a.getBoundingClientRect();
+            return r.width > 0 && r.height > 0;
+        });
+        if (!visible.length) return null;
+        const first = visible[0];
+        return first.href || first.getAttribute('href') || null;
+    }"""
+    try:
+        href = await page.evaluate(js)
+    except Exception:
+        href = None
+    if not href:
+        return None
+    if href.startswith("/"):
+        href = "https://chatgpt.com" + href
+    try:
+        await page.goto(href, wait_until='domcontentloaded', timeout=15000)
+        return href
+    except Exception:
+        return None
+
+
 async def handle_codex_task_inner(task, page, q, stop_event, activityts=None):
     """Fluxo dedicado ao Codex (chatgpt.com/codex/cloud):
       1) Navega para a Codex URL.
@@ -3668,6 +3723,12 @@ async def handle_codex_task_inner(task, page, q, stop_event, activityts=None):
         m = re.search(r"https://chatgpt\.com/codex/cloud/tasks/([A-Za-z0-9_\-]+)", cur)
         if m:
             task_url = cur
+            break
+        # Se o Codex voltou para /codex/cloud, tenta abrir imediatamente a
+        # tarefa recém-criada pela lista "Tarefas" (primeiro item visível).
+        opened = await _codex_try_open_fresh_task(page)
+        if opened:
+            task_url = opened
             break
         await asyncio.sleep(0.5)
 
@@ -4018,7 +4079,7 @@ async def handle_chat_task_inner(task, page, q, stop_event: asyncio.Event, activ
                 emit_event(q, "error", f"Falha no ChatGPT após {max_chat_error_reloads} recarga(s): {err_msg[:300]}")
                 break
 
-        status_txt = await page.evaluate("""() => {
+        status_txt = await page.evaluate(r"""() => {
             const asstMsgs = document.querySelectorAll('div[data-message-author-role="assistant"]');
             if (asstMsgs.length > 0) {
                 const lastAsst = asstMsgs[asstMsgs.length - 1];
