@@ -329,12 +329,18 @@ def get_local_ip():
 
 
 def start_browser_thread(browser_module):
-    browser_module.browser_loop()
+    try:
+        browser_module.browser_loop()
+    except Exception as exc:
+        print(f"[ERRO] Falha no browser worker: {exc}")
 
 
 def start_http_server(config_module, server_module):
     http_port = config_module.PORT + 1
-    server_module.app.run(host="0.0.0.0", port=http_port, debug=False, use_reloader=False)
+    try:
+        server_module.app.run(host="0.0.0.0", port=http_port, debug=False, use_reloader=False)
+    except Exception as exc:
+        print(f"[ERRO] Falha ao iniciar HTTP na porta {http_port}: {exc}")
 
 
 def _wait_for_port(host: str, port: int, timeout: int = 180, interval: float = 0.5) -> bool:
@@ -384,13 +390,15 @@ if __name__ == "__main__":
 
     utils.ensure_certificates()
 
-    t_browser = threading.Thread(target=start_browser_thread, args=(browser,))
+    t_browser = threading.Thread(target=start_browser_thread, args=(browser,), name="browser-worker")
     t_browser.daemon = True
     t_browser.start()
+    print(f"[INFO] Thread iniciada: {t_browser.name}")
 
-    t_http = threading.Thread(target=start_http_server, args=(config, server))
+    t_http = threading.Thread(target=start_http_server, args=(config, server), name="http-server")
     t_http.daemon = True
     t_http.start()
+    print(f"[INFO] Thread iniciada: {t_http.name}")
 
     utils.setup_frontend()
 
