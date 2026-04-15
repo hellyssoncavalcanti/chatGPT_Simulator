@@ -381,16 +381,27 @@ if __name__ == "__main__":
 
     print(f"\n=== CHATGPT SIMULATOR v{config.VERSION} (Async Tabs) ===")
     print("[INFO] Inicializando sistema...")
+    print(f"[INFO] Processo atual: PID={os.getpid()} PPID={os.getppid()}")
 
     utils.ensure_certificates()
 
-    t_browser = threading.Thread(target=start_browser_thread, args=(browser,))
+    t_browser = threading.Thread(target=start_browser_thread, args=(browser,), name="browser-worker")
     t_browser.daemon = True
     t_browser.start()
+    print(f"[INFO] Thread iniciada: {t_browser.name}")
 
-    t_http = threading.Thread(target=start_http_server, args=(config, server))
+    t_http = threading.Thread(target=start_http_server, args=(config, server), name="http-server")
     t_http.daemon = True
     t_http.start()
+    print(f"[INFO] Thread iniciada: {t_http.name}")
+
+    time.sleep(0.5)
+    print(f"[INFO] Status thread {t_browser.name}: {'alive' if t_browser.is_alive() else 'dead'}")
+    print(f"[INFO] Status thread {t_http.name}: {'alive' if t_http.is_alive() else 'dead'}")
+    if not t_browser.is_alive():
+        print(f"[WARN] Thread {t_browser.name} encerrou logo após a inicialização.")
+    if not t_http.is_alive():
+        print(f"[WARN] Thread {t_http.name} encerrou logo após a inicialização.")
 
     utils.setup_frontend()
 
