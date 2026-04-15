@@ -401,6 +401,14 @@ if __name__ == "__main__":
     t_http.start()
     print(f"[INFO] Thread iniciada: {t_http.name}")
 
+    time.sleep(0.5)
+    print(f"[INFO] Status thread {t_browser.name}: {'alive' if t_browser.is_alive() else 'dead'}")
+    print(f"[INFO] Status thread {t_http.name}: {'alive' if t_http.is_alive() else 'dead'}")
+    if not t_browser.is_alive():
+        print(f"[WARN] Thread {t_browser.name} encerrou logo após a inicialização.")
+    if not t_http.is_alive():
+        print(f"[WARN] Thread {t_http.name} encerrou logo após a inicialização.")
+
     utils.setup_frontend()
 
     local_ip = get_local_ip()
