@@ -1673,15 +1673,20 @@ def _wrap_for_paste(text: str) -> str:
 
     Regras:
       • Respeita USE_PASTE_MARKERS (env AUTODEV_AGENT_USE_PASTE_MARKERS).
-      • Não re-encapsula texto que já contenha os marcadores (idempotente).
+      • Não re-encapsula texto já delimitado no formato exato
+        [INICIO_TEXTO_COLADO]... [FIM_TEXTO_COLADO] (idempotente).
       • Ignora entradas vazias.
     """
     if not text:
         return text
     if not USE_PASTE_MARKERS:
         return text
-    # Idempotência: se já veio encapsulado, não duplica
-    if PASTE_MARKER_START in text and PASTE_MARKER_END in text:
+    # Idempotência estrita: só considera "já encapsulado" quando os
+    # marcadores estão nos limites do texto (aceita whitespace externo).
+    # Isso evita falso-positivo quando o prompt apenas cita os marcadores
+    # no conteúdo (instruções), sem estar realmente encapsulado.
+    stripped = text.strip()
+    if stripped.startswith(PASTE_MARKER_START) and stripped.endswith(PASTE_MARKER_END):
         return text
     return f"{PASTE_MARKER_START}{text}{PASTE_MARKER_END}"
 
