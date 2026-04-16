@@ -58,6 +58,7 @@
 from __future__ import annotations
 
 import json
+import ast
 import logging
 import os
 import platform
@@ -184,6 +185,12 @@ _CFG_REQUEST_TIMEOUT = int(
 ) if config else 900
 REQUEST_TIMEOUT_SEC = int(_env("AUTODEV_AGENT_REQUEST_TIMEOUT", str(_CFG_REQUEST_TIMEOUT)))
 STREAM_IDLE_TIMEOUT_SEC = int(_env("AUTODEV_AGENT_STREAM_IDLE_SEC", "180"))
+# O browser pode gastar até timeout_chat * tentativas no fluxo CHAT
+# (por padrão: 660s * 2). Mantemos o timeout total do cliente alinhado
+# para evitar abortos falsos do auto_dev_agent durante prompts longos.
+BROWSER_CHAT_TIMEOUT_SEC = int(_env("AUTODEV_AGENT_BROWSER_CHAT_TIMEOUT_SEC", "660"))
+BROWSER_CHAT_MAX_ATTEMPTS = max(1, int(_env("AUTODEV_AGENT_BROWSER_CHAT_MAX_ATTEMPTS", "2")))
+BROWSER_CHAT_TIMEOUT_BUFFER_SEC = int(_env("AUTODEV_AGENT_BROWSER_CHAT_TIMEOUT_BUFFER_SEC", "120"))
 STARTUP_WAIT_SEC = int(_env("AUTODEV_AGENT_STARTUP_WAIT_SEC", "30"))
 HEALTH_LOG_THROTTLE_SEC = 30.0
 HEALTHCHECK_RETRIES = max(1, int(_env("AUTODEV_AGENT_HEALTH_RETRIES", "2")))
@@ -235,6 +242,9 @@ MAX_ACTIONS_PER_CYCLE = int(_env("AUTODEV_AGENT_MAX_ACTIONS", "5"))
 MAX_RETRY_ATTEMPTS = int(_env("AUTODEV_AGENT_MAX_RETRIES", "2"))
 MAX_SHELL_TIMEOUT_SEC = int(_env("AUTODEV_AGENT_SHELL_TIMEOUT", "180"))
 STREAM_REQUEST_RETRIES = int(_env("AUTODEV_AGENT_STREAM_RETRIES", "2"))
+# Quantas tentativas totais por pedido quando falhar por timeout no browser.py.
+# Valor 2 = tentativa inicial + 1 retry automático.
+BROWSER_TIMEOUT_RETRY_ATTEMPTS = max(1, int(_env("AUTODEV_AGENT_BROWSER_TIMEOUT_RETRIES", "2")))
 
 GIT_BRANCH = _env("AUTODEV_AGENT_BRANCH", "").strip()
 GIT_REMOTE = _env("AUTODEV_AGENT_REMOTE", "origin")
@@ -1261,6 +1271,50 @@ def _extract_json_object(text: str) -> Optional[dict]:
     raw = _strip_code_fences(text)
     decoder = json.JSONDecoder()
 
+    def _try_parse_loose(chunk: str) -> Optional[dict]:
+        if not chunk:
+            return None
+        c = chunk.strip().lstrip("\ufeff")
+        if not c:
+            return None
+        # Remove prefixos comuns de resposta.
+        c = re.sub(r"^\s*(resposta|response|json)\s*:\s*", "", c, flags=re.IGNORECASE)
+        # Remove blocos markdown residuais.
+        c = _strip_code_fences(c)
+
+        parse_queue = [c]
+        # Se vier encapsulado como string JSON (duplamente serializado), tenta desembrulhar.
+        try:
+            maybe = json.loads(c)
+            if isinstance(maybe, dict):
+                return maybe
+            if isinstance(maybe, str):
+                parse_queue.append(maybe.strip())
+        except Exception:
+            pass
+
+        # Tenta parse estrito e "python literal" (aspas simples/True/False/None).
+        for candidate in parse_queue:
+            for parser in (json.loads, ast.literal_eval):
+                try:
+                    obj = parser(candidate)
+                    if isinstance(obj, dict):
+                        return obj
+                except Exception:
+                    pass
+
+        # Normalização leve para JSON quase-válido (vírgula final e aspas curvas).
+        normalized = c.replace("“", "\"").replace("”", "\"").replace("’", "'")
+        normalized = re.sub(r",\s*([}\]])", r"\1", normalized)
+        for parser in (json.loads, ast.literal_eval):
+            try:
+                obj = parser(normalized)
+                if isinstance(obj, dict):
+                    return obj
+            except Exception:
+                pass
+        return None
+
     def _score_candidate(data: dict) -> int:
         score = 0
         if isinstance(data.get("analysis"), str):
@@ -1276,12 +1330,9 @@ def _extract_json_object(text: str) -> Optional[dict]:
     candidates: List[dict] = []
 
     # Tentativa direta
-    try:
-        data = json.loads(raw)
-        if isinstance(data, dict):
-            candidates.append(data)
-    except Exception:
-        pass
+    direct = _try_parse_loose(raw)
+    if isinstance(direct, dict):
+        candidates.append(direct)
 
     # Tenta parse após marcadores frequentes.
     marker_candidates = ["\nRESPOSTA:", "\nResposta:", "\nJSON:", "responda apenas com json"]
@@ -1293,13 +1344,10 @@ def _extract_json_object(text: str) -> Optional[dict]:
         chunk = raw[pos + len(marker):].strip()
         if not chunk:
             continue
-        try:
-            data = json.loads(chunk)
-            if isinstance(data, dict):
-                candidates.append(data)
-                continue
-        except Exception:
-            pass
+        data = _try_parse_loose(chunk)
+        if isinstance(data, dict):
+            candidates.append(data)
+            continue
         brace = chunk.find("{")
         if brace != -1:
             try:
@@ -1307,7 +1355,9 @@ def _extract_json_object(text: str) -> Optional[dict]:
                 if isinstance(obj, dict):
                     candidates.append(obj)
             except Exception:
-                pass
+                loose_obj = _try_parse_loose(chunk[brace:])
+                if isinstance(loose_obj, dict):
+                    candidates.append(loose_obj)
 
     # Varrida geral por objetos JSON possíveis.
     start = raw.find("{")
@@ -1317,7 +1367,9 @@ def _extract_json_object(text: str) -> Optional[dict]:
             if isinstance(obj, dict):
                 candidates.append(obj)
         except Exception:
-            pass
+            loose_obj = _try_parse_loose(raw[start:])
+            if isinstance(loose_obj, dict):
+                candidates.append(loose_obj)
         start = raw.find("{", start + 1)
 
     if not candidates:
@@ -1435,6 +1487,10 @@ def _stream_chat_completion(
     chat_id: Optional[str] = None
     chat_url: Optional[str] = None
     error_msg: Optional[str] = None
+    effective_total_timeout_sec = max(
+        REQUEST_TIMEOUT_SEC,
+        (BROWSER_CHAT_TIMEOUT_SEC * BROWSER_CHAT_MAX_ATTEMPTS) + BROWSER_CHAT_TIMEOUT_BUFFER_SEC,
+    )
 
     # Tamanho aproximado do payload em chars (útil para correlacionar com
     # o tempo de envio/colagem no browser).
@@ -1497,7 +1553,7 @@ def _stream_chat_completion(
         raise RuntimeError(f"HTTP {resp.status_code} no Simulator: {exc} | {detail}")
 
     log(f"📡 Conexão com {label} aberta (HTTP {resp.status_code}); "
-        f"aguardando eventos do stream...")
+        f"aguardando eventos do stream (timeout total={effective_total_timeout_sec}s)...")
 
     # Controle de verbosidade para eventos repetitivos (status/markdown).
     last_status_logged: str = ""
@@ -1641,9 +1697,12 @@ def _stream_chat_completion(
                 _apply_rate_limit_cooldown(retry_after, reason)
             break
 
-        # Hard timeout total
-        if time.time() - started > REQUEST_TIMEOUT_SEC:
-            raise TimeoutError("timeout total excedido aguardando resposta do ChatGPT")
+        # Hard timeout total (alinhado com timeout/retentativas do browser CHAT)
+        if time.time() - started > effective_total_timeout_sec:
+            raise TimeoutError(
+                "timeout total excedido aguardando resposta do ChatGPT "
+                f"(limite={effective_total_timeout_sec}s)"
+            )
 
     if error_msg and not markdown_buf:
         raise RuntimeError(f"ChatGPT retornou erro: {error_msg}")
@@ -1660,17 +1719,44 @@ def _wrap_for_paste(text: str) -> str:
 
     Regras:
       • Respeita USE_PASTE_MARKERS (env AUTODEV_AGENT_USE_PASTE_MARKERS).
-      • Não re-encapsula texto que já contenha os marcadores (idempotente).
+      • Não re-encapsula texto já delimitado no formato exato
+        [INICIO_TEXTO_COLADO]... [FIM_TEXTO_COLADO] (idempotente).
       • Ignora entradas vazias.
     """
     if not text:
         return text
     if not USE_PASTE_MARKERS:
         return text
-    # Idempotência: se já veio encapsulado, não duplica
-    if PASTE_MARKER_START in text and PASTE_MARKER_END in text:
+    # Idempotência estrita: só considera "já encapsulado" quando os
+    # marcadores estão nos limites do texto (aceita whitespace externo).
+    # Isso evita falso-positivo quando o prompt apenas cita os marcadores
+    # no conteúdo (instruções), sem estar realmente encapsulado.
+    stripped = text.strip()
+    if stripped.startswith(PASTE_MARKER_START) and stripped.endswith(PASTE_MARKER_END):
         return text
     return f"{PASTE_MARKER_START}{text}{PASTE_MARKER_END}"
+
+
+def _strip_paste_marker_instructions(text: str) -> str:
+    """Remove instruções redundantes sobre uso dos marcadores de paste.
+
+    O agente já encapsula automaticamente todo payload via `_wrap_for_paste`;
+    portanto não precisamos instruir o LLM a incluir esses delimitadores na
+    resposta. Essa limpeza evita poluir prompts com orientação desnecessária.
+    """
+    if not text:
+        return text
+    lines = []
+    for raw in str(text).splitlines():
+        low = raw.lower()
+        if (
+            "inicio_texto_colado" in low
+            or "fim_texto_colado" in low
+            or ("texto colado" in low and ("prefixo" in low or "sufixo" in low or "delimit" in low))
+        ):
+            continue
+        lines.append(raw)
+    return "\n".join(lines)
 
 
 # =============================================================================
@@ -1810,6 +1896,27 @@ def _parse_rate_limit(payload: Any) -> Tuple[bool, Optional[float], str]:
     return False, None, ""
 
 
+def _is_browser_timeout_error(exc: Exception) -> bool:
+    """Detecta timeout originado no fluxo browser.py para permitir retry."""
+    t = str(exc or "").lower()
+    if not t:
+        return False
+    timeout_hint = (
+        "timeout" in t
+        or "timed out" in t
+        or "timeout externo" in t
+        or "stream idle timeout" in t
+    )
+    browser_hint = (
+        "falha no navegador" in t
+        or "page.goto" in t
+        or "watchdog" in t
+        or "aba não respondeu" in t
+        or "browser.py" in t
+    )
+    return timeout_hint and browser_hint
+
+
 def ask_chatgpt_for_plan(context: Dict[str, Any],
                          objective: str,
                          source_files: Dict[str, str],
@@ -1835,6 +1942,7 @@ def ask_chatgpt_for_plan(context: Dict[str, Any],
         "=== FIM DAS INSTRUÇÕES DO SISTEMA ===\n\n"
         f"{user_prompt}"
     )
+    combined = _strip_paste_marker_instructions(combined)
     wrapped = _wrap_for_paste(combined)
     body: Dict[str, Any] = {
         "model": SIMULATOR_MODEL,
@@ -1857,12 +1965,31 @@ def ask_chatgpt_for_plan(context: Dict[str, Any],
         body["url"] = CODEX_URL
         body["origin_url"] = CODEX_URL
 
-    try:
-        markdown, chat_id, chat_url = _stream_chat_completion(
-            body, label="ChatGPT Simulator (diagnóstico)"
-        )
-    except Exception as exc:
-        log(f"❌ Falha na comunicação com Simulator/ChatGPT: {exc}", logging.ERROR)
+    markdown = ""
+    chat_id = None
+    chat_url = None
+    last_exc: Optional[Exception] = None
+    for req_try in range(1, BROWSER_TIMEOUT_RETRY_ATTEMPTS + 1):
+        try:
+            markdown, chat_id, chat_url = _stream_chat_completion(
+                body, label="ChatGPT Simulator (diagnóstico)"
+            )
+            last_exc = None
+            break
+        except Exception as exc:
+            last_exc = exc
+            if _is_browser_timeout_error(exc) and req_try < BROWSER_TIMEOUT_RETRY_ATTEMPTS:
+                log(
+                    f"⚠️ Timeout no browser.py durante diagnóstico "
+                    f"(tentativa {req_try}/{BROWSER_TIMEOUT_RETRY_ATTEMPTS}). "
+                    "Reenviando o MESMO pedido automaticamente...",
+                    logging.WARNING,
+                )
+                time.sleep(2)
+                continue
+            break
+    if last_exc is not None:
+        log(f"❌ Falha na comunicação com Simulator/ChatGPT: {last_exc}", logging.ERROR)
         return None
 
     # Atualiza conversa ativa para próximos ciclos
@@ -2436,6 +2563,7 @@ def forward_to_codex(context: Dict[str, Any],
     for rel, content in (source_files or {}).items():
         codex_prompt += f"--- BEGIN FILE: {rel} ---\n{content}\n--- END FILE: {rel} ---\n"
     codex_prompt += "\nResponda APENAS com JSON no formato especificado."
+    codex_prompt = _strip_paste_marker_instructions(codex_prompt)
 
     # IMPORTANTE: NÃO injeta prefixo de "MAX REASONING" aqui.
     # Esse ajuste é aplicado somente no browser.py no momento do paste.
@@ -2471,7 +2599,8 @@ def forward_to_codex(context: Dict[str, Any],
     chat_id = None
     chat_url = None
     last_exc: Optional[Exception] = None
-    for codex_try in range(1, 3):
+    codex_max_tries = max(2, BROWSER_TIMEOUT_RETRY_ATTEMPTS)
+    for codex_try in range(1, codex_max_tries + 1):
         try:
             markdown, chat_id, chat_url = _stream_chat_completion(
                 body,
@@ -2487,7 +2616,7 @@ def forward_to_codex(context: Dict[str, Any],
                 "Composer do Codex não encontrado" in exc_txt
                 or "placeholder /plan ausente" in exc_txt
             )
-            if composer_missing and codex_try < 2:
+            if composer_missing and codex_try < codex_max_tries:
                 log("⚠️ Composer do Codex ausente; limpando sessão Codex e tentando reconexão.",
                     logging.WARNING)
                 _AGENT_STATE.codex_chat_id = None
@@ -2496,6 +2625,15 @@ def forward_to_codex(context: Dict[str, Any],
                 body.pop("chat_id", None)
                 body["url"] = codex_target_url
                 time.sleep(3)
+                continue
+            if _is_browser_timeout_error(exc) and codex_try < codex_max_tries:
+                log(
+                    f"⚠️ Timeout no browser.py durante forward para Codex "
+                    f"(tentativa {codex_try}/{codex_max_tries}). "
+                    "Reenviando o MESMO pedido automaticamente...",
+                    logging.WARNING,
+                )
+                time.sleep(2)
                 continue
             break
     if last_exc is not None:
