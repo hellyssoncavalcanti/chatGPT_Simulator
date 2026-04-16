@@ -111,10 +111,12 @@ def _terminate_previous_same_server_instances(script_name: str) -> None:
             for pid_txt in (shell_proc.stdout or "").splitlines()
             if pid_txt.strip().isdigit()
         }
+        shell_killed = 0
         for pid in sorted(shell_targets):
             if pid in protected_pids:
                 continue
             subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+            shell_killed += 1
             print(f"[BOOT] Janela CMD anterior do servidor foi finalizada (PID {pid}) para {script_name}.")
 
         py_proc = subprocess.run(
@@ -129,11 +131,20 @@ def _terminate_previous_same_server_instances(script_name: str) -> None:
             for pid_txt in (py_proc.stdout or "").splitlines()
             if pid_txt.strip().isdigit()
         }
+        py_killed = 0
         for pid in sorted(py_targets):
             if pid in protected_pids:
                 continue
             subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+            py_killed += 1
             print(f"[BOOT] Processo Python anterior finalizado (PID {pid}) para {script_name}.")
+
+        print(
+            f"[BOOT] Substituição de instâncias de {script_name}: "
+            f"shells_encontrados={len(shell_targets)} shells_finalizados={shell_killed} "
+            f"python_encontrados={len(py_targets)} python_finalizados={py_killed} "
+            f"pids_protegidos={len(protected_pids)}"
+        )
     except Exception as exc:
         print(f"[BOOT] Aviso: não foi possível substituir instâncias anteriores de {script_name}: {exc}")
 

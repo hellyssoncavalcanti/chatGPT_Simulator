@@ -1739,6 +1739,28 @@ def _wrap_for_paste(text: str) -> str:
     return f"{PASTE_MARKER_START}{text}{PASTE_MARKER_END}"
 
 
+def _strip_paste_marker_instructions(text: str) -> str:
+    """Remove instruções redundantes sobre uso dos marcadores de paste.
+
+    O agente já encapsula automaticamente todo payload via `_wrap_for_paste`;
+    portanto não precisamos instruir o LLM a incluir esses delimitadores na
+    resposta. Essa limpeza evita poluir prompts com orientação desnecessária.
+    """
+    if not text:
+        return text
+    lines = []
+    for raw in str(text).splitlines():
+        low = raw.lower()
+        if (
+            "inicio_texto_colado" in low
+            or "fim_texto_colado" in low
+            or ("texto colado" in low and ("prefixo" in low or "sufixo" in low or "delimit" in low))
+        ):
+            continue
+        lines.append(raw)
+    return "\n".join(lines)
+
+
 # =============================================================================
 # RATE LIMIT — cooldown compartilhado entre ciclos
 # =============================================================================
@@ -1901,6 +1923,7 @@ def ask_chatgpt_for_plan(context: Dict[str, Any],
         "=== FIM DAS INSTRUÇÕES DO SISTEMA ===\n\n"
         f"{user_prompt}"
     )
+    combined = _strip_paste_marker_instructions(combined)
     wrapped = _wrap_for_paste(combined)
     body: Dict[str, Any] = {
         "model": SIMULATOR_MODEL,
@@ -2505,6 +2528,7 @@ def forward_to_codex(context: Dict[str, Any],
     for rel, content in (source_files or {}).items():
         codex_prompt += f"--- BEGIN FILE: {rel} ---\n{content}\n--- END FILE: {rel} ---\n"
     codex_prompt += "\nResponda APENAS com JSON no formato especificado."
+    codex_prompt = _strip_paste_marker_instructions(codex_prompt)
 
     # IMPORTANTE: NÃO injeta prefixo de "MAX REASONING" aqui.
     # Esse ajuste é aplicado somente no browser.py no momento do paste.
