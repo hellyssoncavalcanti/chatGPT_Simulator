@@ -242,6 +242,9 @@ MAX_ACTIONS_PER_CYCLE = int(_env("AUTODEV_AGENT_MAX_ACTIONS", "5"))
 MAX_RETRY_ATTEMPTS = int(_env("AUTODEV_AGENT_MAX_RETRIES", "2"))
 MAX_SHELL_TIMEOUT_SEC = int(_env("AUTODEV_AGENT_SHELL_TIMEOUT", "180"))
 STREAM_REQUEST_RETRIES = int(_env("AUTODEV_AGENT_STREAM_RETRIES", "2"))
+# Quantas tentativas totais por pedido quando falhar por timeout no browser.py.
+# Valor 2 = tentativa inicial + 1 retry automático.
+BROWSER_TIMEOUT_RETRY_ATTEMPTS = max(1, int(_env("AUTODEV_AGENT_BROWSER_TIMEOUT_RETRIES", "2")))
 
 GIT_BRANCH = _env("AUTODEV_AGENT_BRANCH", "").strip()
 GIT_REMOTE = _env("AUTODEV_AGENT_REMOTE", "origin")
@@ -1941,6 +1944,27 @@ def _parse_rate_limit(payload: Any) -> Tuple[bool, Optional[float], str]:
     return False, None, ""
 
 
+def _is_browser_timeout_error(exc: Exception) -> bool:
+    """Detecta timeout originado no fluxo browser.py para permitir retry."""
+    t = str(exc or "").lower()
+    if not t:
+        return False
+    timeout_hint = (
+        "timeout" in t
+        or "timed out" in t
+        or "timeout externo" in t
+        or "stream idle timeout" in t
+    )
+    browser_hint = (
+        "falha no navegador" in t
+        or "page.goto" in t
+        or "watchdog" in t
+        or "aba não respondeu" in t
+        or "browser.py" in t
+    )
+    return timeout_hint and browser_hint
+
+
 def ask_chatgpt_for_plan(context: Dict[str, Any],
                          objective: str,
                          source_files: Dict[str, str],
@@ -1989,12 +2013,31 @@ def ask_chatgpt_for_plan(context: Dict[str, Any],
         body["url"] = CODEX_URL
         body["origin_url"] = CODEX_URL
 
-    try:
-        markdown, chat_id, chat_url = _stream_chat_completion(
-            body, label="ChatGPT Simulator (diagnóstico)"
-        )
-    except Exception as exc:
-        log(f"❌ Falha na comunicação com Simulator/ChatGPT: {exc}", logging.ERROR)
+    markdown = ""
+    chat_id = None
+    chat_url = None
+    last_exc: Optional[Exception] = None
+    for req_try in range(1, BROWSER_TIMEOUT_RETRY_ATTEMPTS + 1):
+        try:
+            markdown, chat_id, chat_url = _stream_chat_completion(
+                body, label="ChatGPT Simulator (diagnóstico)"
+            )
+            last_exc = None
+            break
+        except Exception as exc:
+            last_exc = exc
+            if _is_browser_timeout_error(exc) and req_try < BROWSER_TIMEOUT_RETRY_ATTEMPTS:
+                log(
+                    f"⚠️ Timeout no browser.py durante diagnóstico "
+                    f"(tentativa {req_try}/{BROWSER_TIMEOUT_RETRY_ATTEMPTS}). "
+                    "Reenviando o MESMO pedido automaticamente...",
+                    logging.WARNING,
+                )
+                time.sleep(2)
+                continue
+            break
+    if last_exc is not None:
+        log(f"❌ Falha na comunicação com Simulator/ChatGPT: {last_exc}", logging.ERROR)
         return None
 
     # Atualiza conversa ativa para próximos ciclos
@@ -2607,7 +2650,8 @@ def forward_to_codex(context: Dict[str, Any],
     chat_id = None
     chat_url = None
     last_exc: Optional[Exception] = None
-    for codex_try in range(1, 3):
+    codex_max_tries = max(2, BROWSER_TIMEOUT_RETRY_ATTEMPTS)
+    for codex_try in range(1, codex_max_tries + 1):
         try:
             markdown, chat_id, chat_url = _stream_chat_completion(
                 body,
@@ -2623,7 +2667,7 @@ def forward_to_codex(context: Dict[str, Any],
                 "Composer do Codex não encontrado" in exc_txt
                 or "placeholder /plan ausente" in exc_txt
             )
-            if composer_missing and codex_try < 2:
+            if composer_missing and codex_try < codex_max_tries:
                 log("⚠️ Composer do Codex ausente; limpando sessão Codex e tentando reconexão.",
                     logging.WARNING)
                 _AGENT_STATE.codex_chat_id = None
@@ -2632,6 +2676,15 @@ def forward_to_codex(context: Dict[str, Any],
                 body.pop("chat_id", None)
                 body["url"] = codex_target_url
                 time.sleep(3)
+                continue
+            if _is_browser_timeout_error(exc) and codex_try < codex_max_tries:
+                log(
+                    f"⚠️ Timeout no browser.py durante forward para Codex "
+                    f"(tentativa {codex_try}/{codex_max_tries}). "
+                    "Reenviando o MESMO pedido automaticamente...",
+                    logging.WARNING,
+                )
+                time.sleep(2)
                 continue
             break
     if last_exc is not None:
