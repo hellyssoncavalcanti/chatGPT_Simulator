@@ -1716,7 +1716,7 @@ async def _click_chatgpt_download_elements(page, q=None):
                     seenCards.add(card);
 
                     const headerText = (card.innerText || '').trim();
-                    const m = headerText.match(/[A-Za-z0-9_. -]+\\.(xlsx|xls|csv|pdf|docx|doc|pptx|ppt|zip|rar|json|xml|txt|png|jpg|jpeg|gif|svg)/i);
+                    const m = headerText.match(/[\w.\- ]+\.(xlsx|xls|csv|pdf|docx|doc|pptx|ppt|zip|rar|json|xml|txt|png|jpg|jpeg|gif|svg)/i);
                     if (!m) return;
                     const filename = m[0].trim();
 
@@ -2593,9 +2593,32 @@ async def handle_sync_task(context, task):
 
 async def watchdog_page(page, q, stop_event: asyncio.Event,
                         check_interval: int = 15,
-                        activity_ts: list = None,
-                        max_consecutive_failures: int = 2):
-    consecutive_failures = 0
+                        activity_ts: list = None):
+    transient_failures = 0
+
+    async def _poke_page_to_unfreeze():
+        """Interação leve para destravar renderização quando a aba fica inerte."""
+        actions = ("focus_input", "random_click", "scroll")
+        action = random.choice(actions)
+        if action == "focus_input":
+            await page.evaluate("""() => {
+                const ta = document.querySelector('#prompt-textarea');
+                if (ta) { ta.focus(); return true; }
+                const main = document.querySelector('main');
+                if (main) { main.click(); return true; }
+                return false;
+            }""")
+            return "focus_input"
+        if action == "random_click":
+            vp = page.viewport_size or {"width": 1280, "height": 720}
+            x = max(20, min(vp.get("width", 1280) - 20, random.randint(80, max(120, vp.get("width", 1280) - 80))))
+            y = max(20, min(vp.get("height", 720) - 20, random.randint(120, max(160, vp.get("height", 720) - 120))))
+            await page.mouse.click(x, y, delay=random.randint(20, 120))
+            return f"random_click({x},{y})"
+        delta = random.choice((-300, -180, 180, 300))
+        await page.mouse.wheel(0, delta)
+        return f"scroll({delta})"
+
     while not stop_event.is_set():
         try:
             await asyncio.wait_for(asyncio.sleep(check_interval), timeout=check_interval + 1)
@@ -2606,20 +2629,26 @@ async def watchdog_page(page, q, stop_event: asyncio.Event,
         if activity_ts and (time.time() - activity_ts[0]) < check_interval:
             continue
         try:
-            await asyncio.wait_for(page.evaluate("1"), timeout=45.0)
-            consecutive_failures = 0
+            await asyncio.wait_for(page.evaluate("1"), timeout=20.0)
+            transient_failures = 0
         except Exception as e:
-            consecutive_failures += 1
-            if consecutive_failures < max(1, int(max_consecutive_failures)):
-                emit_log(
-                    q,
-                    f"⚠️ Watchdog: falha transitória de heartbeat ({consecutive_failures}/"
-                    f"{max(1, int(max_consecutive_failures))}) — {e}",
-                )
+            transient_failures += 1
+            emit_log(q, f"⚠️ Watchdog: falha transitória de heartbeat ({transient_failures}/2) — {e}")
+            try:
+                action = await _poke_page_to_unfreeze()
+                if activity_ts:
+                    activity_ts[0] = time.time()
+                emit_log(q, f"🩺 Watchdog: interação de recuperação aplicada ({action}).")
+                await asyncio.sleep(0.35)
+                await asyncio.wait_for(page.evaluate("1"), timeout=8.0)
+                transient_failures = 0
                 continue
-            emit_event(q, "error", f"⏱️ Watchdog: aba não respondeu ({e}). Abortando.")
-            stop_event.set()
-            return
+            except Exception as recover_err:
+                emit_log(q, f"⚠️ Watchdog: recuperação não confirmou heartbeat ({recover_err}).")
+            if transient_failures >= 2:
+                emit_event(q, "error", f"⏱️ Watchdog: aba não respondeu ({e}). Abortando.")
+                stop_event.set()
+                return
 
 
 

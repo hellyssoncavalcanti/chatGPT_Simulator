@@ -389,6 +389,7 @@ def open_urls_when_server_is_ready(port: int, urls: list, startup_timeout: int =
 
 
 if __name__ == "__main__":
+    bootstrap_started_at = time.perf_counter()
     _terminate_previous_same_server_instances("main.py")
     cleaned_argv = ensure_runtime_environment()
     sys.argv = [sys.argv[0], *cleaned_argv]
@@ -431,6 +432,8 @@ if __name__ == "__main__":
 
     local_ip = get_local_ip()
     local_https_url = f"https://localhost:{config.PORT}"
+    bootstrap_elapsed = time.perf_counter() - bootstrap_started_at
+    print(f"[BOOT] Preparação inicial concluída em {bootstrap_elapsed:.2f}s.")
     print("\n[SERVIDOR ONLINE]")
     print(f" 🔒 HTTPS (Seguro):   {local_https_url}")
     print(f" 🌍 HTTP (Remoto):    http://{local_ip}:{config.PORT + 1}")
