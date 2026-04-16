@@ -379,7 +379,8 @@ def open_urls_when_server_is_ready(port: int, urls: list, startup_timeout: int =
 
 if __name__ == "__main__":
     _terminate_previous_same_server_instances("main.py")
-    ensure_runtime_environment()
+    cleaned_argv = ensure_runtime_environment()
+    sys.argv = [sys.argv[0], *cleaned_argv]
 
     sys.path.append(SCRIPTS_DIR)
 
