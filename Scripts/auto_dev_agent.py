@@ -1162,8 +1162,17 @@ SYSTEM_PROMPT_BASE = textwrap.dedent("""\
       4) Em edições use 'search/replace' com trechos EXATOS do código atual.
          Inclua contexto suficiente para que 'search' seja único no arquivo.
       5) Prefira correções pequenas a refatorações grandes.
-      6) Se não houver nada seguro a fazer, retorne lista 'actions' vazia
-         e uma 'analysis' explicando o motivo.
+      6) Se faltarem dados para concluir com segurança, NÃO pare apenas no
+         diagnóstico: solicite dados adicionais de forma objetiva para o agent
+         remeter no MESMO chat.
+      7) Quando faltarem dados, preencha 'actions' com pelo menos um item
+         do tipo 'note' contendo:
+         - "dados_necessarios": lista objetiva (arquivos, funções, trechos, logs).
+         - "como_coletar": comandos read-only (ex.: rg, sed -n, python -m py_compile)
+           para facilitar coleta rápida pelo agent.
+         - "criterio_de_pronto": o que precisa chegar para você propor edit_file/create_file.
+      8) Só retorne 'actions' vazia quando realmente não houver ação segura
+         nem mesmo pedido objetivo de dados adicionais.
 
     FORMATO EXATO:
     {
@@ -2466,8 +2475,11 @@ def forward_to_codex(context: Dict[str, Any],
         "copie caractere por caractere, preservando indentação.\n"
         "  • 'search' deve ser ÚNICO no arquivo (inclua contexto suficiente).\n"
         "  • Respeite arquivos protegidos (Scripts/config.py).\n"
-        "  • NÃO responda apenas com 'note'. Se honestamente não houver como "
-        "implementar com segurança, retorne actions=[] com analysis justificando.\n\n"
+        "  • Se faltar contexto para implementar com segurança, inclua ao menos "
+        "um action do tipo 'note' solicitando dados adicionais com: "
+        "'dados_necessarios', 'como_coletar' e 'criterio_de_pronto'.\n"
+        "  • Só use actions=[] quando nem pedido objetivo de dados adicionais "
+        "for aplicável.\n\n"
         "SUGESTÕES/FALHAS PENDENTES:\n"
         f"{suggestions_block}\n\n"
         "CÓDIGO-FONTE RELEVANTE (use trechos daqui em 'search'):\n"
