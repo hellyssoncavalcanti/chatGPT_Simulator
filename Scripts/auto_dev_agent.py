@@ -184,6 +184,12 @@ _CFG_REQUEST_TIMEOUT = int(
 ) if config else 900
 REQUEST_TIMEOUT_SEC = int(_env("AUTODEV_AGENT_REQUEST_TIMEOUT", str(_CFG_REQUEST_TIMEOUT)))
 STREAM_IDLE_TIMEOUT_SEC = int(_env("AUTODEV_AGENT_STREAM_IDLE_SEC", "180"))
+# O browser pode gastar até timeout_chat * tentativas no fluxo CHAT
+# (por padrão: 660s * 2). Mantemos o timeout total do cliente alinhado
+# para evitar abortos falsos do auto_dev_agent durante prompts longos.
+BROWSER_CHAT_TIMEOUT_SEC = int(_env("AUTODEV_AGENT_BROWSER_CHAT_TIMEOUT_SEC", "660"))
+BROWSER_CHAT_MAX_ATTEMPTS = max(1, int(_env("AUTODEV_AGENT_BROWSER_CHAT_MAX_ATTEMPTS", "2")))
+BROWSER_CHAT_TIMEOUT_BUFFER_SEC = int(_env("AUTODEV_AGENT_BROWSER_CHAT_TIMEOUT_BUFFER_SEC", "120"))
 STARTUP_WAIT_SEC = int(_env("AUTODEV_AGENT_STARTUP_WAIT_SEC", "30"))
 HEALTH_LOG_THROTTLE_SEC = 30.0
 HEALTHCHECK_RETRIES = max(1, int(_env("AUTODEV_AGENT_HEALTH_RETRIES", "2")))
@@ -1435,6 +1441,10 @@ def _stream_chat_completion(
     chat_id: Optional[str] = None
     chat_url: Optional[str] = None
     error_msg: Optional[str] = None
+    effective_total_timeout_sec = max(
+        REQUEST_TIMEOUT_SEC,
+        (BROWSER_CHAT_TIMEOUT_SEC * BROWSER_CHAT_MAX_ATTEMPTS) + BROWSER_CHAT_TIMEOUT_BUFFER_SEC,
+    )
 
     # Tamanho aproximado do payload em chars (útil para correlacionar com
     # o tempo de envio/colagem no browser).
@@ -1497,7 +1507,7 @@ def _stream_chat_completion(
         raise RuntimeError(f"HTTP {resp.status_code} no Simulator: {exc} | {detail}")
 
     log(f"📡 Conexão com {label} aberta (HTTP {resp.status_code}); "
-        f"aguardando eventos do stream...")
+        f"aguardando eventos do stream (timeout total={effective_total_timeout_sec}s)...")
 
     # Controle de verbosidade para eventos repetitivos (status/markdown).
     last_status_logged: str = ""
@@ -1641,9 +1651,12 @@ def _stream_chat_completion(
                 _apply_rate_limit_cooldown(retry_after, reason)
             break
 
-        # Hard timeout total
-        if time.time() - started > REQUEST_TIMEOUT_SEC:
-            raise TimeoutError("timeout total excedido aguardando resposta do ChatGPT")
+        # Hard timeout total (alinhado com timeout/retentativas do browser CHAT)
+        if time.time() - started > effective_total_timeout_sec:
+            raise TimeoutError(
+                "timeout total excedido aguardando resposta do ChatGPT "
+                f"(limite={effective_total_timeout_sec}s)"
+            )
 
     if error_msg and not markdown_buf:
         raise RuntimeError(f"ChatGPT retornou erro: {error_msg}")
