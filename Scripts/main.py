@@ -378,7 +378,20 @@ def open_urls_when_server_is_ready(port: int, urls: list, startup_timeout: int =
 
         print(f"[BOOT] Servidor HTTPS na porta {port} ficou pronto após {waited_seconds:.1f}s.")
         time.sleep(1.0)
-        for url in urls:
+        normalized_urls = []
+        seen = set()
+        for raw_url in (urls or []):
+            url = str(raw_url or "").strip()
+            if not url or url in seen:
+                continue
+            seen.add(url)
+            normalized_urls.append(url)
+
+        if not normalized_urls:
+            print("[BOOT] Aviso: nenhuma URL válida para abrir automaticamente.")
+            return
+
+        for url in normalized_urls:
             try:
                 webbrowser.open_new(url)
             except Exception as exc:
