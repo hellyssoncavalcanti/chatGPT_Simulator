@@ -4489,14 +4489,8 @@ async def handle_chat_task_inner(task, page, q, stop_event: asyncio.Event, activ
     # Para o streaming de screenshots
     screenshot_stop.set()
     screenshot_task.cancel()
-    render_keepalive_stop.set()
-    render_keepalive_task.cancel()
     try:
         await screenshot_task
-    except (asyncio.CancelledError, Exception):
-        pass
-    try:
-        await render_keepalive_task
     except (asyncio.CancelledError, Exception):
         pass
 
