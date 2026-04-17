@@ -4478,14 +4478,14 @@ def analisar_prontuario(
                     new_chat_id = obj.get("content") or new_chat_id
                     log.info(f"  📎 chat_id: {new_chat_id}")
 
-                elif t == "markdown":
-                           markdown = obj.get("content", "")
-                           markdown_visivel = _extrair_markdown_visivel_llm(markdown)
-                           if markdown_visivel:
-                               _inline_status('📝', f"Recebendo: {len(markdown_visivel)} chars...")
-                           else:
-                               _inline_status('⏳', "Pensando...")
-                           inline_active = True
+        elif t == "markdown":
+            markdown = obj.get("content", "")
+            markdown_visivel = _extrair_markdown_visivel_llm(markdown)
+            if markdown_visivel:
+                _inline_status('📝', f"Recebendo: {len(markdown_visivel)} chars...")
+            else:
+                _inline_status('⏳', "Pensando...")
+            inline_active = True
 
                 elif t == "finish":
                     if inline_active:
