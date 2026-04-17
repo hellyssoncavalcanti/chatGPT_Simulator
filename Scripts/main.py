@@ -355,15 +355,29 @@ def start_http_server(config_module, server_module):
 
 
 def _wait_for_port(host: str, port: int, timeout: int = 180, interval: float = 0.5) -> tuple[bool, float]:
-    started_at = time.time()
+    try:
+        timeout = max(1, int(timeout))
+    except Exception:
+        timeout = 180
+    try:
+        interval = max(0.1, float(interval))
+    except Exception:
+        interval = 0.5
+    started_at = time.perf_counter()
     deadline = started_at + timeout
-    while time.time() < deadline:
+    while True:
+        now = time.perf_counter()
+        if now >= deadline:
+            break
         try:
             with socket.create_connection((host, port), timeout=2):
-                return True, (time.time() - started_at)
+                return True, (time.perf_counter() - started_at)
         except OSError:
-            time.sleep(interval)
-    return False, (time.time() - started_at)
+            remaining = deadline - time.perf_counter()
+            if remaining <= 0:
+                break
+            time.sleep(min(interval, remaining))
+    return False, (time.perf_counter() - started_at)
 
 
 def open_urls_when_server_is_ready(port: int, urls: list, startup_timeout: int = 180):
