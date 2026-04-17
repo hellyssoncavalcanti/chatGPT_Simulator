@@ -4235,6 +4235,10 @@ async def handle_chat_task_inner(task, page, q, stop_event: asyncio.Event, activ
     render_keepalive_task = asyncio.create_task(
         _keep_chat_render_alive(page, q, render_keepalive_stop, activity_ts=activityts, interval_sec=1.4)
     )
+    render_keepalive_stop = asyncio.Event()
+    render_keepalive_task = asyncio.create_task(
+        _keep_chat_render_alive(page, q, render_keepalive_stop, activity_ts=activityts, interval_sec=1.4)
+    )
 
     start_time  = time.time()
     started     = False
