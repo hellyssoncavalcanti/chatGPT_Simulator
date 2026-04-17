@@ -4651,11 +4651,29 @@ if __name__ == "__main__":
     log.info("Modo teste ativo: todos os envios serão direcionados para %s", TEST_DESTINATION_PHONE)
     log.info("Filtro teste estrito (somente paciente do telefone de teste): %s", TEST_MODE_STRICT_SINGLE_PATIENT)
 
-    log.info("Iniciando browser WhatsApp. Se necessário, faça login via QR Code...")
-    wa_web.start()
+    bootstrapped = False
+    while True:
+        try:
+            if not bootstrapped:
+                log.info("Iniciando browser WhatsApp. Se necessário, faça login via QR Code...")
+                wa_web.start()
+                threading.Thread(target=scheduler_loop, daemon=True).start()
+                threading.Thread(target=replies_loop, daemon=True).start()
+                bootstrapped = True
 
-    threading.Thread(target=scheduler_loop, daemon=True).start()
-    threading.Thread(target=replies_loop, daemon=True).start()
+            log.info("Servidor de acompanhamento WhatsApp Web em %s:%s", HOST, PORT)
+            app.run(host=HOST, port=PORT, debug=False, use_reloader=False)
+            log.warning("⚠️ app.run retornou inesperadamente; tentando reiniciar serviço.")
+        except KeyboardInterrupt:
+            log.info("👋 Servidor de acompanhamento encerrado por KeyboardInterrupt.")
+            break
+        except SystemExit as e:
+            log.warning("⚠️ SystemExit capturado (%s). Mantendo serviço ativo.", e)
+        except Exception:
+            log.exception("Falha fatal no servidor de acompanhamento. Reiniciando em 15s...")
 
-    log.info("Servidor de acompanhamento WhatsApp Web em %s:%s", HOST, PORT)
-    app.run(host=HOST, port=PORT)
+        try:
+            time.sleep(15)
+        except KeyboardInterrupt:
+            log.info("👋 Servidor de acompanhamento encerrado por KeyboardInterrupt.")
+            break
