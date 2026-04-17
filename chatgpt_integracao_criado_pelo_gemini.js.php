@@ -4051,7 +4051,8 @@ Responder SOMENTE com o JSON.`;
         .sb-pend-card-badge.secretaria { background: #d97706; }
 
         /* === CHAT VIEW DENTRO DE PENDÊNCIAS === */
-        #sb-view-pendencias-chat { display: flex; flex-direction: column; height: 100%; }
+        #sb-view-pendencias-chat { flex-direction: column; height: 100%; }
+        #sb-view-pendencias-chat.active { display: flex; }
         #sb-pend-chat-messages {
             flex: 1; overflow-y: auto; padding: 10px 0;
             display: flex; flex-direction: column; gap: 8px;
