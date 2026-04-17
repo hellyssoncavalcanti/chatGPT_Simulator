@@ -179,6 +179,22 @@ function chatgpt_ensure_prompt_scope_schema($db) {
     }
 }
 
+function chatgpt_ensure_text_wrapper($conteudo) {
+    $start = '[INICIO_TEXTO_COLADO]';
+    $end   = '[FIM_TEXTO_COLADO]';
+    $txt = trim((string)$conteudo);
+    if ($txt === '') return $txt;
+
+    $has_start = strpos($txt, $start) !== false;
+    $has_end = strpos($txt, $end) !== false;
+    $is_wrapped = preg_match('/^\s*\[INICIO_TEXTO_COLADO\]/', $txt) && preg_match('/\[FIM_TEXTO_COLADO\]\s*$/', $txt);
+    if ($has_start && $has_end && $is_wrapped) return $txt;
+
+    $txt = str_replace([$start, $end], '', $txt);
+    $txt = trim($txt);
+    return $start . "\n" . $txt . "\n" . $end;
+}
+
 // Salva tabelas auxiliares (alertas, grafo, casos) em transacao atomica
 function chatgpt_salvar_auxiliar($db, $id_atendimento, $id_paciente, $dados) {
     // Garante UTF-8 na conexao antes de qualquer INSERT
@@ -1268,21 +1284,21 @@ if (isset($_GET['action']) && $_GET['action'] === 'get_prompt') {
         $system_prompt = null;
         if ($id_criador && verifica_permissao($mysqli, $id_criador, 'chatgpt_system_prompt', 'editar')) {
             $r = $db->query("SELECT conteudo FROM chatgpt_prompts WHERE tipo='system' AND escopo='chat' AND id_criador='default' LIMIT 1");
-            if ($r && $row_sp = $r->fetch_assoc()) $system_prompt = $row_sp['conteudo'];
+            if ($r && $row_sp = $r->fetch_assoc()) $system_prompt = chatgpt_ensure_text_wrapper($row_sp['conteudo']);
         }
 
         // User prompt do usuário logado
         $user_prompt = null;
         if ($id_criador) {
             $r = $db->query("SELECT conteudo FROM chatgpt_prompts WHERE tipo='user' AND escopo='chat' AND id_criador=$id_criador LIMIT 1");
-            if ($r && $row_up = $r->fetch_assoc()) $user_prompt = $row_up['conteudo'];
+            if ($r && $row_up = $r->fetch_assoc()) $user_prompt = chatgpt_ensure_text_wrapper($row_up['conteudo']);
         }
 
         // Prompt de análise de prontuários do membro logado
         $analisador_prompt = null;
         if ($id_criador) {
             $r = $db->query("SELECT conteudo FROM chatgpt_prompts WHERE tipo='system' AND escopo='analisador_prontuarios' AND id_criador=$id_criador LIMIT 1");
-            if ($r && $row_ap = $r->fetch_assoc()) $analisador_prompt = $row_ap['conteudo'];
+            if ($r && $row_ap = $r->fetch_assoc()) $analisador_prompt = chatgpt_ensure_text_wrapper($row_ap['conteudo']);
         }
 
         echo json_encode([
@@ -1338,6 +1354,7 @@ if (isset($_GET['action']) && $_GET['action'] === 'save_prompt') {
         if (!$db) throw new Exception("Falha na conexão");
         $db->set_charset("utf8mb4");
         chatgpt_ensure_prompt_scope_schema($db);
+        $conteudo = chatgpt_ensure_text_wrapper($conteudo);
         $conteudo_esc = $db->real_escape_string($conteudo);
         $escopo_esc = $db->real_escape_string($escopo);
 
@@ -2535,15 +2552,17 @@ if (function_exists('get_mysql_connection_local')) {
             // System prompt (somente se o admin tiver editado)
             $_r = $_db_p->query("SELECT conteudo FROM chatgpt_prompts WHERE tipo='system' AND escopo='chat' AND id_criador='default' LIMIT 1");
             if ($_r && $_row = $_r->fetch_assoc()) {
-                if (!empty(trim($_row['conteudo']))) $active_system_prompt = $_row['conteudo'];
+                $_systemPromptDb = chatgpt_ensure_text_wrapper($_row['conteudo']);
+                if (!empty(trim($_systemPromptDb))) $active_system_prompt = $_systemPromptDb;
             }
             // User prompt do usuário logado
             if (isset($row_login_atual['id']) && !empty($row_login_atual['id'])) {
                 $_uid = intval($row_login_atual['id']);
                 $_r2 = $_db_p->query("SELECT conteudo FROM chatgpt_prompts WHERE tipo='user' AND escopo='chat' AND id_criador=$_uid LIMIT 1");
                 if ($_r2 && $_row2 = $_r2->fetch_assoc()) {
-                    if (!empty(trim($_row2['conteudo']))) {
-                        $active_system_prompt .= "\n\n[PREFERÊNCIAS DO USUÁRIO]\n" . $_row2['conteudo'];
+                    $_userPromptDb = chatgpt_ensure_text_wrapper($_row2['conteudo']);
+                    if (!empty(trim($_userPromptDb))) {
+                        $active_system_prompt .= "\n\n[PREFERÊNCIAS DO USUÁRIO]\n" . $_userPromptDb;
                     }
                 }
             }
@@ -3439,22 +3458,20 @@ header('Content-Type: application/javascript; charset=utf-8');
     
     
     const DEFAULT_SYS_PROMPT = `<?php echo str_replace('`', '\`', $default_system_prompt); ?>`;
-    const DEFAULT_ANALISADOR_PROMPT_TEMPLATE = `[INICIO_TEXTO_COLADO]
-Você é um analisador clínico de prontuários focado em neuropediatria.
+    const DEFAULT_ANALISADOR_PROMPT_TEMPLATE = `Você é um analisador clínico de prontuários em neuropediatria.
 
-Objetivo:
-- Extrair sinais clínicos, hipóteses diagnósticas, condutas e seguimento de forma estruturada e objetiva.
-- Priorizar segurança clínica e linguagem clara para equipe multiprofissional.
+Sua tarefa é transformar a evolução clínica em uma síntese estruturada para suporte ao atendimento.
+Produza resposta apenas em JSON válido.
 
-Regras práticas:
-1) Não invente dados ausentes no prontuário.
-2) Quando houver incerteza, registre como hipótese com justificativa.
-3) Mantenha rastreabilidade entre achado clínico e recomendação.
-4) Sempre preencher resumo_texto em linguagem clínica direta.
+Diretrizes:
+- Use somente dados disponíveis no prontuário e no contexto recebido.
+- Não invente exames, datas, doses, diagnósticos ou condutas ausentes.
+- Quando houver incerteza, registre hipótese com justificativa clínica objetiva.
+- Priorize segurança do paciente e clareza para equipe multiprofissional.
 
-Campos mais usados pelo renderAnalisePrevia (preencha quando houver dados):
+Preencha com prioridade os campos que o renderAnalisePrevia consome:
 - resumo_texto
-- gravidade_clinica (nivel/justificativa)
+- gravidade_clinica
 - idade_paciente
 - diagnosticos_citados
 - pontos_chave
@@ -3465,10 +3482,10 @@ Campos mais usados pelo renderAnalisePrevia (preencha quando houver dados):
 - condutas_gerais_sugeridas
 - seguimento_retorno_estimado
 
-Formato de saída:
-- JSON válido e consistente com a estrutura esperada pelo analisador.
-- Texto sempre em Português do Brasil.
-[FIM_TEXTO_COLADO]`;
+Regras de qualidade:
+- Seja específico e rastreável (achado -> interpretação -> conduta).
+- Evite linguagem genérica.
+- Se um campo não tiver evidência suficiente, retorne valor vazio/array vazio, sem inventar conteúdo.`;
 
     const PROXY_URL = "<?php echo $_SERVER['PHP_SELF']; ?>?action=proxy";
     const FILE_PREFIX = "[<?php echo $_SERVER['PHP_SELF']; ?>]"; 
