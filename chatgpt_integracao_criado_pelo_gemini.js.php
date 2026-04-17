@@ -3544,9 +3544,8 @@ Antes de responder, valide:
 - nenhum diagnóstico/sintoma/exame/terapia foi inventado;
 - todas as medicações realmente aparecem no texto;
 - doses e posologias foram preservadas literalmente;
-- condutas específicas têm justificativa clínica e referência coerente (quando informadas).
-
-══════════════════════════════════════
+- condutas específicas têm justificativa clínica e referência coerente (quando informadas).`;
+    const ANALISADOR_PROMPT_LOCKED_SECTION = `══════════════════════════════════════
 FORMATO DE SAÍDA (JSON)
 ══════════════════════════════════════
 {
@@ -4319,6 +4318,8 @@ Responder SOMENTE com o JSON.`;
                         <p style="font-size:12px; font-weight:bold; margin-bottom:5px;">Prompt de análise de prontuários (seu usuário):</p>
                         <p style="font-size:10px; color:#666; margin-bottom:5px;">Usado pelo analisador_prontuarios.py para suas análises. Se estiver vazio no banco, um modelo descritivo é carregado automaticamente.</p>
                         <textarea id="sb-analisador-prompt" class="sb-textarea" style="height:170px;" placeholder="Defina o comportamento da análise clínica automática para seus atendimentos..."></textarea>
+                        <p style="font-size:10px; color:#666; margin:6px 0 4px 0;">Trecho JSON fixo (não editável):</p>
+                        <textarea id="sb-analisador-locked-section" class="sb-textarea" style="height:140px; background:#fafafa;" readonly></textarea>
                         <button id="sb-save-analisador-prompt" class="sb-btn sb-btn-sec">Salvar Prompt de Análise</button>
 
                         <hr style="border:0; border-top:1px solid #eee; margin:15px 0;">
@@ -4335,6 +4336,8 @@ Responder SOMENTE com o JSON.`;
                             <p style="font-size:12px; font-weight:bold; margin-bottom:5px; color:#b71c1c;">🩺 Prompt padrão do analisador (atendimentos_analise):</p>
                             <p style="font-size:10px; color:#666; margin-bottom:5px;">Usado como fallback global do analisador_prontuarios.py quando não houver prompt por membro.</p>
                             <textarea id="sb-analisador-default-prompt" class="sb-textarea" style="height:220px;"></textarea>
+                            <p style="font-size:10px; color:#666; margin:6px 0 4px 0;">Trecho JSON fixo (não editável):</p>
+                            <textarea id="sb-analisador-default-locked-section" class="sb-textarea" style="height:140px; background:#fafafa;" readonly></textarea>
                             <button id="sb-save-analisador-default-prompt" class="sb-btn sb-btn-sec" style="border-color:#b71c1c; color:#b71c1c;">Salvar Prompt Padrão do Analisador</button>
                         </div>
                         <?php endif; ?>
@@ -4467,6 +4470,21 @@ Responder SOMENTE com o JSON.`;
         setTimeout(loadProfessionalData, 500); // Carrega o profissional um pouco antes do paciente
     });
 
+    function buildAnalisadorPromptCompleto(textoEditavel) {
+        const startMarker = "══════════════════════════════════════\nFORMATO DE SAÍDA (JSON)";
+        const raw = (textoEditavel || '').toString();
+        const idx = raw.indexOf(startMarker);
+        const base = (idx >= 0 ? raw.slice(0, idx) : raw).trim();
+        return `${base}\n\n${ANALISADOR_PROMPT_LOCKED_SECTION}`;
+    }
+
+    function extractAnalisadorPromptEditavel(promptCompleto) {
+        const startMarker = "══════════════════════════════════════\nFORMATO DE SAÍDA (JSON)";
+        const raw = (promptCompleto || '').toString();
+        const idx = raw.indexOf(startMarker);
+        return (idx >= 0 ? raw.slice(0, idx) : raw).trim();
+    }
+
     async function initPrompts() {
         try {
             const res = await fetch(`<?php echo $_SERVER['PHP_SELF']; ?>?action=get_prompt`);
@@ -4477,9 +4495,11 @@ Responder SOMENTE com o JSON.`;
             if (userEl && d.user_prompt !== null) userEl.value = d.user_prompt;
 
             const analisadorEl = document.getElementById('sb-analisador-prompt');
+            const analisadorLockedEl = document.getElementById('sb-analisador-locked-section');
+            if (analisadorLockedEl) analisadorLockedEl.value = ANALISADOR_PROMPT_LOCKED_SECTION;
             if (analisadorEl) {
                 analisadorEl.value = d.analisador_prompt !== null && String(d.analisador_prompt).trim() !== ''
-                    ? d.analisador_prompt
+                    ? extractAnalisadorPromptEditavel(d.analisador_prompt)
                     : DEFAULT_ANALISADOR_PROMPT_TEMPLATE;
             }
 
@@ -4487,9 +4507,11 @@ Responder SOMENTE com o JSON.`;
             const sysEl = document.getElementById('sb-system-prompt');
             if (sysEl) sysEl.value = d.system_prompt !== null ? d.system_prompt : DEFAULT_SYS_PROMPT;
             const analisadorDefaultEl = document.getElementById('sb-analisador-default-prompt');
+            const analisadorDefaultLockedEl = document.getElementById('sb-analisador-default-locked-section');
+            if (analisadorDefaultLockedEl) analisadorDefaultLockedEl.value = ANALISADOR_PROMPT_LOCKED_SECTION;
             if (analisadorDefaultEl) {
                 analisadorDefaultEl.value = d.analisador_prompt_default !== null && String(d.analisador_prompt_default).trim() !== ''
-                    ? d.analisador_prompt_default
+                    ? extractAnalisadorPromptEditavel(d.analisador_prompt_default)
                     : DEFAULT_ANALISADOR_PROMPT_TEMPLATE;
             }
             <?php endif; ?>
@@ -9241,7 +9263,11 @@ Responder SOMENTE com o JSON.`;
             try {
                 const r = await fetch(`<?php echo $_SERVER['PHP_SELF']; ?>?action=save_prompt`, {
                     method: 'POST', headers: {'Content-Type':'application/json'},
-                    body: JSON.stringify({ tipo: 'system', escopo: 'analisador_prontuarios', conteudo: val })
+                    body: JSON.stringify({
+                        tipo: 'system',
+                        escopo: 'analisador_prontuarios',
+                        conteudo: buildAnalisadorPromptCompleto(val)
+                    })
                 });
                 const d = await r.json();
                 alert(d.success ? "Prompt de análise salvo!" : "Erro: " + d.error);
@@ -9280,7 +9306,7 @@ Responder SOMENTE com o JSON.`;
                         tipo: 'system',
                         escopo: 'analisador_prontuarios',
                         id_criador_alvo: 'atendimentos_analise',
-                        conteudo: val
+                        conteudo: buildAnalisadorPromptCompleto(val)
                     })
                 });
                 const d = await r.json();
