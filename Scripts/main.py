@@ -355,6 +355,8 @@ def start_http_server(config_module, server_module):
 
 
 def _wait_for_port(host: str, port: int, timeout: int = 180, interval: float = 0.5) -> tuple[bool, float]:
+    timeout = max(1, int(timeout))
+    interval = max(0.1, float(interval))
     started_at = time.time()
     deadline = started_at + timeout
     while time.time() < deadline:

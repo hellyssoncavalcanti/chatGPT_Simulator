@@ -265,11 +265,13 @@ async def _emit_browser_screenshot(page, q, label: str = "browser"):
         return
 
 
-async def _stream_browser_screenshots(page,
-                                      q,
-                                      stop_event: asyncio.Event,
-                                      label: str = "browser",
-                                      activity_ts: list = None):
+async def _stream_browser_screenshots(
+    page,
+    q,
+    stop_event: asyncio.Event,
+    label: str = "browser",
+    activity_ts: list = None,
+):
     if not q:
         return
     try:
@@ -1641,7 +1643,7 @@ async def _scan_file_cards(page):
                     }
                     if (!name || !fileExts.test(name)) {
                         const text = (card.innerText || '').trim();
-                        const m = text.match(/[-\\w. ]+\\.(xlsx|xls|csv|pdf|docx|doc|pptx|ppt|zip|rar|json|xml|txt|png|jpg|jpeg|gif|svg)/i);
+                        const m = text.match(/[A-Za-z0-9_. -]+\\.(xlsx|xls|csv|pdf|docx|doc|pptx|ppt|zip|rar|json|xml|txt|png|jpg|jpeg|gif|svg)/i);
                         if (m) name = m[0].trim();
                     }
                     if (!name) return;
@@ -1751,7 +1753,7 @@ async def _click_chatgpt_download_elements(page, q=None):
                     seenCards.add(card);
 
                     const headerText = (card.innerText || '').trim();
-                    const m = headerText.match(/[-\\w. ]+\\.(xlsx|xls|csv|pdf|docx|doc|pptx|ppt|zip|rar|json|xml|txt|png|jpg|jpeg|gif|svg)/i);
+                    const m = headerText.match(/[A-Za-z0-9_. -]+\\.(xlsx|xls|csv|pdf|docx|doc|pptx|ppt|zip|rar|json|xml|txt|png|jpg|jpeg|gif|svg)/i);
                     if (!m) return;
                     const filename = m[0].trim();
 
@@ -2628,7 +2630,8 @@ async def handle_sync_task(context, task):
 
 async def watchdog_page(page, q, stop_event: asyncio.Event,
                         check_interval: int = 15,
-                        activity_ts: list = None):
+                        activity_ts: list = None,
+                        max_consecutive_failures: int = 2):
     consecutive_failures = 0
     while not stop_event.is_set():
         try:
@@ -2640,13 +2643,16 @@ async def watchdog_page(page, q, stop_event: asyncio.Event,
         if activity_ts and (time.time() - activity_ts[0]) < check_interval:
             continue
         try:
-            await asyncio.wait_for(page.evaluate("1"), timeout=20.0)
+            await asyncio.wait_for(page.evaluate("1"), timeout=45.0)
             consecutive_failures = 0
         except Exception as e:
             consecutive_failures += 1
-            if consecutive_failures < 3:
-                emit_log(q, f"⚠️ Watchdog: ping da aba falhou ({consecutive_failures}/3): {e}")
-                await asyncio.sleep(2.0)
+            if consecutive_failures < max(1, int(max_consecutive_failures)):
+                emit_log(
+                    q,
+                    f"⚠️ Watchdog: falha transitória de heartbeat ({consecutive_failures}/"
+                    f"{max(1, int(max_consecutive_failures))}) — {e}",
+                )
                 continue
             emit_event(q, "error", f"⏱️ Watchdog: aba não respondeu ({e}). Abortando.")
             stop_event.set()
