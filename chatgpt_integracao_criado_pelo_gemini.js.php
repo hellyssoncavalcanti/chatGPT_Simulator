@@ -4051,7 +4051,8 @@ Responder SOMENTE com o JSON.`;
         .sb-pend-card-badge.secretaria { background: #d97706; }
 
         /* === CHAT VIEW DENTRO DE PENDÊNCIAS === */
-        #sb-view-pendencias-chat { display: flex; flex-direction: column; height: 100%; }
+        #sb-view-pendencias-chat { flex-direction: column; height: 100%; }
+        #sb-view-pendencias-chat.active { display: flex; }
         #sb-pend-chat-messages {
             flex: 1; overflow-y: auto; padding: 10px 0;
             display: flex; flex-direction: column; gap: 8px;
@@ -9268,7 +9269,13 @@ Responder SOMENTE com o JSON.`;
         
         window.switchSidebarView = function(viewName) {
             document.querySelectorAll('.sb-view').forEach(el => el.classList.remove('active'));
-            document.getElementById('sb-view-' + viewName).classList.add('active');
+            const targetView = document.getElementById('sb-view-' + viewName);
+            if (!targetView) return;
+            targetView.classList.add('active');
+
+            const sidebarEl = document.getElementById('ow-sidebar');
+            if (sidebarEl) sidebarEl.scrollTop = 0;
+            targetView.scrollTop = 0;
         }
         
         document.getElementById('sb-save-user-prompt').onclick = async () => {
