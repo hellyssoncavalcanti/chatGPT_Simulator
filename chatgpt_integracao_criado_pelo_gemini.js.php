@@ -1282,9 +1282,12 @@ if (isset($_GET['action']) && $_GET['action'] === 'get_prompt') {
 
         // System prompt (somente se tiver permissão)
         $system_prompt = null;
+        $analisador_prompt_default = null;
         if ($id_criador && verifica_permissao($mysqli, $id_criador, 'chatgpt_system_prompt', 'editar')) {
             $r = $db->query("SELECT conteudo FROM chatgpt_prompts WHERE tipo='system' AND escopo='chat' AND id_criador='default' LIMIT 1");
             if ($r && $row_sp = $r->fetch_assoc()) $system_prompt = chatgpt_ensure_text_wrapper($row_sp['conteudo']);
+            $r = $db->query("SELECT conteudo FROM chatgpt_prompts WHERE tipo='system' AND escopo='analisador_prontuarios' AND id_criador='atendimentos_analise' LIMIT 1");
+            if ($r && $row_apd = $r->fetch_assoc()) $analisador_prompt_default = chatgpt_ensure_text_wrapper($row_apd['conteudo']);
         }
 
         // User prompt do usuário logado
@@ -1305,7 +1308,8 @@ if (isset($_GET['action']) && $_GET['action'] === 'get_prompt') {
             'success' => true,
             'system_prompt' => $system_prompt,
             'user_prompt' => $user_prompt,
-            'analisador_prompt' => $analisador_prompt
+            'analisador_prompt' => $analisador_prompt,
+            'analisador_prompt_default' => $analisador_prompt_default
         ]);
     } catch (Exception $e) {
         echo json_encode(['success' => false, 'error' => $e->getMessage()]);
@@ -1321,6 +1325,7 @@ if (isset($_GET['action']) && $_GET['action'] === 'save_prompt') {
     $body = json_decode(file_get_contents('php://input'), true);
     $tipo    = $body['tipo']    ?? '';
     $escopo  = $body['escopo']  ?? 'chat';
+    $id_criador_alvo = trim((string)($body['id_criador_alvo'] ?? ''));
     $conteudo = trim($body['conteudo'] ?? '');
 
     global $row_login_atual;
@@ -1343,7 +1348,16 @@ if (isset($_GET['action']) && $_GET['action'] === 'save_prompt') {
             }
             $id_criador_sql = "'default'";
         } else {
-            $id_criador_sql = "'$id_criador'";
+            if ($id_criador_alvo === 'atendimentos_analise') {
+                if (!verifica_permissao($mysqli, $id_criador, 'chatgpt_system_prompt', 'editar')) {
+                    http_response_code(403);
+                    echo json_encode(['success' => false, 'error' => 'Sem permissão']);
+                    exit;
+                }
+                $id_criador_sql = "'atendimentos_analise'";
+            } else {
+                $id_criador_sql = "'$id_criador'";
+            }
         }
     } else {
         $id_criador_sql = "'$id_criador'";
@@ -4316,6 +4330,12 @@ Responder SOMENTE com o JSON.`;
                             <textarea id="sb-system-prompt" class="sb-textarea" style="height:200px;"></textarea>
                             <button id="sb-save-system-prompt" class="sb-btn sb-btn-sec" style="border-color:#d32f2f; color:#d32f2f;">Salvar Prompt do Sistema</button>
                             <button id="sb-reset-system-prompt" class="sb-btn sb-btn-sec" style="font-size:10px;">Restaurar Padrão</button>
+
+                            <hr style="border:0; border-top:1px solid #f3d1d1; margin:15px 0;">
+                            <p style="font-size:12px; font-weight:bold; margin-bottom:5px; color:#b71c1c;">🩺 Prompt padrão do analisador (atendimentos_analise):</p>
+                            <p style="font-size:10px; color:#666; margin-bottom:5px;">Usado como fallback global do analisador_prontuarios.py quando não houver prompt por membro.</p>
+                            <textarea id="sb-analisador-default-prompt" class="sb-textarea" style="height:220px;"></textarea>
+                            <button id="sb-save-analisador-default-prompt" class="sb-btn sb-btn-sec" style="border-color:#b71c1c; color:#b71c1c;">Salvar Prompt Padrão do Analisador</button>
                         </div>
                         <?php endif; ?>
                     </div>
@@ -4466,6 +4486,12 @@ Responder SOMENTE com o JSON.`;
             <?php if ($user_can_edit_system): ?>
             const sysEl = document.getElementById('sb-system-prompt');
             if (sysEl) sysEl.value = d.system_prompt !== null ? d.system_prompt : DEFAULT_SYS_PROMPT;
+            const analisadorDefaultEl = document.getElementById('sb-analisador-default-prompt');
+            if (analisadorDefaultEl) {
+                analisadorDefaultEl.value = d.analisador_prompt_default !== null && String(d.analisador_prompt_default).trim() !== ''
+                    ? d.analisador_prompt_default
+                    : DEFAULT_ANALISADOR_PROMPT_TEMPLATE;
+            }
             <?php endif; ?>
         } catch(e) {
             console.warn('initPrompts: erro ao carregar do banco:', e);
@@ -9244,6 +9270,22 @@ Responder SOMENTE com o JSON.`;
                     });
                 } catch(e) {}
             }
+        };
+        document.getElementById('sb-save-analisador-default-prompt').onclick = async () => {
+            const val = document.getElementById('sb-analisador-default-prompt').value;
+            try {
+                const r = await fetch(`<?php echo $_SERVER['PHP_SELF']; ?>?action=save_prompt`, {
+                    method: 'POST', headers: {'Content-Type':'application/json'},
+                    body: JSON.stringify({
+                        tipo: 'system',
+                        escopo: 'analisador_prontuarios',
+                        id_criador_alvo: 'atendimentos_analise',
+                        conteudo: val
+                    })
+                });
+                const d = await r.json();
+                alert(d.success ? "Prompt padrão do analisador atualizado!" : "Erro: " + d.error);
+            } catch(e) { alert("Erro de rede: " + e.message); }
         };
         <?php endif; ?>
         
