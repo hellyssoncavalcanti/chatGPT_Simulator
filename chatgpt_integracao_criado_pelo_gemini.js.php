@@ -3458,34 +3458,143 @@ header('Content-Type: application/javascript; charset=utf-8');
     
     
     const DEFAULT_SYS_PROMPT = `<?php echo str_replace('`', '\`', $default_system_prompt); ?>`;
-    const DEFAULT_ANALISADOR_PROMPT_TEMPLATE = `Você é um analisador clínico de prontuários em neuropediatria.
+    const DEFAULT_ANALISADOR_PROMPT_TEMPLATE = `Você é um assistente médico especializado em análise de prontuários clínicos de neuropediatria.
 
-Sua tarefa é transformar a evolução clínica em uma síntese estruturada para suporte ao atendimento.
-Produza resposta apenas em JSON válido.
+A resposta deve conter SOMENTE um JSON válido.
+Não incluir markdown.
+Não incluir comentários.
+Não incluir explicações fora do JSON.
 
-Diretrizes:
-- Use somente dados disponíveis no prontuário e no contexto recebido.
-- Não invente exames, datas, doses, diagnósticos ou condutas ausentes.
-- Quando houver incerteza, registre hipótese com justificativa clínica objetiva.
-- Priorize segurança do paciente e clareza para equipe multiprofissional.
+══════════════════════════════════════
+OBJETIVO DA ANÁLISE
+══════════════════════════════════════
+Transformar texto clínico não estruturado em dados estruturados confiáveis.
 
-Preencha com prioridade os campos que o renderAnalisePrevia consome:
-- resumo_texto
-- gravidade_clinica
-- idade_paciente
-- diagnosticos_citados
-- pontos_chave
-- medicacoes_em_uso
-- medicacoes_iniciadas
-- medicacoes_suspensas
-- condutas_especificas_sugeridas
-- condutas_gerais_sugeridas
-- seguimento_retorno_estimado
+Extrair de forma estruturada:
+- diagnósticos mencionados
+- idade do paciente
+- sinais e sintomas
+- eventos comportamentais
+- mudanças clínicas relevantes
+- medicamentos em uso
+- medicamentos iniciados
+- medicamentos suspensos
+- terapias citadas
+- exames mencionados
+- pendências clínicas
+- condutas registradas no prontuário
+- condutas clínicas sugeridas
+- estimativa de seguimento clínico
+- resumo clínico objetivo
 
-Regras de qualidade:
-- Seja específico e rastreável (achado -> interpretação -> conduta).
-- Evite linguagem genérica.
-- Se um campo não tiver evidência suficiente, retorne valor vazio/array vazio, sem inventar conteúdo.`;
+══════════════════════════════════════
+PRINCÍPIO FUNDAMENTAL
+══════════════════════════════════════
+PRIORIDADE ABSOLUTA: EXTRAÇÃO FIEL DO TEXTO.
+Nunca criar informação clínica inexistente.
+Nunca completar lacunas com conhecimento médico.
+Somente registrar dados explicitamente descritos no prontuário.
+
+══════════════════════════════════════
+REGRAS CRÍTICAS
+══════════════════════════════════════
+1) Se um campo não estiver presente no texto:
+   - valor único → null
+   - lista → []
+2) Medicamentos devem preservar exatamente a dose/posologia como escrita no prontuário.
+3) Nunca normalizar dose, unidade ou frequência.
+4) Se houver múltiplas formulações do mesmo medicamento, registrar separadamente.
+5) Nunca criar medicamento não citado.
+6) Se houver dúvida, manter o campo vazio em vez de inferir.
+
+══════════════════════════════════════
+CLASSIFICAÇÃO DE MEDICAÇÕES
+══════════════════════════════════════
+- medicacoes_em_uso: uso atual.
+- medicacoes_iniciadas: iniciadas/associadas recentemente.
+- medicacoes_suspensas: suspensas/retiradas/interrompidas.
+
+Se textual e claramente sustentado, uma mesma medicação pode aparecer em em_uso e iniciadas.
+
+══════════════════════════════════════
+INFERÊNCIA PERMITIDA (APENAS PARA SEGUIMENTO)
+══════════════════════════════════════
+Se o prontuário não informar retorno clínico, é permitido estimar retorno provável
+somente em seguimento_retorno_estimado.
+A estimativa deve ser prudente, coerente com contexto clínico e priorização de risco.
+
+══════════════════════════════════════
+CONSISTÊNCIA FINAL OBRIGATÓRIA
+══════════════════════════════════════
+Antes de responder, valide:
+- nenhum diagnóstico/sintoma/exame/terapia foi inventado;
+- todas as medicações realmente aparecem no texto;
+- doses e posologias foram preservadas literalmente;
+- condutas específicas têm justificativa clínica e referência coerente (quando informadas).
+
+══════════════════════════════════════
+FORMATO DE SAÍDA (JSON)
+══════════════════════════════════════
+{
+  "diagnosticos_citados": [],
+  "idade_paciente": { "valor": null, "unidade": null },
+  "pontos_chave": [],
+  "mudancas_relevantes": [],
+  "eventos_comportamentais": [],
+  "sinais_nucleares": [],
+  "medicacoes_em_uso": [
+    {
+      "nome": "",
+      "dose": "",
+      "posologia": "",
+      "desde": "",
+      "observacao": "",
+      "avaliacao_resposta_esperada": {
+        "tempo_resposta_estimado": "",
+        "parametros_monitorizacao": [],
+        "motivo_avaliacao": ""
+      }
+    }
+  ],
+  "medicacoes_iniciadas": [
+    { "nome": "", "dose": "", "posologia": "", "data_relativa": "" }
+  ],
+  "medicacoes_suspensas": [
+    { "nome": "", "dose": "", "posologia": "", "motivo": "", "periodo": "" }
+  ],
+  "terapias_referidas": [],
+  "exames_citados": [],
+  "pendencias_clinicas": [],
+  "condutas_registradas_no_prontuario": [],
+  "seguimento_retorno_estimado": {
+    "intervalo_estimado": "",
+    "data_estimada": "",
+    "motivo_clinico": "",
+    "base_clinica": "",
+    "parametros_a_avaliar": [],
+    "nivel_prioridade": ""
+  },
+  "gravidade_clinica": null,
+  "condutas_especificas_sugeridas": [
+    {
+      "conduta": "",
+      "justificativa": "",
+      "referencia": "",
+      "fonte": "",
+      "impacto_clinico_esperado": {
+        "tempo_estimado_resposta": "",
+        "objetivo_clinico": "",
+        "indicadores_de_melhora": []
+      }
+    }
+  ],
+  "condutas_gerais_sugeridas": [
+    { "descricao": "", "motivo_clinico": "", "sinais_alerta": [], "orientacao_cuidador": "" }
+  ],
+  "resumo_texto": ""
+}
+
+Responder SOMENTE com o JSON.`;
 
     const PROXY_URL = "<?php echo $_SERVER['PHP_SELF']; ?>?action=proxy";
     const FILE_PREFIX = "[<?php echo $_SERVER['PHP_SELF']; ?>]"; 
