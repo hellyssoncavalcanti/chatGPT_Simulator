@@ -1278,7 +1278,19 @@ if (isset($_GET['action']) && $_GET['action'] === 'get_prompt') {
             if ($r && $row_up = $r->fetch_assoc()) $user_prompt = $row_up['conteudo'];
         }
 
-        echo json_encode(['success' => true, 'system_prompt' => $system_prompt, 'user_prompt' => $user_prompt]);
+        // Prompt de análise de prontuários do membro logado
+        $analisador_prompt = null;
+        if ($id_criador) {
+            $r = $db->query("SELECT conteudo FROM chatgpt_prompts WHERE tipo='system' AND escopo='analisador_prontuarios' AND id_criador=$id_criador LIMIT 1");
+            if ($r && $row_ap = $r->fetch_assoc()) $analisador_prompt = $row_ap['conteudo'];
+        }
+
+        echo json_encode([
+            'success' => true,
+            'system_prompt' => $system_prompt,
+            'user_prompt' => $user_prompt,
+            'analisador_prompt' => $analisador_prompt
+        ]);
     } catch (Exception $e) {
         echo json_encode(['success' => false, 'error' => $e->getMessage()]);
     }
@@ -1303,14 +1315,20 @@ if (isset($_GET['action']) && $_GET['action'] === 'save_prompt') {
     if (!in_array($tipo, ['system', 'user'])) { echo json_encode(['success' => false, 'error' => 'Tipo inválido']); exit; }
     if (!in_array($escopo, ['chat', 'analisador_prontuarios'], true)) { echo json_encode(['success' => false, 'error' => 'Escopo inválido']); exit; }
 
-    // system prompt: exige permissão; id_criador fica NULL (registro global)
+    // system prompt:
+    // - escopo=chat: exige permissão e grava como prompt global (id_criador='default')
+    // - escopo=analisador_prontuarios: prompt por membro logado (id_criador=membro.id)
     if ($tipo === 'system') {
-        if (!verifica_permissao($mysqli, $id_criador, 'chatgpt_system_prompt', 'editar')) {
-            http_response_code(403);
-            echo json_encode(['success' => false, 'error' => 'Sem permissão']);
-            exit;
+        if ($escopo === 'chat') {
+            if (!verifica_permissao($mysqli, $id_criador, 'chatgpt_system_prompt', 'editar')) {
+                http_response_code(403);
+                echo json_encode(['success' => false, 'error' => 'Sem permissão']);
+                exit;
+            }
+            $id_criador_sql = "'default'";
+        } else {
+            $id_criador_sql = "'$id_criador'";
         }
-        $id_criador_sql = "'default'";
     } else {
         $id_criador_sql = "'$id_criador'";
     }
@@ -3421,6 +3439,36 @@ header('Content-Type: application/javascript; charset=utf-8');
     
     
     const DEFAULT_SYS_PROMPT = `<?php echo str_replace('`', '\`', $default_system_prompt); ?>`;
+    const DEFAULT_ANALISADOR_PROMPT_TEMPLATE = `[INICIO_TEXTO_COLADO]
+Você é um analisador clínico de prontuários focado em neuropediatria.
+
+Objetivo:
+- Extrair sinais clínicos, hipóteses diagnósticas, condutas e seguimento de forma estruturada e objetiva.
+- Priorizar segurança clínica e linguagem clara para equipe multiprofissional.
+
+Regras práticas:
+1) Não invente dados ausentes no prontuário.
+2) Quando houver incerteza, registre como hipótese com justificativa.
+3) Mantenha rastreabilidade entre achado clínico e recomendação.
+4) Sempre preencher resumo_texto em linguagem clínica direta.
+
+Campos mais usados pelo renderAnalisePrevia (preencha quando houver dados):
+- resumo_texto
+- gravidade_clinica (nivel/justificativa)
+- idade_paciente
+- diagnosticos_citados
+- pontos_chave
+- medicacoes_em_uso
+- medicacoes_iniciadas
+- medicacoes_suspensas
+- condutas_especificas_sugeridas
+- condutas_gerais_sugeridas
+- seguimento_retorno_estimado
+
+Formato de saída:
+- JSON válido e consistente com a estrutura esperada pelo analisador.
+- Texto sempre em Português do Brasil.
+[FIM_TEXTO_COLADO]`;
 
     const PROXY_URL = "<?php echo $_SERVER['PHP_SELF']; ?>?action=proxy";
     const FILE_PREFIX = "[<?php echo $_SERVER['PHP_SELF']; ?>]"; 
@@ -4121,11 +4169,18 @@ header('Content-Type: application/javascript; charset=utf-8');
                     </div>
                     
                     <div style="flex:1; overflow-y:auto;">
-                        <p style="font-size:12px; font-weight:bold; margin-bottom:5px;">Suas Preferências (User Prompt):</p>
+                        <p style="font-size:12px; font-weight:bold; margin-bottom:5px;">Suas Preferências para o chat (User Prompt):</p>
                         <p style="font-size:10px; color:#666; margin-bottom:5px;">Ex: "Responda sempre formalmente", "Seja breve".</p>
                         <textarea id="sb-user-prompt" class="sb-textarea" placeholder="Digite suas instruções aqui..."></textarea>
                         <button id="sb-save-user-prompt" class="sb-btn sb-btn-sec">Salvar Preferências</button>
                         
+                        <hr style="border:0; border-top:1px solid #eee; margin:15px 0;">
+
+                        <p style="font-size:12px; font-weight:bold; margin-bottom:5px;">Prompt de análise de prontuários (seu usuário):</p>
+                        <p style="font-size:10px; color:#666; margin-bottom:5px;">Usado pelo analisador_prontuarios.py para suas análises. Se estiver vazio no banco, um modelo descritivo é carregado automaticamente.</p>
+                        <textarea id="sb-analisador-prompt" class="sb-textarea" style="height:170px;" placeholder="Defina o comportamento da análise clínica automática para seus atendimentos..."></textarea>
+                        <button id="sb-save-analisador-prompt" class="sb-btn sb-btn-sec">Salvar Prompt de Análise</button>
+
                         <hr style="border:0; border-top:1px solid #eee; margin:15px 0;">
 
                         <?php if ($user_can_edit_system): ?>
@@ -4274,6 +4329,13 @@ header('Content-Type: application/javascript; charset=utf-8');
 
             const userEl = document.getElementById('sb-user-prompt');
             if (userEl && d.user_prompt !== null) userEl.value = d.user_prompt;
+
+            const analisadorEl = document.getElementById('sb-analisador-prompt');
+            if (analisadorEl) {
+                analisadorEl.value = d.analisador_prompt !== null && String(d.analisador_prompt).trim() !== ''
+                    ? d.analisador_prompt
+                    : DEFAULT_ANALISADOR_PROMPT_TEMPLATE;
+            }
 
             <?php if ($user_can_edit_system): ?>
             const sysEl = document.getElementById('sb-system-prompt');
@@ -9019,6 +9081,18 @@ header('Content-Type: application/javascript; charset=utf-8');
                 });
                 const d = await r.json();
                 alert(d.success ? "Preferências salvas!" : "Erro: " + d.error);
+            } catch(e) { alert("Erro de rede: " + e.message); }
+        };
+
+        document.getElementById('sb-save-analisador-prompt').onclick = async () => {
+            const val = document.getElementById('sb-analisador-prompt').value;
+            try {
+                const r = await fetch(`<?php echo $_SERVER['PHP_SELF']; ?>?action=save_prompt`, {
+                    method: 'POST', headers: {'Content-Type':'application/json'},
+                    body: JSON.stringify({ tipo: 'system', escopo: 'analisador_prontuarios', conteudo: val })
+                });
+                const d = await r.json();
+                alert(d.success ? "Prompt de análise salvo!" : "Erro: " + d.error);
             } catch(e) { alert("Erro de rede: " + e.message); }
         };
 
