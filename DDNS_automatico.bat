@@ -1,3 +1,4 @@
+chcp 65001 >nul
 @echo off
 :: Garante que o diretório de trabalho seja o local onde este arquivo .bat está
 cd /d "%~dp0"
