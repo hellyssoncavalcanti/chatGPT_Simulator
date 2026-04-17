@@ -22,6 +22,7 @@
 import json
 import os
 import sys
+import copy
 from datetime import datetime
 import config
 from utils import log
@@ -94,7 +95,8 @@ def _load_chats_unlocked():
 
 def load_chats():
     with _lock:
-        return _load_chats_unlocked()
+        # Retorna cópia defensiva para evitar mutação externa sem lock.
+        return copy.deepcopy(_load_chats_unlocked())
 
 
 def save_chat(chat_id, title, url, messages, origin_url=None):
