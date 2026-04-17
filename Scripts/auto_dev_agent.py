@@ -1567,10 +1567,8 @@ def _stream_chat_completion(
     last_markdown_report_ts = 0.0
     MARKDOWN_REPORT_MIN_STEP = 1024   # chars
     MARKDOWN_REPORT_MIN_INTERVAL = 3  # segundos
-    stream_verbose = "codex" in (label or "").lower()
     inline_status_open = False
-    inline_last_len = 0
-    stream = getattr(sys, "stdout", None)
+
     def _clean_browser_prefix(text: str) -> str:
         s = (text or "").strip()
         s = re.sub(r"^\s*Remetente:\s*[^|]+\|\s*", "", s, flags=re.IGNORECASE)
@@ -1586,40 +1584,25 @@ def _stream_chat_completion(
         return s
 
     def _print_inline_status(text: str) -> None:
-        nonlocal inline_status_open, inline_last_len
+        nonlocal inline_status_open
         try:
             rendered = f"   ⏳ status: {_normalize_status(text)[:220]}"
-            clear_pad = max(0, inline_last_len - len(rendered))
-            sys.stdout.write("\r" + rendered + (" " * (clear_pad + 8)))
+            sys.stdout.write("\r" + rendered + " " * 24)
             sys.stdout.flush()
             inline_status_open = True
-            inline_last_len = len(rendered)
         except Exception:
             log(f"   ⏳ status: {_normalize_status(text)[:220]}")
 
-    def _print_inline_markdown(size: int) -> None:
-        nonlocal inline_status_open, inline_last_len
-        try:
-            rendered = f"   📝 recebendo resposta: {size} chars..."
-            clear_pad = max(0, inline_last_len - len(rendered))
-            sys.stdout.write("\r" + rendered + (" " * (clear_pad + 8)))
-            sys.stdout.flush()
-            inline_status_open = True
-            inline_last_len = len(rendered)
-        except Exception:
-            log(f"   📝 recebendo resposta: {size} chars...")
-
     def _close_inline_status() -> None:
-        nonlocal inline_status_open, inline_last_len
+        nonlocal inline_status_open
         if inline_status_open:
             try:
-                sys.stdout.write("\r" + " " * (inline_last_len + 16) + "\r")
+                sys.stdout.write("\r" + " " * 260 + "\r")
                 sys.stdout.flush()
             except Exception:
                 pass
             finally:
                 inline_status_open = False
-                inline_last_len = 0
 
     started = time.time()
     last_event = started
@@ -1642,11 +1625,7 @@ def _stream_chat_completion(
         if t == "status":
             text = (str(c) if c is not None else "").strip()
             if text and text != last_status_logged:
-                if stream_verbose:
-                    _close_inline_status()
-                    log(f"   ⏳ {_normalize_status(text)[:320]}")
-                else:
-                    _print_inline_status(text)
+                _print_inline_status(text)
                 last_status_logged = text
 
         elif t == "log":
@@ -1677,11 +1656,8 @@ def _stream_chat_completion(
                 or (size != last_markdown_size_reported
                     and now - last_markdown_report_ts >= MARKDOWN_REPORT_MIN_INTERVAL)
             ):
-                if stream_verbose:
-                    _close_inline_status()
-                    log(f"   📝 recebendo resposta: {size} chars...")
-                else:
-                    _print_inline_markdown(size)
+                _close_inline_status()
+                log(f"   📝 recebendo resposta: {size} chars...")
                 last_markdown_size_reported = size
                 last_markdown_report_ts = now
 

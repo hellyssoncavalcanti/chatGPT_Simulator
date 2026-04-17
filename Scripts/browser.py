@@ -3412,15 +3412,6 @@ async def _codex_wait_for_composer(page, q, timeout_ms: int = 20000):
         const directCandidates = Array.from(document.querySelectorAll(
             '#prompt-textarea[contenteditable="true"], [contenteditable="true"], [contenteditable=""], textarea[name="prompt-textarea"], textarea[aria-label*="Codex" i]'
         ));
-        // Em páginas de task do Codex, o #prompt-textarea pode existir sem
-        // placeholder /plan visível. Se estiver visível, aceita diretamente.
-        const directPrompt = directCandidates.find(el =>
-            isVisible(el) && ((el.id || '').toLowerCase() === 'prompt-textarea')
-        );
-        if (directPrompt) {
-            directPrompt.setAttribute('data-autodev-codex-composer', '1');
-            return true;
-        }
         let hit = directCandidates.find(el => {
             if (!isVisible(el)) return false;
             const ph = (el.getAttribute('placeholder') || el.getAttribute('data-placeholder') || '');
@@ -3454,31 +3445,7 @@ async def _codex_wait_for_composer(page, q, timeout_ms: int = 20000):
         except Exception:
             pass
         await asyncio.sleep(0.4)
-
-    emit_log(q, "⚠️ Placeholder do composer Codex não detectado; iniciando auto-heal via HTML + ChatGPT...")
-    locator_sugerido = await _sugerir_locator_placeholder_via_chatgpt(
-        page,
-        q,
-        contexto="composer do Codex (textarea/contenteditable para enviar tarefa)"
-    )
-    if locator_sugerido:
-        try:
-            ok = await page.evaluate(
-                """(sel) => {
-                    const el = document.querySelector(sel);
-                    if (!el) return false;
-                    el.setAttribute('data-autodev-codex-composer', '1');
-                    return true;
-                }""",
-                locator_sugerido,
-            )
-            if ok:
-                emit_log(q, "✅ Codex auto-heal: composer localizado com seletor sugerido e script ajustado automaticamente.")
-                return '[data-autodev-codex-composer="1"]'
-        except Exception as e:
-            emit_log(q, f"⚠️ Codex auto-heal: seletor sugerido falhou na validação: {e}")
-
-    raise RuntimeError('Composer do Codex não encontrado (placeholder /plan ausente, inclusive após auto-heal)')
+    raise RuntimeError('Composer do Codex não encontrado (placeholder/data-placeholder ausente)')
 
 
 async def _codex_select_repo(page, q, repo: str) -> bool:
@@ -3792,57 +3759,6 @@ async def _codex_wait_and_click_pr_controls(page, q, timeout_s: int = 900) -> tu
     return False, ""
 
 
-async def _codex_try_open_fresh_task(page):
-    """Na home do Codex, tenta abrir a tarefa mais recente ainda em execução.
-
-    Critério prioritário: primeira tarefa visível que contenha botão
-    `aria-label="Cancelar tarefa"` (ou equivalente em inglês), pois isso
-    indica que é a tarefa ativa recém-submetida.
-    """
-    js = """() => {
-        const isVisible = (el) => {
-            if (!el) return false;
-            const st = window.getComputedStyle(el);
-            if (!st || st.display === 'none' || st.visibility === 'hidden') return false;
-            const r = el.getBoundingClientRect();
-            return r.width > 0 && r.height > 0;
-        };
-
-        const links = Array.from(document.querySelectorAll('a[href*="/codex/cloud/tasks/"]'))
-            .filter(a => a && (a.href || a.getAttribute('href')) && isVisible(a));
-        if (!links.length) return null;
-
-        const hasCancelInTask = (link) => {
-            const scope = link.closest('.task-row-container, .group, li, article, div') || link;
-            const btn = scope.querySelector('button[aria-label], [data-testid="stop-button"]');
-            if (!btn || !isVisible(btn)) return false;
-            const label = ((btn.getAttribute('aria-label') || btn.innerText || btn.textContent || '') + '')
-                .trim().toLowerCase();
-            return label.includes('cancelar tarefa') || label.includes('cancel task');
-        };
-
-        // IMPORTANTE: seleciona a primeira tarefa visível que esteja ativa
-        // (com botão de cancelar), evitando abrir tarefa antiga da lista.
-        for (const a of links) {
-            if (hasCancelInTask(a)) return a.href || a.getAttribute('href');
-        }
-        return null;
-    }"""
-    try:
-        href = await page.evaluate(js)
-    except Exception:
-        href = None
-    if not href:
-        return None
-    if href.startswith("/"):
-        href = "https://chatgpt.com" + href
-    try:
-        await page.goto(href, wait_until='domcontentloaded', timeout=15000)
-        return href
-    except Exception:
-        return None
-
-
 async def handle_codex_task_inner(task, page, q, stop_event, activityts=None):
     """Fluxo dedicado ao Codex (chatgpt.com/codex/cloud):
       1) Navega para a Codex URL.
@@ -3963,7 +3879,7 @@ async def handle_codex_task_inner(task, page, q, stop_event, activityts=None):
 
     # Mantém a aba aberta até aparecer uma das ações finais do Codex para
     # concluir o fluxo de PR/branch antes de encerrar a tarefa no worker.
-    clicked_final, clicked_label = await _codex_wait_and_click_pr_controls(page, q, timeout_s=900)
+    await _codex_wait_and_click_pr_controls(page, q, timeout_s=900)
 
     # Resposta curta confirmando submissão — o agente parseia JSON; devolvemos
     # um plano vazio com analysis explicando que a tarefa Codex foi enfileirada.

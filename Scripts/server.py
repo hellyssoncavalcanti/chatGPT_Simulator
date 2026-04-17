@@ -213,7 +213,12 @@ def _wait_chat_rate_limit_if_needed(stream_queue=None):
         remaining = _get_chat_rate_limit_remaining_seconds()
         if remaining <= 0:
             if inline_open:
-                print()
+                try:
+                    width = max(80, shutil.get_terminal_size((160, 20)).columns - 1)
+                except Exception:
+                    width = 120
+                sys.stdout.write("\r" + (" " * width) + "\r\n")
+                sys.stdout.flush()
             return
         status_text = (
             "⏳ Aguardando cooldown por excesso de solicitações no ChatGPT. "
@@ -227,9 +232,13 @@ def _wait_chat_rate_limit_if_needed(stream_queue=None):
                 "wait_seconds": round(remaining, 1),
             }, ensure_ascii=False))
         # No CMD do próprio ChatGPT Simulator: atualizar cooldown inline.
-        width = max(80, shutil.get_terminal_size((160, 20)).columns - 1)
+        try:
+            width = max(80, shutil.get_terminal_size((160, 20)).columns - 1)
+        except Exception:
+            width = 120
         line = status_text if len(status_text) <= width else (status_text[: width - 3].rstrip() + "...")
-        print("\x1b[2K\r" + line.ljust(width), end="", flush=True)
+        sys.stdout.write("\r" + line.ljust(width))
+        sys.stdout.flush()
         inline_open = True
         time.sleep(min(CHAT_RATE_LIMIT_PROGRESS_TICK_SEC, remaining))
 
