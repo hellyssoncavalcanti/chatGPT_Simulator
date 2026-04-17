@@ -289,6 +289,43 @@ async def _stream_browser_screenshots(
         raise
 
 
+async def _keep_chat_render_alive(page, q, stop_event: asyncio.Event, activity_ts: list = None,
+                                  interval_sec: float = 1.4):
+    """
+    Mantém a renderização da resposta "acordada" com micro-scrolls periódicos.
+    Em alguns ambientes o streaming da UI só avança após interação de usuário.
+    """
+    tick = 0
+    while not stop_event.is_set():
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=interval_sec)
+            continue
+        except asyncio.TimeoutError:
+            pass
+
+        try:
+            down = random.randint(70, 120)
+            up = -(down - random.randint(8, 22))
+            await page.evaluate(
+                """([down, up]) => {
+                    window.scrollBy(0, down);
+                    window.scrollBy(0, up);
+                    return window.scrollY || 0;
+                }""",
+                [down, up],
+            )
+            if activity_ts:
+                activity_ts[0] = time.time()
+            tick += 1
+            if q and tick % 30 == 0:
+                emit_log(q, "🫀 Keepalive: micro-scroll aplicado para manter renderização contínua.")
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            # Keepalive é best-effort; não deve interromper o fluxo principal.
+            await asyncio.sleep(0.2)
+
+
 def _composer_state_script():
     return r"""() => {
         const composerRoot = document.querySelector('form')
@@ -4186,6 +4223,10 @@ async def handle_chat_task_inner(task, page, q, stop_event: asyncio.Event, activ
     screenshot_task = asyncio.create_task(
         _stream_browser_screenshots(page, q, screenshot_stop, label="chat", activity_ts=activityts)
     )
+    render_keepalive_stop = asyncio.Event()
+    render_keepalive_task = asyncio.create_task(
+        _keep_chat_render_alive(page, q, render_keepalive_stop, activity_ts=activityts, interval_sec=1.4)
+    )
 
     start_time  = time.time()
     started     = False
@@ -4481,8 +4522,14 @@ async def handle_chat_task_inner(task, page, q, stop_event: asyncio.Event, activ
     # Para o streaming de screenshots
     screenshot_stop.set()
     screenshot_task.cancel()
+    render_keepalive_stop.set()
+    render_keepalive_task.cancel()
     try:
         await screenshot_task
+    except (asyncio.CancelledError, Exception):
+        pass
+    try:
+        await render_keepalive_task
     except (asyncio.CancelledError, Exception):
         pass
 
