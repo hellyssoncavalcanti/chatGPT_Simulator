@@ -4001,7 +4001,11 @@ Responder SOMENTE com o JSON.`;
         #ow-sidebar { position: absolute; top: 0; left: 0; width: 0; height: 100%; background: #ffffff; z-index: 100; transition: width 0.3s; overflow-y: auto; overflow-x: hidden; -webkit-overflow-scrolling: touch; color: #333; box-shadow: 2px 0 5px rgba(0,0,0,0.1); border-right: 1px solid #eee; }
         #ow-sidebar.open { width: 90%; }
         .sb-content { padding: 20px; width: 100%; box-sizing: border-box; display: flex; flex-direction: column; height: 100%; }
-        .sb-title { font-size: 16px; font-weight: bold; margin-bottom: 15px; border-bottom: 1px solid #eee; padding-bottom: 10px; display: flex; justify-content: space-between; align-items: center; }
+        .sb-title {
+            font-size: 16px; font-weight: bold; margin-bottom: 15px; border-bottom: 1px solid #eee; padding-bottom: 10px;
+            display: flex; justify-content: space-between; align-items: center;
+            position: sticky; top: 0; z-index: 3; background: #fff;
+        }
         .sb-input { width: 100%; padding: 10px; margin-bottom: 10px; border-radius: 4px; border: 1px solid #ddd; background: #f9f9f9; color: #333; box-sizing: border-box;}
         .sb-textarea { width: 100%; padding: 10px; margin-bottom: 10px; border-radius: 4px; border: 1px solid #ddd; background: #f9f9f9; color: #333; box-sizing: border-box; min-height: 100px; resize: vertical; font-family: monospace; font-size: 12px; }
         .sb-btn { width: 100%; padding: 10px; background: #212121; color: white; border: none; border-radius: 4px; cursor: pointer; font-weight: bold; margin-bottom: 10px; }
