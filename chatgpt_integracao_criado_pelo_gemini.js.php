@@ -81,6 +81,52 @@ function chatgpt_rate_limit_check($max_per_min = 200) {
     apcu_store($key, $cnt + 1, 60);
 }
 
+function chatgpt_extract_trycloudflare_base_url($value) {
+    if (!is_string($value) || $value === '') return '';
+    if (!preg_match('~https://[a-zA-Z0-9.-]+\.trycloudflare\.com/?~i', $value, $m)) return '';
+    $candidate = rtrim($m[0], '/');
+    return filter_var($candidate, FILTER_VALIDATE_URL) ? $candidate : '';
+}
+
+function chatgpt_resolve_simulator_base_url($manual_base = '', $timeout = 5) {
+    $manual_base = trim((string)$manual_base);
+    if ($manual_base !== '') {
+        $manual_base = rtrim($manual_base, '/');
+        $manual_base = str_replace(':11434', ':3003', $manual_base);
+        if (!preg_match('~^https?://~i', $manual_base)) $manual_base = 'http://' . $manual_base;
+        return filter_var($manual_base, FILTER_VALIDATE_URL) ? $manual_base : '';
+    }
+
+    $cloudflare_url = "https://conexaovida.org/no-ip-dynamic_via_clouflare.php";
+    $ch_cf = curl_init($cloudflare_url);
+    curl_setopt($ch_cf, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($ch_cf, CURLOPT_FOLLOWLOCATION, true);
+    curl_setopt($ch_cf, CURLOPT_HEADER, true);
+    curl_setopt($ch_cf, CURLOPT_TIMEOUT, max(2, intval($timeout)));
+    $raw_cf = curl_exec($ch_cf);
+    $effective_cf = curl_getinfo($ch_cf, CURLINFO_EFFECTIVE_URL);
+    curl_close($ch_cf);
+    $cf_base = chatgpt_extract_trycloudflare_base_url($effective_cf);
+    if ($cf_base === '') $cf_base = chatgpt_extract_trycloudflare_base_url($raw_cf ?: '');
+    if ($cf_base !== '') return $cf_base;
+
+    $fallback_url = "http://conexaovida.org/no-ip-dynamic_ip.php?port=3003";
+    $ch = curl_init($fallback_url);
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($ch, CURLOPT_FOLLOWLOCATION, true);
+    curl_setopt($ch, CURLOPT_HEADER, true);
+    curl_setopt($ch, CURLOPT_TIMEOUT, max(2, intval($timeout)));
+    $raw_response = curl_exec($ch);
+    $effective_url = curl_getinfo($ch, CURLINFO_EFFECTIVE_URL);
+    curl_close($ch);
+
+    $ip_found = null;
+    if (preg_match('/(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})/', $effective_url, $matches)) $ip_found = $matches[1];
+    elseif (preg_match('/(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})/', $raw_response ?? '', $matches)) $ip_found = $matches[1];
+    if ($ip_found && filter_var($ip_found, FILTER_VALIDATE_IP)) return "http://{$ip_found}:3003";
+    return '';
+}
+
 function chatgpt_log_query($db, $query, $reason, $elapsed_ms) {
     if (!$db) return;
     $ip = $_SERVER['REMOTE_ADDR'] ?? '';
@@ -88,6 +134,49 @@ function chatgpt_log_query($db, $query, $reason, $elapsed_ms) {
         . $db->real_escape_string(substr($query, 0, 2000)) . "','"
         . $db->real_escape_string(substr($reason, 0, 500)) . "','"
         . $db->real_escape_string($ip) . "'," . intval($elapsed_ms) . ",NOW())");
+}
+
+function chatgpt_ensure_prompt_scope_schema($db) {
+    if (!$db) return;
+    $db->set_charset("utf8mb4");
+
+    $col = @$db->query("
+        SELECT COLUMN_NAME
+        FROM INFORMATION_SCHEMA.COLUMNS
+        WHERE TABLE_SCHEMA = DATABASE()
+          AND TABLE_NAME = 'chatgpt_prompts'
+          AND COLUMN_NAME = 'escopo'
+        LIMIT 1
+    ");
+    $has_escopo = ($col && $col->num_rows > 0);
+    if (!$has_escopo) {
+        @$db->query("
+            ALTER TABLE chatgpt_prompts
+            ADD COLUMN escopo ENUM('analisador_prontuarios','chat')
+            NOT NULL DEFAULT 'chat'
+            COMMENT 'Escopo funcional do prompt. \"chat\" = prompt usado no chat interativo. \"analisador_prontuarios\" = prompt usado pelo daemon Scripts/analisador_prontuarios.py para extração clínica.'
+            AFTER tipo
+        ");
+    }
+
+    $idx = @$db->query("
+        SELECT GROUP_CONCAT(COLUMN_NAME ORDER BY SEQ_IN_INDEX SEPARATOR ',') AS cols
+        FROM INFORMATION_SCHEMA.STATISTICS
+        WHERE TABLE_SCHEMA = DATABASE()
+          AND TABLE_NAME = 'chatgpt_prompts'
+          AND INDEX_NAME = 'uq_tipo_criador'
+        GROUP BY INDEX_NAME
+        LIMIT 1
+    ");
+    $idx_cols = ($idx && ($r = $idx->fetch_assoc())) ? strtolower((string)($r['cols'] ?? '')) : '';
+    if ($idx_cols !== 'tipo,id_criador,escopo') {
+        @$db->query("ALTER TABLE chatgpt_prompts DROP INDEX uq_tipo_criador");
+        @$db->query("
+            ALTER TABLE chatgpt_prompts
+            ADD UNIQUE KEY uq_tipo_criador (tipo, id_criador, escopo)
+            COMMENT 'Garante 1 prompt por (tipo, id_criador, escopo): permite separar prompts de chat e analisador_prontuarios para o mesmo criador.'
+        ");
+    }
 }
 
 // Salva tabelas auxiliares (alertas, grafo, casos) em transacao atomica
@@ -375,24 +464,8 @@ if (isset($_GET['action']) && $_GET['action'] === 'ping_simulator') {
     while (ob_get_level()) ob_end_clean();
     header('Content-Type: application/json; charset=utf-8');
     
-    // Identifica o IP base (mesma lógica do proxy)
-    if (!empty($ollama_manual_ip)) {
-        $ip_final = $ollama_manual_ip;
-    } else {
-        $url_monitor = "http://conexaovida.org/no-ip-dynamic_ip.php?port=3003";
-        $ch = curl_init($url_monitor);
-        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-        curl_setopt($ch, CURLOPT_FOLLOWLOCATION, true); 
-        curl_setopt($ch, CURLOPT_HEADER, true);         
-        curl_setopt($ch, CURLOPT_TIMEOUT, 5);
-        $raw_response = curl_exec($ch);
-        $effective_url = curl_getinfo($ch, CURLINFO_EFFECTIVE_URL); 
-        curl_close($ch);
-        $ip_found = null;
-        if (preg_match('/(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})/', $effective_url, $matches)) { $ip_found = $matches[1]; } 
-        else if (preg_match('/(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})/', $raw_response ?? '', $matches)) { $ip_found = $matches[1]; }
-        if ($ip_found && filter_var($ip_found, FILTER_VALIDATE_IP)) { $ip_final = "http://" . $ip_found . ":3003"; }
-    }
+    // Resolve base do Simulator: Cloudflare primeiro; no-ip IP como fallback.
+    $ip_final = chatgpt_resolve_simulator_base_url($ollama_manual_ip, 5);
     
     if (empty($ip_final) || !filter_var($ip_final, FILTER_VALIDATE_URL)) {
         header('Content-Type: application/json');
@@ -834,27 +907,8 @@ if (isset($_GET['action']) && $_GET['action'] === 'send_manual_whatsapp_reply') 
         exit;
     }
 
-    // Resolve IP do servidor Python (porta 3003) — mesma lógica do proxy
-    $ip_final = '';
-    if (!empty($ollama_manual_ip)) {
-        $ip_final = preg_replace('/:\d+$/', ':3003', rtrim($ollama_manual_ip, '/'));
-    } else {
-        $url_monitor = "http://conexaovida.org/no-ip-dynamic_ip.php?port=3003";
-        $ch_ip = curl_init($url_monitor);
-        curl_setopt($ch_ip, CURLOPT_RETURNTRANSFER, true);
-        curl_setopt($ch_ip, CURLOPT_FOLLOWLOCATION, true);
-        curl_setopt($ch_ip, CURLOPT_HEADER, true);
-        curl_setopt($ch_ip, CURLOPT_TIMEOUT, 5);
-        $raw_resp = curl_exec($ch_ip);
-        $eff_url = curl_getinfo($ch_ip, CURLINFO_EFFECTIVE_URL);
-        curl_close($ch_ip);
-        $ip_found = null;
-        if (preg_match('/(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})/', $eff_url, $m)) $ip_found = $m[1];
-        elseif (preg_match('/(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})/', $raw_resp ?? '', $m)) $ip_found = $m[1];
-        if ($ip_found && filter_var($ip_found, FILTER_VALIDATE_IP)) {
-            $ip_final = "http://{$ip_found}:3003";
-        }
-    }
+    // Resolve base do Simulator: Cloudflare primeiro; no-ip IP como fallback.
+    $ip_final = chatgpt_resolve_simulator_base_url($ollama_manual_ip, 5);
 
     if (empty($ip_final)) {
         echo json_encode(['success' => false, 'error' => 'Não foi possível detectar IP do servidor.']);
@@ -1153,24 +1207,7 @@ if (isset($_GET['action']) && $_GET['action'] === 'get_chat_meta') {
             ]);
         } else {
             if (!empty($url_atual)) {
-                $ip_final = '';
-                if (!empty($ollama_manual_ip)) {
-                    $ip_final = str_replace('11434', '3003', rtrim($ollama_manual_ip, '/'));
-                } else {
-                    $url_monitor = "http://conexaovida.org/no-ip-dynamic_ip.php?port=3003";
-                    $ch = curl_init($url_monitor);
-                    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-                    curl_setopt($ch, CURLOPT_FOLLOWLOCATION, true);
-                    curl_setopt($ch, CURLOPT_HEADER, true);
-                    curl_setopt($ch, CURLOPT_TIMEOUT, 10);
-                    $raw_response = curl_exec($ch);
-                    $effective_url = curl_getinfo($ch, CURLINFO_EFFECTIVE_URL);
-                    curl_close($ch);
-                    $ip_found = null;
-                    if (preg_match('/(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})/', $effective_url, $matches)) $ip_found = $matches[1];
-                    else if (preg_match('/(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})/', $raw_response ?? '', $matches)) $ip_found = $matches[1];
-                    if ($ip_found && filter_var($ip_found, FILTER_VALIDATE_IP)) $ip_final = "http://{$ip_found}:3003";
-                }
+                $ip_final = chatgpt_resolve_simulator_base_url($ollama_manual_ip, 10);
 
                 if (!empty($ip_final)) {
                     $lookupPayload = json_encode([
@@ -1225,18 +1262,19 @@ if (isset($_GET['action']) && $_GET['action'] === 'get_prompt') {
         $db = get_mysql_connection_local();
         if (!$db) throw new Exception("Falha na conexão com banco de dados");
         $db->set_charset("utf8mb4");
+        chatgpt_ensure_prompt_scope_schema($db);
 
         // System prompt (somente se tiver permissão)
         $system_prompt = null;
         if ($id_criador && verifica_permissao($mysqli, $id_criador, 'chatgpt_system_prompt', 'editar')) {
-            $r = $db->query("SELECT conteudo FROM chatgpt_prompts WHERE tipo='system' AND id_criador='default' LIMIT 1");
+            $r = $db->query("SELECT conteudo FROM chatgpt_prompts WHERE tipo='system' AND escopo='chat' AND id_criador='default' LIMIT 1");
             if ($r && $row_sp = $r->fetch_assoc()) $system_prompt = $row_sp['conteudo'];
         }
 
         // User prompt do usuário logado
         $user_prompt = null;
         if ($id_criador) {
-            $r = $db->query("SELECT conteudo FROM chatgpt_prompts WHERE tipo='user' AND id_criador=$id_criador LIMIT 1");
+            $r = $db->query("SELECT conteudo FROM chatgpt_prompts WHERE tipo='user' AND escopo='chat' AND id_criador=$id_criador LIMIT 1");
             if ($r && $row_up = $r->fetch_assoc()) $user_prompt = $row_up['conteudo'];
         }
 
@@ -1254,6 +1292,7 @@ if (isset($_GET['action']) && $_GET['action'] === 'save_prompt') {
     header('Content-Type: application/json; charset=utf-8');
     $body = json_decode(file_get_contents('php://input'), true);
     $tipo    = $body['tipo']    ?? '';
+    $escopo  = $body['escopo']  ?? 'chat';
     $conteudo = trim($body['conteudo'] ?? '');
 
     global $row_login_atual;
@@ -1262,6 +1301,7 @@ if (isset($_GET['action']) && $_GET['action'] === 'save_prompt') {
 
     if (!$id_criador) { echo json_encode(['success' => false, 'error' => 'Não autenticado']); exit; }
     if (!in_array($tipo, ['system', 'user'])) { echo json_encode(['success' => false, 'error' => 'Tipo inválido']); exit; }
+    if (!in_array($escopo, ['chat', 'analisador_prontuarios'], true)) { echo json_encode(['success' => false, 'error' => 'Escopo inválido']); exit; }
 
     // system prompt: exige permissão; id_criador fica NULL (registro global)
     if ($tipo === 'system') {
@@ -1279,12 +1319,13 @@ if (isset($_GET['action']) && $_GET['action'] === 'save_prompt') {
         $db = get_mysql_connection_local();
         if (!$db) throw new Exception("Falha na conexão");
         $db->set_charset("utf8mb4");
+        chatgpt_ensure_prompt_scope_schema($db);
         $conteudo_esc = $db->real_escape_string($conteudo);
+        $escopo_esc = $db->real_escape_string($escopo);
 
-        // id_criador é agora VARCHAR(10): 'default' para system prompt, string numérica para user prompt.
-        // ON DUPLICATE KEY funciona normalmente pois não há mais NULL na UNIQUE KEY (tipo, id_criador).
-        $db->query("INSERT INTO chatgpt_prompts (tipo, id_criador, conteudo)
-                    VALUES ('$tipo', $id_criador_sql, '$conteudo_esc')
+        // ON DUPLICATE KEY funciona pela UNIQUE KEY (tipo, id_criador, escopo).
+        $db->query("INSERT INTO chatgpt_prompts (tipo, escopo, id_criador, conteudo)
+                    VALUES ('$tipo', '$escopo_esc', $id_criador_sql, '$conteudo_esc')
                     ON DUPLICATE KEY UPDATE conteudo='$conteudo_esc', datetime_atualizacao=NOW()");
 
         echo json_encode(['success' => true]);
@@ -1329,24 +1370,7 @@ if (isset($_GET['action']) && $_GET['action'] === 'web_search') {
     }
 
     global $ollama_manual_ip, $CHATGPT_VIA_API_KEY;
-    $ip_final = '';
-    if (!empty($ollama_manual_ip)) {
-        $ip_final = $ollama_manual_ip;
-    } else {
-        $url_monitor = 'http://conexaovida.org/no-ip-dynamic_ip.php?port=3003';
-        $ch = curl_init($url_monitor);
-        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-        curl_setopt($ch, CURLOPT_FOLLOWLOCATION, true);
-        curl_setopt($ch, CURLOPT_HEADER, true);
-        curl_setopt($ch, CURLOPT_TIMEOUT, 10);
-        $raw_response = curl_exec($ch);
-        $effective_url = curl_getinfo($ch, CURLINFO_EFFECTIVE_URL);
-        curl_close($ch);
-        $ip_found = null;
-        if (preg_match('/(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})/', $effective_url, $matches)) { $ip_found = $matches[1]; }
-        else if (preg_match('/(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})/', $raw_response ?? '', $matches)) { $ip_found = $matches[1]; }
-        if ($ip_found && filter_var($ip_found, FILTER_VALIDATE_IP)) { $ip_final = 'http://' . $ip_found . ':3003'; }
-    }
+    $ip_final = chatgpt_resolve_simulator_base_url($ollama_manual_ip, 10);
 
     if (empty($ip_final) || !filter_var($ip_final, FILTER_VALIDATE_URL)) {
         echo json_encode(['success' => false, 'error' => 'Não foi possível detectar IP do servidor.']); exit;
@@ -2489,15 +2513,16 @@ if (function_exists('get_mysql_connection_local')) {
         $_db_p = get_mysql_connection_local();
         if ($_db_p) {
             $_db_p->set_charset("utf8mb4");
+            chatgpt_ensure_prompt_scope_schema($_db_p);
             // System prompt (somente se o admin tiver editado)
-            $_r = $_db_p->query("SELECT conteudo FROM chatgpt_prompts WHERE tipo='system' AND id_criador='default' LIMIT 1");
+            $_r = $_db_p->query("SELECT conteudo FROM chatgpt_prompts WHERE tipo='system' AND escopo='chat' AND id_criador='default' LIMIT 1");
             if ($_r && $_row = $_r->fetch_assoc()) {
                 if (!empty(trim($_row['conteudo']))) $active_system_prompt = $_row['conteudo'];
             }
             // User prompt do usuário logado
             if (isset($row_login_atual['id']) && !empty($row_login_atual['id'])) {
                 $_uid = intval($row_login_atual['id']);
-                $_r2 = $_db_p->query("SELECT conteudo FROM chatgpt_prompts WHERE tipo='user' AND id_criador=$_uid LIMIT 1");
+                $_r2 = $_db_p->query("SELECT conteudo FROM chatgpt_prompts WHERE tipo='user' AND escopo='chat' AND id_criador=$_uid LIMIT 1");
                 if ($_r2 && $_row2 = $_r2->fetch_assoc()) {
                     if (!empty(trim($_row2['conteudo']))) {
                         $active_system_prompt .= "\n\n[PREFERÊNCIAS DO USUÁRIO]\n" . $_row2['conteudo'];
@@ -2652,24 +2677,7 @@ if (isset($_GET['action']) && $_GET['action'] === 'sync_simulator') {
     
     // Identifica o IP base (mesma lógica do proxy principal)
 
-    $ip_final = "";
-    if (!empty($ollama_manual_ip)) {
-        $ip_final = $ollama_manual_ip;
-    } else {
-        $url_monitor = "http://conexaovida.org/no-ip-dynamic_ip.php?port=3003";
-        $ch = curl_init($url_monitor);
-        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-        curl_setopt($ch, CURLOPT_FOLLOWLOCATION, true); 
-        curl_setopt($ch, CURLOPT_HEADER, true);         
-        curl_setopt($ch, CURLOPT_TIMEOUT, 200);
-        $raw_response = curl_exec($ch);
-        $effective_url = curl_getinfo($ch, CURLINFO_EFFECTIVE_URL); 
-        curl_close($ch);
-        $ip_found = null;
-        if (preg_match('/(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})/', $effective_url, $matches)) { $ip_found = $matches[1]; } 
-        else if (preg_match('/(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})/', $raw_response ?? '', $matches)) { $ip_found = $matches[1]; }
-        if ($ip_found && filter_var($ip_found, FILTER_VALIDATE_IP)) { $ip_final = "http://" . $ip_found . ":3003"; }
-    }
+    $ip_final = chatgpt_resolve_simulator_base_url($ollama_manual_ip, 200);
     
     if (empty($ip_final) || !filter_var($ip_final, FILTER_VALIDATE_URL)) {
         header('Content-Type: application/json');
@@ -2720,24 +2728,7 @@ if (isset($_GET['action']) && $_GET['action'] === 'delete_simulator_chat') {
     $origin_url = $req['origin_url'] ?? '';
 
     // Identifica o IP base (mesma lógica do sync)
-    $ip_final = "";
-    if (!empty($ollama_manual_ip)) {
-        $ip_final = str_replace('11434', '3003', rtrim($ollama_manual_ip, '/'));
-    } else {
-        $url_monitor = "http://conexaovida.org/no-ip-dynamic_ip.php?port=3003";
-        $ch = curl_init($url_monitor);
-        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-        curl_setopt($ch, CURLOPT_FOLLOWLOCATION, true);
-        curl_setopt($ch, CURLOPT_HEADER, true);
-        curl_setopt($ch, CURLOPT_TIMEOUT, 10);
-        $raw_response = curl_exec($ch);
-        $effective_url = curl_getinfo($ch, CURLINFO_EFFECTIVE_URL);
-        curl_close($ch);
-        $ip_found = null;
-        if (preg_match('/(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})/', $effective_url, $matches)) $ip_found = $matches[1];
-        else if (preg_match('/(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})/', $raw_response ?? '', $matches)) $ip_found = $matches[1];
-        if ($ip_found && filter_var($ip_found, FILTER_VALIDATE_IP)) $ip_final = "http://{$ip_found}:3003";
-    }
+    $ip_final = chatgpt_resolve_simulator_base_url($ollama_manual_ip, 10);
 
     if (empty($ip_final) || !filter_var($ip_final, FILTER_VALIDATE_URL)) {
         echo json_encode(["success" => false, "error" => "IP_ERROR"]);
@@ -2780,24 +2771,7 @@ if (isset($_GET['action']) && $_GET['action'] === 'download_file') {
 
     // Resolve IP do ChatGPT Simulator (porta 3003)
     global $ollama_manual_ip;
-    $sim_base = '';
-    if (!empty($ollama_manual_ip)) {
-        $sim_base = preg_replace('/:\d+$/', ':3003', rtrim($ollama_manual_ip, '/'));
-    } else {
-        $url_monitor = "http://conexaovida.org/no-ip-dynamic_ip.php?port=3003";
-        $ch = curl_init($url_monitor);
-        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-        curl_setopt($ch, CURLOPT_FOLLOWLOCATION, true);
-        curl_setopt($ch, CURLOPT_HEADER, true);
-        curl_setopt($ch, CURLOPT_TIMEOUT, 5);
-        $raw = curl_exec($ch);
-        $eff = curl_getinfo($ch, CURLINFO_EFFECTIVE_URL);
-        curl_close($ch);
-        $ip = null;
-        if (preg_match('/(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})/', $eff, $m)) $ip = $m[1];
-        elseif (preg_match('/(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})/', $raw ?? '', $m)) $ip = $m[1];
-        if ($ip && filter_var($ip, FILTER_VALIDATE_IP)) $sim_base = "http://{$ip}:3003";
-    }
+    $sim_base = chatgpt_resolve_simulator_base_url($ollama_manual_ip, 5);
 
     if (empty($sim_base)) {
         http_response_code(502);
@@ -2922,9 +2896,12 @@ if (isset($_GET['action']) && $_GET['action'] === 'proxy') {
     // ROTA EXCLUSIVA: CHATGPT SIMULATOR (Porta 3003)
     // ====================================================================================
     if(isset($req['data']['model']) && !empty($req['data']['model']) && $req['data']['model'] === 'ChatGPT Simulator') {
-        
-        $ip_final = str_replace('11434', '3003', $ip_final);
-        $url_destino = $ip_final . "/v1/chat/completions"; 
+        $simulator_base = chatgpt_resolve_simulator_base_url($ollama_manual_ip, 5);
+        if (empty($simulator_base) || !filter_var($simulator_base, FILTER_VALIDATE_URL)) {
+            header('Content-Type: application/json');
+            echo json_encode(["error" => "IP_ERROR", "msg" => "Não foi possível detectar URL do ChatGPT Simulator."]); exit;
+        }
+        $url_destino = rtrim($simulator_base, '/') . "/v1/chat/completions";
         
         $chat_id = $req['data']['chat_id'] ?? null;
         $url_context = $req['data']['url'] ?? null;
