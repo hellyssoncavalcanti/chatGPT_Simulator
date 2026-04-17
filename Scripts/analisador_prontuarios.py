@@ -1190,45 +1190,52 @@ def garantir_schema_analise_compilada_paciente():
 
 def garantir_migracoes():
     """
-    Aplica migrações de schema em tabelas pré-existentes.
-    Seguro executar múltiplas vezes — MODIFY COLUMN é idempotente no MySQL.
-    Invalida o cache de colunas ao final para refletir as mudanças.
-
-    Migrações incluídas:
-      • seguimento_retorno_estimado  VARCHAR(100) → LONGTEXT
-        Motivo: o campo recebe o objeto JSON completo de seguimento, que pode
-        facilmente ultrapassar os 100 caracteres do tipo original.
-      • hash_prontuario (comentário)
-        Motivo: remover referência antiga ao descritor analise_compilada_paciente,
-        que agora é salvo em id_criador nas análises compiladas.
+    Aplica migrações pendentes da pasta Scripts/migrations e remove o arquivo
+    SQL após sucesso completo. Assim, cada atualização roda apenas uma vez.
+    Placeholders suportados no SQL: __TABELA__.
     """
-    migracoes = [
-        (
-            "seguimento_retorno_estimado VARCHAR(100) → LONGTEXT",
-            f"""
-            ALTER TABLE {TABELA}
-            MODIFY COLUMN seguimento_retorno_estimado LONGTEXT NULL
-            COMMENT 'JSON completo do objeto seguimento_retorno_estimado retornado pelo LLM.'
-            """
-        ),
-        (
-            "hash_prontuario COMMENT atualizado",
-            f"""
-            ALTER TABLE {TABELA}
-            MODIFY COLUMN hash_prontuario CHAR(64) NULL
-            COMMENT 'Hash SHA-256 do conteudo bruto do prontuario analisado.'
-            """
-        ),
-    ]
+    migrations_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "migrations")
+    if not os.path.isdir(migrations_dir):
+        return
 
-    for descricao, sql in migracoes:
+    migration_files = sorted(
+        name for name in os.listdir(migrations_dir)
+        if name.lower().endswith(".sql") and name.startswith("analisador_")
+    )
+    if not migration_files:
+        return
+
+    def _split_sql_statements(content: str) -> list[str]:
+        cleaned = re.sub(r"/\*.*?\*/", "", content, flags=re.DOTALL)
+        lines = []
+        for ln in cleaned.splitlines():
+            stripped = ln.strip()
+            if not stripped or stripped.startswith("--") or stripped.startswith("#"):
+                continue
+            lines.append(ln)
+        merged = "\n".join(lines)
+        return [stmt.strip() for stmt in merged.split(";") if stmt.strip()]
+
+    for filename in migration_files:
+        path = os.path.join(migrations_dir, filename)
         try:
-            sql_exec(sql, reason="garantir_migracoes")
-            log.info(f"✅ Migração aplicada: {descricao}")
+            with open(path, "r", encoding="utf-8") as f:
+                sql_content = f.read()
+            sql_content = sql_content.replace("__TABELA__", TABELA)
+            statements = _split_sql_statements(sql_content)
+            if not statements:
+                log.warning(f"⚠️ Migração sem comandos executáveis: {filename}")
+                continue
+
+            for idx, statement in enumerate(statements, 1):
+                sql_exec(statement, reason=f"garantir_migracoes:{filename}:{idx}")
+
+            os.remove(path)
+            log.info(f"✅ Migração aplicada e removida: {filename}")
         except RuntimeError as e:
-            log.warning(f"⚠️  Migração '{descricao}': {e}")
+            log.warning(f"⚠️  Migração '{filename}': {e}")
         except Exception as e:
-            log.warning(f"⚠️  Migração '{descricao}' (erro inesperado): {e}")
+            log.warning(f"⚠️  Migração '{filename}' (erro inesperado): {e}")
 
     global _COLUNAS_TABELA
     _COLUNAS_TABELA = None   # força releitura do schema após migrações
@@ -4391,13 +4398,13 @@ def analisar_prontuario(
             log.info(f"  📎 chat_id: {new_chat_id}")
 
         elif t == "markdown":
-                   markdown = obj.get("content", "")
-                   markdown_visivel = _extrair_markdown_visivel_llm(markdown)
-                   if markdown_visivel:
-                       _inline_status('📝', f"Recebendo: {len(markdown_visivel)} chars...")
-                   else:
-                       _inline_status('⏳', "Pensando...")
-                   inline_active = True
+            markdown = obj.get("content", "")
+            markdown_visivel = _extrair_markdown_visivel_llm(markdown)
+            if markdown_visivel:
+                _inline_status('📝', f"Recebendo: {len(markdown_visivel)} chars...")
+            else:
+                _inline_status('⏳', "Pensando...")
+            inline_active = True
 
         elif t == "finish":
             if inline_active:
