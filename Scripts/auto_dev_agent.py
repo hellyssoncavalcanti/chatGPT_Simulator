@@ -1063,12 +1063,42 @@ def _stream_chat_completion(
     last_markdown_report_ts = 0.0
     MARKDOWN_REPORT_MIN_STEP = 1024   # chars
     MARKDOWN_REPORT_MIN_INTERVAL = 3  # segundos
+    inline_status_open = False
 
     def _clean_browser_prefix(text: str) -> str:
         s = (text or "").strip()
         s = re.sub(r"^\s*Remetente:\s*[^|]+\|\s*", "", s, flags=re.IGNORECASE)
         s = re.sub(r"(\[browser\.py\])\s+\[[^\]]+\]\s+", r"\1 ", s, flags=re.IGNORECASE)
         return s
+
+    def _normalize_status(text: str) -> str:
+        s = (text or "").strip()
+        s = re.sub(r"^\s*Remetente:\s*[^|]+\|\s*", "", s, flags=re.IGNORECASE)
+        cooldown_match = re.search(r"nova tentativa em\s*([0-9]{1,2}:[0-9]{2})", s, flags=re.IGNORECASE)
+        if cooldown_match:
+            return f"Aguardando cooldown do ChatGPT | nova tentativa em {cooldown_match.group(1)}"
+        return s
+
+    def _print_inline_status(text: str) -> None:
+        nonlocal inline_status_open
+        try:
+            rendered = f"   ⏳ status: {_normalize_status(text)[:220]}"
+            sys.stdout.write("\r" + rendered + " " * 24)
+            sys.stdout.flush()
+            inline_status_open = True
+        except Exception:
+            log(f"   ⏳ status: {_normalize_status(text)[:220]}")
+
+    def _close_inline_status() -> None:
+        nonlocal inline_status_open
+        if inline_status_open:
+            try:
+                sys.stdout.write("\r" + " " * 260 + "\r")
+                sys.stdout.flush()
+            except Exception:
+                pass
+            finally:
+                inline_status_open = False
 
     started = time.time()
     last_event = started
@@ -1091,19 +1121,22 @@ def _stream_chat_completion(
         if t == "status":
             text = (str(c) if c is not None else "").strip()
             if text and text != last_status_logged:
-                log(f"   ⏳ status: {text[:220]}")
+                _print_inline_status(text)
                 last_status_logged = text
 
         elif t == "log":
             text = (str(c) if c is not None else "").strip()
             if text and "screenshot stream" not in text.lower():
+                _close_inline_status()
                 log(f"   🔧 {_clean_browser_prefix(text)[:320]}")
 
         elif t == "chat_id" and isinstance(c, str):
+            _close_inline_status()
             chat_id = c
             log(f"   📎 chat_id: {c}")
 
         elif t == "chat_meta" and isinstance(c, dict):
+            _close_inline_status()
             chat_url = c.get("url") or chat_url
             chat_id = c.get("chat_id") or chat_id
             if c.get("url"):
@@ -1119,11 +1152,13 @@ def _stream_chat_completion(
                 or (size != last_markdown_size_reported
                     and now - last_markdown_report_ts >= MARKDOWN_REPORT_MIN_INTERVAL)
             ):
+                _close_inline_status()
                 log(f"   📝 recebendo resposta: {size} chars...")
                 last_markdown_size_reported = size
                 last_markdown_report_ts = now
 
         elif t == "finish" and isinstance(c, dict):
+            _close_inline_status()
             chat_url = c.get("url") or chat_url
             total_chars = len(markdown_buf)
             elapsed = time.time() - started
@@ -1131,6 +1166,7 @@ def _stream_chat_completion(
                 f"em {elapsed:.1f}s | url={chat_url}")
 
         elif t == "error":
+            _close_inline_status()
             error_msg = str(c)
             log(f"   ❌ erro recebido: {error_msg[:260]}", logging.WARNING)
             # Detecta rate limit e aplica cooldown ANTES de abortar
@@ -1145,6 +1181,7 @@ def _stream_chat_completion(
 
     if error_msg and not markdown_buf:
         raise RuntimeError(f"ChatGPT retornou erro: {error_msg}")
+    _close_inline_status()
     return markdown_buf, chat_id, chat_url
 
 

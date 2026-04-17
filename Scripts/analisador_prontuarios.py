@@ -4341,6 +4341,15 @@ def analisar_prontuario(
 
         if t == "status":
             msg = obj.get("content", "")
+            phase = str(obj.get("phase") or "").strip().lower()
+            wait_seconds = obj.get("wait_seconds")
+            if phase == "chat_rate_limit_cooldown" and wait_seconds is not None:
+                try:
+                    wait_seconds = max(0, int(round(float(wait_seconds))))
+                    mm, ss = divmod(wait_seconds, 60)
+                    msg = f"Aguardando cooldown do ChatGPT | nova tentativa em {mm:02d}:{ss:02d}"
+                except Exception:
+                    pass
             if msg == last_status:
                 continue
             last_status = msg
@@ -5298,6 +5307,15 @@ def enriquecer_com_evidencias(resultado: dict, resultados_web: list,
             t = obj.get("type")
             if t == "status":
                 msg = obj.get("content", "")
+                phase = str(obj.get("phase") or "").strip().lower()
+                wait_seconds = obj.get("wait_seconds")
+                if phase == "chat_rate_limit_cooldown" and wait_seconds is not None:
+                    try:
+                        wait_seconds = max(0, int(round(float(wait_seconds))))
+                        mm, ss = divmod(wait_seconds, 60)
+                        msg = f"Aguardando cooldown do ChatGPT | nova tentativa em {mm:02d}:{ss:02d}"
+                    except Exception:
+                        pass
                 if msg == last_status:
                     continue
                 last_status = msg
