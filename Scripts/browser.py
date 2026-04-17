@@ -274,6 +274,43 @@ async def _stream_browser_screenshots(page, q, stop_event: asyncio.Event, label:
         raise
 
 
+async def _keep_chat_render_alive(page, q, stop_event: asyncio.Event, activity_ts: list = None,
+                                  interval_sec: float = 1.4):
+    """
+    Mantém a renderização da resposta "acordada" com micro-scrolls periódicos.
+    Em alguns ambientes o streaming da UI só avança após interação de usuário.
+    """
+    tick = 0
+    while not stop_event.is_set():
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=interval_sec)
+            continue
+        except asyncio.TimeoutError:
+            pass
+
+        try:
+            down = random.randint(70, 120)
+            up = -(down - random.randint(8, 22))
+            await page.evaluate(
+                """([down, up]) => {
+                    window.scrollBy(0, down);
+                    window.scrollBy(0, up);
+                    return window.scrollY || 0;
+                }""",
+                [down, up],
+            )
+            if activity_ts:
+                activity_ts[0] = time.time()
+            tick += 1
+            if q and tick % 30 == 0:
+                emit_log(q, "🫀 Keepalive: micro-scroll aplicado para manter renderização contínua.")
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            # Keepalive é best-effort; não deve interromper o fluxo principal.
+            await asyncio.sleep(0.2)
+
+
 def _composer_state_script():
     return r"""() => {
         const composerRoot = document.querySelector('form')
@@ -1662,7 +1699,7 @@ async def _click_chatgpt_download_elements(page, q=None):
                     seenCards.add(card);
 
                     const headerText = (card.innerText || '').trim();
-                    const m = headerText.match(/[\\w\\-. ]+\\.(xlsx|xls|csv|pdf|docx|doc|pptx|ppt|zip|rar|json|xml|txt|png|jpg|jpeg|gif|svg)/i);
+                    const m = headerText.match(/[\w.\- ]+\.(xlsx|xls|csv|pdf|docx|doc|pptx|ppt|zip|rar|json|xml|txt|png|jpg|jpeg|gif|svg)/i);
                     if (!m) return;
                     const filename = m[0].trim();
 
@@ -2540,6 +2577,31 @@ async def handle_sync_task(context, task):
 async def watchdog_page(page, q, stop_event: asyncio.Event,
                         check_interval: int = 15,
                         activity_ts: list = None):
+    transient_failures = 0
+
+    async def _poke_page_to_unfreeze():
+        """Interação leve para destravar renderização quando a aba fica inerte."""
+        actions = ("focus_input", "random_click", "scroll")
+        action = random.choice(actions)
+        if action == "focus_input":
+            await page.evaluate("""() => {
+                const ta = document.querySelector('#prompt-textarea');
+                if (ta) { ta.focus(); return true; }
+                const main = document.querySelector('main');
+                if (main) { main.click(); return true; }
+                return false;
+            }""")
+            return "focus_input"
+        if action == "random_click":
+            vp = page.viewport_size or {"width": 1280, "height": 720}
+            x = max(20, min(vp.get("width", 1280) - 20, random.randint(80, max(120, vp.get("width", 1280) - 80))))
+            y = max(20, min(vp.get("height", 720) - 20, random.randint(120, max(160, vp.get("height", 720) - 120))))
+            await page.mouse.click(x, y, delay=random.randint(20, 120))
+            return f"random_click({x},{y})"
+        delta = random.choice((-300, -180, 180, 300))
+        await page.mouse.wheel(0, delta)
+        return f"scroll({delta})"
+
     while not stop_event.is_set():
         try:
             await asyncio.wait_for(asyncio.sleep(check_interval), timeout=check_interval + 1)
@@ -2551,10 +2613,25 @@ async def watchdog_page(page, q, stop_event: asyncio.Event,
             continue
         try:
             await asyncio.wait_for(page.evaluate("1"), timeout=20.0)
+            transient_failures = 0
         except Exception as e:
-            emit_event(q, "error", f"⏱️ Watchdog: aba não respondeu ({e}). Abortando.")
-            stop_event.set()
-            return
+            transient_failures += 1
+            emit_log(q, f"⚠️ Watchdog: falha transitória de heartbeat ({transient_failures}/2) — {e}")
+            try:
+                action = await _poke_page_to_unfreeze()
+                if activity_ts:
+                    activity_ts[0] = time.time()
+                emit_log(q, f"🩺 Watchdog: interação de recuperação aplicada ({action}).")
+                await asyncio.sleep(0.35)
+                await asyncio.wait_for(page.evaluate("1"), timeout=8.0)
+                transient_failures = 0
+                continue
+            except Exception as recover_err:
+                emit_log(q, f"⚠️ Watchdog: recuperação não confirmou heartbeat ({recover_err}).")
+            if transient_failures >= 2:
+                emit_event(q, "error", f"⏱️ Watchdog: aba não respondeu ({e}). Abortando.")
+                stop_event.set()
+                return
 
 
 
@@ -3889,6 +3966,10 @@ async def handle_chat_task_inner(task, page, q, stop_event: asyncio.Event, activ
     screenshot_task = asyncio.create_task(
         _stream_browser_screenshots(page, q, screenshot_stop, label="chat")
     )
+    render_keepalive_stop = asyncio.Event()
+    render_keepalive_task = asyncio.create_task(
+        _keep_chat_render_alive(page, q, render_keepalive_stop, activity_ts=activityts, interval_sec=1.4)
+    )
 
     start_time  = time.time()
     started     = False
@@ -4182,8 +4263,14 @@ async def handle_chat_task_inner(task, page, q, stop_event: asyncio.Event, activ
     # Para o streaming de screenshots
     screenshot_stop.set()
     screenshot_task.cancel()
+    render_keepalive_stop.set()
+    render_keepalive_task.cancel()
     try:
         await screenshot_task
+    except (asyncio.CancelledError, Exception):
+        pass
+    try:
+        await render_keepalive_task
     except (asyncio.CancelledError, Exception):
         pass
 
