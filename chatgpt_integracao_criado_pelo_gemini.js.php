@@ -195,6 +195,19 @@ function chatgpt_ensure_text_wrapper($conteudo) {
     return $start . "\n" . $txt . "\n" . $end;
 }
 
+function chatgpt_extract_analisador_schema_section($prompt) {
+    $raw = trim((string)$prompt);
+    if ($raw === '') return null;
+    $start = "══════════════════════════════════════\nFORMATO DE SAÍDA (JSON)";
+    $end = "Responder SOMENTE com o JSON.";
+    $start_pos = strpos($raw, $start);
+    if ($start_pos === false) return null;
+    $end_pos = strrpos($raw, $end);
+    if ($end_pos === false || $end_pos < $start_pos) return null;
+    $slice_end = $end_pos + strlen($end);
+    return trim(substr($raw, $start_pos, $slice_end - $start_pos));
+}
+
 // Salva tabelas auxiliares (alertas, grafo, casos) em transacao atomica
 function chatgpt_salvar_auxiliar($db, $id_atendimento, $id_paciente, $dados) {
     // Garante UTF-8 na conexao antes de qualquer INSERT
@@ -1299,9 +1312,16 @@ if (isset($_GET['action']) && $_GET['action'] === 'get_prompt') {
 
         // Prompt de análise de prontuários do membro logado
         $analisador_prompt = null;
+        $analisador_schema_locked = null;
         if ($id_criador) {
             $r = $db->query("SELECT conteudo FROM chatgpt_prompts WHERE tipo='system' AND escopo='analisador_prontuarios' AND id_criador=$id_criador LIMIT 1");
             if ($r && $row_ap = $r->fetch_assoc()) $analisador_prompt = chatgpt_ensure_text_wrapper($row_ap['conteudo']);
+        }
+        // Schema JSON fixo: sempre extraído do prompt base (id_criador='atendimentos_analise')
+        $r = $db->query("SELECT conteudo FROM chatgpt_prompts WHERE tipo='system' AND escopo='analisador_prontuarios' AND id_criador='atendimentos_analise' LIMIT 1");
+        if ($r && $row_schema = $r->fetch_assoc()) {
+            $schema_src = chatgpt_ensure_text_wrapper($row_schema['conteudo']);
+            $analisador_schema_locked = chatgpt_extract_analisador_schema_section($schema_src);
         }
 
         echo json_encode([
@@ -1309,7 +1329,8 @@ if (isset($_GET['action']) && $_GET['action'] === 'get_prompt') {
             'system_prompt' => $system_prompt,
             'user_prompt' => $user_prompt,
             'analisador_prompt' => $analisador_prompt,
-            'analisador_prompt_default' => $analisador_prompt_default
+            'analisador_prompt_default' => $analisador_prompt_default,
+            'analisador_schema_locked' => $analisador_schema_locked
         ]);
     } catch (Exception $e) {
         echo json_encode(['success' => false, 'error' => $e->getMessage()]);
@@ -3608,6 +3629,7 @@ FORMATO DE SAÍDA (JSON)
 }
 
 Responder SOMENTE com o JSON.`;
+    let ANALISADOR_PROMPT_LOCKED_SECTION_CURRENT = ANALISADOR_PROMPT_LOCKED_SECTION;
 
     const PROXY_URL = "<?php echo $_SERVER['PHP_SELF']; ?>?action=proxy";
     const FILE_PREFIX = "[<?php echo $_SERVER['PHP_SELF']; ?>]"; 
@@ -3976,7 +3998,7 @@ Responder SOMENTE com o JSON.`;
         @keyframes blink { 50% { opacity: 0; } }
         .ctx-pill { display: flex; align-items: center; gap: 4px; background: #fff; border: 1px solid #ccc; padding: 2px 8px; border-radius: 12px; cursor: pointer; font-size: 11px; }
         .ow-stream-box { display: flex; align-items: center; gap: 6px; margin-top: 8px; font-size: 11px; color: #666; }
-        #ow-sidebar { position: absolute; top: 0; left: 0; width: 0; height: 100%; background: #ffffff; z-index: 100; transition: width 0.3s; overflow: hidden; color: #333; box-shadow: 2px 0 5px rgba(0,0,0,0.1); border-right: 1px solid #eee; }
+        #ow-sidebar { position: absolute; top: 0; left: 0; width: 0; height: 100%; background: #ffffff; z-index: 100; transition: width 0.3s; overflow-y: auto; overflow-x: hidden; -webkit-overflow-scrolling: touch; color: #333; box-shadow: 2px 0 5px rgba(0,0,0,0.1); border-right: 1px solid #eee; }
         #ow-sidebar.open { width: 90%; }
         .sb-content { padding: 20px; width: 100%; box-sizing: border-box; display: flex; flex-direction: column; height: 100%; }
         .sb-title { font-size: 16px; font-weight: bold; margin-bottom: 15px; border-bottom: 1px solid #eee; padding-bottom: 10px; display: flex; justify-content: space-between; align-items: center; }
@@ -4475,7 +4497,7 @@ Responder SOMENTE com o JSON.`;
         const raw = (textoEditavel || '').toString();
         const idx = raw.indexOf(startMarker);
         const base = (idx >= 0 ? raw.slice(0, idx) : raw).trim();
-        return `${base}\n\n${ANALISADOR_PROMPT_LOCKED_SECTION}`;
+        return `${base}\n\n${ANALISADOR_PROMPT_LOCKED_SECTION_CURRENT}`;
     }
 
     function extractAnalisadorPromptEditavel(promptCompleto) {
@@ -4490,13 +4512,16 @@ Responder SOMENTE com o JSON.`;
             const res = await fetch(`<?php echo $_SERVER['PHP_SELF']; ?>?action=get_prompt`);
             const d   = await res.json();
             if (!d.success) throw new Error(d.error);
+            if (d.analisador_schema_locked && String(d.analisador_schema_locked).trim() !== '') {
+                ANALISADOR_PROMPT_LOCKED_SECTION_CURRENT = String(d.analisador_schema_locked).trim();
+            }
 
             const userEl = document.getElementById('sb-user-prompt');
             if (userEl && d.user_prompt !== null) userEl.value = d.user_prompt;
 
             const analisadorEl = document.getElementById('sb-analisador-prompt');
             const analisadorLockedEl = document.getElementById('sb-analisador-locked-section');
-            if (analisadorLockedEl) analisadorLockedEl.value = ANALISADOR_PROMPT_LOCKED_SECTION;
+            if (analisadorLockedEl) analisadorLockedEl.value = ANALISADOR_PROMPT_LOCKED_SECTION_CURRENT;
             if (analisadorEl) {
                 analisadorEl.value = d.analisador_prompt !== null && String(d.analisador_prompt).trim() !== ''
                     ? extractAnalisadorPromptEditavel(d.analisador_prompt)
@@ -4508,7 +4533,7 @@ Responder SOMENTE com o JSON.`;
             if (sysEl) sysEl.value = d.system_prompt !== null ? d.system_prompt : DEFAULT_SYS_PROMPT;
             const analisadorDefaultEl = document.getElementById('sb-analisador-default-prompt');
             const analisadorDefaultLockedEl = document.getElementById('sb-analisador-default-locked-section');
-            if (analisadorDefaultLockedEl) analisadorDefaultLockedEl.value = ANALISADOR_PROMPT_LOCKED_SECTION;
+            if (analisadorDefaultLockedEl) analisadorDefaultLockedEl.value = ANALISADOR_PROMPT_LOCKED_SECTION_CURRENT;
             if (analisadorDefaultEl) {
                 analisadorDefaultEl.value = d.analisador_prompt_default !== null && String(d.analisador_prompt_default).trim() !== ''
                     ? extractAnalisadorPromptEditavel(d.analisador_prompt_default)
