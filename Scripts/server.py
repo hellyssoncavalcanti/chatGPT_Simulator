@@ -77,6 +77,24 @@ _chat_rate_limit_lock = threading.Lock()
 _chat_rate_limit_until = 0.0
 _chat_rate_limit_strikes = 0
 ACTIVE_CHAT_STALE_SEC = 900
+PYTHON_CHAT_QUEUE_TICK_SEC = 1.0
+PYTHON_CHAT_QUEUE_TIMEOUT_SEC = max(
+    30,
+    int(
+        getattr(
+            config,
+            "REQUEST_TIMEOUT_SEC",
+            getattr(config, "AUTODEV_AGENT_REQUEST_TIMEOUT", 900)
+        ) or os.getenv(
+            "REQUEST_TIMEOUT_SEC",
+            os.getenv("AUTODEV_AGENT_REQUEST_TIMEOUT", "900")
+        )
+    )
+)
+_python_chat_queue_lock = threading.Lock()
+_python_chat_queue_cond = threading.Condition(_python_chat_queue_lock)
+_python_chat_queue_waiting = []
+_python_chat_queue_active = None
 
 
 def _cleanup_active_chats():
@@ -251,6 +269,90 @@ def _wait_remote_user_priority_if_needed(is_analyzer: bool, stream_queue=None):
                 "phase": "analyzer_waiting_remote_priority",
             }, ensure_ascii=False))
         time.sleep(1.0)
+
+
+def _is_python_chat_request(source_hint_norm: str) -> bool:
+    src = (source_hint_norm or "").strip().lower()
+    return src.endswith(".py") or ".py/" in src or src.startswith("python:")
+
+
+def _is_codex_chat_request(source_hint_norm: str, url: str, origin_url: str) -> bool:
+    hay = " ".join([
+        str(source_hint_norm or "").lower(),
+        str(url or "").lower(),
+        str(origin_url or "").lower(),
+    ])
+    return ("codex" in hay) or ("/codex/cloud" in hay) or ("/codex/" in hay)
+
+
+def _queue_status_payload(wait_seconds: float, position: int, total: int, sender_label: str) -> str:
+    return json.dumps({
+        "type": "status",
+        "content": (
+            f"⏳ Fila interna do servidor: posição {position}/{max(1, total)}. "
+            f"Tempo restante estimado para liberação: {_format_wait_seconds(wait_seconds)}."
+        ),
+        "phase": "server_python_queue_wait",
+        "wait_seconds": round(max(0.0, wait_seconds), 1),
+        "queue_position": int(position),
+        "queue_size": int(total),
+        "sender": sender_label,
+    }, ensure_ascii=False)
+
+
+def _acquire_python_chat_slot(request_key: str,
+                              stream_queue=None,
+                              sender_label: str = "") -> None:
+    """FIFO para pedidos Python (ChatGPT), com timeout e status progressivo."""
+    global _python_chat_queue_active
+    joined_at = time.time()
+    with _python_chat_queue_cond:
+        _python_chat_queue_waiting.append(request_key)
+        while True:
+            elapsed = time.time() - joined_at
+            remaining = max(0.0, PYTHON_CHAT_QUEUE_TIMEOUT_SEC - elapsed)
+
+            # Timeout na fila antes de obter slot
+            if remaining <= 0:
+                if request_key in _python_chat_queue_waiting:
+                    _python_chat_queue_waiting.remove(request_key)
+                _python_chat_queue_cond.notify_all()
+                raise TimeoutError(
+                    f"Timeout de fila ({PYTHON_CHAT_QUEUE_TIMEOUT_SEC}s) aguardando slot interno."
+                )
+
+            is_head = (
+                len(_python_chat_queue_waiting) > 0
+                and _python_chat_queue_waiting[0] == request_key
+            )
+            if is_head and _python_chat_queue_active is None:
+                _python_chat_queue_waiting.pop(0)
+                _python_chat_queue_active = request_key
+                _python_chat_queue_cond.notify_all()
+                return
+
+            if stream_queue is not None:
+                try:
+                    pos = (_python_chat_queue_waiting.index(request_key) + 1)
+                except ValueError:
+                    pos = 1
+                total = len(_python_chat_queue_waiting) + (1 if _python_chat_queue_active else 0)
+                stream_queue.put(_queue_status_payload(remaining, pos, total, sender_label))
+
+            _python_chat_queue_cond.wait(timeout=min(PYTHON_CHAT_QUEUE_TICK_SEC, remaining))
+
+
+def _release_python_chat_slot(request_key: str) -> None:
+    global _python_chat_queue_active
+    with _python_chat_queue_cond:
+        if _python_chat_queue_active == request_key:
+            _python_chat_queue_active = None
+        else:
+            try:
+                _python_chat_queue_waiting.remove(request_key)
+            except ValueError:
+                pass
+        _python_chat_queue_cond.notify_all()
 
 
 def _reserve_web_search_slot():
@@ -1489,6 +1591,15 @@ def chat_completions():
     stream      = data.get("stream", False)
     attachments = data.get("attachments", [])
     origin_url  = data.get("origin_url") or data.get("url_atual") or request.headers.get("X-Origin-URL") or ""
+    is_python_source = _is_python_chat_request(source_hint_norm)
+    is_codex_request = _is_codex_chat_request(source_hint_norm, data.get("url"), origin_url)
+    use_python_queue = bool(is_python_source and not is_codex_request)
+
+    # Todos os pedidos oriundos de scripts Python devem usar encapsulamento de
+    # texto colado para evitar typing realista (lento) no browser.py.
+    if is_python_source and isinstance(message, str) and message.strip():
+        if "[INICIO_TEXTO_COLADO]" not in message or "[FIM_TEXTO_COLADO]" not in message:
+            message = f"[INICIO_TEXTO_COLADO]{message}[FIM_TEXTO_COLADO]"
 
     # --- 2. PROCESSAMENTO DE ANEXOS ---
     saved_paths = []
@@ -1559,16 +1670,30 @@ def chat_completions():
     }
 
     def _dispatch_chat_task():
+        queue_key = f"{chat_id}:{time.time_ns()}"
+        slot_acquired = False
         try:
+            if use_python_queue:
+                _acquire_python_chat_slot(queue_key, stream_q if stream else None, sender_label)
+                slot_acquired = True
             _wait_remote_user_priority_if_needed(is_analyzer, stream_q if stream else None)
             _wait_chat_rate_limit_if_needed(stream_q if stream else None)
             browser_queue.put(chat_task_payload)
+        except TimeoutError as queue_timeout:
+            stream_q.put(json.dumps({
+                "type": "error",
+                "content": f"Timeout aguardando fila interna do servidor: {queue_timeout}"
+            }, ensure_ascii=False))
+            stream_q.put(None)
         except Exception as dispatch_err:
             stream_q.put(json.dumps({
                 "type": "error",
                 "content": f"Falha ao enfileirar tarefa no browser: {dispatch_err}"
             }, ensure_ascii=False))
             stream_q.put(None)
+        finally:
+            if slot_acquired:
+                _release_python_chat_slot(queue_key)
 
     if stream:
         threading.Thread(target=_dispatch_chat_task, daemon=True).start()
@@ -1577,6 +1702,61 @@ def chat_completions():
 
     # --- 5. RESPOSTA STREAMING OU BLOCO ---
     if stream:
+        def _drain_stream_queue_after_disconnect():
+            """
+            Quando o cliente de stream desconecta, continua consumindo a fila em
+            background para que ACTIVE_CHATS reflita término real da tarefa e não
+            bloqueie filas prioritárias até o timeout de stale.
+            """
+            try:
+                while True:
+                    try:
+                        raw_msg = stream_q.get(timeout=900)
+                    except queue.Empty:
+                        break
+
+                    if raw_msg is None:
+                        ACTIVE_CHATS[chat_id]['finished'] = True
+                        ACTIVE_CHATS[chat_id]['finished_at'] = time.time()
+                        ACTIVE_CHATS[chat_id]['last_event_at'] = time.time()
+                        break
+
+                    try:
+                        msg_obj = json.loads(raw_msg)
+                    except Exception:
+                        ACTIVE_CHATS[chat_id]['last_event_at'] = time.time()
+                        continue
+
+                    t = msg_obj.get('type')
+                    if t == 'status':
+                        ACTIVE_CHATS[chat_id]['status'] = msg_obj.get('content', '')
+                        ACTIVE_CHATS[chat_id]['last_event_at'] = time.time()
+                    elif t == 'markdown':
+                        ACTIVE_CHATS[chat_id]['markdown'] = msg_obj.get('content', '')
+                        ACTIVE_CHATS[chat_id]['last_event_at'] = time.time()
+                    elif t == 'finish':
+                        fin = msg_obj.get('content', {}) or {}
+                        ACTIVE_CHATS[chat_id]['finished'] = True
+                        ACTIVE_CHATS[chat_id]['finished_at'] = time.time()
+                        ACTIVE_CHATS[chat_id]['last_event_at'] = time.time()
+                        try:
+                            storage.append_message(chat_id, "user", message)
+                            storage.append_message(chat_id, "assistant", ACTIVE_CHATS[chat_id]['markdown'])
+                            storage.save_chat(chat_id, fin.get('title', ''), fin.get('url', '') or url or '', [], origin_url=origin_url)
+                        except Exception as e:
+                            log(f"[WARN] Falha ao persistir finish (drain pós-disconnect): {e}")
+                        break
+                    elif t == 'error':
+                        ACTIVE_CHATS[chat_id]['finished'] = True
+                        ACTIVE_CHATS[chat_id]['finished_at'] = time.time()
+                        ACTIVE_CHATS[chat_id]['last_event_at'] = time.time()
+                        break
+                    else:
+                        # log/chat_meta/etc.
+                        ACTIVE_CHATS[chat_id]['last_event_at'] = time.time()
+            except Exception as e:
+                log(f"[WARN] Falha no dreno de stream pós-disconnect para chat {chat_id}: {e}")
+
         def generate():
             yield json.dumps({"type": "chat_id", "content": chat_id}) + "\n"
             if url and url != "None":
@@ -1607,6 +1787,8 @@ def chat_completions():
                             if isinstance(content_text, str) and content_text and not content_text.startswith("Remetente: "):
                                 msg_obj['content'] = f"Remetente: {sender_label} | {content_text}"
                                 raw_msg = json.dumps(msg_obj, ensure_ascii=False)
+                        if t == 'log':
+                            ACTIVE_CHATS[chat_id]['last_event_at'] = time.time()
                         if t == 'status':
                             ACTIVE_CHATS[chat_id]['status'] = msg_obj['content']
                             ACTIVE_CHATS[chat_id]['last_event_at'] = time.time()
@@ -1654,12 +1836,16 @@ def chat_completions():
                         break
 
             except GeneratorExit:
-                # PHP abortou por timeout — tarefa background continua;
-                # fila fica intacta para /api/sync recolher via TAKEOVER mode
-                ACTIVE_CHATS[chat_id]['finished'] = True
-                ACTIVE_CHATS[chat_id]['finished_at'] = time.time()
+                # Conexão de stream foi interrompida pelo lado cliente/proxy.
+                # NÃO marca como finalizado aqui: a tarefa no browser pode
+                # continuar em progresso e será recuperável via /api/sync.
                 ACTIVE_CHATS[chat_id]['last_event_at'] = time.time()
-                log(f"[ACTIVE_CHATS] stream encerrado pelo cliente; chat {chat_id} liberado para novas filas.")
+                log(
+                    f"[ACTIVE_CHATS] stream interrompido (cliente/proxy) para chat {chat_id}; "
+                    "mantendo tarefa ativa para retomada."
+                )
+                if not ACTIVE_CHATS.get(chat_id, {}).get('finished'):
+                    threading.Thread(target=_drain_stream_queue_after_disconnect, daemon=True).start()
 
         return Response(generate(), mimetype="application/x-ndjson")
 

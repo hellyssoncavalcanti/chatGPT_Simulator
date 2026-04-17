@@ -53,13 +53,58 @@
 import os
 from datetime import datetime
 
+
+def _env(name: str, default: str) -> str:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    value = value.strip()
+    return value if value else default
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        return int(raw.strip())
+    except Exception:
+        return default
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    normalized = raw.strip().lower()
+    if normalized in {"1", "true", "yes", "on", "sim"}:
+        return True
+    if normalized in {"0", "false", "no", "off", "nao", "não"}:
+        return False
+    return default
+
 VERSION = "11.0"
-PORT = 3002
-API_KEY = "CVAPI_2b9c80c2abf94a76baf8b3e68d89cb7e"
-BASE_DIR = r"C:\chatgpt_simulator"
+PORT = _env_int("SIMULATOR_PORT", 3002)
+API_KEY = _env("SIMULATOR_API_KEY", "CVAPI_2b9c80c2abf94a76baf8b3e68d89cb7e")
+BASE_DIR = _env(
+    "SIMULATOR_BASE_DIR",
+    r"C:\chatgpt_simulator" if os.name == "nt" else os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+)
 
 # Debug: exibe todas as queries SQL no console (útil para auditoria)
-DEBUG_LOG = False   # Altere para True para ativar o debug
+DEBUG_LOG = _env_bool("SIMULATOR_DEBUG_LOG", False)   # Altere para True para ativar o debug
+
+# Timeout universal (segundos) para requisições longas de automações Python.
+# Prioridade:
+#   1) REQUEST_TIMEOUT_SEC
+#   2) AUTODEV_AGENT_REQUEST_TIMEOUT (legado)
+#   3) default 900s
+REQUEST_TIMEOUT_SEC = _env_int(
+    "REQUEST_TIMEOUT_SEC",
+    _env_int("AUTODEV_AGENT_REQUEST_TIMEOUT", 900)
+)
+# Alias explícito para manter compatibilidade com scripts legados.
+AUTODEV_AGENT_REQUEST_TIMEOUT = REQUEST_TIMEOUT_SEC
 
 
 DIRS = {
