@@ -9268,7 +9268,13 @@ Responder SOMENTE com o JSON.`;
         
         window.switchSidebarView = function(viewName) {
             document.querySelectorAll('.sb-view').forEach(el => el.classList.remove('active'));
-            document.getElementById('sb-view-' + viewName).classList.add('active');
+            const targetView = document.getElementById('sb-view-' + viewName);
+            if (!targetView) return;
+            targetView.classList.add('active');
+
+            const sidebarEl = document.getElementById('ow-sidebar');
+            if (sidebarEl) sidebarEl.scrollTop = 0;
+            targetView.scrollTop = 0;
         }
         
         document.getElementById('sb-save-user-prompt').onclick = async () => {
