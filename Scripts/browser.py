@@ -560,9 +560,8 @@ async def smart_input(page, message, q=None, activityts=None):
         Normaliza \r\n -> \n antes de escrever no clipboard."""
         text = text.replace('\r\n', '\n').replace('\r', '\n')
         total = len(text)
-        emit_log(q, f'{label}: {total} chars via clipboard...')
         if q:
-            emit_event(q, 'status', f'{label}... 0%')
+            emit_event(q, 'status', f'{label}: {total} chars via clipboard... 0%')
         if activityts:
             activityts[0] = time.time()
 
@@ -622,7 +621,7 @@ async def smart_input(page, message, q=None, activityts=None):
         if activityts:
             activityts[0] = time.time()
         if q:
-            emit_event(q, 'status', f'{label}... 100%')
+            emit_event(q, 'status', f'{label}: {total} chars via clipboard... 100%')
         return inserted
 
     if start_marker in message and end_marker in message:
@@ -3143,23 +3142,51 @@ def _is_codex_url(url: str) -> bool:
 
 async def _codex_wait_for_composer(page, q, timeout_ms: int = 20000):
     """Aguarda o composer do Codex aparecer. Retorna o handle do elemento."""
-    # O composer Codex é um textarea/contenteditable cujo placeholder começa
-    # com 'Faça uma pergunta' (pt-BR) ou 'Ask' / 'Describe' (en-US). Fazemos
-    # busca por JS para aceitar múltiplas formas.
+    # O composer Codex pode expor placeholder no próprio textarea/contenteditable
+    # OU em um <p class="placeholder" data-placeholder="..."> dentro do editor
+    # ProseMirror. Fazemos busca por JS para aceitar ambos os formatos.
     js = """() => {
-        const candidates = Array.from(document.querySelectorAll(
-            'textarea, [contenteditable="true"], [contenteditable=""]'
-        ));
-        const hit = candidates.find(el => {
-            const ph = (el.getAttribute('placeholder') || el.getAttribute('data-placeholder') || '').toLowerCase();
-            const txt = (el.innerText || el.textContent || '').toLowerCase();
-            // O placeholder do Codex contém "/plan" no final
-            if (ph.includes('/plan')) return true;
-            if (ph.startsWith('fa\\u00e7a uma pergunta')) return true;
-            if (ph.startsWith('ask ')) return true;
-            if (ph.startsWith('describe ')) return true;
+        const norm = (s) => (s || '').toLowerCase().replace(/\\s+/g, ' ').trim();
+        const looksLikeCodexPlaceholder = (txt) => {
+            const t = norm(txt);
+            if (!t) return false;
+            if (t.includes('/plan')) return true;
+            if (t.startsWith('fa\\u00e7a uma pergunta')) return true;
+            if (t.startsWith('ask ')) return true;
+            if (t.startsWith('describe ')) return true;
             return false;
+        };
+        const isVisible = (el) => {
+            if (!el) return false;
+            const st = window.getComputedStyle(el);
+            if (!st || st.display === 'none' || st.visibility === 'hidden') return false;
+            const r = el.getBoundingClientRect();
+            return r.width > 0 && r.height > 0;
+        };
+
+        // 1) Caminho direto: o próprio editor possui placeholder/data-placeholder.
+        const directCandidates = Array.from(document.querySelectorAll(
+            '#prompt-textarea[contenteditable="true"], [contenteditable="true"], [contenteditable=""], textarea[name="prompt-textarea"], textarea[aria-label*="Codex" i]'
+        ));
+        let hit = directCandidates.find(el => {
+            if (!isVisible(el)) return false;
+            const ph = (el.getAttribute('placeholder') || el.getAttribute('data-placeholder') || '');
+            return looksLikeCodexPlaceholder(ph);
         });
+
+        // 2) Caminho ProseMirror: placeholder em <p class="placeholder" data-placeholder="...">.
+        if (!hit) {
+            const placeholderNodes = Array.from(document.querySelectorAll('p.placeholder, [class*="placeholder"]'));
+            const phNode = placeholderNodes.find(p => {
+                if (!isVisible(p)) return false;
+                const ph = p.getAttribute('data-placeholder') || p.getAttribute('placeholder') || p.innerText || p.textContent || '';
+                return looksLikeCodexPlaceholder(ph);
+            });
+            if (phNode) {
+                hit = phNode.closest('[contenteditable="true"], [contenteditable=""], textarea') || null;
+            }
+        }
+
         if (!hit) return null;
         // Marca elemento para querySelector posterior
         hit.setAttribute('data-autodev-codex-composer', '1');
@@ -3174,7 +3201,7 @@ async def _codex_wait_for_composer(page, q, timeout_ms: int = 20000):
         except Exception:
             pass
         await asyncio.sleep(0.4)
-    raise RuntimeError('Composer do Codex não encontrado (placeholder /plan ausente)')
+    raise RuntimeError('Composer do Codex não encontrado (placeholder/data-placeholder ausente)')
 
 
 async def _codex_select_repo(page, q, repo: str) -> bool:
@@ -3323,7 +3350,7 @@ async def _codex_paste_message(page, composer_selector: str, message: str, q, ac
     total = len(text)
     emit_log(q, f'Codex: colando bloco ({total} chars) em {len(chunks)} parte(s)...')
     for idx, chunk in enumerate(chunks, 1):
-        emit_log(q, f'Codex: colando parte {idx}/{len(chunks)}: {len(chunk)} chars via clipboard...')
+        emit_event(q, 'status', f'Codex: colando parte {idx}/{len(chunks)}: {len(chunk)} chars via clipboard...')
         if activityts:
             activityts[0] = time.time()
         try:
@@ -3403,6 +3430,64 @@ async def _codex_submit(page, q) -> bool:
     return False
 
 
+async def _codex_wait_and_click_pr_controls(page, q, timeout_s: int = 900) -> tuple[bool, str]:
+    """Mantém a aba do Codex aberta até surgir 'Criar PR'/'Atualizar Branch' e clica.
+
+    Retorna (clicked, label) com label em minúsculas quando clicado.
+    """
+    emit_log(q, "Codex: aguardando botões finais ('Criar PR'/'Atualizar Branch')...")
+    selector_js = """() => {
+        const alvos = ['criar pr', 'atualizar branch'];
+        const isVisible = (el) => {
+            if (!el) return false;
+            const style = window.getComputedStyle(el);
+            if (!style) return false;
+            if (style.visibility === 'hidden' || style.display === 'none') return false;
+            const rect = el.getBoundingClientRect();
+            return rect.width > 0 && rect.height > 0;
+        };
+        const candidates = Array.from(document.querySelectorAll('button, a, div[role="button"], span, summary'));
+        for (const el of candidates) {
+            if (!isVisible(el) || el.disabled) continue;
+            const txt = ((el.innerText || el.textContent || '') + '').trim().toLowerCase().replace(/\\s+/g, ' ');
+            if (!txt) continue;
+            const alvo = alvos.find(a => txt === a || txt.includes(a));
+            if (!alvo) continue;
+            try { el.scrollIntoView({block: 'center', inline: 'center'}); } catch (_) {}
+            try { el.click(); return {clicked: true, label: alvo}; } catch (_) {}
+            try {
+                el.dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true, view: window}));
+                return {clicked: true, label: alvo};
+            } catch (_) {}
+        }
+        return {clicked: false, label: ''};
+    }"""
+
+    deadline = time.time() + max(10, int(timeout_s or 0))
+    last_status_emit = 0.0
+    while time.time() < deadline:
+        if hasattr(page, "is_closed") and page.is_closed():
+            return False, ""
+        try:
+            result = await page.evaluate(selector_js)
+        except Exception:
+            result = {"clicked": False, "label": ""}
+        if isinstance(result, dict) and result.get("clicked"):
+            label = str(result.get("label") or "").strip().lower()
+            emit_log(q, f"✅ Codex: botão detectado e clicado automaticamente ({label or 'ação final'}).")
+            return True, label
+
+        now = time.time()
+        if now - last_status_emit >= 5.0:
+            remaining = max(0, int(deadline - now))
+            emit_event(q, "status", f"Codex: aguardando botão de PR/Branch... {remaining}s")
+            last_status_emit = now
+        await asyncio.sleep(1.0)
+
+    emit_log(q, "⚠️ Codex: timeout aguardando botão 'Criar PR'/'Atualizar Branch'.")
+    return False, ""
+
+
 async def handle_codex_task_inner(task, page, q, stop_event, activityts=None):
     """Fluxo dedicado ao Codex (chatgpt.com/codex/cloud):
       1) Navega para a Codex URL.
@@ -3468,6 +3553,10 @@ async def handle_codex_task_inner(task, page, q, stop_event, activityts=None):
         })
     else:
         emit_log(q, 'Codex: URL da tarefa não detectada em 25s (submissão pode ter sido aceita mesmo assim).')
+
+    # Mantém a aba aberta até aparecer uma das ações finais do Codex para
+    # concluir o fluxo de PR/branch antes de encerrar a tarefa no worker.
+    await _codex_wait_and_click_pr_controls(page, q, timeout_s=900)
 
     # Resposta curta confirmando submissão — o agente parseia JSON; devolvemos
     # um plano vazio com analysis explicando que a tarefa Codex foi enfileirada.
