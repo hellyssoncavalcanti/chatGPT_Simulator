@@ -370,6 +370,50 @@ class ChatGPTRateLimitError(RuntimeError):
     pass
 
 
+def _is_llm_connection_error(exc: BaseException) -> bool:
+    """
+    Detecta erros transitórios de conexão/stream com o ChatGPT Simulator.
+    Inclui casos comuns quando o servidor reinicia durante uma análise.
+    """
+    if isinstance(exc, (requests.Timeout, requests.ConnectionError)):
+        return True
+    if isinstance(exc, (ConnectionResetError, BrokenPipeError, TimeoutError)):
+        return True
+
+    texto = str(exc or "").lower()
+    padroes = (
+        "connection reset",
+        "connection aborted",
+        "connection broken",
+        "remote end closed connection",
+        "forçado o cancelamento de uma conexão existente pelo host remoto",
+        "max retries exceeded",
+        "failed to establish a new connection",
+    )
+    return any(p in texto for p in padroes)
+
+
+def _aguardar_reconexao_llm(espera: int, tentativa: int, exc: BaseException):
+    """Aguarda nova tentativa de conexão sem derrubar o daemon."""
+    log.warning(
+        f"  ⚠️ Conexão com ChatGPT Simulator interrompida "
+        f"(tentativa #{tentativa}): {exc}"
+    )
+    if not verificar_llm():
+        log.warning(
+            "     🔌 Simulator aparenta estar offline/reiniciando. "
+            "O analisador seguirá tentando reconectar automaticamente."
+        )
+    else:
+        log.warning(
+            "     🔄 Simulator respondeu no health-check; repetindo chamada para retomar o stream."
+        )
+    try:
+        countdown(espera, "reconexão LLM")
+    except Exception:
+        time.sleep(espera)
+
+
 def _post_llm(payload: dict, timeout: int = 300) -> requests.Response:
     """
     Wrapper para requests.post(LLM_URL) com throttle + retry em rate limit.
@@ -377,7 +421,9 @@ def _post_llm(payload: dict, timeout: int = 300) -> requests.Response:
     mensagem de rate limit, faz retry com backoff exponencial.
     """
     ultimo_erro: Exception | None = None
-    for tentativa in range(1, LLM_RATE_LIMIT_RETRY_MAX + 1):
+    tentativa = 0
+    while True:
+        tentativa += 1
         try:
             _aguardar_throttle_llm()
             _registrar_envio_llm()
@@ -389,22 +435,14 @@ def _post_llm(payload: dict, timeout: int = 300) -> requests.Response:
                 timeout=timeout,
             )
             resp.raise_for_status()
+            if tentativa > 1:
+                log.info(f"  ✅ ChatGPT Simulator reconectado após {tentativa - 1} falha(s).")
             return resp
         except (requests.Timeout, requests.ConnectionError) as exc:
             ultimo_erro = exc
-            if tentativa >= LLM_RATE_LIMIT_RETRY_MAX:
-                break
-            espera = int(LLM_RATE_LIMIT_RETRY_BASE_S * (LLM_RATE_LIMIT_RETRY_MULT ** (tentativa - 1)))
+            espera = int(LLM_RATE_LIMIT_RETRY_BASE_S * (LLM_RATE_LIMIT_RETRY_MULT ** min(tentativa - 1, 6)))
             espera = max(2, min(180, espera))
-            log.warning(
-                f"  ⚠️ Falha de conexão com ChatGPT Simulator "
-                f"(tentativa {tentativa}/{LLM_RATE_LIMIT_RETRY_MAX}): {exc}. "
-                f"Nova tentativa em {espera}s."
-            )
-            try:
-                countdown(espera, "reconexão LLM")
-            except Exception:
-                time.sleep(espera)
+            _aguardar_reconexao_llm(espera, tentativa, exc)
         except requests.HTTPError as exc:
             # Mantém comportamento atual para rate-limit/erro HTTP: quem chama
             # decide como tratar via fluxo de exceções já existente.
@@ -414,10 +452,7 @@ def _post_llm(payload: dict, timeout: int = 300) -> requests.Response:
             ultimo_erro = exc
             raise
     # Nunca deve chegar aqui, mas por segurança:
-    raise ChatGPTRateLimitError(
-        f"Falha de conexão com ChatGPT Simulator após {LLM_RATE_LIMIT_RETRY_MAX} tentativas: "
-        f"{ultimo_erro}"
-    )
+    raise ChatGPTRateLimitError(f"Falha inesperada de conexão com ChatGPT Simulator: {ultimo_erro}")
 
 
 def _verificar_rate_limit_no_markdown(markdown: str, tentativa_atual: int = 0):
@@ -4313,8 +4348,6 @@ def analisar_prontuario(
     if chat_id:
         payload["chatid"] = chat_id
 
-    resp = _post_llm(payload)
-
     new_chat_id    = chat_id    # fallback: mantém o anterior se não vier novo
     new_chat_url   = chat_url
     new_chat_title = None
@@ -4362,68 +4395,85 @@ def analisar_prontuario(
             mensagem = mensagem[:max(0, largura_util - 3)].rstrip() + "..."
         _inline(mensagem)
 
-    last_status = ""
-    inline_active = False  # True quando ha uma linha inline aberta
-    for raw_line in resp.iter_lines():
-        if not raw_line:
-            continue
+    tentativa_stream = 0
+    while True:
+        tentativa_stream += 1
         try:
-            obj = json.loads(raw_line)
-        except json.JSONDecodeError:
-            continue
+            resp = _post_llm(payload)
+            last_status = ""
+            inline_active = False  # True quando ha uma linha inline aberta
+            for raw_line in resp.iter_lines():
+                if not raw_line:
+                    continue
+                try:
+                    obj = json.loads(raw_line)
+                except json.JSONDecodeError:
+                    continue
 
-        t = obj.get("type")
+                t = obj.get("type")
 
-        if t == "status":
-            msg = obj.get("content", "")
-            if msg == last_status:
-                continue
-            last_status = msg
-            _inline_status('⏳', msg)
-            inline_active = True
+                if t == "status":
+                    msg = obj.get("content", "")
+                    if msg == last_status:
+                        continue
+                    last_status = msg
+                    _inline_status('⏳', msg)
+                    inline_active = True
 
-        elif t == "log":
-            if inline_active:
-                _newline()
-                inline_active = False
-            cleaned_log = _clean_simulator_log_for_local_view(obj.get("content", ""))
-            if cleaned_log:
-                log.info(f"  🔧 {cleaned_log}")
+                elif t == "log":
+                    if inline_active:
+                        _newline()
+                        inline_active = False
+                    cleaned_log = _clean_simulator_log_for_local_view(obj.get("content", ""))
+                    if cleaned_log:
+                        log.info(f"  🔧 {cleaned_log}")
 
-        elif t == "chatid":
-            if inline_active:
-                _newline()
-                inline_active = False
-            new_chat_id = obj.get("content") or new_chat_id
-            log.info(f"  📎 chat_id: {new_chat_id}")
+                elif t == "chatid":
+                    if inline_active:
+                        _newline()
+                        inline_active = False
+                    new_chat_id = obj.get("content") or new_chat_id
+                    log.info(f"  📎 chat_id: {new_chat_id}")
 
-        elif t == "markdown":
-                   markdown = obj.get("content", "")
-                   markdown_visivel = _extrair_markdown_visivel_llm(markdown)
-                   if markdown_visivel:
-                       _inline_status('📝', f"Recebendo: {len(markdown_visivel)} chars...")
-                   else:
-                       _inline_status('⏳', "Pensando...")
-                   inline_active = True
+                elif t == "markdown":
+                           markdown = obj.get("content", "")
+                           markdown_visivel = _extrair_markdown_visivel_llm(markdown)
+                           if markdown_visivel:
+                               _inline_status('📝', f"Recebendo: {len(markdown_visivel)} chars...")
+                           else:
+                               _inline_status('⏳', "Pensando...")
+                           inline_active = True
 
-        elif t == "finish":
-            if inline_active:
-                _newline()
-                inline_active = False
-            fin = obj.get("content", {})
-            new_chat_url   = fin.get("url")     or new_chat_url
-            new_chat_title = fin.get("title")   or new_chat_title
-            new_chat_id    = fin.get("chat_id") or new_chat_id
-            # fallback: extrai chat_id da URL caso ainda não tenha sido recebido
-            if not new_chat_id and new_chat_url:
-                new_chat_id = new_chat_url.rstrip('/').split('/')[-1] or new_chat_id
-            log.info(f"  🔗 chat_url: {new_chat_url} | chat_id: {new_chat_id}")
+                elif t == "finish":
+                    if inline_active:
+                        _newline()
+                        inline_active = False
+                    fin = obj.get("content", {})
+                    new_chat_url   = fin.get("url")     or new_chat_url
+                    new_chat_title = fin.get("title")   or new_chat_title
+                    new_chat_id    = fin.get("chat_id") or new_chat_id
+                    # fallback: extrai chat_id da URL caso ainda não tenha sido recebido
+                    if not new_chat_id and new_chat_url:
+                        new_chat_id = new_chat_url.rstrip('/').split('/')[-1] or new_chat_id
+                    log.info(f"  🔗 chat_url: {new_chat_url} | chat_id: {new_chat_id}")
 
-        elif t == "error":
-            if inline_active:
-                _newline()
-                inline_active = False
-            raise RuntimeError(f"Simulador retornou erro: {obj.get('content')}")
+                elif t == "error":
+                    if inline_active:
+                        _newline()
+                        inline_active = False
+                    raise RuntimeError(f"Simulador retornou erro: {obj.get('content')}")
+            break
+        except Exception as exc:
+            if not _is_llm_connection_error(exc):
+                raise
+            espera = max(3, min(180, int(POLL_INTERVAL)))
+            _aguardar_reconexao_llm(espera, tentativa_stream, exc)
+            markdown = ""
+            # garante retomada no mesmo chat quando já existir contexto de conversa
+            if new_chat_id:
+                payload["chatid"] = new_chat_id
+            if new_chat_url:
+                payload["url"] = new_chat_url
 
     if not markdown:
         raise ValueError("Simulador não retornou conteúdo markdown.")
