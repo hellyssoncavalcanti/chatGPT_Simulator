@@ -4229,9 +4229,15 @@ Responder SOMENTE com o JSON.
 """
 #================================================SYSTEM_PROMPT = FIM ===============================================
 
-def buscar_prompt_db():
-    """Busca o prompt do analisador no banco via PHP (id_criador='atendimentos_analise').
-    Retorna o conteudo se encontrado, ou None para usar o SYSTEM_PROMPT local."""
+def buscar_prompt_db(id_atendimento: int | None = None):
+    """Busca o prompt do analisador no banco.
+
+    Prioridade:
+      1) chatgpt_prompts.tipo='system' + escopo='analisador_prontuarios' +
+         id_criador igual ao id_criador da linha de chatgpt_atendimentos_analise.
+      2) fallback legado: id_criador='atendimentos_analise'.
+    Retorna o conteudo se encontrado, ou None para usar o SYSTEM_PROMPT local.
+    """
     regra_dose_alvo = """
 
 REGRA OBRIGATÓRIA (DOSE-ALVO E RETORNO):
@@ -4241,10 +4247,38 @@ REGRA OBRIGATÓRIA (DOSE-ALVO E RETORNO):
 - Se o intervalo estiver condicionado à dose-alvo, não deixar "data_estimada" vazia sem justificativa clínica explícita.
 """
     try:
-        data = sql_exec(
-            "SELECT conteudo FROM chatgpt_prompts WHERE tipo='system' AND id_criador='atendimentos_analise' LIMIT 1",
-            reason="buscar_prompt_analisador"
+        prompt_sql = (
+            "SELECT p.conteudo "
+            "FROM chatgpt_prompts p "
+            "WHERE p.tipo='system' "
+            "  AND p.escopo='analisador_prontuarios' "
+            "  AND p.id_criador='atendimentos_analise' "
+            "LIMIT 1"
         )
+        if id_atendimento:
+            prompt_sql = (
+                "SELECT p.conteudo "
+                "FROM chatgpt_prompts p "
+                "WHERE p.tipo='system' "
+                "  AND p.escopo='analisador_prontuarios' "
+                "  AND p.id_criador = COALESCE(("
+                "    SELECT CAST(a.id_criador AS CHAR) "
+                "    FROM chatgpt_atendimentos_analise a "
+                f"    WHERE a.id_atendimento = {int(id_atendimento)} "
+                "    ORDER BY a.id DESC LIMIT 1"
+                "  ), 'atendimentos_analise') "
+                "ORDER BY CASE WHEN p.id_criador='atendimentos_analise' THEN 1 ELSE 0 END "
+                "LIMIT 1"
+            )
+
+        try:
+            data = sql_exec(prompt_sql, reason="buscar_prompt_analisador")
+        except Exception:
+            # Compatibilidade temporária: bancos ainda sem coluna escopo.
+            data = sql_exec(
+                "SELECT conteudo FROM chatgpt_prompts WHERE tipo='system' AND id_criador='atendimentos_analise' LIMIT 1",
+                reason="buscar_prompt_analisador_legacy"
+            )
         rows = data.get("data") or []
         if rows and rows[0].get("conteudo"):
             conteudo = rows[0]["conteudo"]
@@ -4254,7 +4288,7 @@ REGRA OBRIGATÓRIA (DOSE-ALVO E RETORNO):
                 conteudo = conteudo.replace("[FIM_TEXTO_COLADO]", regra_dose_alvo + "\n[FIM_TEXTO_COLADO]")
             log.info("Prompt do analisador carregado do banco (chatgpt_prompts).")
             return conteudo
-        log.info("Prompt 'atendimentos_analise' nao encontrado no banco - usando prompt local.")
+        log.info("Prompt do analisador nao encontrado no banco - usando prompt local.")
         return None
     except Exception as e:
         log.warning(f"Erro ao buscar prompt do banco: {e} - usando prompt local.")
@@ -4337,7 +4371,7 @@ def analisar_prontuario(
         "model":   LLM_MODEL,
         "stream":  True,
         "messages": [
-            {"role": "system", "content": buscar_prompt_db() or SYSTEM_PROMPT},
+            {"role": "system", "content": buscar_prompt_db(id_atendimento=id_atendimento) or SYSTEM_PROMPT},
             {"role": "user",   "content": user_content},
         ],
     }

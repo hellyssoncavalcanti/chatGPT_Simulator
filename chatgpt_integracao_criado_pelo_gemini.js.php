@@ -136,6 +136,49 @@ function chatgpt_log_query($db, $query, $reason, $elapsed_ms) {
         . $db->real_escape_string($ip) . "'," . intval($elapsed_ms) . ",NOW())");
 }
 
+function chatgpt_ensure_prompt_scope_schema($db) {
+    if (!$db) return;
+    $db->set_charset("utf8mb4");
+
+    $col = @$db->query("
+        SELECT COLUMN_NAME
+        FROM INFORMATION_SCHEMA.COLUMNS
+        WHERE TABLE_SCHEMA = DATABASE()
+          AND TABLE_NAME = 'chatgpt_prompts'
+          AND COLUMN_NAME = 'escopo'
+        LIMIT 1
+    ");
+    $has_escopo = ($col && $col->num_rows > 0);
+    if (!$has_escopo) {
+        @$db->query("
+            ALTER TABLE chatgpt_prompts
+            ADD COLUMN escopo ENUM('analisador_prontuarios','chat')
+            NOT NULL DEFAULT 'chat'
+            COMMENT 'Escopo funcional do prompt. \"chat\" = prompt usado no chat interativo. \"analisador_prontuarios\" = prompt usado pelo daemon Scripts/analisador_prontuarios.py para extração clínica.'
+            AFTER tipo
+        ");
+    }
+
+    $idx = @$db->query("
+        SELECT GROUP_CONCAT(COLUMN_NAME ORDER BY SEQ_IN_INDEX SEPARATOR ',') AS cols
+        FROM INFORMATION_SCHEMA.STATISTICS
+        WHERE TABLE_SCHEMA = DATABASE()
+          AND TABLE_NAME = 'chatgpt_prompts'
+          AND INDEX_NAME = 'uq_tipo_criador'
+        GROUP BY INDEX_NAME
+        LIMIT 1
+    ");
+    $idx_cols = ($idx && ($r = $idx->fetch_assoc())) ? strtolower((string)($r['cols'] ?? '')) : '';
+    if ($idx_cols !== 'tipo,id_criador,escopo') {
+        @$db->query("ALTER TABLE chatgpt_prompts DROP INDEX uq_tipo_criador");
+        @$db->query("
+            ALTER TABLE chatgpt_prompts
+            ADD UNIQUE KEY uq_tipo_criador (tipo, id_criador, escopo)
+            COMMENT 'Garante 1 prompt por (tipo, id_criador, escopo): permite separar prompts de chat e analisador_prontuarios para o mesmo criador.'
+        ");
+    }
+}
+
 // Salva tabelas auxiliares (alertas, grafo, casos) em transacao atomica
 function chatgpt_salvar_auxiliar($db, $id_atendimento, $id_paciente, $dados) {
     // Garante UTF-8 na conexao antes de qualquer INSERT
@@ -1219,18 +1262,19 @@ if (isset($_GET['action']) && $_GET['action'] === 'get_prompt') {
         $db = get_mysql_connection_local();
         if (!$db) throw new Exception("Falha na conexão com banco de dados");
         $db->set_charset("utf8mb4");
+        chatgpt_ensure_prompt_scope_schema($db);
 
         // System prompt (somente se tiver permissão)
         $system_prompt = null;
         if ($id_criador && verifica_permissao($mysqli, $id_criador, 'chatgpt_system_prompt', 'editar')) {
-            $r = $db->query("SELECT conteudo FROM chatgpt_prompts WHERE tipo='system' AND id_criador='default' LIMIT 1");
+            $r = $db->query("SELECT conteudo FROM chatgpt_prompts WHERE tipo='system' AND escopo='chat' AND id_criador='default' LIMIT 1");
             if ($r && $row_sp = $r->fetch_assoc()) $system_prompt = $row_sp['conteudo'];
         }
 
         // User prompt do usuário logado
         $user_prompt = null;
         if ($id_criador) {
-            $r = $db->query("SELECT conteudo FROM chatgpt_prompts WHERE tipo='user' AND id_criador=$id_criador LIMIT 1");
+            $r = $db->query("SELECT conteudo FROM chatgpt_prompts WHERE tipo='user' AND escopo='chat' AND id_criador=$id_criador LIMIT 1");
             if ($r && $row_up = $r->fetch_assoc()) $user_prompt = $row_up['conteudo'];
         }
 
@@ -1248,6 +1292,7 @@ if (isset($_GET['action']) && $_GET['action'] === 'save_prompt') {
     header('Content-Type: application/json; charset=utf-8');
     $body = json_decode(file_get_contents('php://input'), true);
     $tipo    = $body['tipo']    ?? '';
+    $escopo  = $body['escopo']  ?? 'chat';
     $conteudo = trim($body['conteudo'] ?? '');
 
     global $row_login_atual;
@@ -1256,6 +1301,7 @@ if (isset($_GET['action']) && $_GET['action'] === 'save_prompt') {
 
     if (!$id_criador) { echo json_encode(['success' => false, 'error' => 'Não autenticado']); exit; }
     if (!in_array($tipo, ['system', 'user'])) { echo json_encode(['success' => false, 'error' => 'Tipo inválido']); exit; }
+    if (!in_array($escopo, ['chat', 'analisador_prontuarios'], true)) { echo json_encode(['success' => false, 'error' => 'Escopo inválido']); exit; }
 
     // system prompt: exige permissão; id_criador fica NULL (registro global)
     if ($tipo === 'system') {
@@ -1273,12 +1319,13 @@ if (isset($_GET['action']) && $_GET['action'] === 'save_prompt') {
         $db = get_mysql_connection_local();
         if (!$db) throw new Exception("Falha na conexão");
         $db->set_charset("utf8mb4");
+        chatgpt_ensure_prompt_scope_schema($db);
         $conteudo_esc = $db->real_escape_string($conteudo);
+        $escopo_esc = $db->real_escape_string($escopo);
 
-        // id_criador é agora VARCHAR(10): 'default' para system prompt, string numérica para user prompt.
-        // ON DUPLICATE KEY funciona normalmente pois não há mais NULL na UNIQUE KEY (tipo, id_criador).
-        $db->query("INSERT INTO chatgpt_prompts (tipo, id_criador, conteudo)
-                    VALUES ('$tipo', $id_criador_sql, '$conteudo_esc')
+        // ON DUPLICATE KEY funciona pela UNIQUE KEY (tipo, id_criador, escopo).
+        $db->query("INSERT INTO chatgpt_prompts (tipo, escopo, id_criador, conteudo)
+                    VALUES ('$tipo', '$escopo_esc', $id_criador_sql, '$conteudo_esc')
                     ON DUPLICATE KEY UPDATE conteudo='$conteudo_esc', datetime_atualizacao=NOW()");
 
         echo json_encode(['success' => true]);
@@ -2466,15 +2513,16 @@ if (function_exists('get_mysql_connection_local')) {
         $_db_p = get_mysql_connection_local();
         if ($_db_p) {
             $_db_p->set_charset("utf8mb4");
+            chatgpt_ensure_prompt_scope_schema($_db_p);
             // System prompt (somente se o admin tiver editado)
-            $_r = $_db_p->query("SELECT conteudo FROM chatgpt_prompts WHERE tipo='system' AND id_criador='default' LIMIT 1");
+            $_r = $_db_p->query("SELECT conteudo FROM chatgpt_prompts WHERE tipo='system' AND escopo='chat' AND id_criador='default' LIMIT 1");
             if ($_r && $_row = $_r->fetch_assoc()) {
                 if (!empty(trim($_row['conteudo']))) $active_system_prompt = $_row['conteudo'];
             }
             // User prompt do usuário logado
             if (isset($row_login_atual['id']) && !empty($row_login_atual['id'])) {
                 $_uid = intval($row_login_atual['id']);
-                $_r2 = $_db_p->query("SELECT conteudo FROM chatgpt_prompts WHERE tipo='user' AND id_criador=$_uid LIMIT 1");
+                $_r2 = $_db_p->query("SELECT conteudo FROM chatgpt_prompts WHERE tipo='user' AND escopo='chat' AND id_criador=$_uid LIMIT 1");
                 if ($_r2 && $_row2 = $_r2->fetch_assoc()) {
                     if (!empty(trim($_row2['conteudo']))) {
                         $active_system_prompt .= "\n\n[PREFERÊNCIAS DO USUÁRIO]\n" . $_row2['conteudo'];
