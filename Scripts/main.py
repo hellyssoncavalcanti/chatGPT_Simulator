@@ -356,7 +356,7 @@ def start_http_server(config_module, server_module):
 
 def _wait_for_port(host: str, port: int, timeout: int = 180, interval: float = 0.5) -> tuple[bool, float]:
     started_at = time.time()
-    deadline = started_at + timeout
+    deadline = time.time() + timeout
     while time.time() < deadline:
         try:
             with socket.create_connection((host, port), timeout=2):

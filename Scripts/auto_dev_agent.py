@@ -1286,50 +1286,6 @@ def _extract_json_object(text: str) -> Optional[dict]:
     raw = _strip_code_fences(text)
     decoder = json.JSONDecoder()
 
-    def _try_parse_loose(chunk: str) -> Optional[dict]:
-        if not chunk:
-            return None
-        c = chunk.strip().lstrip("\ufeff")
-        if not c:
-            return None
-        # Remove prefixos comuns de resposta.
-        c = re.sub(r"^\s*(resposta|response|json)\s*:\s*", "", c, flags=re.IGNORECASE)
-        # Remove blocos markdown residuais.
-        c = _strip_code_fences(c)
-
-        parse_queue = [c]
-        # Se vier encapsulado como string JSON (duplamente serializado), tenta desembrulhar.
-        try:
-            maybe = json.loads(c)
-            if isinstance(maybe, dict):
-                return maybe
-            if isinstance(maybe, str):
-                parse_queue.append(maybe.strip())
-        except Exception:
-            pass
-
-        # Tenta parse estrito e "python literal" (aspas simples/True/False/None).
-        for candidate in parse_queue:
-            for parser in (json.loads, ast.literal_eval):
-                try:
-                    obj = parser(candidate)
-                    if isinstance(obj, dict):
-                        return obj
-                except Exception:
-                    pass
-
-        # Normalização leve para JSON quase-válido (vírgula final e aspas curvas).
-        normalized = c.replace("“", "\"").replace("”", "\"").replace("’", "'")
-        normalized = re.sub(r",\s*([}\]])", r"\1", normalized)
-        for parser in (json.loads, ast.literal_eval):
-            try:
-                obj = parser(normalized)
-                if isinstance(obj, dict):
-                    return obj
-            except Exception:
-                pass
-        return None
-
     def _score_candidate(data: dict) -> int:
         score = 0
         if isinstance(data.get("analysis"), str):
@@ -1345,9 +1301,12 @@ def _extract_json_object(text: str) -> Optional[dict]:
     candidates: List[dict] = []
 
     # Tentativa direta
-    direct = _try_parse_loose(raw)
-    if isinstance(direct, dict):
-        candidates.append(direct)
+    try:
+        data = json.loads(raw)
+        if isinstance(data, dict):
+            candidates.append(data)
+    except Exception:
+        pass
 
     # Tenta parse após marcadores frequentes.
     marker_candidates = ["\nRESPOSTA:", "\nResposta:", "\nJSON:", "responda apenas com json"]
@@ -1359,10 +1318,13 @@ def _extract_json_object(text: str) -> Optional[dict]:
         chunk = raw[pos + len(marker):].strip()
         if not chunk:
             continue
-        data = _try_parse_loose(chunk)
-        if isinstance(data, dict):
-            candidates.append(data)
-            continue
+        try:
+            data = json.loads(chunk)
+            if isinstance(data, dict):
+                candidates.append(data)
+                continue
+        except Exception:
+            pass
         brace = chunk.find("{")
         if brace != -1:
             try:
@@ -1370,9 +1332,7 @@ def _extract_json_object(text: str) -> Optional[dict]:
                 if isinstance(obj, dict):
                     candidates.append(obj)
             except Exception:
-                loose_obj = _try_parse_loose(chunk[brace:])
-                if isinstance(loose_obj, dict):
-                    candidates.append(loose_obj)
+                pass
 
     # Varrida geral por objetos JSON possíveis.
     start = raw.find("{")
@@ -1382,9 +1342,7 @@ def _extract_json_object(text: str) -> Optional[dict]:
             if isinstance(obj, dict):
                 candidates.append(obj)
         except Exception:
-            loose_obj = _try_parse_loose(raw[start:])
-            if isinstance(loose_obj, dict):
-                candidates.append(loose_obj)
+            pass
         start = raw.find("{", start + 1)
 
     if not candidates:

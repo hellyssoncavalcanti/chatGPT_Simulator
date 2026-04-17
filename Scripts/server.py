@@ -1702,6 +1702,61 @@ def chat_completions():
 
     # --- 5. RESPOSTA STREAMING OU BLOCO ---
     if stream:
+        def _drain_stream_queue_after_disconnect():
+            """
+            Quando o cliente de stream desconecta, continua consumindo a fila em
+            background para que ACTIVE_CHATS reflita término real da tarefa e não
+            bloqueie filas prioritárias até o timeout de stale.
+            """
+            try:
+                while True:
+                    try:
+                        raw_msg = stream_q.get(timeout=900)
+                    except queue.Empty:
+                        break
+
+                    if raw_msg is None:
+                        ACTIVE_CHATS[chat_id]['finished'] = True
+                        ACTIVE_CHATS[chat_id]['finished_at'] = time.time()
+                        ACTIVE_CHATS[chat_id]['last_event_at'] = time.time()
+                        break
+
+                    try:
+                        msg_obj = json.loads(raw_msg)
+                    except Exception:
+                        ACTIVE_CHATS[chat_id]['last_event_at'] = time.time()
+                        continue
+
+                    t = msg_obj.get('type')
+                    if t == 'status':
+                        ACTIVE_CHATS[chat_id]['status'] = msg_obj.get('content', '')
+                        ACTIVE_CHATS[chat_id]['last_event_at'] = time.time()
+                    elif t == 'markdown':
+                        ACTIVE_CHATS[chat_id]['markdown'] = msg_obj.get('content', '')
+                        ACTIVE_CHATS[chat_id]['last_event_at'] = time.time()
+                    elif t == 'finish':
+                        fin = msg_obj.get('content', {}) or {}
+                        ACTIVE_CHATS[chat_id]['finished'] = True
+                        ACTIVE_CHATS[chat_id]['finished_at'] = time.time()
+                        ACTIVE_CHATS[chat_id]['last_event_at'] = time.time()
+                        try:
+                            storage.append_message(chat_id, "user", message)
+                            storage.append_message(chat_id, "assistant", ACTIVE_CHATS[chat_id]['markdown'])
+                            storage.save_chat(chat_id, fin.get('title', ''), fin.get('url', '') or url or '', [], origin_url=origin_url)
+                        except Exception as e:
+                            log(f"[WARN] Falha ao persistir finish (drain pós-disconnect): {e}")
+                        break
+                    elif t == 'error':
+                        ACTIVE_CHATS[chat_id]['finished'] = True
+                        ACTIVE_CHATS[chat_id]['finished_at'] = time.time()
+                        ACTIVE_CHATS[chat_id]['last_event_at'] = time.time()
+                        break
+                    else:
+                        # log/chat_meta/etc.
+                        ACTIVE_CHATS[chat_id]['last_event_at'] = time.time()
+            except Exception as e:
+                log(f"[WARN] Falha no dreno de stream pós-disconnect para chat {chat_id}: {e}")
+
         def generate():
             yield json.dumps({"type": "chat_id", "content": chat_id}) + "\n"
             if url and url != "None":
@@ -1732,6 +1787,8 @@ def chat_completions():
                             if isinstance(content_text, str) and content_text and not content_text.startswith("Remetente: "):
                                 msg_obj['content'] = f"Remetente: {sender_label} | {content_text}"
                                 raw_msg = json.dumps(msg_obj, ensure_ascii=False)
+                        if t == 'log':
+                            ACTIVE_CHATS[chat_id]['last_event_at'] = time.time()
                         if t == 'status':
                             ACTIVE_CHATS[chat_id]['status'] = msg_obj['content']
                             ACTIVE_CHATS[chat_id]['last_event_at'] = time.time()
@@ -1787,6 +1844,8 @@ def chat_completions():
                     f"[ACTIVE_CHATS] stream interrompido (cliente/proxy) para chat {chat_id}; "
                     "mantendo tarefa ativa para retomada."
                 )
+                if not ACTIVE_CHATS.get(chat_id, {}).get('finished'):
+                    threading.Thread(target=_drain_stream_queue_after_disconnect, daemon=True).start()
 
         return Response(generate(), mimetype="application/x-ndjson")
 
