@@ -36,6 +36,7 @@ CORE_DEPENDENCIES = [
 ]
 REPAIR_FLAG = "--repair-venv"
 SKIP_BOOTSTRAP_FLAG = "--skip-bootstrap"
+BROWSER_JOIN_TIMEOUT_SEC = max(1, int(os.getenv("SIMULATOR_BROWSER_JOIN_TIMEOUT_SEC", "8")))
 
 
 def _terminate_previous_same_server_instances(script_name: str) -> None:
@@ -479,7 +480,7 @@ if __name__ == "__main__":
     finally:
         try:
             browser_queue.put({'action': 'STOP'})
-            t_browser.join(timeout=8)
+            t_browser.join(timeout=BROWSER_JOIN_TIMEOUT_SEC)
             print("[INFO] Sinal de parada enviado ao browser worker.")
         except Exception as e:
             print(f"[WARN] Falha ao sinalizar parada do browser worker: {e}")
