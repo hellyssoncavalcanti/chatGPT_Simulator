@@ -624,9 +624,44 @@ function Merge-AllPullRequests {
         return
     }
 
-    # Ordena do mais antigo ao mais novo para merge sequencial
-    $ordered = @($prsArray | Sort-Object -Property number)
-    Write-Info ("Encontrado(s) {0} PR(s) aberto(s). Mergeando TODOS sequencialmente..." -f $ordered.Count)
+    # Evita merge duplicado quando existirem PRs consecutivos com mesmo titulo e mesmo created_at.
+    # Nesses casos, processa apenas o mais novo (maior numero de PR).
+    $deduped = @()
+    $duplicatesSkipped = 0
+    $groups = @($prsArray | Group-Object -Property {
+        $titleKey = [string]$_.title
+        $createdKey = [string]$_.created_at
+        if ([string]::IsNullOrWhiteSpace($createdKey)) {
+            # Sem created_at, não deduplica por segurança.
+            return "{0}|NO_CREATED_AT|{1}" -f $titleKey, [string]$_.number
+        }
+        return "{0}|{1}" -f $titleKey, $createdKey
+    })
+    foreach ($group in $groups) {
+        $items = @($group.Group | Where-Object { $_ -and $null -ne $_.number })
+        if ($items.Count -le 1) {
+            if ($items.Count -eq 1) { $deduped += $items[0] }
+            continue
+        }
+
+        # Mantem somente o mais novo/atual: maior numero de PR.
+        $selected = @($items | Sort-Object -Property number -Descending)[0]
+        $deduped += $selected
+
+        $itemsSorted = @($items | Sort-Object -Property number)
+        $skipped = @($itemsSorted | Where-Object { $_.number -ne $selected.number })
+        $duplicatesSkipped += $skipped.Count
+        $skippedNums = ($skipped | ForEach-Object { "#$($_.number)" }) -join ', '
+        Write-Info ("Duplicidade detectada (titulo/data iguais). Mantendo PR #{0} e ignorando {1}." -f $selected.number, $skippedNums) -Color DarkGray
+    }
+
+    # Ordena do mais antigo ao mais novo para merge sequencial, já sem duplicatas
+    $ordered = @($deduped | Sort-Object -Property number)
+    if ($duplicatesSkipped -gt 0) {
+        Write-Info ("Encontrado(s) {0} PR(s) aberto(s), {1} duplicado(s) ignorado(s). Mergeando {2} PR(s)..." -f $prsArray.Count, $duplicatesSkipped, $ordered.Count)
+    } else {
+        Write-Info ("Encontrado(s) {0} PR(s) aberto(s). Mergeando TODOS sequencialmente..." -f $ordered.Count)
+    }
 
     $mergedCount = 0
     $failedCount = 0

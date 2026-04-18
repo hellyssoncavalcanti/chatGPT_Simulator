@@ -4432,10 +4432,10 @@ def analisar_prontuario(
     tentativa_stream = 0
     while True:
         tentativa_stream += 1
+        inline_active = False  # True quando ha uma linha inline aberta
         try:
             resp = _post_llm(payload)
             last_status = ""
-            inline_active = False  # True quando ha uma linha inline aberta
             for raw_line in resp.iter_lines():
                 if not raw_line:
                     continue
@@ -4446,70 +4446,87 @@ def analisar_prontuario(
 
                 t = obj.get("type")
 
-        if t == "status":
-            msg = obj.get("content", "")
-            phase = str(obj.get("phase") or "").strip().lower()
-            wait_seconds = obj.get("wait_seconds")
-            if phase == "chat_rate_limit_cooldown" and wait_seconds is not None:
-                try:
-                    wait_seconds = max(0, int(round(float(wait_seconds))))
-                    mm, ss = divmod(wait_seconds, 60)
-                    msg = f"Aguardando cooldown do ChatGPT | nova tentativa em {mm:02d}:{ss:02d}"
-                except Exception:
-                    pass
-            if msg == last_status:
+                if t == "status":
+                    msg = obj.get("content", "")
+                    phase = str(obj.get("phase") or "").strip().lower()
+                    wait_seconds = obj.get("wait_seconds")
+                    if phase == "chat_rate_limit_cooldown" and wait_seconds is not None:
+                        try:
+                            wait_seconds = max(0, int(round(float(wait_seconds))))
+                            mm, ss = divmod(wait_seconds, 60)
+                            msg = f"Aguardando cooldown do ChatGPT | nova tentativa em {mm:02d}:{ss:02d}"
+                        except Exception:
+                            pass
+                    if msg == last_status:
+                        continue
+                    last_status = msg
+                    _inline_status('⏳', msg)
+                    inline_active = True
+                    continue
+
+                if t == "log":
+                    if inline_active:
+                        _newline()
+                        inline_active = False
+                    cleaned_log = _clean_simulator_log_for_local_view(obj.get("content", ""))
+                    if cleaned_log:
+                        log.info(f"  🔧 {cleaned_log}")
+                    continue
+
+                if t == "chatid":
+                    if inline_active:
+                        _newline()
+                        inline_active = False
+                    new_chat_id = obj.get("content") or new_chat_id
+                    log.info(f"  📎 chat_id: {new_chat_id}")
+                    continue
+
+                if t == "markdown":
+                    markdown = obj.get("content", "")
+                    markdown_visivel = _extrair_markdown_visivel_llm(markdown)
+                    if markdown_visivel:
+                        _inline_status('📝', f"Recebendo: {len(markdown_visivel)} chars...")
+                    else:
+                        _inline_status('⏳', "Pensando...")
+                    inline_active = True
+                    continue
+
+                if t == "finish":
+                    if inline_active:
+                        _newline()
+                        inline_active = False
+                    fin = obj.get("content", {})
+                    new_chat_url = fin.get("url") or new_chat_url
+                    new_chat_title = fin.get("title") or new_chat_title
+                    new_chat_id = fin.get("chat_id") or new_chat_id
+                    # fallback: extrai chat_id da URL caso ainda não tenha sido recebido
+                    if not new_chat_id and new_chat_url:
+                        new_chat_id = new_chat_url.rstrip('/').split('/')[-1] or new_chat_id
+                    log.info(f"  🔗 chat_url: {new_chat_url} | chat_id: {new_chat_id}")
+                    continue
+
+                if t == "error":
+                    if inline_active:
+                        _newline()
+                        inline_active = False
+                    raise RuntimeError(f"Simulador retornou erro: {obj.get('content')}")
+
+            if inline_active:
+                _newline()
+                inline_active = False
+            break
+        except Exception as e:
+            if inline_active:
+                _newline()
+            if tentativa_stream < 3:
+                espera = min(10, 2 * tentativa_stream)
+                log.warning(
+                    f"  ⚠️ Falha no stream da LLM (tentativa {tentativa_stream}/3): {e}. "
+                    f"Nova tentativa em {espera}s..."
+                )
+                time.sleep(espera)
                 continue
-            last_status = msg
-            _inline_status('⏳', msg)
-            inline_active = True
-            continue
-
-        if t == "log":
-            if inline_active:
-                _newline()
-                inline_active = False
-            cleaned_log = _clean_simulator_log_for_local_view(obj.get("content", ""))
-            if cleaned_log:
-                log.info(f"  🔧 {cleaned_log}")
-            continue
-
-        if t == "chatid":
-            if inline_active:
-                _newline()
-                inline_active = False
-            new_chat_id = obj.get("content") or new_chat_id
-            log.info(f"  📎 chat_id: {new_chat_id}")
-            continue
-
-        if t == "markdown":
-            markdown = obj.get("content", "")
-            markdown_visivel = _extrair_markdown_visivel_llm(markdown)
-            if markdown_visivel:
-                _inline_status('📝', f"Recebendo: {len(markdown_visivel)} chars...")
-            else:
-                _inline_status('⏳', "Pensando...")
-            inline_active = True
-            continue
-
-        if t == "finish":
-            if inline_active:
-                _newline()
-                inline_active = False
-            fin = obj.get("content", {})
-            new_chat_url = fin.get("url") or new_chat_url
-            new_chat_title = fin.get("title") or new_chat_title
-            new_chat_id = fin.get("chat_id") or new_chat_id
-            # fallback: extrai chat_id da URL caso ainda não tenha sido recebido
-            if not new_chat_id and new_chat_url:
-                new_chat_id = new_chat_url.rstrip('/').split('/')[-1] or new_chat_id
-            log.info(f"  🔗 chat_url: {new_chat_url} | chat_id: {new_chat_id}")
-            continue
-
-        if t == "error":
-            if inline_active:
-                _newline()
-                inline_active = False
-            raise RuntimeError(f"Simulador retornou erro: {obj.get('content')}")
+            raise RuntimeError(f"Falha ao consumir stream do simulador após {tentativa_stream} tentativas: {e}") from e
 
     if not markdown:
         raise ValueError("Simulador não retornou conteúdo markdown.")
