@@ -411,6 +411,9 @@ def open_urls_when_server_is_ready(port: int, urls: list, startup_timeout: int =
             url = str(raw_url or "").strip()
             if not url or url in seen:
                 continue
+            if not re.match(r"^https?://", url, flags=re.IGNORECASE):
+                print(f"[BOOT] Aviso: URL ignorada (formato não HTTP/HTTPS): {url}")
+                continue
             seen.add(url)
             normalized_urls.append(url)
 
