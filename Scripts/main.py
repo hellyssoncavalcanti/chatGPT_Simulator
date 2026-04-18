@@ -358,10 +358,12 @@ def _wait_for_port(host: str, port: int, timeout: int = 180, interval: float = 0
     try:
         timeout = max(1, int(timeout))
     except Exception:
+        print(f"[BOOT] Aviso: timeout inválido para _wait_for_port ({timeout!r}); usando 180s.")
         timeout = 180
     try:
         interval = max(0.1, float(interval))
     except Exception:
+        print(f"[BOOT] Aviso: interval inválido para _wait_for_port ({interval!r}); usando 0.5s.")
         interval = 0.5
     started_at = time.perf_counter()
     deadline = started_at + timeout
