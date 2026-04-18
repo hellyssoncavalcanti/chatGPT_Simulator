@@ -3885,7 +3885,7 @@ async def handle_codex_task_inner(task, page, q, stop_event, activityts=None):
 
     # Mantém a aba aberta até aparecer uma das ações finais do Codex para
     # concluir o fluxo de PR/branch antes de encerrar a tarefa no worker.
-    await _codex_wait_and_click_pr_controls(page, q, timeout_s=900)
+    clicked_final, clicked_label = await _codex_wait_and_click_pr_controls(page, q, timeout_s=900)
 
     # Resposta curta confirmando submissão — o agente parseia JSON; devolvemos
     # um plano vazio com analysis explicando que a tarefa Codex foi enfileirada.
