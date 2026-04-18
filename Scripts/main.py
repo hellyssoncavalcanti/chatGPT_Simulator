@@ -111,10 +111,12 @@ def _terminate_previous_same_server_instances(script_name: str) -> None:
             for pid_txt in (shell_proc.stdout or "").splitlines()
             if pid_txt.strip().isdigit()
         }
+        shell_killed = 0
         for pid in sorted(shell_targets):
             if pid in protected_pids:
                 continue
             subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+            shell_killed += 1
             print(f"[BOOT] Janela CMD anterior do servidor foi finalizada (PID {pid}) para {script_name}.")
 
         py_proc = subprocess.run(
@@ -129,11 +131,20 @@ def _terminate_previous_same_server_instances(script_name: str) -> None:
             for pid_txt in (py_proc.stdout or "").splitlines()
             if pid_txt.strip().isdigit()
         }
+        py_killed = 0
         for pid in sorted(py_targets):
             if pid in protected_pids:
                 continue
             subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+            py_killed += 1
             print(f"[BOOT] Processo Python anterior finalizado (PID {pid}) para {script_name}.")
+
+        print(
+            f"[BOOT] Substituição de instâncias de {script_name}: "
+            f"shells_encontrados={len(shell_targets)} shells_finalizados={shell_killed} "
+            f"python_encontrados={len(py_targets)} python_finalizados={py_killed} "
+            f"pids_protegidos={len(protected_pids)}"
+        )
     except Exception as exc:
         print(f"[BOOT] Aviso: não foi possível substituir instâncias anteriores de {script_name}: {exc}")
 
@@ -344,15 +355,30 @@ def start_http_server(config_module, server_module):
 
 
 def _wait_for_port(host: str, port: int, timeout: int = 180, interval: float = 0.5) -> tuple[bool, float]:
-    started_at = time.time()
-    deadline = time.time() + timeout
-    while time.time() < deadline:
+    try:
+        timeout = max(1, int(timeout))
+    except Exception:
+        timeout = 180
+    try:
+        interval = max(0.1, float(interval))
+    except Exception:
+        interval = 0.5
+    started_at = time.perf_counter()
+    deadline = started_at + timeout
+    while True:
+        now = time.perf_counter()
+        if now >= deadline:
+            break
         try:
-            with socket.create_connection((host, port), timeout=2):
-                return True, (time.time() - started_at)
+            connect_timeout = min(2.0, max(0.2, deadline - now))
+            with socket.create_connection((host, port), timeout=connect_timeout):
+                return True, (time.perf_counter() - started_at)
         except OSError:
-            time.sleep(interval)
-    return False, (time.time() - started_at)
+            remaining = deadline - time.perf_counter()
+            if remaining <= 0:
+                break
+            time.sleep(min(interval, remaining))
+    return False, (time.perf_counter() - started_at)
 
 
 def open_urls_when_server_is_ready(port: int, urls: list, startup_timeout: int = 180):
@@ -367,7 +393,20 @@ def open_urls_when_server_is_ready(port: int, urls: list, startup_timeout: int =
 
         print(f"[BOOT] Servidor HTTPS na porta {port} ficou pronto após {waited_seconds:.1f}s.")
         time.sleep(1.0)
-        for url in urls:
+        normalized_urls = []
+        seen = set()
+        for raw_url in (urls or []):
+            url = str(raw_url or "").strip()
+            if not url or url in seen:
+                continue
+            seen.add(url)
+            normalized_urls.append(url)
+
+        if not normalized_urls:
+            print("[BOOT] Aviso: nenhuma URL válida para abrir automaticamente.")
+            return
+
+        for url in normalized_urls:
             try:
                 webbrowser.open_new(url)
             except Exception as exc:
@@ -379,7 +418,8 @@ def open_urls_when_server_is_ready(port: int, urls: list, startup_timeout: int =
 
 if __name__ == "__main__":
     _terminate_previous_same_server_instances("main.py")
-    ensure_runtime_environment()
+    cleaned_argv = ensure_runtime_environment()
+    sys.argv = [sys.argv[0], *cleaned_argv]
 
     sys.path.append(SCRIPTS_DIR)
 
