@@ -34,12 +34,17 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import quote
 
-from typing import Any, Dict
-
 import requests
 from flask import Flask, jsonify, request as flask_request
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from playwright.sync_api import sync_playwright
+
+# ── Carrega .env se disponível ─────────────────────────────
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
 
 try:
     from playwright._impl._errors import TargetClosedError
@@ -155,6 +160,75 @@ elog = logging.getLogger("enrich_contact_phone")
 elog.setLevel(logging.INFO)
 elog.addHandler(_elog_handler)
 elog.propagate = False  # não duplicar no root logger
+
+
+class CircuitBreaker:
+    def __init__(self, max_failures: int = 3, reset_seconds: int = 300):
+        self.max_failures = max_failures
+        self.reset_seconds = reset_seconds
+        self.failures = 0
+        self.last_failure: Optional[float] = None
+        self.lock = threading.Lock()
+
+    def record_failure(self) -> None:
+        with self.lock:
+            self.failures += 1
+            self.last_failure = time.time()
+
+    def record_success(self) -> None:
+        with self.lock:
+            self.failures = 0
+            self.last_failure = None
+
+    def is_open(self) -> bool:
+        with self.lock:
+            if self.failures < self.max_failures:
+                return False
+            if self.last_failure and (time.time() - self.last_failure) > self.reset_seconds:
+                self.failures = 0
+                self.last_failure = None
+                return False
+            return True
+
+    def status(self) -> Dict[str, Any]:
+        with self.lock:
+            is_open = False
+            if self.failures >= self.max_failures:
+                if self.last_failure and (time.time() - self.last_failure) > self.reset_seconds:
+                    self.failures = 0
+                    self.last_failure = None
+                else:
+                    is_open = True
+            return {
+                "failures": self.failures,
+                "is_open": is_open,
+                "last_failure": self.last_failure,
+                "max_failures": self.max_failures,
+                "reset_seconds": self.reset_seconds,
+            }
+
+
+wa_circuit = CircuitBreaker(
+    max_failures=int(os.getenv("PYWA_CIRCUIT_MAX_FAILURES", "3")),
+    reset_seconds=int(os.getenv("PYWA_CIRCUIT_RESET_SECONDS", "300")),
+)
+
+_manual_reply_timestamps: Dict[str, float] = {}
+_manual_reply_lock = threading.Lock()
+
+
+def check_rate_limit(phone: str, window_sec: int = 5) -> bool:
+    safe_phone = normalize_phone(phone) or (phone or "").strip()
+    if not safe_phone:
+        return True
+    with _manual_reply_lock:
+        now = time.time()
+        last = _manual_reply_timestamps.get(safe_phone, 0)
+        if now - last < window_sec:
+            return False
+        _manual_reply_timestamps[safe_phone] = now
+        return True
+
 
 app = Flask(__name__)
 
@@ -1496,50 +1570,29 @@ def classify_reply(text: str) -> str:
 
 
 def detect_professional_inquiry(answer_text: str) -> Optional[str]:
-    """Detect if the LLM response indicates it will consult a professional or secretary.
-
-    Returns:
-        "id_criador"    — if the LLM mentions it will ask the doctor/professional
-        "id_secretaria" — if the LLM mentions it will ask the secretary/reception
-        None            — no inquiry detected
-    """
+    """Detecta intenção de consultar profissional/secretaria com regex contextual."""
     t = (answer_text or "").lower()
 
-    # Keywords indicating the LLM will consult the secretary
+    # Padrões com verbo de ação + alvo (secretaria/recepção/agenda)
     secretary_patterns = [
-        "verificar com a secretária", "verificar com a secretaria",
-        "consultar a secretária", "consultar a secretaria",
-        "perguntar à secretária", "perguntar a secretaria",
-        "falar com a secretária", "falar com a secretaria",
-        "entrar em contato com a secretária", "entrar em contato com a secretaria",
-        "vou verificar com a recepção", "verificar na recepção",
-        "checar com a secretária", "checar com a secretaria",
-        "vou checar a agenda", "vou verificar a agenda",
-        "vou consultar a agenda", "verificar disponibilidade",
-        "consultar disponibilidade", "vou ver com a secretária",
-        "vou ver com a secretaria",
+        r"\b(vou|irei|preciso|vamos)\s+(verificar|consultar|checar|falar|entrar em contato)\s+com\s+a\s+(secretári[ao]|recep[çc][ãa]o)\b",
+        r"\b(verificar|consultar)\s+(a\s+)?agenda\b",
+        r"\b(verificar|consultar)\s+disponibilidade\b",
     ]
 
-    # Keywords indicating the LLM will consult the doctor/professional
+    # Padrões com verbo de ação + alvo (médico/profissional)
     doctor_patterns = [
-        "verificar com o dr", "verificar com a dra",
-        "consultar o dr", "consultar a dra",
-        "perguntar ao dr", "perguntar à dra",
-        "falar com o dr", "falar com a dra",
-        "consultar o médico", "consultar a médica",
-        "consultar o profissional", "verificar com o profissional",
-        "verificar com o médico", "verificar com a médica",
-        "vou consultar o doutor", "vou consultar a doutora",
-        "encaminhar ao dr", "encaminhar à dra",
-        "repassar ao dr", "repassar à dra",
-        "vou verificar com o doutor", "vou verificar com a doutora",
+        r"\b(vou|irei|preciso|vamos)\s+(verificar|consultar|falar|perguntar)\s+com\s+(o|a)\s+(dr\.?|dra\.?|médic[oa]|doutor[oa]|profissional)\b",
+        r"\b(encaminhar|repassar)\s+(ao|à)\s+(dr\.?|dra\.?)\b",
     ]
 
-    for p in secretary_patterns:
-        if p in t:
+    for pat in secretary_patterns:
+        if re.search(pat, t):
+            log.info("detect_professional_inquiry: match SECRETARIA | pattern=%s", pat)
             return "id_secretaria"
-    for p in doctor_patterns:
-        if p in t:
+    for pat in doctor_patterns:
+        if re.search(pat, t):
+            log.info("detect_professional_inquiry: match CRIADOR | pattern=%s", pat)
             return "id_criador"
     return None
 
@@ -2079,6 +2132,9 @@ class WhatsAppWebClient:
         )
 
     def send_message(self, phone: str, text: str) -> Dict[str, Any]:
+        if wa_circuit.is_open():
+            raise RuntimeError("Circuit breaker aberto - WhatsApp temporariamente indisponível")
+
         self.start()
 
         def _do():
@@ -2143,7 +2199,17 @@ class WhatsAppWebClient:
                 "sent_text": sent_text,
             }
 
-        return self._run_on_browser_thread(_do)
+        for attempt in range(2):
+            try:
+                result = self._run_on_browser_thread(_do)
+                wa_circuit.record_success()
+                return result
+            except Exception:
+                wa_circuit.record_failure()
+                if attempt == 0:
+                    time.sleep(2 ** attempt)
+                    continue
+                raise
 
     def read_last_inbound(self, phone: str) -> Optional[Dict[str, str]]:
         self.start()
@@ -4548,6 +4614,7 @@ def health():
             "whatsapp_web_url": WHATSAPP_WEB_URL,
             "simulator_url": SIMULATOR_URL,
             "php_url": PHP_URL,
+            "circuit_breaker": wa_circuit.status(),
             "test_destination_phone": TEST_DESTINATION_PHONE,
             "poll_interval_sec": POLL_INTERVAL_SEC,
             "reply_poll_interval_sec": REPLY_POLL_INTERVAL_SEC,
@@ -4585,6 +4652,9 @@ def send_manual_reply():
 
     if not phone or not message:
         return jsonify({"ok": False, "error": "phone e message são obrigatórios"}), 400
+
+    if not check_rate_limit(phone, window_sec=5):
+        return jsonify({"ok": False, "error": "rate_limited", "retry_after_sec": 5}), 429
 
     log.info(
         "\n%s%s  ┌──────────────────────────────────────────────────────────────┐%s\n"
