@@ -388,6 +388,12 @@ def _wait_for_port(host: str, port: int, timeout: int = 180, interval: float = 0
 
 
 def open_urls_when_server_is_ready(port: int, urls: list, startup_timeout: int = 180):
+    try:
+        startup_timeout = max(1, int(startup_timeout))
+    except Exception:
+        print(f"[BOOT] Aviso: startup_timeout inválido ({startup_timeout!r}); usando 180s.")
+        startup_timeout = 180
+
     def _worker():
         is_ready, waited_seconds = _wait_for_port("127.0.0.1", port, timeout=startup_timeout)
         if not is_ready:
