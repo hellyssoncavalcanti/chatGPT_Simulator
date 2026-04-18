@@ -624,35 +624,80 @@ function Merge-AllPullRequests {
         return
     }
 
-    # Evita merge duplicado quando existirem PRs consecutivos com mesmo titulo e mesmo created_at.
-    # Nesses casos, processa apenas o mais novo (maior numero de PR).
+    # Evita merge duplicado quando houver PRs muito próximos (consecutivos) com mesmo título.
+    # Regra: para o mesmo título, se created_at diferir até 120s, mantém só o mais novo.
     $deduped = @()
     $duplicatesSkipped = 0
-    $groups = @($prsArray | Group-Object -Property {
-        $titleKey = [string]$_.title
-        $createdKey = [string]$_.created_at
-        if ([string]::IsNullOrWhiteSpace($createdKey)) {
-            # Sem created_at, não deduplica por segurança.
-            return "{0}|NO_CREATED_AT|{1}" -f $titleKey, [string]$_.number
-        }
-        return "{0}|{1}" -f $titleKey, $createdKey
-    })
-    foreach ($group in $groups) {
-        $items = @($group.Group | Where-Object { $_ -and $null -ne $_.number })
+    $duplicateWindowSec = 120
+
+    $titleGroups = @($prsArray | Group-Object -Property { [string]$_.title })
+    foreach ($titleGroup in $titleGroups) {
+        $items = @($titleGroup.Group | Where-Object { $_ -and $null -ne $_.number })
         if ($items.Count -le 1) {
             if ($items.Count -eq 1) { $deduped += $items[0] }
             continue
         }
 
-        # Mantem somente o mais novo/atual: maior numero de PR.
-        $selected = @($items | Sort-Object -Property number -Descending)[0]
-        $deduped += $selected
+        $parsable = @()
+        $nonParsable = @()
+        foreach ($item in $items) {
+            $dt = $null
+            if ([datetimeoffset]::TryParse([string]$item.created_at, [ref]$dt)) {
+                $parsable += [pscustomobject]@{
+                    pr = $item
+                    createdAt = $dt
+                }
+            } else {
+                $nonParsable += $item
+            }
+        }
 
-        $itemsSorted = @($items | Sort-Object -Property number)
-        $skipped = @($itemsSorted | Where-Object { $_.number -ne $selected.number })
-        $duplicatesSkipped += $skipped.Count
-        $skippedNums = ($skipped | ForEach-Object { "#$($_.number)" }) -join ', '
-        Write-Info ("Duplicidade detectada (titulo/data iguais). Mantendo PR #{0} e ignorando {1}." -f $selected.number, $skippedNums) -Color DarkGray
+        # Sem created_at parseável não há base temporal segura: mantém todos.
+        if ($parsable.Count -eq 0) {
+            $deduped += $items
+            continue
+        }
+
+        # Clusteriza por proximidade temporal (janela de 120s) e mantém só o PR mais novo por cluster.
+        $parsableSorted = @($parsable | Sort-Object -Property { $_.createdAt.ToUnixTimeSeconds() }, @{Expression = { $_.pr.number }; Ascending = $true })
+        $cluster = @()
+        $lastEpoch = $null
+        foreach ($entry in $parsableSorted) {
+            $currentEpoch = $entry.createdAt.ToUnixTimeSeconds()
+            if ($null -eq $lastEpoch -or [math]::Abs($currentEpoch - $lastEpoch) -le $duplicateWindowSec) {
+                $cluster += $entry
+                $lastEpoch = $currentEpoch
+                continue
+            }
+
+            $selected = @($cluster | Sort-Object -Property { $_.pr.number } -Descending)[0]
+            $deduped += $selected.pr
+            $skipped = @($cluster | Where-Object { $_.pr.number -ne $selected.pr.number })
+            if ($skipped.Count -gt 0) {
+                $duplicatesSkipped += $skipped.Count
+                $skippedNums = ($skipped | ForEach-Object { "#$($_.pr.number)" }) -join ', '
+                Write-Info ("Duplicidade detectada (mesmo título + proximidade temporal). Mantendo PR #{0} e ignorando {1}." -f $selected.pr.number, $skippedNums) -Color DarkGray
+            }
+
+            $cluster = @($entry)
+            $lastEpoch = $currentEpoch
+        }
+
+        if ($cluster.Count -gt 0) {
+            $selected = @($cluster | Sort-Object -Property { $_.pr.number } -Descending)[0]
+            $deduped += $selected.pr
+            $skipped = @($cluster | Where-Object { $_.pr.number -ne $selected.pr.number })
+            if ($skipped.Count -gt 0) {
+                $duplicatesSkipped += $skipped.Count
+                $skippedNums = ($skipped | ForEach-Object { "#$($_.pr.number)" }) -join ', '
+                Write-Info ("Duplicidade detectada (mesmo título + proximidade temporal). Mantendo PR #{0} e ignorando {1}." -f $selected.pr.number, $skippedNums) -Color DarkGray
+            }
+        }
+
+        # Itens sem created_at parseável são mantidos para não haver falso positivo.
+        if ($nonParsable.Count -gt 0) {
+            $deduped += $nonParsable
+        }
     }
 
     # Ordena do mais antigo ao mais novo para merge sequencial, já sem duplicatas
