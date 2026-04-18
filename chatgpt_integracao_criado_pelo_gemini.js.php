@@ -4334,7 +4334,7 @@ Responder SOMENTE com o JSON.`;
                         <button id="sb-btn-close-prompts" class="sb-close-btn">×</button>
                     </div>
                     
-                    <div style="flex:1; overflow-y:auto;">
+                    <div style="flex:1;">
                         <p style="font-size:12px; font-weight:bold; margin-bottom:5px;">Suas Preferências para o chat (User Prompt):</p>
                         <p style="font-size:10px; color:#666; margin-bottom:5px;">Ex: "Responda sempre formalmente", "Seja breve".</p>
                         <textarea id="sb-user-prompt" class="sb-textarea" placeholder="Digite suas instruções aqui..."></textarea>
