@@ -368,10 +368,12 @@ def _wait_for_port(host: str, port: int, timeout: int = 180, interval: float = 0
         interval = 0.5
     started_at = time.perf_counter()
     deadline = started_at + timeout
+    attempts = 0
     while True:
         now = time.perf_counter()
         if now >= deadline:
             break
+        attempts += 1
         try:
             connect_timeout = min(2.0, max(0.2, deadline - now))
             with socket.create_connection((host, port), timeout=connect_timeout):
@@ -381,6 +383,7 @@ def _wait_for_port(host: str, port: int, timeout: int = 180, interval: float = 0
             if remaining <= 0:
                 break
             time.sleep(min(interval, remaining))
+    print(f"[BOOT] Aviso: _wait_for_port timeout em {host}:{port} após {attempts} tentativa(s).")
     return False, (time.perf_counter() - started_at)
 
 
