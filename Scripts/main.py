@@ -490,6 +490,9 @@ if __name__ == "__main__":
         try:
             browser_queue.put({'action': 'STOP'})
             t_browser.join(timeout=BROWSER_JOIN_TIMEOUT_SEC)
-            print("[INFO] Sinal de parada enviado ao browser worker.")
+            if t_browser.is_alive():
+                print(f"[WARN] Browser worker não encerrou após {BROWSER_JOIN_TIMEOUT_SEC}s.")
+            else:
+                print("[INFO] Sinal de parada enviado ao browser worker.")
         except Exception as e:
             print(f"[WARN] Falha ao sinalizar parada do browser worker: {e}")
