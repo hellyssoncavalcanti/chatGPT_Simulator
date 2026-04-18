@@ -3998,10 +3998,14 @@ Responder SOMENTE com o JSON.`;
         @keyframes blink { 50% { opacity: 0; } }
         .ctx-pill { display: flex; align-items: center; gap: 4px; background: #fff; border: 1px solid #ccc; padding: 2px 8px; border-radius: 12px; cursor: pointer; font-size: 11px; }
         .ow-stream-box { display: flex; align-items: center; gap: 6px; margin-top: 8px; font-size: 11px; color: #666; }
-        #ow-sidebar { position: absolute; top: 0; left: 0; width: 0; height: 100%; background: #ffffff; z-index: 100; transition: width 0.3s; overflow-y: auto; overflow-x: hidden; -webkit-overflow-scrolling: touch; color: #333; box-shadow: 2px 0 5px rgba(0,0,0,0.1); border-right: 1px solid #eee; }
+        #ow-sidebar { position: absolute; top: 0; left: 0; width: 0; height: 100%; background: #ffffff; z-index: 100; transition: width 0.3s; overflow-y: hidden; overflow-x: hidden; -webkit-overflow-scrolling: touch; color: #333; box-shadow: 2px 0 5px rgba(0,0,0,0.1); border-right: 1px solid #eee; }
         #ow-sidebar.open { width: 90%; }
         .sb-content { padding: 20px; width: 100%; box-sizing: border-box; display: flex; flex-direction: column; height: 100%; }
-        .sb-title { font-size: 16px; font-weight: bold; margin-bottom: 15px; border-bottom: 1px solid #eee; padding-bottom: 10px; display: flex; justify-content: space-between; align-items: center; }
+        .sb-title {
+            font-size: 16px; font-weight: bold; margin-bottom: 15px; border-bottom: 1px solid #eee; padding-bottom: 10px;
+            display: flex; justify-content: space-between; align-items: center;
+            position: sticky; top: 0; z-index: 3; background: #fff;
+        }
         .sb-input { width: 100%; padding: 10px; margin-bottom: 10px; border-radius: 4px; border: 1px solid #ddd; background: #f9f9f9; color: #333; box-sizing: border-box;}
         .sb-textarea { width: 100%; padding: 10px; margin-bottom: 10px; border-radius: 4px; border: 1px solid #ddd; background: #f9f9f9; color: #333; box-sizing: border-box; min-height: 100px; resize: vertical; font-family: monospace; font-size: 12px; }
         .sb-btn { width: 100%; padding: 10px; background: #212121; color: white; border: none; border-radius: 4px; cursor: pointer; font-weight: bold; margin-bottom: 10px; }
@@ -4015,7 +4019,7 @@ Responder SOMENTE com o JSON.`;
         .sb-status { margin-top: 5px; font-size: 11px; color: #666; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
         #ow-menu-toggle { cursor: pointer; font-size: 20px; margin-right: 10px; background: none; border: none; color: #333; }
         .sb-close-btn { background: none; border: none; font-size: 20px; cursor: pointer; color: #666; }
-        .sb-view { display: none; animation: fadeIn 0.3s; }
+        .sb-view { display: none; animation: fadeIn 0.3s; height: 100%; overflow-y: auto; }
         .sb-view.active { display: block; }
         @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
 
@@ -4051,7 +4055,8 @@ Responder SOMENTE com o JSON.`;
         .sb-pend-card-badge.secretaria { background: #d97706; }
 
         /* === CHAT VIEW DENTRO DE PENDÊNCIAS === */
-        #sb-view-pendencias-chat { display: flex; flex-direction: column; height: 100%; }
+        #sb-view-pendencias-chat { flex-direction: column; height: 100%; }
+        #sb-view-pendencias-chat.active { display: flex; }
         #sb-pend-chat-messages {
             flex: 1; overflow-y: auto; padding: 10px 0;
             display: flex; flex-direction: column; gap: 8px;
@@ -4329,7 +4334,7 @@ Responder SOMENTE com o JSON.`;
                         <button id="sb-btn-close-prompts" class="sb-close-btn">×</button>
                     </div>
                     
-                    <div style="flex:1; overflow-y:auto;">
+                    <div style="flex:1;">
                         <p style="font-size:12px; font-weight:bold; margin-bottom:5px;">Suas Preferências para o chat (User Prompt):</p>
                         <p style="font-size:10px; color:#666; margin-bottom:5px;">Ex: "Responda sempre formalmente", "Seja breve".</p>
                         <textarea id="sb-user-prompt" class="sb-textarea" placeholder="Digite suas instruções aqui..."></textarea>
@@ -9268,7 +9273,13 @@ Responder SOMENTE com o JSON.`;
         
         window.switchSidebarView = function(viewName) {
             document.querySelectorAll('.sb-view').forEach(el => el.classList.remove('active'));
-            document.getElementById('sb-view-' + viewName).classList.add('active');
+            const targetView = document.getElementById('sb-view-' + viewName);
+            if (!targetView) return;
+            targetView.classList.add('active');
+
+            const sidebarEl = document.getElementById('ow-sidebar');
+            if (sidebarEl) sidebarEl.scrollTop = 0;
+            targetView.scrollTop = 0;
         }
         
         document.getElementById('sb-save-user-prompt').onclick = async () => {
