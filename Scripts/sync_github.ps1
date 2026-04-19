@@ -28,6 +28,7 @@ $script:GitExe = $null
 $script:Config = [ordered]@{}
 $script:LastMergeInfo = $null
 $script:CanWriteRepo = $true
+$script:GitHubAuthFailed = $false
 
 foreach ($arg in ($RemainingArgs | Where-Object { $_ -and $_.Trim() })) {
     switch ($arg.ToLowerInvariant()) {
@@ -72,6 +73,21 @@ function Write-Warn([string]$Message) {
 function Write-Fail([string]$Message) {
     Write-Host "[ERRO] $Message" -ForegroundColor Red
     Write-Log "[ERRO] $Message"
+}
+
+function Disable-GitHubAuth([string]$Reason = '') {
+    if (-not $script:GitHubAuthFailed) {
+        if ([string]::IsNullOrWhiteSpace($Reason)) {
+            Write-Warn 'Credenciais GitHub inválidas/expiradas. A etapa de API será ignorada neste ciclo.'
+        } else {
+            Write-Warn ("Credenciais GitHub inválidas/expiradas. Motivo: {0}. A etapa de API será ignorada neste ciclo." -f $Reason)
+        }
+    }
+    $script:GitHubAuthFailed = $true
+    $script:CanWriteRepo = $false
+    if ($script:Config -and $script:Config.headers) {
+        $script:Config.headers.Remove('Authorization') | Out-Null
+    }
 }
 
 function Write-Log([string]$Message) {
@@ -367,7 +383,7 @@ function Invoke-Git {
 }
 
 function Get-RepoUrlForClone {
-    if ($script:Config.githubToken) {
+    if ($script:Config.githubToken -and -not $script:GitHubAuthFailed) {
         return "https://$($script:Config.ghUser):$($script:Config.githubToken)@github.com/$($script:Config.ghUser)/$($script:Config.repo).git"
     }
     return "https://github.com/$($script:Config.ghUser)/$($script:Config.repo).git"
@@ -404,9 +420,11 @@ function Invoke-GitHubApi {
     } catch {
         $errorMessage = $_.Exception.Message
         $responseBody = $null
+        $statusCode = $null
 
         try {
             $response = $_.Exception.Response
+            try { $statusCode = [int]$response.StatusCode.value__ } catch { }
             if ($response -and $response.GetResponseStream) {
                 $stream = $response.GetResponseStream()
                 if ($stream) {
@@ -417,6 +435,11 @@ function Invoke-GitHubApi {
                 }
             }
         } catch { }
+
+        $bodyText = [string]$responseBody
+        if ($statusCode -in @(401, 403) -or $errorMessage -match '\(401\)|\(403\)' -or $bodyText -match 'Bad credentials') {
+            Disable-GitHubAuth -Reason ("HTTP {0} / {1}" -f $statusCode, ($bodyText -replace '\s+', ' ').Trim())
+        }
 
         if (-not [string]::IsNullOrWhiteSpace($responseBody)) {
             throw ("{0} | Body: {1}" -f $errorMessage, $responseBody)
@@ -431,7 +454,7 @@ function New-PullRequestsForPendingBranches {
         Detecta branches sem PR aberto (prefixos claude/, codex/, chatgpt/) e cria PRs
         automaticamente com titulo e corpo baseados nos commits reais da branch.
     #>
-    if (-not $script:Config.githubToken) { return }
+    if (-not $script:Config.githubToken -or $script:GitHubAuthFailed) { return }
 
     $branchesComPr = @()
     try {
@@ -584,9 +607,13 @@ function New-PullRequestsForPendingBranches {
 function Merge-AllPullRequests {
     Write-Section 'PULL REQUESTS'
 
-    if (-not $script:Config.githubToken) {
+    if (-not $script:Config.githubToken -or $script:GitHubAuthFailed) {
         $script:CanWriteRepo = $false
-        Write-Warn 'Token GitHub nao configurado; etapa de PR sera ignorada, mas o sync dos arquivos ainda sera tentado.'
+        if (-not $script:Config.githubToken) {
+            Write-Warn 'Token GitHub nao configurado; etapa de PR sera ignorada, mas o sync dos arquivos ainda sera tentado.'
+        } else {
+            Write-Warn 'Token GitHub invalido/expirado; etapa de PR sera ignorada, mas o sync dos arquivos ainda sera tentado.'
+        }
         return
     }
 
@@ -1364,6 +1391,7 @@ function Reset-CycleState {
     # Nota: $script:LogFile NÃO é resetado — o log da sessão é reutilizado
     # entre ciclos (assim como os outros sistemas do projeto).
     $script:CanWriteRepo = $true
+    $script:GitHubAuthFailed = $false
 }
 
 function Run-SyncCycle {
