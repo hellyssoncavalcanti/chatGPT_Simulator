@@ -3998,7 +3998,7 @@ Responder SOMENTE com o JSON.`;
         @keyframes blink { 50% { opacity: 0; } }
         .ctx-pill { display: flex; align-items: center; gap: 4px; background: #fff; border: 1px solid #ccc; padding: 2px 8px; border-radius: 12px; cursor: pointer; font-size: 11px; }
         .ow-stream-box { display: flex; align-items: center; gap: 6px; margin-top: 8px; font-size: 11px; color: #666; }
-        #ow-sidebar { position: absolute; top: 0; left: 0; width: 0; height: 100%; background: #ffffff; z-index: 100; transition: width 0.3s; overflow-y: auto; overflow-x: hidden; -webkit-overflow-scrolling: touch; color: #333; box-shadow: 2px 0 5px rgba(0,0,0,0.1); border-right: 1px solid #eee; }
+        #ow-sidebar { position: absolute; top: 0; left: 0; width: 0; height: 100%; background: #ffffff; z-index: 100; transition: width 0.3s; overflow-y: hidden; overflow-x: hidden; -webkit-overflow-scrolling: touch; color: #333; box-shadow: 2px 0 5px rgba(0,0,0,0.1); border-right: 1px solid #eee; }
         #ow-sidebar.open { width: 90%; }
         .sb-content { padding: 20px; width: 100%; box-sizing: border-box; display: flex; flex-direction: column; height: 100%; }
         .sb-title {
@@ -4019,7 +4019,7 @@ Responder SOMENTE com o JSON.`;
         .sb-status { margin-top: 5px; font-size: 11px; color: #666; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
         #ow-menu-toggle { cursor: pointer; font-size: 20px; margin-right: 10px; background: none; border: none; color: #333; }
         .sb-close-btn { background: none; border: none; font-size: 20px; cursor: pointer; color: #666; }
-        .sb-view { display: none; animation: fadeIn 0.3s; }
+        .sb-view { display: none; animation: fadeIn 0.3s; height: 100%; overflow-y: auto; }
         .sb-view.active { display: block; }
         @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
 
