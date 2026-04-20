@@ -16,6 +16,7 @@ import subprocess
 import sys
 import threading
 import time
+from urllib.parse import urlparse
 import webbrowser
 
 SCRIPTS_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -418,8 +419,9 @@ def open_urls_when_server_is_ready(port: int, urls: list, startup_timeout: int =
             url = str(raw_url or "").strip()
             if not url or url in seen:
                 continue
-            if not re.match(r"^https?://", url, flags=re.IGNORECASE):
-                print(f"[BOOT] Aviso: URL ignorada (formato não HTTP/HTTPS): {url}")
+            parsed = urlparse(url)
+            if parsed.scheme.lower() not in {"http", "https"} or not parsed.netloc:
+                print(f"[BOOT] Aviso: URL ignorada (inválida para abertura automática): {url}")
                 continue
             seen.add(url)
             normalized_urls.append(url)
