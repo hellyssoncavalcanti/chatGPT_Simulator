@@ -3759,6 +3759,26 @@ async def _codex_try_open_fresh_task(page):
         return None
 
 
+async def _recover_closed_page(page, q, reason: str = ""):
+    """Tenta recriar uma Page no mesmo BrowserContext quando a atual fechou."""
+    try:
+        if page is not None and (not hasattr(page, "is_closed") or not page.is_closed()):
+            return page
+    except Exception:
+        pass
+    try:
+        context = getattr(page, "context", None)
+        if callable(context):
+            context = context()
+        if context is None:
+            raise RuntimeError("contexto do navegador indisponível")
+        new_page = await context.new_page()
+        emit_log(q, f"♻️ Codex: página foi recriada após fechamento inesperado ({reason or 'sem motivo'}).")
+        return new_page
+    except Exception as exc:
+        raise RuntimeError(f"Falha no navegador: página/contexto fechados e recuperação falhou ({exc})") from exc
+
+
 async def handle_codex_task_inner(task, page, q, stop_event, activityts=None):
     """Fluxo dedicado ao Codex (chatgpt.com/codex/cloud):
       1) Navega para a Codex URL.
@@ -3770,8 +3790,16 @@ async def handle_codex_task_inner(task, page, q, stop_event, activityts=None):
     msg = task.get('message') or ''
     codex_repo = task.get('codex_repo')
 
+    page = await _recover_closed_page(page, q, reason="início do fluxo Codex")
     emit_log(q, f'Codex: abrindo {url}')
-    await page.goto(url, wait_until='domcontentloaded', timeout=30000)
+    try:
+        await page.goto(url, wait_until='domcontentloaded', timeout=30000)
+    except Exception as exc:
+        if "target page, context or browser has been closed" in str(exc).lower():
+            page = await _recover_closed_page(page, q, reason="goto inicial Codex")
+            await page.goto(url, wait_until='domcontentloaded', timeout=30000)
+        else:
+            raise
     await asyncio.sleep(1.2)
 
     if stop_event.is_set():
@@ -3809,6 +3837,9 @@ async def handle_codex_task_inner(task, page, q, stop_event, activityts=None):
     deadline = time.time() + 25.0
     last_wait_log = 0.0
     while time.time() < deadline:
+        if hasattr(page, "is_closed") and page.is_closed():
+            page = await _recover_closed_page(page, q, reason="espera por URL da tarefa Codex")
+            await page.goto(url, wait_until='domcontentloaded', timeout=15000)
         cur = (page.url or '')
         m = re.search(r"https://chatgpt\.com/codex/cloud/tasks/([A-Za-z0-9_\-]+)", cur)
         if m:
