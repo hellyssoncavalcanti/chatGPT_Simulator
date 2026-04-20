@@ -357,6 +357,10 @@ def start_http_server(config_module, server_module):
 
 
 def _wait_for_port(host: str, port: int, timeout: int = 180, interval: float = 0.5) -> tuple[bool, float]:
+    host = str(host or "").strip()
+    if not host:
+        print("[BOOT] Aviso: host inválido para _wait_for_port (vazio); abortando espera.")
+        return False, 0.0
     try:
         port = int(port)
         if not (1 <= port <= 65535):
