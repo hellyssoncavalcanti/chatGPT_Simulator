@@ -36,3 +36,6 @@ downloads/
 
 # venv
 .venv/
+
+# Ambiente local
+.env

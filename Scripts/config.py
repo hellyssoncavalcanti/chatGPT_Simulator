@@ -51,7 +51,14 @@
 # =============================================================================
 # -*- coding: utf-8 -*-
 import os
+from pathlib import Path
 from datetime import datetime
+
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except Exception:
+    pass
 
 
 def _env(name: str, default: str) -> str:
@@ -94,10 +101,7 @@ def _env_csv(name: str, default: list[str]) -> list[str]:
 VERSION = "11.0"
 PORT = _env_int("SIMULATOR_PORT", 3002)
 API_KEY = _env("SIMULATOR_API_KEY", "CVAPI_2b9c80c2abf94a76baf8b3e68d89cb7e")
-BASE_DIR = _env(
-    "SIMULATOR_BASE_DIR",
-    r"C:\chatgpt_simulator" if os.name == "nt" else os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-)
+BASE_DIR = _env("SIMULATOR_BASE_DIR", str(Path(__file__).resolve().parent.parent))
 
 # Debug: exibe todas as queries SQL no console (útil para auditoria)
 DEBUG_LOG = _env_bool("SIMULATOR_DEBUG_LOG", False)   # Altere para True para ativar o debug
@@ -113,6 +117,7 @@ CORS_ALLOWED_ORIGINS = _env_csv(
 ALLOWED_IPS = _env_csv("SIMULATOR_ALLOWED_IPS", ["127.0.0.1", "151.106.97.30"])
 SESSION_COOKIE_SECURE = _env_bool("SIMULATOR_SESSION_COOKIE_SECURE", False)
 SESSION_COOKIE_SAMESITE = _env("SIMULATOR_SESSION_COOKIE_SAMESITE", "Lax")
+SESSION_TTL_HOURS = _env_int("SIMULATOR_SESSION_TTL_HOURS", 24)
 SECURITY_RATE_LIMIT_PER_MIN = _env_int("SIMULATOR_RATE_LIMIT_PER_MIN", 120)
 SECURITY_LOGIN_MAX_FAILS = _env_int("SIMULATOR_LOGIN_MAX_FAILS", 8)
 SECURITY_LOGIN_BLOCK_SEC = _env_int("SIMULATOR_LOGIN_BLOCK_SEC", 900)

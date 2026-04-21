@@ -22,7 +22,14 @@
 # -*- coding: utf-8 -*-
 import os
 import secrets
+from pathlib import Path
 from datetime import datetime
+
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except Exception:
+    pass
 
 
 def _env(name: str, default: str) -> str:
@@ -71,10 +78,7 @@ PORT = _env_int("SIMULATOR_PORT", 3002)
 # SIMULATOR_API_KEY no ambiente ou edite este arquivo depois de copiado.
 API_KEY = _env("SIMULATOR_API_KEY", "CVAPI_" + secrets.token_hex(16))
 
-BASE_DIR = _env(
-    "SIMULATOR_BASE_DIR",
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-)
+BASE_DIR = _env("SIMULATOR_BASE_DIR", str(Path(__file__).resolve().parent.parent))
 
 DEBUG_LOG = _env_bool("SIMULATOR_DEBUG_LOG", False)
 
@@ -90,6 +94,7 @@ ALLOWED_IPS = _env_csv("SIMULATOR_ALLOWED_IPS", ["127.0.0.1"])
 
 SESSION_COOKIE_SECURE = _env_bool("SIMULATOR_SESSION_COOKIE_SECURE", False)
 SESSION_COOKIE_SAMESITE = _env("SIMULATOR_SESSION_COOKIE_SAMESITE", "Lax")
+SESSION_TTL_HOURS = _env_int("SIMULATOR_SESSION_TTL_HOURS", 24)
 SECURITY_RATE_LIMIT_PER_MIN = _env_int("SIMULATOR_RATE_LIMIT_PER_MIN", 120)
 SECURITY_LOGIN_MAX_FAILS = _env_int("SIMULATOR_LOGIN_MAX_FAILS", 8)
 SECURITY_LOGIN_BLOCK_SEC = _env_int("SIMULATOR_LOGIN_BLOCK_SEC", 900)
