@@ -668,7 +668,7 @@ function Merge-AllPullRequests {
         $parsable = @()
         $nonParsable = @()
         foreach ($item in $items) {
-            $dt = $null
+            [datetimeoffset]$dt = [datetimeoffset]::MinValue
             if ([datetimeoffset]::TryParse([string]$item.created_at, [ref]$dt)) {
                 $parsable += [pscustomobject]@{
                     pr = $item
