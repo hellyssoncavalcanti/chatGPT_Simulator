@@ -165,6 +165,47 @@ function Initialize-Logging {
     Write-Info "Log em $($script:LogFile)"
 }
 
+function Get-ConfigPySettings {
+    param(
+        [string]$ScriptDir,
+        [string]$LocalDirHint
+    )
+    $result = @{}
+    try {
+        $configPath = Join-Path $ScriptDir 'config.py'
+        if (-not (Test-Path $configPath) -and $LocalDirHint) {
+            $candidate = Join-Path $LocalDirHint 'Scripts\config.py'
+            if (Test-Path $candidate) { $configPath = $candidate }
+        }
+        if (-not (Test-Path $configPath)) { return $result }
+
+        $pyCode = @"
+import json, importlib.util
+cfg_path = r'''$configPath'''
+spec = importlib.util.spec_from_file_location('sim_cfg', cfg_path)
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+keys = ['GITHUB_TOKEN','GH_USER','GITHUB_USER','GITHUB_REPO','GITHUB_BRANCH','BASE_DIR']
+data = {k: getattr(mod, k, None) for k in keys}
+print(json.dumps(data, ensure_ascii=False))
+"@
+        $jsonOut = (& python -c $pyCode 2>$null) | Out-String
+        if ([string]::IsNullOrWhiteSpace($jsonOut)) { return $result }
+        $parsed = $jsonOut | ConvertFrom-Json -ErrorAction Stop
+        if ($parsed) {
+            if ($parsed.GITHUB_TOKEN) { $result.githubToken = [string]$parsed.GITHUB_TOKEN }
+            if ($parsed.GH_USER) { $result.ghUser = [string]$parsed.GH_USER }
+            elseif ($parsed.GITHUB_USER) { $result.ghUser = [string]$parsed.GITHUB_USER }
+            if ($parsed.GITHUB_REPO) { $result.repo = [string]$parsed.GITHUB_REPO }
+            if ($parsed.GITHUB_BRANCH) { $result.branch = [string]$parsed.GITHUB_BRANCH }
+            if ($parsed.BASE_DIR) { $result.localDir = [string]$parsed.BASE_DIR }
+        }
+    } catch {
+        # Fallback silencioso: sync continua com settings/env.
+    }
+    return $result
+}
+
 function Import-Settings {
     $scriptPath = $PSCommandPath
     if ([string]::IsNullOrWhiteSpace($scriptPath)) {
@@ -219,6 +260,17 @@ function Import-Settings {
             $script:Config[$key] = (Get-Variable -Name $key -ValueOnly)
         } else {
             $script:Config[$key] = $defaults[$key]
+        }
+    }
+
+    # Compatibilidade: quando token/usuário não vierem de settings/env,
+    # tenta restaurar credenciais definidas no Scripts/config.py.
+    $cfgPy = Get-ConfigPySettings -ScriptDir $scriptDir -LocalDirHint $script:Config.localDir
+    foreach ($key in @('githubToken', 'ghUser', 'repo', 'branch', 'localDir')) {
+        $current = [string]($script:Config[$key] ?? '')
+        $isUnset = [string]::IsNullOrWhiteSpace($current) -or (Test-IsPlaceholderValue $current)
+        if ($isUnset -and $cfgPy.ContainsKey($key) -and -not [string]::IsNullOrWhiteSpace([string]$cfgPy[$key])) {
+            $script:Config[$key] = [string]$cfgPy[$key]
         }
     }
 

@@ -106,6 +106,12 @@ REQUEST_TIMEOUT_SEC = _env_int(
 # Alias explícito para manter compatibilidade com scripts legados.
 AUTODEV_AGENT_REQUEST_TIMEOUT = REQUEST_TIMEOUT_SEC
 
+# GitHub sync (compatibilidade com scripts legados que liam credenciais daqui)
+GITHUB_TOKEN = _env("CHATGPT_SIMULATOR_GITHUB_TOKEN", "")
+GH_USER = _env("CHATGPT_SIMULATOR_GITHUB_USER", "")
+GITHUB_REPO = _env("CHATGPT_SIMULATOR_GITHUB_REPO", "chatGPT_Simulator")
+GITHUB_BRANCH = _env("CHATGPT_SIMULATOR_GITHUB_BRANCH", "main")
+
 
 DIRS = {
     "certs": os.path.join(BASE_DIR, "certs"),
