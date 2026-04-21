@@ -1088,26 +1088,12 @@ Detecção de incidentes:
 - Linhas informativas conhecidas do `sync_github` (ex.: branches sem commits
   novos) são ignoradas no classificador de incidentes.
 
-### Como o agente consulta Codex (via `browser.py`)
+## Documentação detalhada
+- [Arquitetura](docs/arquitetura.md)
+- [Analisador de Prontuários](docs/analisador_prontuarios.md)
+- [WhatsApp](docs/whatsapp.md)
+- [Agente Autônomo](docs/agente_autonomo.md)
+- [Sync GitHub](docs/sync_github.md)
 
-1. O agente envia `POST /v1/chat/completions` com `stream: True` para o
-   `server.py` (porta 3003).
-2. `server.py` enfileira uma tarefa `CHAT` em `shared.browser_queue`.
-3. `browser.py` consome a tarefa e, se `url` tiver sido passada
-   (p. ex. `AUTODEV_AGENT_CODEX_URL=https://chatgpt.com/codex/...`), navega
-   para lá antes de digitar. Caso contrário, abre um chat novo no ChatGPT
-   regular.
-4. O `browser.py` injeta automaticamente um prefixo fixo de **MAX REASONING**
-   em qualquer mensagem enviada ao Codex (independente de qual cliente Python
-   originou a requisição), para manter o modo de execução aprofundado.
-5. Após enviar a tarefa, o `browser.py` tenta abrir imediatamente a URL da
-   tarefa recém-criada (`/codex/cloud/tasks/...`) a partir da lista visível de
-   tarefas, em vez de aguardar longamente na home `/codex/cloud`.
-6. A resposta volta em **eventos streaming** (`status`, `markdown`, `finish`,
-   `chat_id`, `chat_meta`, `error`).
-7. O agente guarda `chat_id` e `url` em `AgentState`, e nas rodadas seguintes
-   reutiliza essa conversa — ou seja, o ChatGPT mantém memória contextual de
-   toda a trajetória de manutenção do projeto.
-8. O intervalo anti-rate-limit humano é aplicado ao fluxo de diagnóstico no
-   ChatGPT Simulator, mas **não bloqueia** o forward de implementação para o
-   Codex (canal separado).
+## Refactor em andamento
+Acompanhe o plano completo em [`REFACTOR_PROGRESS.md`](REFACTOR_PROGRESS.md).
