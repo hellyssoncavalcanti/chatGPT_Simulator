@@ -108,8 +108,12 @@ AUTODEV_AGENT_REQUEST_TIMEOUT = REQUEST_TIMEOUT_SEC
 
 # GitHub sync (compatibilidade com scripts legados que liam credenciais daqui)
 GITHUB_TOKEN = _env("CHATGPT_SIMULATOR_GITHUB_TOKEN", "")
-GH_USER = _env("CHATGPT_SIMULATOR_GITHUB_USER", "")
+GH_USER = _env("CHATGPT_SIMULATOR_GITHUB_USER", "hellyssoncavalcanti")
 GITHUB_REPO = _env("CHATGPT_SIMULATOR_GITHUB_REPO", "chatGPT_Simulator")
+GITHUB_ORIGIN = _env(
+    "CHATGPT_SIMULATOR_GITHUB_ORIGIN",
+    "https://github.com/hellyssoncavalcanti/chatGPT_Simulator",
+)
 GITHUB_BRANCH = _env("CHATGPT_SIMULATOR_GITHUB_BRANCH", "main")
 GITHUB_LOCAL_DIR = _env("CHATGPT_SIMULATOR_DIR", BASE_DIR)
 GITHUB_TASK_NAME = _env("CHATGPT_SIMULATOR_GITHUB_TASK_NAME", "chatGPT_Simulator_AutoSync")

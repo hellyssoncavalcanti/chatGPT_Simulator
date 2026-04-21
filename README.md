@@ -109,6 +109,50 @@ Dentro do `main.py`, a inicialização acontece assim:
 
 ---
 
+## Estrutura da fila interna (server → browser) e priorização
+
+Para reduzir gargalos e starvation entre chats concorrentes, a fila global
+`browser_queue` foi evoluída para uma estrutura com:
+
+1. **Lanes por prioridade** (ações críticas primeiro, como `STOP`);
+2. **Subfilas por tenant/chat** (`chat_id` / `url` / `request_source`);
+3. **Round-robin entre tenants da mesma prioridade**, evitando que um único
+   chat monopolize a execução;
+4. **Priorização explícita de pedidos remotos** sobre pedidos oriundos de
+   scripts Python/autônomos (ex.: analisador).
+
+Isso mantém compatibilidade de uso com `put/get` e melhora previsibilidade em
+cenários com múltiplas origens concorrendo por execução no navegador.
+
+### Endpoint de observabilidade da fila
+
+- `GET /api/queue/status`
+  - Retorna `qsize`, contadores de enfileiramento/consumo, métricas de espera
+    (`avg_wait_ms`, `max_wait_ms`) e distribuição por origem/prioridade.
+  - Exige autenticação (mesma política dos demais endpoints privados).
+
+### Endpoint de log em tempo real (polling)
+
+- `GET /api/logs/tail?lines=120`
+  - Retorna as últimas linhas do arquivo de log ativo (`config.LOG_PATH`).
+  - Ideal para atualização periódica no frontend sem abrir shell.
+  - Exige autenticação.
+
+### Frontend: novos itens no menu do usuário (`userDropdown`)
+
+No avatar/menu superior direito foram adicionadas duas ações:
+
+1. **Status da Fila**  
+   Abre um toast com atualização em tempo real do `/api/queue/status`.
+
+2. **Log em tempo real**  
+   Abre um toast com tail do log via `/api/logs/tail`.
+
+Esses painéis são focados em observabilidade operacional durante uso em
+produção/local, sem interromper a conversa ativa.
+
+---
+
 ## Servidor de acompanhamento WhatsApp Web (modo isolado, sem Meta)
 
 Foi adicionado o script `Scripts/acompanhamento_whatsapp.py`, responsável por:

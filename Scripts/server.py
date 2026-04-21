@@ -751,6 +751,69 @@ def health_check():
 
     return jsonify({"status": "ok", "service": "ChatGPT Simulator"}), 200
 
+
+@app.route("/api/queue/status", methods=["GET"])
+def queue_status():
+    """
+    Observabilidade da fila interna server → browser.
+    Requer autenticação padrão (before_request/check_auth).
+    """
+    stats = {}
+    try:
+        if hasattr(browser_queue, "snapshot_stats"):
+            stats = browser_queue.snapshot_stats() or {}
+    except Exception as e:
+        stats = {"error": str(e)}
+
+    return jsonify({
+        "success": True,
+        "queue": {
+            "qsize": int(browser_queue.qsize()),
+            **stats
+        }
+    }), 200
+
+
+@app.route("/api/logs/tail", methods=["GET"])
+def logs_tail():
+    """
+    Retorna as últimas linhas do log atual do simulator.
+    Ideal para polling leve no frontend (toast de observabilidade).
+    """
+    try:
+        requested = int(request.args.get("lines", 120))
+    except Exception:
+        requested = 120
+    lines_limit = max(10, min(800, requested))
+
+    path = getattr(config, "LOG_PATH", "")
+    if not path or not os.path.exists(path):
+        return jsonify({"success": False, "error": "log_not_found", "path": path}), 404
+
+    try:
+        with open(path, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            file_size = f.tell()
+            chunk_size = 4096
+            data = b""
+            pos = file_size
+            while pos > 0 and data.count(b"\n") <= lines_limit:
+                read_size = min(chunk_size, pos)
+                pos -= read_size
+                f.seek(pos)
+                data = f.read(read_size) + data
+            text = data.decode("utf-8", errors="replace")
+            tail_lines = text.splitlines()[-lines_limit:]
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e), "path": path}), 500
+
+    return jsonify({
+        "success": True,
+        "path": path,
+        "lines": tail_lines,
+        "line_count": len(tail_lines),
+    }), 200
+
 @app.route("/", methods=["GET", "POST"])
 def index(): 
     # Força o mime-type correto para evitar erro de texto no navegador
@@ -1667,6 +1730,7 @@ def chat_completions():
         'url':              url,
         'chat_id':          chat_id,
         'message':          message,
+        'is_analyzer':      bool(is_analyzer),
         'sender':           sender_label,
         'request_source':   source_hint or sender_label,
         'attachment_paths': saved_paths,
