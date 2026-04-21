@@ -46,10 +46,13 @@ SESSIONS = {}
 
 def load_users():
     if not os.path.exists(config.USERS_FILE):
-        # Cria admin padrão se não existir
+        # Cria admin padrão se não existir.
+        # Senha inicial é "admin" — o usuário DEVE alterá-la no primeiro login.
+        # Esta senha só é restaurada quando config.py também está ausente
+        # (ver `0. start.bat`), indicando instalação em novo local.
         default_users = {
             "admin": {
-                "password": hash_password("32713091"),
+                "password": hash_password("admin"),
                 "avatar": None
             }
         }
