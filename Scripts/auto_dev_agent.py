@@ -1393,6 +1393,80 @@ def _extract_json_object(text: str) -> Optional[dict]:
     return candidates[0]
 
 
+def _extract_plan_from_non_json_text(text: str) -> Optional[Dict[str, Any]]:
+    """Fallback heurístico para respostas sem JSON parseável.
+
+    Objetivo: não perder diagnóstico/melhorias citadas no campo analysis mesmo
+    quando o modelo responde em formato textual, markdown ou pseudo-JSON.
+    """
+    raw = _strip_code_fences(str(text or "")).strip()
+    if not raw:
+        return None
+
+    lower = raw.lower()
+    # Só tenta fallback quando o texto parece plano/análise; evita falso-positivo.
+    if not any(tok in lower for tok in (
+        "analysis", "análise", "diagnóstico", "diagnostico",
+        "should_forward_to_codex", "forward", "codex", "ações", "actions",
+        "corre", "aprimor", "sugest"
+    )):
+        return None
+
+    analysis = ""
+    should_forward: Optional[bool] = None
+    actions: List[Dict[str, Any]] = []
+
+    # 1) tenta capturar blocos tipo "analysis: ..."
+    m = re.search(
+        r"(?is)(?:^|\n)\s*(analysis|análise|diagnóstico|diagnostico)\s*[:=\-]\s*(.+?)(?=\n\s*[a-z_ ]+\s*[:=\-]|\Z)",
+        raw,
+    )
+    if m:
+        analysis = m.group(2).strip()
+    else:
+        # 2) fallback: primeira seção textual útil sem "responda/JSON"
+        candidate_lines: List[str] = []
+        for ln in raw.splitlines():
+            s = ln.strip()
+            if not s:
+                continue
+            if re.match(r"(?i)^(resposta|response|json|formato|schema)\b", s):
+                continue
+            candidate_lines.append(s)
+        analysis = " ".join(candidate_lines)[:4000].strip()
+
+    # Booleano explícito quando presente em texto.
+    m_forward = re.search(r"(?i)should_forward_to_codex\s*[:=]\s*(true|false)", raw)
+    if m_forward:
+        should_forward = m_forward.group(1).lower() == "true"
+    elif re.search(r"(?i)\bencaminh(ar|e)\b.*\bcodex\b", raw):
+        should_forward = True
+
+    # Se houver bullets de ações, preserva como notes para não perder contexto.
+    bullet_lines = []
+    for ln in raw.splitlines():
+        if re.match(r"^\s*([-*•]|\d+[.)])\s+", ln):
+            txt = re.sub(r"^\s*([-*•]|\d+[.)])\s+", "", ln).strip()
+            if txt:
+                bullet_lines.append(txt)
+    if bullet_lines:
+        actions.append({
+            "type": "note",
+            "content": "Sugestões extraídas de resposta não-JSON:\n- " + "\n- ".join(bullet_lines[:25])
+        })
+
+    analysis = analysis.strip()
+    if not analysis and not actions and should_forward is None:
+        return None
+
+    return {
+        "analysis": analysis,
+        "actions": actions,
+        "should_forward_to_codex": bool(should_forward) if should_forward is not None else False,
+        "_parsed_from_non_json": True,
+    }
+
+
 def _normalize_plan(plan: Dict[str, Any]) -> Dict[str, Any]:
     """Normaliza o JSON de plano para contrato mínimo esperado pelo agente."""
     if not isinstance(plan.get("actions"), list):
@@ -2026,9 +2100,16 @@ def ask_chatgpt_for_plan(context: Dict[str, Any],
 
     plan = _extract_json_object(markdown or "")
     if not plan:
-        log("⚠️ ChatGPT respondeu sem JSON válido — resposta ignorada neste ciclo.",
-            logging.WARNING)
-        return None
+        fallback_plan = _extract_plan_from_non_json_text(markdown or "")
+        if not fallback_plan:
+            log("⚠️ ChatGPT respondeu sem JSON válido — resposta ignorada neste ciclo.",
+                logging.WARNING)
+            return None
+        plan = fallback_plan
+        log(
+            "⚠️ ChatGPT respondeu fora do JSON; plano inferido heurísticamente para não perder sugestões.",
+            logging.WARNING,
+        )
     plan = _normalize_plan(plan)
     _log_plan_decision(plan, "ChatGPT")
     return plan

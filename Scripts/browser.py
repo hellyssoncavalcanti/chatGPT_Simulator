@@ -997,11 +997,24 @@ async def wait_for_chat_ready(page, url: str, q=None, timeout: int = 30) -> bool
     while asyncio.get_event_loop().time() < deadline:
         attempt += 1
         try:
+            if hasattr(page, "is_closed") and page.is_closed():
+                reason = "page já foi fechada"
+                emit_log(q, f"🛑 Poll interrompido no wait_for_chat_ready: {reason}.")
+                raise RuntimeError(f"wait_for_chat_ready_abort_closed: {reason}")
+        except RuntimeError:
+            raise
+        except Exception:
+            pass
+        try:
             result = await page.evaluate(JS_CHECK)
             if result and result.get("ready"):
                 emit_log(q, f"✅ Chat pronto (sinal: {result.get('signal')}, tentativa #{attempt})")
                 return True
         except Exception as e:
+            err = str(e or "")
+            if "target page, context or browser has been closed" in err.lower():
+                emit_log(q, f"🛑 Poll interrompido no wait_for_chat_ready: {err}")
+                raise RuntimeError(f"wait_for_chat_ready_abort_closed: {err}") from e
             emit_log(q, f"⚠️ Erro no poll #{attempt}: {e}")
 
         await asyncio.sleep(0.4)
@@ -2646,6 +2659,11 @@ async def watchdog_page(page, q, stop_event: asyncio.Event,
             await asyncio.wait_for(page.evaluate("1"), timeout=45.0)
             consecutive_failures = 0
         except Exception as e:
+            err = str(e or "")
+            if "target page, context or browser has been closed" in err.lower():
+                emit_log(q, "ℹ️ Watchdog: aba/contexto já fechado; encerrando heartbeat sem retry.")
+                stop_event.set()
+                return
             consecutive_failures += 1
             if consecutive_failures < max(1, int(max_consecutive_failures)):
                 emit_log(
@@ -3218,6 +3236,47 @@ async def handle_chat_task(context, task):
         max_attempts = 2
         handled = False
         page = None
+        async def _resume_stream_after_reopen(probe_page, initial_markdown: str) -> str:
+            """Retoma streaming de uma resposta já iniciada após reabrir a aba."""
+            current = (initial_markdown or "").strip()
+            if current:
+                emit_event(q, "markdown", current)
+
+            deadline = time.time() + 180
+            last_change = time.time()
+            while time.time() < deadline:
+                try:
+                    snap = await _read_last_assistant_snapshot(probe_page)
+                    html = clean_html(snap.get("html", ""))
+                    md_now = md(html, heading_style="ATX").strip()
+                    md_now = md_now.replace("\\_", "_").replace("\\*", "*")
+                except Exception as e_snap:
+                    emit_log(q, f"⚠️ Falha ao ler resposta após reabertura: {e_snap}")
+                    break
+
+                if md_now and md_now != current:
+                    current = md_now
+                    last_change = time.time()
+                    emit_event(q, "markdown", current)
+
+                try:
+                    gen_state = await probe_page.evaluate("""() => {
+                        const stopBtn = document.querySelector('button[aria-label="Stop generating"], button[data-testid="stop-button"]');
+                        const ta = document.querySelector('#prompt-textarea');
+                        return {
+                            generating: !!(stopBtn && stopBtn.offsetParent !== null),
+                            busy: !!(ta && ta.getAttribute('aria-busy') === 'true')
+                        };
+                    }""")
+                except Exception:
+                    gen_state = {"generating": False, "busy": False}
+
+                idle_sec = time.time() - last_change
+                if current and (not gen_state.get("generating")) and (not gen_state.get("busy")) and idle_sec >= 6:
+                    break
+                await asyncio.sleep(1.0)
+            return current
+
         try:
             for attempt in range(1, max_attempts + 1):
                 stop_event = asyncio.Event()
@@ -3241,11 +3300,14 @@ async def handle_chat_task(context, task):
                     err = str(e)
                     recoverable = (
                         "watchdog_abort_before_response" in err
+                        or "page_closed_before_response" in err
+                        or "wait_for_chat_ready_abort_closed" in err
                         or "target page, context or browser has been closed" in err.lower()
                         or "stream encerrado pelo cliente" in err.lower()
                     )
                     if recoverable and attempt < max_attempts:
                         emit_log(q, "⚠️ Interrupção detectada. Reabrindo aba para verificar status/resposta...")
+                        emit_event(q, "status", "Conexão instável: reabrindo aba para retomar stream da resposta...")
                         probe_ok = False
                         probe_page = None
                         try:
@@ -3258,10 +3320,12 @@ async def handle_chat_task(context, task):
                             probe_md = md(probe_html, heading_style="ATX").strip()
                             probe_md = probe_md.replace("\\_", "_").replace("\\*", "*")
                             if probe_md:
-                                emit_log(q, "✅ Resposta recuperada após reabrir aba; concluindo sem reenvio.")
-                                emit_event(q, "markdown", probe_md)
+                                emit_log(q, "✅ Resposta recuperada após reabrir aba; retomando stream...")
+                                final_md = await _resume_stream_after_reopen(probe_page, probe_md)
                                 final_title = await get_chat_title(probe_page)
                                 emit_event(q, "finish", {"chat_id": task.get("chat_id"), "title": final_title, "url": probe_page.url})
+                                if final_md and final_md != probe_md:
+                                    emit_log(q, f"✅ Stream retomado após reabertura ({len(final_md)} chars).")
                                 probe_ok = True
                                 handled = True
                         except Exception as probe_err:
@@ -4195,6 +4259,11 @@ async def handle_chat_task_inner(task, page, q, stop_event: asyncio.Event, activ
     response_started = False
 
     while True:
+        if hasattr(page, "is_closed") and page.is_closed():
+            emit_event(q, "error", "⚠️ Aba fechada durante recepção da resposta.")
+            if not response_started:
+                raise RuntimeError("page_closed_before_response")
+            break
         await emit_chat_meta_if_ready()
 
         if stop_event.is_set():
@@ -4205,7 +4274,8 @@ async def handle_chat_task_inner(task, page, q, stop_event: asyncio.Event, activ
 
         loop_count += 1
 
-        rate_limit_state = await page.evaluate("""() => {
+        try:
+            rate_limit_state = await page.evaluate("""() => {
             // Restringe candidatos a elementos que realmente são banners/toasts/diálogos,
             // evitando matchar itens da sidebar cujo título mencione "rate limit".
             const selectors = [
@@ -4247,6 +4317,14 @@ async def handle_chat_task_inner(task, page, q, stop_event: asyncio.Event, activ
             const msg = (hit.innerText || '').trim().slice(0, 600);
             return { detected: true, message: msg };
         }""")
+        except Exception as e:
+            err = str(e or "")
+            if "target page, context or browser has been closed" in err.lower():
+                emit_event(q, "error", f"⚠️ Aba/contexto fechado durante poll de resposta: {err}")
+                if not response_started:
+                    raise RuntimeError("page_closed_before_response") from e
+                break
+            raise
 
         if rate_limit_state.get("detected"):
             rate_limit_msg = (rate_limit_state.get("message") or "Excesso de solicitações").strip()
