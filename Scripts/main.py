@@ -16,6 +16,7 @@ import subprocess
 import sys
 import threading
 import time
+from urllib.parse import urlparse
 import webbrowser
 
 SCRIPTS_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -36,6 +37,7 @@ CORE_DEPENDENCIES = [
 ]
 REPAIR_FLAG = "--repair-venv"
 SKIP_BOOTSTRAP_FLAG = "--skip-bootstrap"
+BROWSER_JOIN_TIMEOUT_SEC = max(1, int(os.getenv("SIMULATOR_BROWSER_JOIN_TIMEOUT_SEC", "8")))
 
 
 def _terminate_previous_same_server_instances(script_name: str) -> None:
@@ -355,32 +357,55 @@ def start_http_server(config_module, server_module):
 
 
 def _wait_for_port(host: str, port: int, timeout: int = 180, interval: float = 0.5) -> tuple[bool, float]:
+    host = str(host or "").strip()
+    if not host:
+        print("[BOOT] Aviso: host inválido para _wait_for_port (vazio); abortando espera.")
+        return False, 0.0
+    try:
+        port = int(port)
+        if not (1 <= port <= 65535):
+            raise ValueError
+    except Exception:
+        print(f"[BOOT] Aviso: porta inválida para _wait_for_port ({port!r}); abortando espera.")
+        return False, 0.0
     try:
         timeout = max(1, int(timeout))
     except Exception:
+        print(f"[BOOT] Aviso: timeout inválido para _wait_for_port ({timeout!r}); usando 180s.")
         timeout = 180
     try:
         interval = max(0.1, float(interval))
     except Exception:
+        print(f"[BOOT] Aviso: interval inválido para _wait_for_port ({interval!r}); usando 0.5s.")
         interval = 0.5
     started_at = time.perf_counter()
     deadline = started_at + timeout
+    attempts = 0
     while True:
         now = time.perf_counter()
         if now >= deadline:
             break
+        attempts += 1
         try:
-            with socket.create_connection((host, port), timeout=2):
+            connect_timeout = min(2.0, max(0.2, deadline - now))
+            with socket.create_connection((host, port), timeout=connect_timeout):
                 return True, (time.perf_counter() - started_at)
         except OSError:
             remaining = deadline - time.perf_counter()
             if remaining <= 0:
                 break
             time.sleep(min(interval, remaining))
+    print(f"[BOOT] Aviso: _wait_for_port timeout em {host}:{port} após {attempts} tentativa(s).")
     return False, (time.perf_counter() - started_at)
 
 
 def open_urls_when_server_is_ready(port: int, urls: list, startup_timeout: int = 180):
+    try:
+        startup_timeout = max(1, int(startup_timeout))
+    except Exception:
+        print(f"[BOOT] Aviso: startup_timeout inválido ({startup_timeout!r}); usando 180s.")
+        startup_timeout = 180
+
     def _worker():
         is_ready, waited_seconds = _wait_for_port("127.0.0.1", port, timeout=startup_timeout)
         if not is_ready:
@@ -397,6 +422,10 @@ def open_urls_when_server_is_ready(port: int, urls: list, startup_timeout: int =
         for raw_url in (urls or []):
             url = str(raw_url or "").strip()
             if not url or url in seen:
+                continue
+            parsed = urlparse(url)
+            if parsed.scheme.lower() not in {"http", "https"} or not parsed.netloc:
+                print(f"[BOOT] Aviso: URL ignorada (inválida para abertura automática): {url}")
                 continue
             seen.add(url)
             normalized_urls.append(url)
@@ -479,7 +508,10 @@ if __name__ == "__main__":
     finally:
         try:
             browser_queue.put({'action': 'STOP'})
-            t_browser.join(timeout=8)
-            print("[INFO] Sinal de parada enviado ao browser worker.")
+            t_browser.join(timeout=BROWSER_JOIN_TIMEOUT_SEC)
+            if t_browser.is_alive():
+                print(f"[WARN] Browser worker não encerrou após {BROWSER_JOIN_TIMEOUT_SEC}s.")
+            else:
+                print("[INFO] Sinal de parada enviado ao browser worker.")
         except Exception as e:
             print(f"[WARN] Falha ao sinalizar parada do browser worker: {e}")
