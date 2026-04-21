@@ -510,6 +510,13 @@ O sistema distingue dois modos de entrada no ChatGPT:
 ### 1. Digitação realista
 Textos comuns são enviados caractere a caractere por `type_realistic()`, com atrasos aleatórios pequenos para parecerem humanos.
 
+Além do delay base, o fluxo agora inclui:
+- micro-pausas em pontuação (`. , ; : ! ?`);
+- pausas de hesitação ocasionais (com probabilidade baixa);
+- erros de digitação raros com correção imediata por `Backspace`.
+
+Esse comportamento é configurável por variáveis `SIMULATOR_HUMAN_TYPING_*` no `config.py` (copiado de `Scripts/config.example.py`), preservando como prioridade a simulação humana do operador.
+
 ### 2. Cola por clipboard
 Blocos delimitados por:
 - `[INICIO_TEXTO_COLADO]`

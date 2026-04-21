@@ -42,6 +42,7 @@ import requests
 from playwright.async_api import async_playwright
 import config
 import app_selectors
+import humanizer
 from shared import browser_queue, register_file
 from utils import log as file_log
 from markdownify import markdownify as md
@@ -77,6 +78,7 @@ CHAT_INPUT_SELECTORS = app_selectors.selector_group("chat_input")
 SEND_BUTTON_SELECTORS = app_selectors.selector_group("send_button")
 MENU_BUTTON_SELECTORS = app_selectors.selector_group("menu_button")
 DOWNLOAD_LINK_SELECTORS = app_selectors.selector_group("download_link")
+TYPING_PROFILE = humanizer.HumanTypingProfile.from_config(config)
 
 def emit_log(q, msg):
     sender = _CURRENT_TASK_SENDER.get()
@@ -822,22 +824,40 @@ async def smart_input(page, message, q=None, activityts=None):
 async def type_realistic(page, text, q=None):
     total = len(text)
     last_status_time = time.time()
+    typo_count = 0
+    hesitation_count = 0
     for i, char in enumerate(text):
         if char == '\n':
             await page.keyboard.down("Shift")
             await page.keyboard.press("Enter")
             await page.keyboard.up("Shift")
-            await asyncio.sleep(random.uniform(0.01, 0.05))
+            await asyncio.sleep(humanizer.delay_for_char(char, TYPING_PROFILE))
         else:
+            typo_char = humanizer.maybe_typo(char, TYPING_PROFILE)
+            if typo_char:
+                await page.keyboard.type(typo_char)
+                await asyncio.sleep(humanizer.delay_for_char(typo_char, TYPING_PROFILE))
+                for _ in range(TYPING_PROFILE.typo_max_backspaces):
+                    await page.keyboard.press("Backspace")
+                    await asyncio.sleep(0.015)
+                typo_count += 1
             await page.keyboard.type(char)
-            # Variabilidade ajustada: 10ms a 80ms
-            await asyncio.sleep(random.uniform(0.01, 0.08))
+            await asyncio.sleep(humanizer.delay_for_char(char, TYPING_PROFILE))
+            if humanizer.should_hesitate(TYPING_PROFILE):
+                hesitation_count += 1
+                await asyncio.sleep(humanizer.hesitation_delay(TYPING_PROFILE))
 
         # --- KEEP-ALIVE: Emite status a cada 2 segundos ---
         current_time = time.time()
         if q and (current_time - last_status_time) >= 2.0:
             emit_event(q, "status", f"Digitando... {int((i+1)/total*100)}%")
             last_status_time = current_time  # Reseta o cronômetro
+
+    if q and total > 25:
+        emit_log(
+            q,
+            f"⌨️ Digitação humana concluída: {total} chars, {typo_count} correções, {hesitation_count} micro-pausas."
+        )
 
 
 async def _clear_input(page, q=None):
