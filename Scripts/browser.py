@@ -4707,14 +4707,45 @@ async def handle_download_file(context, task):
 
 
 # --- LOOP PRINCIPAL ASYNC ---
+def _resolve_profile_dir(profile_name):
+    """
+    Resolve um identificador de perfil Chromium para seu diretório em disco.
+
+    Aceita None, string vazia, nome conhecido em config.CHROMIUM_PROFILES, ou
+    caminho absoluto arbitrário. Valores inválidos caem no "default" — o perfil
+    compartilhado do usuário humano. Isso garante que uma chave malformada
+    vinda de um cliente externo nunca quebre o loop do browser.
+    """
+    profiles = getattr(config, "CHROMIUM_PROFILES", None) or {
+        "default": config.DIRS["profile"]
+    }
+    default_dir = profiles.get("default") or config.DIRS["profile"]
+    if not profile_name:
+        return "default", default_dir
+    key = str(profile_name).strip()
+    if not key:
+        return "default", default_dir
+    if key in profiles:
+        return key, profiles[key]
+    # Se vier um caminho absoluto e existir, aceita como "custom". Caso contrário
+    # cai no default para evitar abrir contextos em diretórios arbitrários.
+    if os.path.isabs(key) and os.path.isdir(os.path.dirname(key) or key):
+        return "custom", key
+    file_log("browser.py", f"⚠️ Perfil Chromium '{key}' desconhecido — usando 'default'.")
+    return "default", default_dir
+
+
 async def browser_loop_async():
     file_log("browser.py", "⚡ Iniciando Loop Async (Playwright)...")
     async with async_playwright() as p:
-        
-        # Função interna para iniciar o browser evitando repetição de código
-        async def start_browser():
+
+        # Cache de contextos Chromium abertos por perfil. Cada perfil vive em
+        # seu próprio diretório (sessão independente); abertos sob demanda.
+        browsers: dict[str, "BrowserContext"] = {}
+
+        async def start_browser(profile_dir: str):
             b = await p.chromium.launch_persistent_context(
-                config.DIRS["profile"],
+                profile_dir,
                 headless=False,
                 accept_downloads=True,
                 args=["--start-maximized", "--disable-blink-features=AutomationControlled", "--disable-infobars"],
@@ -4728,8 +4759,31 @@ async def browser_loop_async():
             await cleanup_known_orphan_tabs(b)
             return b
 
-        # Inicia pela primeira vez
-        browser = await start_browser()
+        async def get_browser_for(profile_key: str, profile_dir: str):
+            """Devolve um BrowserContext vivo para o perfil, criando sob demanda."""
+            current = browsers.get(profile_key)
+            if current is not None:
+                try:
+                    if len(current.pages) == 0:
+                        raise Exception("Sem abas")
+                    await current.pages[0].evaluate("1")
+                    return current
+                except Exception:
+                    file_log("browser.py", f"⚠️ Contexto '{profile_key}' perdido; recriando...")
+                    try:
+                        await current.close()
+                    except Exception:
+                        pass
+                    browsers.pop(profile_key, None)
+            new_b = await start_browser(profile_dir)
+            browsers[profile_key] = new_b
+            if profile_key != "default":
+                file_log("browser.py", f"🟢 Perfil Chromium '{profile_key}' aberto em {profile_dir}.")
+            return new_b
+
+        # Inicia o perfil padrão (histórico compartilhado do usuário humano).
+        default_dir = (getattr(config, "CHROMIUM_PROFILES", None) or {}).get("default") or config.DIRS["profile"]
+        browsers["default"] = await start_browser(default_dir)
         file_log("browser.py", "🟢 Async Worker Online. Aguardando tarefas...")
 
         try:
@@ -4737,33 +4791,15 @@ async def browser_loop_async():
                 try:
                     loop = asyncio.get_running_loop()
                     task = await loop.run_in_executor(None, browser_queue.get)
-                    
+
                     if task.get('action') == 'STOP': break
+
+                    profile_key, profile_dir = _resolve_profile_dir(task.get('browser_profile'))
+                    browser = await get_browser_for(profile_key, profile_dir)
                     await cleanup_known_orphan_tabs(browser)
-                    
-                    # =======================================================
-                    # AUTO-RECOVERY: TESTA SE O BROWSER AINDA ESTÁ VIVO
-                    # =======================================================
-                    try:
-                        # 1. Se o usuário fechou todas as abas, consideramos fechado
-                        if len(browser.pages) == 0:
-                            raise Exception("Sem abas")
-                        
-                        # 2. Faz um "Ping" real no Chromium. Se ele foi fechado no X, isso vai dar erro na hora!
-                        await browser.pages[0].evaluate("1")
-                        
-                    except Exception:
-                        file_log("browser.py", "⚠️ Navegador fechado ou desconectado detectado! Recriando...")
-                        try: await browser.close()
-                        except: pass
-                        
-                        # Reabre o navegador usando a função interna
-                        browser = await start_browser()
-                        file_log("browser.py", "✅ Navegador reaberto com sucesso!")
-                    # =======================================================
 
                     action = task.get('action', 'CHAT')
-                    
+
                     if action in ['GET_MENU', 'EXEC_MENU']:
                         asyncio.create_task(handle_menu_task(browser, task))
                     elif action == 'SYNC':
@@ -4776,16 +4812,17 @@ async def browser_loop_async():
                         asyncio.create_task(handle_download_file(browser, task))
                     else:
                         asyncio.create_task(handle_chat_task(browser, task))
-                        
+
                 except Exception as e:
                     print(f"Erro no loop principal: {e}")
                     await asyncio.sleep(1)
         finally:
-            try:
-                await browser.close()
-                file_log("browser.py", "🛑 Contexto Chromium encerrado corretamente.")
-            except Exception as close_err:
-                file_log("browser.py", f"⚠️ Falha ao encerrar Chromium com elegância: {close_err}")
+            for key, ctx in list(browsers.items()):
+                try:
+                    await ctx.close()
+                    file_log("browser.py", f"🛑 Contexto Chromium '{key}' encerrado.")
+                except Exception as close_err:
+                    file_log("browser.py", f"⚠️ Falha ao encerrar '{key}': {close_err}")
 
 def browser_loop():
     # Wrapper para rodar o loop async dentro da Thread do main.py
