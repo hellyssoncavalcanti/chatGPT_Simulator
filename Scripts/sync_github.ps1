@@ -88,6 +88,25 @@ function Disable-GitHubAuth([string]$Reason = '') {
     if ($script:Config -and $script:Config.headers) {
         $script:Config.headers.Remove('Authorization') | Out-Null
     }
+    Show-GitHubCredentialFixGuide
+}
+
+function Show-GitHubCredentialFixGuide {
+    $cfgPath = 'Scripts/config.py'
+    if ($script:Config -and $script:Config.settingsPath) {
+        $cfgPath = $script:Config.settingsPath
+    }
+    Write-Warn "Como corrigir credenciais GitHub (passo a passo):"
+    Write-Warn "1) Acesse https://github.com/settings/personal-access-tokens/new (Fine-grained token)."
+    Write-Warn "2) Selecione o repositório alvo e conceda permissões: Contents=Read and write, Pull requests=Read and write."
+    Write-Warn "3) Copie o token gerado (ele aparece uma única vez)."
+    Write-Warn "4) Abra $cfgPath e ajuste:"
+    Write-Warn "   - GITHUB_TOKEN = \"<seu_token>\""
+    Write-Warn "   - GH_USER = \"<seu_usuario_ou_org>\""
+    Write-Warn "   - GITHUB_REPO = \"chatGPT_Simulator\" (ou seu repo)"
+    Write-Warn "   - GITHUB_BRANCH = \"main\" (ou branch alvo)"
+    Write-Warn "5) Salve e execute novamente: sync_github.bat"
+    Write-Warn "Documentação oficial de autenticação GitHub REST: https://docs.github.com/rest"
 }
 
 function Write-Log([string]$Message) {
@@ -654,8 +673,10 @@ function Merge-AllPullRequests {
         $script:CanWriteRepo = $false
         if (-not $script:Config.githubToken) {
             Write-Warn 'Token GitHub nao configurado; etapa de PR sera ignorada, mas o sync dos arquivos ainda sera tentado.'
+            Show-GitHubCredentialFixGuide
         } else {
             Write-Warn 'Token GitHub invalido/expirado; etapa de PR sera ignorada, mas o sync dos arquivos ainda sera tentado.'
+            Show-GitHubCredentialFixGuide
         }
         return
     }
