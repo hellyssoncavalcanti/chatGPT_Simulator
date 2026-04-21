@@ -33,6 +33,7 @@ def init_db() -> None:
                     chat_id TEXT PRIMARY KEY,
                     title TEXT NOT NULL DEFAULT 'Novo Chat',
                     url TEXT NOT NULL DEFAULT '',
+                    chromium_profile TEXT NOT NULL DEFAULT '',
                     origin_url TEXT NOT NULL DEFAULT '',
                     created_at TEXT NOT NULL,
                     updated_at TEXT
@@ -74,6 +75,7 @@ def init_db() -> None:
             )
             conn.execute("CREATE INDEX IF NOT EXISTS idx_messages_chat ON messages(chat_id, idx)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_sessions_exp ON sessions(expires_at)")
+            _ensure_column(conn, "chats", "chromium_profile", "TEXT NOT NULL DEFAULT ''")
             conn.commit()
         _migrate_json_if_needed()
         _INITIALIZED = True
@@ -81,6 +83,14 @@ def init_db() -> None:
 
 def _table_count(conn: sqlite3.Connection, table: str) -> int:
     return int(conn.execute(f"SELECT COUNT(*) AS c FROM {table}").fetchone()["c"])
+
+
+def _ensure_column(conn: sqlite3.Connection, table: str, column: str, ddl: str) -> None:
+    cols = conn.execute(f"PRAGMA table_info({table})").fetchall()
+    names = {str(c["name"]).lower() for c in cols}
+    if column.lower() in names:
+        return
+    conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
 
 
 def _migrate_json_if_needed() -> None:
@@ -99,11 +109,12 @@ def _migrate_json_if_needed() -> None:
                 created = chat.get("created_at") or now
                 updated = chat.get("updated_at") or created
                 conn.execute(
-                    "INSERT OR IGNORE INTO chats(chat_id,title,url,origin_url,created_at,updated_at) VALUES(?,?,?,?,?,?)",
+                    "INSERT OR IGNORE INTO chats(chat_id,title,url,chromium_profile,origin_url,created_at,updated_at) VALUES(?,?,?,?,?,?,?)",
                     (
                         chat_id,
                         chat.get("title") or "Novo Chat",
                         chat.get("url") or "",
+                        chat.get("chromium_profile") or "",
                         chat.get("origin_url") or "",
                         created,
                         updated,

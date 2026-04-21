@@ -48,6 +48,7 @@ def _chat_dict(conn, chat_id: str):
     return {
         "title": chat["title"],
         "url": chat["url"],
+        "chromium_profile": chat["chromium_profile"] or "",
         "origin_url": chat["origin_url"],
         "created_at": chat["created_at"],
         "updated_at": chat["updated_at"],
@@ -55,18 +56,23 @@ def _chat_dict(conn, chat_id: str):
     }
 
 
-def _ensure_chat(conn, chat_id, title="Novo Chat", url="", origin_url=""):
+def _ensure_chat(conn, chat_id, title="Novo Chat", url="", origin_url="", chromium_profile=""):
     row = conn.execute("SELECT chat_id FROM chats WHERE chat_id=?", (chat_id,)).fetchone()
     if row:
         conn.execute(
-            "UPDATE chats SET title=COALESCE(NULLIF(title,''),?), url=COALESCE(NULLIF(url,''),?), origin_url=COALESCE(NULLIF(origin_url,''),?) WHERE chat_id=?",
-            (title or "Novo Chat", url or "", origin_url or "", chat_id),
+            "UPDATE chats SET "
+            "title=COALESCE(NULLIF(title,''),?), "
+            "url=COALESCE(NULLIF(url,''),?), "
+            "chromium_profile=COALESCE(NULLIF(chromium_profile,''),?), "
+            "origin_url=COALESCE(NULLIF(origin_url,''),?) "
+            "WHERE chat_id=?",
+            (title or "Novo Chat", url or "", chromium_profile or "", origin_url or "", chat_id),
         )
         return
     now = datetime.now().isoformat()
     conn.execute(
-        "INSERT INTO chats(chat_id,title,url,origin_url,created_at,updated_at) VALUES(?,?,?,?,?,?)",
-        (chat_id, title or "Novo Chat", url or "", origin_url or "", now, now),
+        "INSERT INTO chats(chat_id,title,url,chromium_profile,origin_url,created_at,updated_at) VALUES(?,?,?,?,?,?,?)",
+        (chat_id, title or "Novo Chat", url or "", chromium_profile or "", origin_url or "", now, now),
     )
 
 
@@ -96,10 +102,17 @@ def append_message(chat_id, role, content):
         conn.commit()
 
 
-def save_chat(chat_id, title, url, messages, origin_url=None):
+def save_chat(chat_id, title, url, messages, origin_url=None, chromium_profile=None):
     db.init_db()
     with _lock, db._connect() as conn:
-        _ensure_chat(conn, chat_id, title=title or "Novo Chat", url=url or "", origin_url=origin_url or "")
+        _ensure_chat(
+            conn,
+            chat_id,
+            title=title or "Novo Chat",
+            url=url or "",
+            origin_url=origin_url or "",
+            chromium_profile=chromium_profile or "",
+        )
         chat = _chat_dict(conn, chat_id)
         existing = {(m.get("role"), m.get("content")) for m in chat["messages"]}
         idx = len(chat["messages"])
@@ -114,17 +127,24 @@ def save_chat(chat_id, title, url, messages, origin_url=None):
             existing.add(pair)
             idx += 1
         conn.execute(
-            "UPDATE chats SET title=?, url=?, origin_url=?, updated_at=? WHERE chat_id=?",
-            (title or chat["title"], url or chat["url"], origin_url or chat["origin_url"], datetime.now().isoformat(), chat_id),
+            "UPDATE chats SET title=?, url=?, chromium_profile=?, origin_url=?, updated_at=? WHERE chat_id=?",
+            (
+                title or chat["title"],
+                url or chat["url"],
+                chromium_profile or chat.get("chromium_profile", ""),
+                origin_url or chat["origin_url"],
+                datetime.now().isoformat(),
+                chat_id,
+            ),
         )
         conn.commit()
         return _chat_dict(conn, chat_id)
 
 
-def update_full_history(chat_id, browser_messages, title=None, url=None):
+def update_full_history(chat_id, browser_messages, title=None, url=None, chromium_profile=None):
     db.init_db()
     with _lock, db._connect() as conn:
-        _ensure_chat(conn, chat_id, title=title or "Novo Chat", url=url or "")
+        _ensure_chat(conn, chat_id, title=title or "Novo Chat", url=url or "", chromium_profile=chromium_profile or "")
         local = _chat_dict(conn, chat_id)
         local_msgs = local["messages"]
         has_changes = False
@@ -152,6 +172,9 @@ def update_full_history(chat_id, browser_messages, title=None, url=None):
             has_changes = True
         if url and url != local["url"]:
             conn.execute("UPDATE chats SET url=? WHERE chat_id=?", (url, chat_id))
+            has_changes = True
+        if chromium_profile and chromium_profile != (local.get("chromium_profile") or ""):
+            conn.execute("UPDATE chats SET chromium_profile=? WHERE chat_id=?", (chromium_profile, chat_id))
             has_changes = True
         if has_changes:
             conn.execute("UPDATE chats SET updated_at=? WHERE chat_id=?", (datetime.now().isoformat(), chat_id))
@@ -185,6 +208,7 @@ def find_chat_by_origin(origin_url: str):
         "title": chat.get("title") or "Novo Chat",
         "url": chat.get("url") or "",
         "origin_url": chat.get("origin_url") or "",
+        "chromium_profile": chat.get("chromium_profile") or "",
         "messages": chat.get("messages") or [],
         "updated_at": chat.get("updated_at") or chat.get("created_at") or "",
     }

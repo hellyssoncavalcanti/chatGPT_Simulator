@@ -126,7 +126,7 @@ DIRS = {
     "users": os.path.join(BASE_DIR, "db", "users"),
     "logs": os.path.join(BASE_DIR, "logs"),
     "profile": os.path.join(BASE_DIR, "chrome_profile"),
-    "profile_analisador": os.path.join(BASE_DIR, "chrome_profile_analisador"),
+    "profile_segunda_chance": os.path.join(BASE_DIR, "chrome_profile_segunda_chance"),
     "temp": os.path.join(BASE_DIR, "temp"),
     "downloads": os.path.join(BASE_DIR, "downloads"),
 }
@@ -152,7 +152,7 @@ for d in DIRS.values(): os.makedirs(d, exist_ok=True)
 # =============================================================================
 CHROMIUM_PROFILES = {
     "default": DIRS["profile"],
-    "analisador": DIRS["profile_analisador"],
+    "segunda_chance": DIRS["profile_segunda_chance"],
 }
 
 # =============================================================================
@@ -164,7 +164,7 @@ ANALISADOR_LLM_MODEL      = _env("ANALISADOR_LLM_MODEL", "ChatGPT Simulator")
 ANALISADOR_PROMPT_VERSION = _env("ANALISADOR_PROMPT_VERSION", "v16.1")
 
 # Perfil Chromium usado pelo analisador. "default" = mesma conta do humano.
-# Use "analisador" (ou outra chave de CHROMIUM_PROFILES) para conta dedicada.
+# Use "segunda_chance" (ou outra chave de CHROMIUM_PROFILES) para conta dedicada.
 ANALISADOR_BROWSER_PROFILE = _env("ANALISADOR_BROWSER_PROFILE", "default")
 
 ANALISADOR_TABELA                   = _env("ANALISADOR_TABELA", "chatgpt_atendimentos_analise")
@@ -174,8 +174,9 @@ ANALISADOR_BATCH_SIZE               = _env_int("ANALISADOR_BATCH_SIZE", 10)
 ANALISADOR_MIN_CHARS                = _env_int("ANALISADOR_MIN_CHARS", 80)
 ANALISADOR_TIMEOUT_PROCESSANDO_MIN  = _env_int("ANALISADOR_TIMEOUT_PROCESSANDO_MIN", 15)
 
-ANALISADOR_PAUSA_MIN = _env_int("ANALISADOR_PAUSA_MIN", 630)
-ANALISADOR_PAUSA_MAX = _env_int("ANALISADOR_PAUSA_MAX", 800)
+ANALISADOR_PAUSA_MIN = _env_int("ANALISADOR_PAUSA_MIN", 25)
+ANALISADOR_PAUSA_MAX = _env_int("ANALISADOR_PAUSA_MAX", 60)
+ANALISADOR_INTERVALO_ANTI_RATE_LIMIT_MULT = float(_env("ANALISADOR_INTERVALO_ANTI_RATE_LIMIT_MULT", "0.5"))
 
 ANALISADOR_FILTRO_HORARIO_UTIL_ATIVO = _env_bool("ANALISADOR_FILTRO_HORARIO_UTIL_ATIVO", False)
 ANALISADOR_HORARIO_UTIL_INICIO       = _env_int("ANALISADOR_HORARIO_UTIL_INICIO", 7)
@@ -191,11 +192,11 @@ ANALISADOR_SEARCH_MAX_QUERIES  = _env_int("ANALISADOR_SEARCH_MAX_QUERIES", 3)
 ANALISADOR_SEARCH_TIMEOUT      = _env_int("ANALISADOR_SEARCH_TIMEOUT", 90)
 ANALISADOR_SEARCH_HABILITADA   = _env_bool("ANALISADOR_SEARCH_HABILITADA", True)
 
-ANALISADOR_LLM_THROTTLE_MIN         = _env_int("ANALISADOR_LLM_THROTTLE_MIN", 8)
-ANALISADOR_LLM_THROTTLE_MAX         = _env_int("ANALISADOR_LLM_THROTTLE_MAX", 15)
+ANALISADOR_LLM_THROTTLE_MIN         = _env_int("ANALISADOR_LLM_THROTTLE_MIN", 0)
+ANALISADOR_LLM_THROTTLE_MAX         = _env_int("ANALISADOR_LLM_THROTTLE_MAX", 0)
 
 ANALISADOR_LLM_RATE_LIMIT_RETRY_MAX     = _env_int("ANALISADOR_LLM_RATE_LIMIT_RETRY_MAX", 3)
-ANALISADOR_LLM_RATE_LIMIT_RETRY_BASE_S  = _env_int("ANALISADOR_LLM_RATE_LIMIT_RETRY_BASE_S", 60)
+ANALISADOR_LLM_RATE_LIMIT_RETRY_BASE_S  = _env_int("ANALISADOR_LLM_RATE_LIMIT_RETRY_BASE_S", 0)
 ANALISADOR_LLM_RATE_LIMIT_RETRY_MULT    = float(_env("ANALISADOR_LLM_RATE_LIMIT_RETRY_MULT", "2.0"))
 
 # =============================================================================

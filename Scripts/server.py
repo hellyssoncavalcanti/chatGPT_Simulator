@@ -1285,6 +1285,13 @@ def api_sync():
     url     = data.get("url")
     chat_id = data.get("chat_id")
     stream  = data.get("stream", False)
+    sync_browser_profile = (data.get("browser_profile") or "").strip() or None
+
+    if chat_id and (not url or str(url).lower() == "none"):
+        snap = storage.load_chats().get(chat_id, {}) or {}
+        url = snap.get("url") or url
+        if not sync_browser_profile:
+            sync_browser_profile = (snap.get("chromium_profile") or "").strip() or None
 
     # --- Identificação do solicitante (opcional) ---
     nome_membro = data.get("nome_membro_solicitante") or None
@@ -1359,7 +1366,14 @@ def api_sync():
             msgs           = list(chat_data.get('messages', []))
             if fresh_markdown and (not msgs or msgs[-1].get('content') != fresh_markdown):
                 msgs.append({"role": "assistant", "content": fresh_markdown})
-                storage.save_chat(chat_id, chat_data.get('title', 'Chat'), chat_data.get('url', url or ''), msgs, origin_url=chat_data.get('origin_url') or '')
+                storage.save_chat(
+                    chat_id,
+                    chat_data.get('title', 'Chat'),
+                    chat_data.get('url', url or ''),
+                    msgs,
+                    origin_url=chat_data.get('origin_url') or '',
+                    chromium_profile=chat_data.get('chromium_profile') or sync_browser_profile or "",
+                )
             return jsonify({
                 "success": True, "updated": True,
                 "chat": {
@@ -1372,7 +1386,15 @@ def api_sync():
     if not url: return jsonify({"success": False, "error": "Missing url"}), 400
     
     sync_q = queue.Queue()
-    browser_queue.put({'action': 'SYNC', 'url': url, 'chat_id': chat_id, 'stream_queue': sync_q})
+    browser_queue.put(
+        {
+            'action': 'SYNC',
+            'url': url,
+            'chat_id': chat_id,
+            'stream_queue': sync_q,
+            'browser_profile': sync_browser_profile,
+        }
+    )
     
     try:
         while True:
@@ -1386,8 +1408,21 @@ def api_sync():
                     fresh_messages = content.get('messages', [])
                     fresh_title    = content.get("title", "")
                     fresh_url      = content.get("url", "") or url
-                    was_updated    = storage.update_full_history(chat_id, fresh_messages, title=fresh_title, url=fresh_url)
-                    storage.save_chat(chat_id, fresh_title or 'Chat', fresh_url, [], origin_url=(storage.load_chats().get(chat_id, {}) or {}).get('origin_url', ''))
+                    was_updated    = storage.update_full_history(
+                        chat_id,
+                        fresh_messages,
+                        title=fresh_title,
+                        url=fresh_url,
+                        chromium_profile=sync_browser_profile or "",
+                    )
+                    storage.save_chat(
+                        chat_id,
+                        fresh_title or 'Chat',
+                        fresh_url,
+                        [],
+                        origin_url=(storage.load_chats().get(chat_id, {}) or {}).get('origin_url', ''),
+                        chromium_profile=sync_browser_profile or "",
+                    )
                     return jsonify({
                         "success": True, "updated": was_updated,
                         "chat": {
@@ -2058,12 +2093,16 @@ def chat_completions():
 
     # Persiste imediatamente o pedido remoto para sobreviver ao fechamento precoce da aba.
     chat_snapshot = storage.load_chats().get(chat_id, {})
+    requested_browser_profile = (data.get('browser_profile') or '').strip() or None
+    stored_browser_profile = (chat_snapshot.get("chromium_profile") or "").strip() or None
+    effective_browser_profile = requested_browser_profile or stored_browser_profile or None
     storage.save_chat(
         chat_id,
         chat_snapshot.get('title') or 'Novo Chat',
         url or chat_snapshot.get('url', ''),
         [],
-        origin_url=origin_url or chat_snapshot.get('origin_url', '')
+        origin_url=origin_url or chat_snapshot.get('origin_url', ''),
+        chromium_profile=effective_browser_profile or "",
     )
     if message:
         storage.append_message(chat_id, "user", message)
@@ -2096,10 +2135,10 @@ def chat_completions():
         # https://chatgpt.com/codex/cloud antes do paste da mensagem.
         # Opcional — quando ausente, browser.py usa a seleção atual do UI.
         'codex_repo':       (data.get('codex_repo') or '').strip() or None,
-        # Perfil Chromium alvo (ex.: "default", "analisador"). Opcional.
+        # Perfil Chromium alvo (ex.: "default", "segunda_chance"). Opcional.
         # browser.py resolve contra config.CHROMIUM_PROFILES; valor ausente
         # ou chave inválida → fallback para "default" (perfil compartilhado).
-        'browser_profile':  (data.get('browser_profile') or '').strip() or None,
+        'browser_profile':  effective_browser_profile,
     }
 
     def _dispatch_chat_task():
@@ -2193,7 +2232,16 @@ def chat_completions():
         def generate():
             yield json.dumps({"type": "chat_id", "content": chat_id}) + "\n"
             if url and url != "None":
-                yield json.dumps({"type": "chat_meta", "content": {"chat_id": chat_id, "url": url}}) + "\n"
+                yield json.dumps(
+                    {
+                        "type": "chat_meta",
+                        "content": {
+                            "chat_id": chat_id,
+                            "url": url,
+                            "chromium_profile": effective_browser_profile or "",
+                        },
+                    }
+                ) + "\n"
 
             try:
                 while True:
@@ -2231,6 +2279,7 @@ def chat_completions():
                         elif t == 'chat_meta':
                             fin = msg_obj.get('content', {}) or {}
                             early_url = fin.get('url') or ''
+                            early_profile = (fin.get('chromium_profile') or "").strip()
                             early_chat_id = fin.get('chat_id') or chat_id
                             if early_url:
                                 try:
@@ -2240,7 +2289,8 @@ def chat_completions():
                                         snapshot.get('title') or 'Novo Chat',
                                         early_url,
                                         [],
-                                        origin_url=origin_url or snapshot.get('origin_url', '')
+                                        origin_url=origin_url or snapshot.get('origin_url', ''),
+                                        chromium_profile=early_profile or snapshot.get("chromium_profile", ""),
                                     )
                                 except Exception as e:
                                     log(f"[WARN] Falha ao persistir chat_meta antecipado: {e}")
@@ -2253,7 +2303,14 @@ def chat_completions():
                                 fin = msg_obj.get('content', {})
                                 storage.append_message(chat_id, "user", message)
                                 storage.append_message(chat_id, "assistant", ACTIVE_CHATS[chat_id]['markdown'])
-                                storage.save_chat(chat_id, fin.get('title', ''), fin.get('url', '') or url or '', [], origin_url=origin_url)
+                                storage.save_chat(
+                                    chat_id,
+                                    fin.get('title', ''),
+                                    fin.get('url', '') or url or '',
+                                    [],
+                                    origin_url=origin_url,
+                                    chromium_profile=(fin.get('chromium_profile') or effective_browser_profile or ""),
+                                )
                             except Exception as e:
                                 log(f"[WARN] Falha ao persistir stream finish: {e}")
                         elif t == 'error':
@@ -2287,6 +2344,7 @@ def chat_completions():
         final_html  = ""
         final_url   = url
         final_title = "Chat"
+        final_chromium_profile = effective_browser_profile or ""
 
         try:
             while True:
@@ -2324,6 +2382,7 @@ def chat_completions():
                 elif t == 'finish':
                     final_url   = msg['content'].get('url',   final_url)
                     final_title = msg['content'].get('title', final_title)
+                    final_chromium_profile = msg['content'].get('chromium_profile', final_chromium_profile)
                     ACTIVE_CHATS[chat_id]['finished']    = True
                     ACTIVE_CHATS[chat_id]['finished_at'] = time.time()
                     ACTIVE_CHATS[chat_id]['last_event_at'] = time.time()
@@ -2343,7 +2402,14 @@ def chat_completions():
         # Persiste no storage
         storage.append_message(chat_id, "user",      message)
         storage.append_message(chat_id, "assistant", final_html)
-        storage.save_chat(chat_id, final_title, final_url, [], origin_url=origin_url)  # [FIX S3] passa [] — save_chat carrega e mescla internamente
+        storage.save_chat(
+            chat_id,
+            final_title,
+            final_url,
+            [],
+            origin_url=origin_url,
+            chromium_profile=final_chromium_profile or effective_browser_profile or "",
+        )  # [FIX S3] passa [] — save_chat carrega e mescla internamente
 
         return jsonify({
             "success": True,

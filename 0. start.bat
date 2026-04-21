@@ -32,7 +32,7 @@ if not defined CHROMIUM_EXE (
   echo [WARN] Nenhum executavel Chromium/Chrome/Edge encontrado. Pulando validacao assistida de login.
 ) else (
   call :ensure_chatgpt_profile_login "default" "chrome_profile"
-  call :ensure_chatgpt_profile_login "analisador" "chrome_profile_analisador"
+  call :ensure_chatgpt_profile_login "segunda_chance" "chrome_profile_segunda_chance"
 )
 
 if not exist ".venv\Scripts\python.exe" (

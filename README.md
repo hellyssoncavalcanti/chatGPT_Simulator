@@ -505,24 +505,26 @@ O `browser.py` aceita tarefas com `action`:
 
 ## Mecanismo de digitação e cola
 
-O sistema distingue dois modos de entrada no ChatGPT:
+O sistema segue **uma única regra para todos os pedidos** (remotos e Python):
 
 ### 1. Digitação realista
-Textos comuns são enviados caractere a caractere por `type_realistic()`, com atrasos aleatórios pequenos para parecerem humanos.
+Textos fora dos marcadores são enviados caractere a caractere por `type_realistic()`, com atrasos aleatórios pequenos para parecerem humanos.
 
 Além do delay base, o fluxo agora inclui:
 - micro-pausas em pontuação (`. , ; : ! ?`);
 - pausas de hesitação ocasionais (com probabilidade baixa);
 - erros de digitação raros com correção imediata por `Backspace`.
 
-Esse comportamento é configurável por variáveis `SIMULATOR_HUMAN_TYPING_*` no `config.py` (copiado de `Scripts/config.example.py`), preservando como prioridade a simulação humana do operador.
+Esse comportamento é configurável por variáveis `SIMULATOR_HUMAN_TYPING_*` no `config.py` (copiado de `Scripts/config.example.py`).
 
 ### 2. Cola por clipboard
 Blocos delimitados por:
 - `[INICIO_TEXTO_COLADO]`
 - `[FIM_TEXTO_COLADO]`
 
-são colados via clipboard (`navigator.clipboard.writeText` + `Ctrl+V`). Isso acelera prompts longos e grandes blocos clínicos. Se o clipboard falhar, há um fallback por injeção em chunks.
+são colados via clipboard (`navigator.clipboard.writeText` + `Ctrl+V`). Isso acelera prompts longos e grandes blocos clínicos. Se o clipboard falhar, há fallback por injeção em chunks.
+
+> **Importante:** não há mais regra diferente por origem (remoto vs Python) para decidir colar/digitar; o comportamento depende apenas dos marcadores.
 
 ---
 
@@ -537,6 +539,18 @@ O simulador agora usa SQLite como persistência principal, com migração autom�
 
 ### Papel do `storage.py` e `db.py`
 `db.py` garante schema e migração inicial; `storage.py` mantém a API histórica do projeto (incluindo deduplicação/sync por chat) usando operações SQL transacionais, reduzindo risco de corrupção sob concorrência.
+
+### Campo `chromium_profile` (rastreabilidade de perfil)
+Cada chat persistido agora guarda `chromium_profile` (nome da pasta/perfil Chromium usado na execução, ex.: `chrome_profile`, `chrome_profile_segunda_chance`, `chrome_profile_whatsapp`).
+
+Esse campo é usado para:
+- retomar chats antigos no perfil correto;
+- executar `/api/sync` no mesmo perfil em que a conversa foi criada;
+- facilitar troubleshooting quando há múltiplas contas/perfis ativos.
+
+No fluxo padrão:
+- chats novos podem alternar automaticamente entre `default` e `segunda_chance` (round-robin), quando nenhum `browser_profile` explícito é enviado;
+- se houver rate limit no `default`, o worker tenta fallback automático para `segunda_chance`.
 
 ---
 
@@ -650,17 +664,18 @@ Todas as constantes configuráveis do analisador estão **centralizadas em `Scri
 | `ANALISADOR_BATCH_SIZE` | `10` | Quantidade de registros processados por lote |
 | `ANALISADOR_MIN_CHARS` | `80` | Tamanho mínimo de texto do prontuário após limpeza HTML |
 | `ANALISADOR_TIMEOUT_PROCESSANDO_MIN` | `15` | Minutos antes de considerar uma análise travada |
-| `ANALISADOR_PAUSA_MIN` / `_MAX` | `15` / `45` | Intervalo de pausa (seg) entre análises individuais |
+| `ANALISADOR_PAUSA_MIN` / `_MAX` | `25` / `60` | Intervalo base (seg) entre análises individuais para proteção anti-rate-limit |
+| `ANALISADOR_INTERVALO_ANTI_RATE_LIMIT_MULT` | `0.5` | Multiplicador aplicado ao intervalo anti-rate-limit (padrão reduz pela metade) |
 | `ANALISADOR_FILTRO_HORARIO_UTIL_ATIVO` | `False` | `True` para bloquear em horário útil (seg-sex) |
 | `ANALISADOR_HORARIO_UTIL_INICIO` | `7` | Hora de início do bloqueio (07:00, formato 24h) |
 | `ANALISADOR_HORARIO_UTIL_FIM` | `19` | Hora de fim do bloqueio (19:00, exclusivo) |
 | `ANALISADOR_SEARCH_HABILITADA` | `True` | `False` para desabilitar busca web |
 | `ANALISADOR_EMBEDDING_MODEL_NAME` | `all-MiniLM-L6-v2` | Modelo de embeddings |
 | `ANALISADOR_SIMILARIDADE_TOP_K` | `5` | Quantos casos semelhantes retornar |
-| `ANALISADOR_LLM_THROTTLE_MIN` | `8` | Seg mínimos entre envios ao ChatGPT |
-| `ANALISADOR_LLM_THROTTLE_MAX` | `15` | Seg máximos (aleatoriza entre MIN e MAX) |
+| `ANALISADOR_LLM_THROTTLE_MIN` | `0` | Seg mínimos entre envios ao ChatGPT (0 = desativado) |
+| `ANALISADOR_LLM_THROTTLE_MAX` | `0` | Seg máximos (aleatoriza entre MIN e MAX; 0 = desativado) |
 | `ANALISADOR_LLM_RATE_LIMIT_RETRY_MAX` | `3` | Tentativas em rate limit antes de desistir |
-| `ANALISADOR_LLM_RATE_LIMIT_RETRY_BASE_S` | `60` | Espera base (seg) no 1.º rate limit |
+| `ANALISADOR_LLM_RATE_LIMIT_RETRY_BASE_S` | `0` | Espera base (seg) no 1.º rate limit (0 = retry imediato) |
 
 ### Lógica de ordenação da fila de análises
 
@@ -673,15 +688,18 @@ Toda a lógica roda no SQL via `CASE WHEN` + `DATE_SUB(NOW(), INTERVAL 30 DAY)`,
 
 ### Throttle e proteção contra rate limit
 
-Cada análise envia 2-4 mensagens ao ChatGPT em sequência (análise principal + planejamento de queries + enriquecimento com evidências + refinamento opcional). Para evitar o bloqueio por "excesso de solicitações":
+Cada análise envia 2-4 mensagens ao ChatGPT em sequência (análise principal + planejamento de queries + enriquecimento com evidências + refinamento opcional). Atualmente, o projeto está em modo de **pacing majoritariamente centralizado no Simulator**, mantendo apenas um intervalo anti-rate-limit entre análises:
 
-- **Throttle global**: antes de cada envio ao ChatGPT, o sistema aguarda um intervalo aleatório entre `ANALISADOR_LLM_THROTTLE_MIN` e `ANALISADOR_LLM_THROTTLE_MAX` segundos desde o último envio. Isso garante um ritmo "humano" mesmo entre mensagens internas de uma mesma análise.
-- **Detecção de rate limit**: se o ChatGPT responder com texto indicando limite (ex: "Você chegou ao limite", "excesso de solicitações"), o sistema levanta `ChatGPTRateLimitError` e aguarda `ANALISADOR_LLM_RATE_LIMIT_RETRY_BASE_S` segundos antes de continuar o próximo item do lote.
-- **Proteção no parse**: a detecção ocorre dentro de `_parse_json_llm()`, garantindo que rate limits não sejam confundidos com "JSON inválido" nem consumam tentativas do registro.
+- **Throttle local do analisador**: desativado por padrão (`ANALISADOR_LLM_THROTTLE_MIN/MAX = 0`).
+- **Cooldown local de rate limit**: desativado por padrão (`ANALISADOR_LLM_RATE_LIMIT_RETRY_BASE_S = 0`, retry imediato).
+- **Intervalo anti-rate-limit entre análises**: ativo por padrão via `ANALISADOR_PAUSA_MIN/MAX`, mas reduzido pela metade com `ANALISADOR_INTERVALO_ANTI_RATE_LIMIT_MULT = 0.5`.
+- **Proteção no parse**: a detecção de rate limit continua dentro de `_parse_json_llm()` para evitar confundir erro de limite com “JSON inválido”.
+
+Ou seja, a cadência passa a ser majoritariamente controlada pelo `browser.py`/worker (incluindo alternância de perfis e fallback automático de perfil).
 
 ### Filtro de horário útil
 
-Por padrão, o analisador usa o perfil `default` (mesma conta/interface do usuário humano). Opcionalmente, pode usar um perfil dedicado via `ANALISADOR_BROWSER_PROFILE` (ex.: `analisador`) para reduzir disputa de rate-limit. O plano Plus impõe um **limite de mensagens por janela de tempo**; se o analisador consumir esse limite durante o expediente, o usuário humano pode ficar temporariamente bloqueado.
+Por padrão, o analisador usa o perfil `default` (mesma conta/interface do usuário humano). Opcionalmente, pode usar um perfil dedicado via `ANALISADOR_BROWSER_PROFILE` (ex.: `segunda_chance`) para reduzir disputa de rate-limit. O plano Plus impõe um **limite de mensagens por janela de tempo**; se o analisador consumir esse limite durante o expediente, o usuário humano pode ficar temporariamente bloqueado.
 
 Quando `FILTRO_HORARIO_UTIL_ATIVO = True`, o analisador entra em espera nos dias úteis (seg-sex) entre `HORARIO_UTIL_INICIO` e `HORARIO_UTIL_FIM`, reavaliando a cada 5 minutos. Fora desse horário (noites, madrugadas e fins de semana), roda normalmente.
 

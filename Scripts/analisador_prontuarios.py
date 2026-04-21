@@ -257,7 +257,7 @@ PROMPT_VERSION = _cfg("ANALISADOR_PROMPT_VERSION", "v16.1")
 
 # Perfil Chromium a ser usado pelas chamadas deste analisador ao Simulator.
 # Fallback "default" = compartilha a conta Plus do usuário humano.
-# Configure ANALISADOR_BROWSER_PROFILE="analisador" (ou outra chave em
+# Configure ANALISADOR_BROWSER_PROFILE="segunda_chance" (ou outra chave em
 # config.CHROMIUM_PROFILES) para usar uma conta dedicada sem disputar
 # rate-limit com o uso manual do ChatGPT.
 BROWSER_PROFILE = _cfg("ANALISADOR_BROWSER_PROFILE", "default")
@@ -287,13 +287,14 @@ SEARCH_MAX_QUERIES   = _cfg("ANALISADOR_SEARCH_MAX_QUERIES",  3)
 SEARCH_TIMEOUT       = _cfg("ANALISADOR_SEARCH_TIMEOUT",      90)
 SEARCH_HABILITADA    = _cfg("ANALISADOR_SEARCH_HABILITADA",   True)
 
-# Throttle entre mensagens ao ChatGPT (evita "excesso de solicitações")
-LLM_THROTTLE_MIN  = _cfg("ANALISADOR_LLM_THROTTLE_MIN", 12)  # segundos mínimos entre envios
-LLM_THROTTLE_MAX  = _cfg("ANALISADOR_LLM_THROTTLE_MAX", 20)  # segundos máximos (aleatoriza)
+# Throttle entre mensagens ao ChatGPT:
+# desabilitado aqui para deixar o controle de pacing no ChatGPT Simulator/browser.py.
+LLM_THROTTLE_MIN  = _cfg("ANALISADOR_LLM_THROTTLE_MIN", 0)  # segundos mínimos entre envios
+LLM_THROTTLE_MAX  = _cfg("ANALISADOR_LLM_THROTTLE_MAX", 0)  # segundos máximos (aleatoriza)
 
 # Retry com backoff quando ChatGPT retorna limite/erro de rate
 LLM_RATE_LIMIT_RETRY_MAX     = _cfg("ANALISADOR_LLM_RATE_LIMIT_RETRY_MAX",     3)    # tentativas
-LLM_RATE_LIMIT_RETRY_BASE_S  = _cfg("ANALISADOR_LLM_RATE_LIMIT_RETRY_BASE_S",  90)   # espera base (seg)
+LLM_RATE_LIMIT_RETRY_BASE_S  = _cfg("ANALISADOR_LLM_RATE_LIMIT_RETRY_BASE_S",  0)    # espera base (seg)
 LLM_RATE_LIMIT_RETRY_MULT    = _cfg("ANALISADOR_LLM_RATE_LIMIT_RETRY_MULT",    2.0)  # multiplicador exponencial
 
 # Endpoints PHP:
@@ -350,6 +351,8 @@ _RATE_LIMIT_PATTERNS = [
 def _aguardar_throttle_llm():
     """Espera o tempo restante do throttle antes de enviar a próxima mensagem ao ChatGPT."""
     global _ultimo_envio_llm
+    if LLM_THROTTLE_MIN <= 0 and LLM_THROTTLE_MAX <= 0:
+        return
     if _ultimo_envio_llm <= 0:
         return
     espera_alvo = random.uniform(LLM_THROTTLE_MIN, LLM_THROTTLE_MAX)
@@ -448,7 +451,10 @@ def _post_llm(payload: dict, timeout: int = 300) -> requests.Response:
         except (requests.Timeout, requests.ConnectionError) as exc:
             ultimo_erro = exc
             espera = int(LLM_RATE_LIMIT_RETRY_BASE_S * (LLM_RATE_LIMIT_RETRY_MULT ** min(tentativa - 1, 6)))
-            espera = max(2, min(180, espera))
+            if espera <= 0:
+                log.warning("  ⚠️ Reconexão imediata com LLM (sem delay configurado no analisador).")
+                continue
+            espera = min(180, espera)
             _aguardar_reconexao_llm(espera, tentativa, exc)
         except requests.HTTPError as exc:
             # Mantém comportamento atual para rate-limit/erro HTTP: quem chama
@@ -5667,6 +5673,9 @@ def executar_busca_evidencias(resultado: dict, chat_url: str = None, chat_id: st
 # Intervalo de pausa entre análises (segundos) — vindo de config.py com fallback
 PAUSA_MIN = _cfg("ANALISADOR_PAUSA_MIN", 25)
 PAUSA_MAX = _cfg("ANALISADOR_PAUSA_MAX", 60)
+# Redutor aplicado ao intervalo anti-rate-limit quando múltiplos perfis
+# Chromium estão ativos (ex.: default + segunda_chance).
+INTERVALO_ANTI_RATE_LIMIT_MULT = float(_cfg("ANALISADOR_INTERVALO_ANTI_RATE_LIMIT_MULT", 0.5))
 _ultima_analise_iniciada_ts = 0.0
 
 
@@ -5677,17 +5686,21 @@ def _aguardar_intervalo_entre_analises(contexto: str = "próxima análise"):
     globalmente entre qualquer análise LLM (prontuário normal e síntese compilada).
     """
     global _ultima_analise_iniciada_ts
+    if PAUSA_MIN <= 0 and PAUSA_MAX <= 0:
+        _ultima_analise_iniciada_ts = time.time()
+        return
     if _ultima_analise_iniciada_ts <= 0:
         _ultima_analise_iniciada_ts = time.time()
         return
 
-    pausa_alvo = int(random.uniform(PAUSA_MIN, PAUSA_MAX))
+    pausa_base = int(random.uniform(PAUSA_MIN, PAUSA_MAX))
+    pausa_alvo = int(max(0, pausa_base * max(0.0, INTERVALO_ANTI_RATE_LIMIT_MULT)))
     decorrido = int(time.time() - _ultima_analise_iniciada_ts)
     restante = pausa_alvo - decorrido
     if restante > 0:
         log.info(
             f"  ⏸  Intervalo anti-rate-limit ({contexto}): "
-            f"aguardando {restante}s (alvo {pausa_alvo}s, já decorridos {decorrido}s)."
+            f"aguardando {restante}s (alvo reduzido {pausa_alvo}s; base {pausa_base}s; já decorridos {decorrido}s)."
         )
         try:
             countdown(restante, "intervalo entre análises")
@@ -5816,6 +5829,8 @@ def processar_lote(pendentes: list):
                 f"  🚫 ID={idat} rate limit detectado: {rl}\n"
                 f"     Aguardando {espera}s antes de continuar o lote..."
             )
+            if espera <= 0:
+                continue
             try:
                 countdown(espera, "cooldown rate limit")
             except (KeyboardInterrupt, SystemExit):
@@ -6075,6 +6090,8 @@ def main():
                             f"  🚫 Síntese compilada do paciente {id_pac} — rate limit: {rl}\n"
                             f"     Aguardando {espera}s antes de continuar..."
                         )
+                        if espera <= 0:
+                            continue
                         try:
                             countdown(espera, "cooldown rate limit")
                         except (KeyboardInterrupt, SystemExit):
