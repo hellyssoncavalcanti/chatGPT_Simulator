@@ -641,6 +641,7 @@ async def smart_input(page, message, q=None, activityts=None):
     import re
 
     selector = CHAT_INPUT_SELECTORS[0] if CHAT_INPUT_SELECTORS else "#prompt-textarea"
+    typing_delay_scale = 1.0
     await _dismiss_rate_limit_modal_if_any(page, q=q)
     await page.wait_for_selector(selector, timeout=10000)
     try:
@@ -816,36 +817,37 @@ async def smart_input(page, message, q=None, activityts=None):
                 if segment.strip():
                     if activityts:
                         activityts[0] = time.time()
-                    await type_realistic(page, segment, q)
+                    await type_realistic(page, segment, q, delay_scale=typing_delay_scale)
     else:
-        await type_realistic(page, message, q)
+        await type_realistic(page, message, q, delay_scale=typing_delay_scale)
 
 
-async def type_realistic(page, text, q=None):
+async def type_realistic(page, text, q=None, delay_scale: float = 1.0):
     total = len(text)
     last_status_time = time.time()
     typo_count = 0
     hesitation_count = 0
+    scale = max(0.0, float(delay_scale or 0.0))
     for i, char in enumerate(text):
         if char == '\n':
             await page.keyboard.down("Shift")
             await page.keyboard.press("Enter")
             await page.keyboard.up("Shift")
-            await asyncio.sleep(humanizer.delay_for_char(char, TYPING_PROFILE))
+            await asyncio.sleep(humanizer.delay_for_char(char, TYPING_PROFILE) * scale)
         else:
             typo_char = humanizer.maybe_typo(char, TYPING_PROFILE)
             if typo_char:
                 await page.keyboard.type(typo_char)
-                await asyncio.sleep(humanizer.delay_for_char(typo_char, TYPING_PROFILE))
+                await asyncio.sleep(humanizer.delay_for_char(typo_char, TYPING_PROFILE) * scale)
                 for _ in range(TYPING_PROFILE.typo_max_backspaces):
                     await page.keyboard.press("Backspace")
-                    await asyncio.sleep(0.015)
+                    await asyncio.sleep(0.015 * scale)
                 typo_count += 1
             await page.keyboard.type(char)
-            await asyncio.sleep(humanizer.delay_for_char(char, TYPING_PROFILE))
-            if humanizer.should_hesitate(TYPING_PROFILE):
+            await asyncio.sleep(humanizer.delay_for_char(char, TYPING_PROFILE) * scale)
+            if scale > 0 and humanizer.should_hesitate(TYPING_PROFILE):
                 hesitation_count += 1
-                await asyncio.sleep(humanizer.hesitation_delay(TYPING_PROFILE))
+                await asyncio.sleep(humanizer.hesitation_delay(TYPING_PROFILE) * scale)
 
         # --- KEEP-ALIVE: Emite status a cada 2 segundos ---
         current_time = time.time()
@@ -3253,7 +3255,7 @@ async def handle_uptodate_search_task(context, task):
                 _CURRENT_TASK_SENDER.reset(sender_token)
 
 
-async def handle_chat_task(context, task):
+async def handle_chat_task(context, task, get_browser_for_profile=None):
     async with tab_semaphore:
         q = task.get('stream_queue')
         sender = _extract_task_sender(task)
@@ -3261,6 +3263,12 @@ async def handle_chat_task(context, task):
         max_attempts = 2
         handled = False
         page = None
+        active_context = context
+        active_profile_key = str(task.get("_resolved_browser_profile_key") or "default").strip() or "default"
+        active_profile_dirname = str(task.get("_resolved_chromium_profile_dirname") or "").strip()
+        fallback_profile_key = str(task.get("_fallback_browser_profile_key") or "").strip()
+        fallback_profile_dirname = str(task.get("_fallback_chromium_profile_dirname") or "").strip()
+        switched_to_fallback = False
         async def _resume_stream_after_reopen(probe_page, initial_markdown: str) -> str:
             """Retoma streaming de uma resposta já iniciada após reabrir a aba."""
             current = (initial_markdown or "").strip()
@@ -3309,7 +3317,7 @@ async def handle_chat_task(context, task):
                 watchdog_task = None
                 try:
                     emit_log(q, f"Iniciando tarefa CHAT no browser (tentativa {attempt}/{max_attempts}).")
-                    page = await context.new_page()
+                    page = await active_context.new_page()
                     watchdog_task = asyncio.create_task(
                         watchdog_page(page, q, stop_event, check_interval=15, activity_ts=activityts)
                     )
@@ -3321,6 +3329,49 @@ async def handle_chat_task(context, task):
                     break
                 except asyncio.TimeoutError:
                     emit_event(q, 'error', 'Timeout externo 660s — tarefa abortada.')
+                except RateLimitDetected as rle:
+                    can_switch_profile = (
+                        (not switched_to_fallback)
+                        and active_profile_key == "default"
+                        and bool(fallback_profile_key)
+                        and callable(get_browser_for_profile)
+                    )
+                    if can_switch_profile:
+                        emit_log(
+                            q,
+                            "⛔ Rate-limit no perfil default. "
+                            f"Tentando automaticamente o perfil '{fallback_profile_key}'."
+                        )
+                        emit_event(q, "status", f"Rate-limit no perfil default; trocando para '{fallback_profile_key}'...")
+                        switched_to_fallback = True
+                        active_profile_key = fallback_profile_key
+                        if fallback_profile_dirname:
+                            active_profile_dirname = fallback_profile_dirname
+                        task["browser_profile"] = fallback_profile_key
+                        task["_resolved_browser_profile_key"] = fallback_profile_key
+                        task["_resolved_chromium_profile_dirname"] = active_profile_dirname
+                        # URL de chat anterior normalmente pertence ao perfil default.
+                        # Ao trocar de perfil, inicia novo chat para evitar 404/Unauthorized.
+                        task["url"] = None
+                        try:
+                            active_context = await get_browser_for_profile(fallback_profile_key)
+                        except Exception as switch_err:
+                            emit_event(
+                                q,
+                                "error",
+                                f"Rate-limit no default e falha ao alternar para perfil '{fallback_profile_key}': {switch_err}",
+                            )
+                            break
+                        if attempt < max_attempts:
+                            await asyncio.sleep(0.8)
+                            continue
+                    emit_event(q, "error", {
+                        "code": "rate_limit",
+                        "message": rle.message,
+                        "retry_after_seconds": rle.retry_after_seconds,
+                        "chromium_profile": active_profile_dirname or "",
+                    })
+                    break
                 except Exception as e:
                     err = str(e)
                     recoverable = (
@@ -4101,12 +4152,6 @@ async def handle_chat_task_inner(task, page, q, stop_event: asyncio.Event, activ
     msg    = task.get('message')
     atts   = task.get('attachment_paths')
 
-    sender = _extract_task_sender(task)
-    if _is_python_sender(sender):
-        msg, wrapped = _ensure_paste_wrappers(msg)
-        if wrapped:
-            emit_log(q, "Mensagem Python encapsulada com [INICIO_TEXTO_COLADO]...[FIM_TEXTO_COLADO].")
-
     msg, replaced_b64 = _replace_inline_base64_payloads(msg)
     if replaced_b64:
         emit_log(q, f"{replaced_b64} payload(s) base64 inline substituído(s) por placeholder.")
@@ -4139,6 +4184,7 @@ async def handle_chat_task_inner(task, page, q, stop_event: asyncio.Event, activ
             "url": canonical_url,
             "browser_chat_id": m.group(1),
             "source": "browser_url",
+            "chromium_profile": str(task.get("_resolved_chromium_profile_dirname") or ""),
         }
         emit_event(q, "chat_meta", payload)
         emit_log(q, f"🔗 Chat URL detectada e enviada via stream: {canonical_url}")
@@ -4221,12 +4267,7 @@ async def handle_chat_task_inner(task, page, q, stop_event: asyncio.Event, activ
         try:
             await wait_for_chat_ready(page, url, q, timeout=30)
         except RateLimitDetected as rle:
-            emit_event(q, "error", {
-                "code": "rate_limit",
-                "message": rle.message,
-                "retry_after_seconds": rle.retry_after_seconds,
-            })
-            return
+            raise rle
 
     if stop_event.is_set():
         raise RuntimeError('Watchdog sinalizou falha após carregamento da página.')
@@ -4374,12 +4415,7 @@ async def handle_chat_task_inner(task, page, q, stop_event: asyncio.Event, activ
         if rate_limit_state.get("detected"):
             rate_limit_msg = (rate_limit_state.get("message") or "Excesso de solicitações").strip()
             emit_log(q, f"⛔ Rate-limit detectado no ChatGPT: {rate_limit_msg[:220]}")
-            emit_event(q, "error", {
-                "code": "rate_limit",
-                "message": rate_limit_msg,
-                "retry_after_seconds": 240
-            })
-            break
+            raise RateLimitDetected(rate_limit_msg, retry_after_seconds=240)
 
         chat_error_state = await page.evaluate("""() => {
             const retryBtn = document.querySelector('button[data-testid="regenerate-thread-error-button"]');
@@ -4417,12 +4453,7 @@ async def handle_chat_task_inner(task, page, q, stop_event: asyncio.Event, activ
                     try:
                         await wait_for_chat_ready(page, current_url, q, timeout=30)
                     except RateLimitDetected as rle:
-                        emit_event(q, "error", {
-                            "code": "rate_limit",
-                            "message": rle.message,
-                            "retry_after_seconds": rle.retry_after_seconds,
-                        })
-                        return
+                        raise rle
                     await asyncio.sleep(1)
                     started = False
                     last_status_text = ""
@@ -4660,7 +4691,16 @@ async def handle_chat_task_inner(task, page, q, stop_event: asyncio.Event, activ
     final_title = await get_chat_title(page)
     final_url   = page.url
     await emit_chat_meta_if_ready()
-    emit_event(q, "finish", {"chat_id": chat_id, "title": final_title, "url": final_url})  # ✅ era chat_id, corrigido para chat_id
+    emit_event(
+        q,
+        "finish",
+        {
+            "chat_id": chat_id,
+            "title": final_title,
+            "url": final_url,
+            "chromium_profile": str(task.get("_resolved_chromium_profile_dirname") or ""),
+        },
+    )
 
 async def handle_download_file(context, task):
     """
@@ -4767,6 +4807,7 @@ async def browser_loop_async():
         # Cache de contextos Chromium abertos por perfil. Cada perfil vive em
         # seu próprio diretório (sessão independente); abertos sob demanda.
         browsers: dict[str, "BrowserContext"] = {}
+        chat_profile_rr_index = 0
 
         async def start_browser(profile_dir: str):
             b = await p.chromium.launch_persistent_context(
@@ -4806,6 +4847,40 @@ async def browser_loop_async():
                 file_log("browser.py", f"🟢 Perfil Chromium '{profile_key}' aberto em {profile_dir}.")
             return new_b
 
+        def _profile_dirname(profile_key: str, profile_dir: str) -> str:
+            try:
+                norm = os.path.normpath(str(profile_dir or ""))
+                base = os.path.basename(norm)
+                if base:
+                    return base
+            except Exception:
+                pass
+            return str(profile_key or "").strip() or "default"
+
+        def _get_rate_limit_fallback_profile() -> tuple[str, str]:
+            profiles = getattr(config, "CHROMIUM_PROFILES", None) or {}
+            candidate = "segunda_chance"
+            if candidate in profiles:
+                return candidate, profiles[candidate]
+            return "", ""
+
+        def _choose_profile_for_new_chat(explicit_profile: str | None, task: dict) -> str | None:
+            nonlocal chat_profile_rr_index
+            if explicit_profile:
+                return explicit_profile
+            if str(task.get("action") or "").upper() != "CHAT":
+                return explicit_profile
+            if task.get("url"):
+                return explicit_profile
+
+            profiles = getattr(config, "CHROMIUM_PROFILES", None) or {}
+            candidates = [k for k in ("default", "segunda_chance") if k in profiles]
+            if len(candidates) < 2:
+                return explicit_profile
+            chosen = candidates[chat_profile_rr_index % len(candidates)]
+            chat_profile_rr_index += 1
+            return chosen
+
         # Inicia o perfil padrão (histórico compartilhado do usuário humano).
         default_dir = (getattr(config, "CHROMIUM_PROFILES", None) or {}).get("default") or config.DIRS["profile"]
         browsers["default"] = await start_browser(default_dir)
@@ -4839,7 +4914,22 @@ async def browser_loop_async():
 
                     if task.get('action') == 'STOP': break
 
+                    chosen_profile = _choose_profile_for_new_chat(
+                        (task.get('browser_profile') or '').strip() or None,
+                        task,
+                    )
+                    if chosen_profile:
+                        task['browser_profile'] = chosen_profile
                     profile_key, profile_dir = _resolve_profile_dir(task.get('browser_profile'))
+                    task["_resolved_browser_profile_key"] = profile_key
+                    task["_resolved_chromium_profile_dirname"] = _profile_dirname(profile_key, profile_dir)
+                    fb_key, fb_dir = _get_rate_limit_fallback_profile()
+                    if fb_key and fb_dir and fb_key != profile_key:
+                        task["_fallback_browser_profile_key"] = fb_key
+                        task["_fallback_chromium_profile_dirname"] = _profile_dirname(fb_key, fb_dir)
+                    else:
+                        task["_fallback_browser_profile_key"] = ""
+                        task["_fallback_chromium_profile_dirname"] = ""
                     browser = await get_browser_for(profile_key, profile_dir)
                     await cleanup_known_orphan_tabs(browser)
 
@@ -4856,7 +4946,7 @@ async def browser_loop_async():
                     elif action == 'DOWNLOAD_FILE':
                         _spawn_task(handle_download_file(browser, task), task, action)
                     else:
-                        _spawn_task(handle_chat_task(browser, task), task, action)
+                        _spawn_task(handle_chat_task(browser, task, get_browser_for_profile=lambda k: get_browser_for(*_resolve_profile_dir(k))), task, action)
 
                 except Exception as e:
                     print(f"Erro no loop principal: {e}")
