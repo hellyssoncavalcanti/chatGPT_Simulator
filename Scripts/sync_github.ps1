@@ -397,6 +397,57 @@ function Import-Settings {
         }
     }
 
+    # Fallback resiliente: se o dot-sourcing não popular variáveis (escopo/encoding),
+    # tenta extrair pares "$chave = valor" diretamente do arquivo de settings.
+    if ($hasSettingsPath -and (Test-Path -LiteralPath $settingsPath)) {
+        try {
+            $rawSettings = Get-Content -LiteralPath $settingsPath -Raw -Encoding UTF8
+            if (-not [string]::IsNullOrWhiteSpace($rawSettings)) {
+                $rawMap = @{}
+                $matches = [regex]::Matches($rawSettings, '(?im)^\s*\$(\w+)\s*=\s*(.+?)\s*$')
+                foreach ($m in $matches) {
+                    $k = [string]$m.Groups[1].Value
+                    $vRaw = [string]$m.Groups[2].Value
+                    $v = $vRaw.Trim()
+                    if (($v.StartsWith("'") -and $v.EndsWith("'")) -or ($v.StartsWith('"') -and $v.EndsWith('"'))) {
+                        $v = $v.Substring(1, $v.Length - 2)
+                    }
+                    if (-not [string]::IsNullOrWhiteSpace($k)) {
+                        $rawMap[$k.ToLowerInvariant()] = $v
+                    }
+                }
+
+                $fallbackKeys = @(
+                    @{ cfg = 'githubToken'; raw = 'githubtoken' },
+                    @{ cfg = 'ghUser'; raw = 'ghuser' },
+                    @{ cfg = 'repo'; raw = 'repo' },
+                    @{ cfg = 'branch'; raw = 'branch' },
+                    @{ cfg = 'localDir'; raw = 'localdir' },
+                    @{ cfg = 'taskName'; raw = 'taskname' },
+                    @{ cfg = 'syncIntervalMinutes'; raw = 'syncintervalminutes' },
+                    @{ cfg = 'chatProcessPattern'; raw = 'chatprocesspattern' },
+                    @{ cfg = 'analyzerPattern'; raw = 'analyzerpattern' },
+                    @{ cfg = 'remotePhpApiKey'; raw = 'remotephpapikey' }
+                )
+
+                foreach ($entry in $fallbackKeys) {
+                    $cfgKey = [string]$entry.cfg
+                    $rawKey = [string]$entry.raw
+                    if (-not $rawMap.ContainsKey($rawKey)) { continue }
+                    $curr = ''
+                    if ($script:Config.Contains($cfgKey) -and $null -ne $script:Config[$cfgKey]) {
+                        $curr = [string]$script:Config[$cfgKey]
+                    }
+                    if ([string]::IsNullOrWhiteSpace($curr) -or (Test-IsPlaceholderValue $curr)) {
+                        $script:Config[$cfgKey] = $rawMap[$rawKey]
+                    }
+                }
+            }
+        } catch {
+            Write-Warn "Falha ao aplicar fallback de leitura direta do settings: $($_.Exception.Message)"
+        }
+    }
+
     if (Test-IsPlaceholderValue $script:Config.githubToken) {
         $script:Config.githubToken = $null
     }
