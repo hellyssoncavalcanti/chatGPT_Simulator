@@ -88,6 +88,20 @@ function Disable-GitHubAuth([string]$Reason = '') {
     if ($script:Config -and $script:Config.headers) {
         $script:Config.headers.Remove('Authorization') | Out-Null
     }
+    Show-GitHubCredentialFixGuide
+}
+
+function Show-GitHubCredentialFixGuide {
+    Write-Warn 'Como corrigir credenciais GitHub (passo a passo):'
+    Write-Warn '1) Acesse: https://github.com/settings/personal-access-tokens/new'
+    Write-Warn '2) Crie um token Fine-grained para o repositório alvo.'
+    Write-Warn '3) Permissões mínimas: Contents=Read and write, Pull requests=Read and write.'
+    Write-Warn '4) Edite Scripts\sync_github_settings.ps1 e ajuste:'
+    Write-Warn '   - $githubToken = ''<seu_token>'''
+    Write-Warn '   - $ghUser = ''<seu_usuario_ou_org>'''
+    Write-Warn '   - $repo / $branch conforme seu repositório.'
+    Write-Warn '5) Salve o arquivo e execute novamente: sync_github.bat'
+    Write-Warn 'Documentação: https://docs.github.com/rest'
 }
 
 function Write-Log([string]$Message) {
@@ -182,6 +196,9 @@ function Import-Settings {
 
     $settingsPath = $settingsCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
     if (-not $settingsPath) { $settingsPath = $settingsCandidates[0] }
+    if ([string]::IsNullOrWhiteSpace([string]$settingsPath)) {
+        throw 'Nao foi possivel resolver o caminho do arquivo sync_github_settings.ps1.'
+    }
 
     $defaults = [ordered]@{
         githubToken         = $env:CHATGPT_SIMULATOR_GITHUB_TOKEN
@@ -207,7 +224,8 @@ function Import-Settings {
         remotePhpTargetPath2 = if ($env:CHATGPT_SIMULATOR_REMOTE_PHP_TARGET_PATH_2) { $env:CHATGPT_SIMULATOR_REMOTE_PHP_TARGET_PATH_2 } else { 'scripts/js/chatgpt_free_openai.js.php' }
     }
 
-    if (Test-Path $settingsPath) {
+    $hasSettingsPath = -not [string]::IsNullOrWhiteSpace([string]$settingsPath)
+    if ($hasSettingsPath -and (Test-Path -LiteralPath $settingsPath)) {
         . $settingsPath
         Write-Host "Usando configuracao do sync: $settingsPath" -ForegroundColor DarkGray
     } else {
@@ -219,6 +237,57 @@ function Import-Settings {
             $script:Config[$key] = (Get-Variable -Name $key -ValueOnly)
         } else {
             $script:Config[$key] = $defaults[$key]
+        }
+    }
+
+    # Fallback resiliente: se o dot-sourcing não popular variáveis (escopo/encoding),
+    # tenta extrair pares "$chave = valor" diretamente do arquivo de settings.
+    if ($hasSettingsPath -and (Test-Path -LiteralPath $settingsPath)) {
+        try {
+            $rawSettings = Get-Content -LiteralPath $settingsPath -Raw -Encoding UTF8
+            if (-not [string]::IsNullOrWhiteSpace($rawSettings)) {
+                $rawMap = @{}
+                $matches = [regex]::Matches($rawSettings, '(?im)^\s*\$(\w+)\s*=\s*(.+?)\s*$')
+                foreach ($m in $matches) {
+                    $k = [string]$m.Groups[1].Value
+                    $vRaw = [string]$m.Groups[2].Value
+                    $v = $vRaw.Trim()
+                    if (($v.StartsWith("'") -and $v.EndsWith("'")) -or ($v.StartsWith('"') -and $v.EndsWith('"'))) {
+                        $v = $v.Substring(1, $v.Length - 2)
+                    }
+                    if (-not [string]::IsNullOrWhiteSpace($k)) {
+                        $rawMap[$k.ToLowerInvariant()] = $v
+                    }
+                }
+
+                $fallbackKeys = @(
+                    @{ cfg = 'githubToken'; raw = 'githubtoken' },
+                    @{ cfg = 'ghUser'; raw = 'ghuser' },
+                    @{ cfg = 'repo'; raw = 'repo' },
+                    @{ cfg = 'branch'; raw = 'branch' },
+                    @{ cfg = 'localDir'; raw = 'localdir' },
+                    @{ cfg = 'taskName'; raw = 'taskname' },
+                    @{ cfg = 'syncIntervalMinutes'; raw = 'syncintervalminutes' },
+                    @{ cfg = 'chatProcessPattern'; raw = 'chatprocesspattern' },
+                    @{ cfg = 'analyzerPattern'; raw = 'analyzerpattern' },
+                    @{ cfg = 'remotePhpApiKey'; raw = 'remotephpapikey' }
+                )
+
+                foreach ($entry in $fallbackKeys) {
+                    $cfgKey = [string]$entry.cfg
+                    $rawKey = [string]$entry.raw
+                    if (-not $rawMap.ContainsKey($rawKey)) { continue }
+                    $curr = ''
+                    if ($script:Config.Contains($cfgKey) -and $null -ne $script:Config[$cfgKey]) {
+                        $curr = [string]$script:Config[$cfgKey]
+                    }
+                    if ([string]::IsNullOrWhiteSpace($curr) -or (Test-IsPlaceholderValue $curr)) {
+                        $script:Config[$cfgKey] = $rawMap[$rawKey]
+                    }
+                }
+            }
+        } catch {
+            Write-Warn "Falha ao aplicar fallback de leitura direta do settings: $($_.Exception.Message)"
         }
     }
 
@@ -611,8 +680,10 @@ function Merge-AllPullRequests {
         $script:CanWriteRepo = $false
         if (-not $script:Config.githubToken) {
             Write-Warn 'Token GitHub nao configurado; etapa de PR sera ignorada, mas o sync dos arquivos ainda sera tentado.'
+            Show-GitHubCredentialFixGuide
         } else {
             Write-Warn 'Token GitHub invalido/expirado; etapa de PR sera ignorada, mas o sync dos arquivos ainda sera tentado.'
+            Show-GitHubCredentialFixGuide
         }
         return
     }
@@ -668,7 +739,7 @@ function Merge-AllPullRequests {
         $parsable = @()
         $nonParsable = @()
         foreach ($item in $items) {
-            $dt = $null
+            [datetimeoffset]$dt = [datetimeoffset]::MinValue
             if ([datetimeoffset]::TryParse([string]$item.created_at, [ref]$dt)) {
                 $parsable += [pscustomobject]@{
                     pr = $item
