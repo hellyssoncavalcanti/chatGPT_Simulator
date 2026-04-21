@@ -192,6 +192,48 @@ de eventos suspeitos para auditoria operacional (incluindo conformidade LGPD).
 
 ---
 
+## Testes automatizados e CI/CD (issue #528)
+
+Foi adicionada uma base de testes com **pytest** e um workflow de CI no
+**GitHub Actions** para execução automática e geração de cobertura.
+
+### Estrutura de testes adicionada
+
+- `tests/test_shared_queue.py`
+  - cobre priorização de chats remotos vs origem Python;
+  - cobre round-robin entre tenants na mesma prioridade.
+
+- `tests/test_storage.py`
+  - cobre persistência e deduplicação de mensagens;
+  - cobre busca por `origin_url` com resolução do chat mais recente.
+
+- `tests/test_server_api.py`
+  - smoke de `/health` e `/api/metrics`;
+  - valida bloqueio por brute force de login;
+  - valida endpoint `/api/logs/tail`.
+
+- `tests/conftest.py`
+  - prepara `PYTHONPATH` para módulos em `Scripts/` durante execução.
+
+### CI em GitHub Actions
+
+- Workflow: `.github/workflows/tests.yml`
+- Executa em `push` e `pull_request`:
+  1. instala Python 3.11;
+  2. instala dependências de teste (`requirements-test.txt`);
+  3. roda `pytest` com cobertura (`--cov=Scripts`);
+  4. publica `coverage.xml` como artifact;
+  5. envia para **Codecov** quando `CODECOV_TOKEN` estiver configurado.
+
+### Como rodar localmente
+
+```bash
+pip install -r requirements-test.txt
+pytest --cov=Scripts --cov-report=term-missing
+```
+
+---
+
 ## Servidor de acompanhamento WhatsApp Web (modo isolado, sem Meta)
 
 Foi adicionado o script `Scripts/acompanhamento_whatsapp.py`, responsável por:
