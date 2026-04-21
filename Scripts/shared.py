@@ -63,6 +63,7 @@ class BrowserTaskQueue:
             "by_origin_enqueued": {"remote": 0, "python": 0, "unknown": 0},
             "by_origin_dequeued": {"remote": 0, "python": 0, "unknown": 0},
         }
+        self._failed_tasks: deque[dict[str, Any]] = deque(maxlen=500)
 
     def _classify_origin(self, task: dict[str, Any]) -> str:
         if not isinstance(task, dict):
@@ -208,7 +209,37 @@ class BrowserTaskQueue:
                 "by_origin_enqueued": dict(self._stats["by_origin_enqueued"]),
                 "by_origin_dequeued": dict(self._stats["by_origin_dequeued"]),
                 "lane_sizes": lane_sizes,
+                "failed_total": len(self._failed_tasks),
             }
+
+    def mark_failed(self, task: dict[str, Any], error: str, *, retry_count: int | None = None):
+        """Registra tarefa com falha para inspeção/retry manual."""
+        payload = {
+            "failed_at": time.time(),
+            "error": str(error or "unknown_error"),
+            "task": dict(task or {}),
+            "retry_count": int(retry_count if retry_count is not None else (task or {}).get("retry_count", 0)),
+        }
+        with self._not_empty:
+            self._failed_tasks.append(payload)
+
+    def list_failed(self, limit: int = 100) -> list[dict[str, Any]]:
+        with self._not_empty:
+            lim = max(1, min(500, int(limit or 100)))
+            items = list(self._failed_tasks)
+            return items[-lim:]
+
+    def retry_failed(self, failed_index: int) -> dict[str, Any] | None:
+        """Reinsere uma tarefa da DLQ na fila principal."""
+        with self._not_empty:
+            items = list(self._failed_tasks)
+            if failed_index < 0 or failed_index >= len(items):
+                return None
+            failed_item = items[failed_index]
+            task = dict(failed_item.get("task") or {})
+            task["retry_count"] = int(task.get("retry_count", 0)) + 1
+        self.put(task)
+        return task
 
 
 # Fila principal de comunicação entre o Flask e o Browser.

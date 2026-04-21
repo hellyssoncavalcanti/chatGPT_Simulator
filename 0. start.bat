@@ -1,162 +1,58 @@
-.
+@echo off
+chcp 65001 >nul
+setlocal EnableExtensions
 
-Essa inferência é permitida apenas no campo:
+title ChatGPT Simulator
+cd /d "%~dp0"
 
-seguimento_retorno_estimado
+echo [BOOT] Verificando arquivos sensiveis locais...
+set "FRESH_INSTALL="
+if not exist "Scripts\config.py" (
+  if exist "Scripts\config.example.py" (
+    copy /Y "Scripts\config.example.py" "Scripts\config.py" >nul
+    set "FRESH_INSTALL=1"
+    echo [BOOT] Scripts\config.py criado a partir do template.
+  )
+)
+if not exist "Scripts\sync_github_settings.ps1" (
+  if exist "Scripts\sync_github_settings.example.ps1" (
+    copy /Y "Scripts\sync_github_settings.example.ps1" "Scripts\sync_github_settings.ps1" >nul
+    echo [BOOT] Scripts\sync_github_settings.ps1 criado a partir do template.
+  )
+)
 
-A estimativa deve considerar:
+if defined FRESH_INSTALL (
+  echo [BOOT] Novo local detectado. Reiniciando credenciais para admin/admin.
+  if exist "db\users\users.json" del /Q "db\users\users.json" >nul 2>&1
+  if exist "db\app.db" del /Q "db\app.db" >nul 2>&1
+)
 
-• farmacodinâmica do medicamento
-• tempo de resposta terapêutica
-• monitorização de efeitos adversos
-• tempo usual de seguimento neuropediátrico
-• início recente de tratamento
-• necessidade de reavaliar conduta recente
+if not exist ".venv\Scripts\python.exe" (
+  echo [BOOT] Criando ambiente virtual...
+  py -3 -m venv .venv
+)
 
-A estimativa deve incluir:
+call .venv\Scripts\activate.bat
+if errorlevel 1 (
+  echo [ERRO] Falha ao ativar .venv
+  pause
+  exit /b 1
+)
 
-• intervalo estimado
-• data calendário estimada
-• motivo clínico
-• base clínica da estimativa
-• parâmetros a serem avaliados
-• nível de prioridade
+echo [BOOT] Atualizando pip...
+python -m pip install --upgrade pip >nul
 
-Se houver medicação recém-iniciada ou recém-ajustada, priorizar o tempo típico necessário
-para avaliar resposta e tolerabilidade inicial.
+if exist "requirements.txt" (
+  echo [BOOT] Instalando dependencias de runtime...
+  pip install -r requirements.txt
+)
+if exist "requirements-test.txt" (
+  echo [BOOT] Instalando dependencias de teste...
+  pip install -r requirements-test.txt
+)
 
-Se houver início de terapia ou necessidade de observar evolução comportamental,
-considerar o tempo razoável para surgirem melhora, piora ou efeitos colaterais detectáveis.
+echo [BOOT] Iniciando sistema...
+python Scripts\main.py
 
-══════════════════════════════════════
-PRIORIZAÇÃO DO RETORNO
-══════════════════════════════════════
-
-O nível de prioridade deve considerar:
-
-baixo
-moderado
-alto
-
-Situações que aumentam prioridade:
-
-• regressão clínica
-• agressividade relevante
-• início recente de medicação
-• ajuste recente de dose
-• sintomas neurológicos novos
-• piora importante do comportamento
-• necessidade de avaliar tolerabilidade medicamentosa
-
-══════════════════════════════════════
-CLASSIFICAÇÃO DE GRAVIDADE
-══════════════════════════════════════
-
-Classificar gravidade clínica apenas se houver evidência suficiente.
-
-Valores possíveis:
-
-leve
-moderada
-grave
-
-Se não houver dados suficientes → null.
-
-══════════════════════════════════════
-CONDUTAS ESPECÍFICAS SUGERIDAS
-══════════════════════════════════════
-
-Podem ser sugeridas condutas adicionais baseadas em evidência científica.
-
-Cada conduta deve conter:
-
-conduta
-justificativa
-referencia
-fonte
-
-Fontes aceitáveis:
-
-• PubMed
-• AAP
-• AACAP
-• Cochrane
-• WHO
-• SBP
-• CFM
-• Ministério da Saúde
-
-Nunca inventar PMID.
-
-A referência deve ser coerente com:
-
-• o medicamento
-• a condição clínica
-• a intervenção sugerida
-
-Se não houver segurança sobre a referência, deixar referencia e fonte vazias ou não incluir a conduta.
-
-══════════════════════════════════════
-CONDUTAS GERAIS SUGERIDAS
-══════════════════════════════════════
-
-Condutas baseadas em boa prática clínica.
-
-Podem incluir:
-
-• orientações ao cuidador
-• monitorização clínica
-• sinais de alerta
-• acompanhamento clínico
-• observação da resposta a tratamento
-• atenção a efeitos adversos
-
-Evitar recomendações genéricas.
-
-Devem ser coerentes com o quadro clínico descrito.
-
-══════════════════════════════════════
-VERIFICAÇÃO FINAL DE CONSISTÊNCIA
-══════════════════════════════════════
-
-Antes de responder, verificar:
-
-• todos os medicamentos realmente aparecem no prontuário?
-• doses estão exatamente iguais ao texto?
-• nenhum diagnóstico foi criado?
-• nenhum exame foi inventado?
-• nenhuma terapia foi inventada?
-• nenhuma conduta específica foi baseada em referência inadequada?
-• o seguimento estimado é coerente com a medicação e o quadro clínico?
-
-Se qualquer uma dessas situações ocorrer, remover ou corrigir a informação.
-
-══════════════════════════════════════
-FORMATO DO JSON
-══════════════════════════════════════
-
-{
-  "diagnosticos_citados": [],
-
-  "idade_paciente": {
-    "valor": null,
-    "unidade": null
-  },
-
-  "pontos_chave": [],
-
-  "mudancas_relevantes": [],
-
-  "eventos_comportamentais": [],
-
-  "sinais_nucleares": [],
-
-  "medicacoes_em_uso": [
-    {
-      "nome": "",
-      "dose": "",
-      "posologia": "",
-      "desde": "",
-      "observacao": "",
-
-      "avaliacao_res
+endlocal
+pause

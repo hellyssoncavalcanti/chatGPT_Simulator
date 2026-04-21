@@ -1,176 +1,14 @@
-# =============================================================================
-# storage.py — Persistência de histórico de chats em JSON
-# =============================================================================
-#
-# RESPONSABILIDADE:
-#   Leitura e escrita thread-safe do arquivo history.json que armazena todos
-#   os chats do simulador (título, URL, mensagens). Utiliza threading.Lock
-#   para evitar condições de corrida entre múltiplas threads.
-#
-# RELAÇÕES:
-#   • Importado por: server.py (lê/salva chats), browser.py (não diretamente —
-#                    server.py intermedia)
-#   • Lê/escreve: config.CHATS_FILE (db/history.json)
-#   • Importa: config.py, utils.py
-#
-# FUNÇÕES PRINCIPAIS:
-#   load_chats()                        → dict de todos os chats
-#   save_chat(chat_id, title, url, msgs, origin_url=None)
-#   append_message(chat_id, role, content)
-#   update_full_history(chat_id, msgs, title=None, url=None)  — sincroniza com histórico do browser
-# =============================================================================
-import json
-import os
-import sys
 import copy
-from datetime import datetime
-import config
-from utils import log
-import threading
 import hashlib
+import threading
+from datetime import datetime
 from urllib.parse import parse_qs, urlparse
 
-# ─────────────────────────────────────────────────────────────
-# CAPTURA CONFIGURAÇÃO DE DEBUG (que é estabelecida no arquivo "config.py").
-# ─────────────────────────────────────────────────────────────
-# Verifica se config já foi importado; se não, importa
-if 'config' not in sys.modules:
-    import config
-
-# Tenta importar DEBUG_LOG do módulo config já carregado
-try:
-    DEBUG_LOG = config.DEBUG_LOG
-except AttributeError:
-    DEBUG_LOG = False  # fallback se a variável não existir no config
-    log("storage.py", "⚠️ DEBUG_LOG não encontrado no config.py. Usando False como padrão.")
+from utils import log
+import config
+import db
 
 _lock = threading.Lock()
-
-
-def _write_chats_unlocked(data):
-    with open(config.CHATS_FILE, 'w', encoding='utf-8') as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
-
-
-def _ensure_chat_dict(data, chat_id, title="Novo Chat", url="", origin_url=""):
-    if chat_id not in data:
-        data[chat_id] = {
-            "title": title or "Novo Chat",
-            "url": url or "",
-            "origin_url": origin_url or "",
-            "created_at": datetime.now().isoformat(),
-            "messages": []
-        }
-    else:
-        data[chat_id].setdefault('title', title or 'Novo Chat')
-        data[chat_id].setdefault('url', url or '')
-        data[chat_id].setdefault('origin_url', origin_url or '')
-        data[chat_id].setdefault('messages', [])
-    return data[chat_id]
-
-
-def append_message(chat_id, role, content):
-    """Adiciona uma mensagem ao histórico de forma atômica, evitando duplicata consecutiva."""
-    with _lock:
-        data = _load_chats_unlocked()
-        chat = _ensure_chat_dict(data, chat_id)
-        nova = {"role": role, "content": content}
-        mensagens = chat['messages']
-        if not mensagens or mensagens[-1] != nova:
-            mensagens.append(nova)
-        chat['updated_at'] = datetime.now().isoformat()
-        _write_chats_unlocked(data)
-
-
-def _load_chats_unlocked():
-    """Lê sem lock — usar apenas dentro de seções já protegidas."""
-    if not os.path.exists(config.CHATS_FILE):
-        return {}
-    try:
-        with open(config.CHATS_FILE, 'r', encoding='utf-8') as f:
-            return json.load(f)
-    except Exception:
-        return {}
-
-
-def load_chats():
-    with _lock:
-        # Retorna cópia defensiva para evitar mutação externa sem lock.
-        return copy.deepcopy(_load_chats_unlocked())
-
-
-def save_chat(chat_id, title, url, messages, origin_url=None):
-    with _lock:
-        data = _load_chats_unlocked()
-        chat = _ensure_chat_dict(data, chat_id, title=title or "Novo Chat", url=url or "", origin_url=origin_url or "")
-
-        if title:
-            chat['title'] = title
-        if url is not None:
-            chat['url'] = url
-        if origin_url:
-            chat['origin_url'] = origin_url
-
-        chat['updated_at'] = datetime.now().isoformat()
-        existing_pairs = {(m.get('role'), m.get('content')) for m in chat['messages']}
-        for msg in messages:
-            par = (msg.get('role'), msg.get('content'))
-            if par not in existing_pairs:
-                chat['messages'].append(msg)
-                existing_pairs.add(par)
-
-        _write_chats_unlocked(data)
-        return chat
-
-
-def get_meta(content):
-    if not content:
-        return ""
-    return hashlib.md5(content.encode('utf-8', errors='ignore')).hexdigest()
-
-
-def update_full_history(chat_id, browser_messages, title=None, url=None):
-    with _lock:
-        data = _load_chats_unlocked()
-        chat = _ensure_chat_dict(data, chat_id, title=title or "Novo Chat", url=url or "")
-        local_msgs = chat['messages']
-        has_changes = False
-
-        log("storage.py", f"Validando {len(browser_messages)} mensagens recebidas...")
-
-        for i, b_msg in enumerate(browser_messages):
-            b_content = b_msg['content']
-
-            if i < len(local_msgs):
-                l_content = local_msgs[i]['content']
-                b_meta = get_meta(b_content)
-                l_meta = get_meta(l_content)
-
-                if b_meta == l_meta:
-                    continue
-
-                if len(b_content) > len(l_content) or b_content != l_content:
-                    log("storage.py", f"Atualizando msg #{i} (Dif: {len(b_content)-len(l_content)} chars)")
-                    local_msgs[i] = b_msg
-                    has_changes = True
-            else:
-                local_msgs.append(b_msg)
-                has_changes = True
-
-        if title and chat.get('title') != title:
-            chat['title'] = title
-            has_changes = True
-        if url and chat.get('url') != url:
-            chat['url'] = url
-            has_changes = True
-
-        if has_changes:
-            chat['messages'] = local_msgs
-            chat['updated_at'] = datetime.now().isoformat()
-            _write_chats_unlocked(data)
-            log("storage.py", "Histórico sincronizado com sucesso.")
-
-        return has_changes
 
 
 def _normalize_lookup_value(value):
@@ -183,105 +21,208 @@ def _normalize_lookup_value(value):
 
 
 def _extract_origin_lookup_ids(origin_url: str):
-    """Extrai ids de contexto da própria origin_url para busca resiliente."""
     if not origin_url:
-        return {
-            'id_paciente': None,
-            'id_atendimento': None,
-            'id_receita': None,
-        }
-
+        return {"id_paciente": None, "id_atendimento": None, "id_receita": None}
     try:
         query = parse_qs(urlparse(origin_url).query, keep_blank_values=True)
     except Exception:
         query = {}
-
     return {
-        'id_paciente': _normalize_lookup_value((query.get('id_paciente') or [None])[0]),
-        'id_atendimento': _normalize_lookup_value((query.get('id_atendimento') or [None])[0]),
-        'id_receita': _normalize_lookup_value((query.get('id_receita') or [None])[0]),
+        "id_paciente": _normalize_lookup_value((query.get("id_paciente") or [None])[0]),
+        "id_atendimento": _normalize_lookup_value((query.get("id_atendimento") or [None])[0]),
+        "id_receita": _normalize_lookup_value((query.get("id_receita") or [None])[0]),
     }
 
 
+def get_meta(content):
+    if not content:
+        return ""
+    return hashlib.md5(content.encode("utf-8", errors="ignore")).hexdigest()
+
+
+def _chat_dict(conn, chat_id: str):
+    chat = conn.execute("SELECT * FROM chats WHERE chat_id=?", (chat_id,)).fetchone()
+    if not chat:
+        return None
+    msgs = conn.execute("SELECT role,content FROM messages WHERE chat_id=? ORDER BY idx", (chat_id,)).fetchall()
+    return {
+        "title": chat["title"],
+        "url": chat["url"],
+        "origin_url": chat["origin_url"],
+        "created_at": chat["created_at"],
+        "updated_at": chat["updated_at"],
+        "messages": [{"role": m["role"], "content": m["content"]} for m in msgs],
+    }
+
+
+def _ensure_chat(conn, chat_id, title="Novo Chat", url="", origin_url=""):
+    row = conn.execute("SELECT chat_id FROM chats WHERE chat_id=?", (chat_id,)).fetchone()
+    if row:
+        conn.execute(
+            "UPDATE chats SET title=COALESCE(NULLIF(title,''),?), url=COALESCE(NULLIF(url,''),?), origin_url=COALESCE(NULLIF(origin_url,''),?) WHERE chat_id=?",
+            (title or "Novo Chat", url or "", origin_url or "", chat_id),
+        )
+        return
+    now = datetime.now().isoformat()
+    conn.execute(
+        "INSERT INTO chats(chat_id,title,url,origin_url,created_at,updated_at) VALUES(?,?,?,?,?,?)",
+        (chat_id, title or "Novo Chat", url or "", origin_url or "", now, now),
+    )
+
+
+def load_chats():
+    db.init_db()
+    with _lock, db._connect() as conn:
+        rows = conn.execute("SELECT chat_id FROM chats ORDER BY COALESCE(updated_at,created_at) ASC").fetchall()
+        result = {}
+        for r in rows:
+            result[r["chat_id"]] = _chat_dict(conn, r["chat_id"])
+        return copy.deepcopy(result)
+
+
+def append_message(chat_id, role, content):
+    db.init_db()
+    with _lock, db._connect() as conn:
+        _ensure_chat(conn, chat_id)
+        last = conn.execute(
+            "SELECT role,content FROM messages WHERE chat_id=? ORDER BY idx DESC LIMIT 1", (chat_id,)
+        ).fetchone()
+        if not last or last["role"] != role or last["content"] != content:
+            idx = conn.execute("SELECT COALESCE(MAX(idx),-1)+1 FROM messages WHERE chat_id=?", (chat_id,)).fetchone()[0]
+            conn.execute(
+                "INSERT INTO messages(chat_id,idx,role,content) VALUES(?,?,?,?)", (chat_id, int(idx), role, content)
+            )
+        conn.execute("UPDATE chats SET updated_at=? WHERE chat_id=?", (datetime.now().isoformat(), chat_id))
+        conn.commit()
+
+
+def save_chat(chat_id, title, url, messages, origin_url=None):
+    db.init_db()
+    with _lock, db._connect() as conn:
+        _ensure_chat(conn, chat_id, title=title or "Novo Chat", url=url or "", origin_url=origin_url or "")
+        chat = _chat_dict(conn, chat_id)
+        existing = {(m.get("role"), m.get("content")) for m in chat["messages"]}
+        idx = len(chat["messages"])
+        for msg in messages:
+            pair = (msg.get("role"), msg.get("content"))
+            if pair in existing:
+                continue
+            conn.execute(
+                "INSERT INTO messages(chat_id,idx,role,content) VALUES(?,?,?,?)",
+                (chat_id, idx, msg.get("role") or "assistant", msg.get("content") or ""),
+            )
+            existing.add(pair)
+            idx += 1
+        conn.execute(
+            "UPDATE chats SET title=?, url=?, origin_url=?, updated_at=? WHERE chat_id=?",
+            (title or chat["title"], url or chat["url"], origin_url or chat["origin_url"], datetime.now().isoformat(), chat_id),
+        )
+        conn.commit()
+        return _chat_dict(conn, chat_id)
+
+
+def update_full_history(chat_id, browser_messages, title=None, url=None):
+    db.init_db()
+    with _lock, db._connect() as conn:
+        _ensure_chat(conn, chat_id, title=title or "Novo Chat", url=url or "")
+        local = _chat_dict(conn, chat_id)
+        local_msgs = local["messages"]
+        has_changes = False
+        for i, b_msg in enumerate(browser_messages):
+            b_content = b_msg.get("content") or ""
+            if i < len(local_msgs):
+                l_content = local_msgs[i].get("content") or ""
+                if get_meta(b_content) != get_meta(l_content) and (len(b_content) > len(l_content) or b_content != l_content):
+                    conn.execute(
+                        "UPDATE messages SET role=?, content=? WHERE chat_id=? AND idx=?",
+                        (b_msg.get("role") or "assistant", b_content, chat_id, i),
+                    )
+                    has_changes = True
+            else:
+                conn.execute(
+                    "INSERT INTO messages(chat_id,idx,role,content) VALUES(?,?,?,?)",
+                    (chat_id, i, b_msg.get("role") or "assistant", b_content),
+                )
+                has_changes = True
+        if len(local_msgs) > len(browser_messages):
+            conn.execute("DELETE FROM messages WHERE chat_id=? AND idx>=?", (chat_id, len(browser_messages)))
+            has_changes = True
+        if title and title != local["title"]:
+            conn.execute("UPDATE chats SET title=? WHERE chat_id=?", (title, chat_id))
+            has_changes = True
+        if url and url != local["url"]:
+            conn.execute("UPDATE chats SET url=? WHERE chat_id=?", (url, chat_id))
+            has_changes = True
+        if has_changes:
+            conn.execute("UPDATE chats SET updated_at=? WHERE chat_id=?", (datetime.now().isoformat(), chat_id))
+            conn.commit()
+            log("storage.py", "Histórico sincronizado com sucesso.")
+        return has_changes
+
+
 def find_chat_by_origin(origin_url: str):
-    """Retorna o chat local mais recente associado ao contexto da origin_url."""
     if not origin_url:
         return None
-
     target_ids = _extract_origin_lookup_ids(origin_url)
     has_target_ids = any(v is not None for v in target_ids.values())
-
-    with _lock:
-        data = _load_chats_unlocked()
-
-    candidatos = []
+    data = load_chats()
+    candidates = []
     for chat_id, chat in data.items():
-        chat_origin_url = chat.get('origin_url') or ''
+        chat_origin_url = chat.get("origin_url") or ""
         chat_ids = _extract_origin_lookup_ids(chat_origin_url)
-
         if has_target_ids:
             if chat_ids != target_ids:
                 continue
         elif chat_origin_url != origin_url:
             continue
-
-        candidatos.append((chat.get('updated_at') or chat.get('created_at') or '', chat_id, chat))
-
-    if not candidatos:
+        candidates.append((chat.get("updated_at") or chat.get("created_at") or "", chat_id, chat))
+    if not candidates:
         return None
-
-    candidatos.sort(reverse=True)
-    _dt, chat_id, chat = candidatos[0]
+    candidates.sort(reverse=True)
+    _dt, chat_id, chat = candidates[0]
     return {
-        'chat_id': chat_id,
-        'title': chat.get('title') or 'Novo Chat',
-        'url': chat.get('url') or '',
-        'origin_url': chat.get('origin_url') or '',
-        'messages': chat.get('messages') or [],
-        'updated_at': chat.get('updated_at') or chat.get('created_at') or '',
+        "chat_id": chat_id,
+        "title": chat.get("title") or "Novo Chat",
+        "url": chat.get("url") or "",
+        "origin_url": chat.get("origin_url") or "",
+        "messages": chat.get("messages") or [],
+        "updated_at": chat.get("updated_at") or chat.get("created_at") or "",
     }
 
 
 def delete_chat(chat_id: str) -> bool:
-    """Remove um chat do histórico local por chat_id."""
     if not chat_id:
         return False
-    with _lock:
-        data = _load_chats_unlocked()
-        if chat_id in data:
-            del data[chat_id]
-            _write_chats_unlocked(data)
+    db.init_db()
+    with _lock, db._connect() as conn:
+        deleted = conn.execute("DELETE FROM chats WHERE chat_id=?", (chat_id,)).rowcount
+        conn.execute("DELETE FROM messages WHERE chat_id=?", (chat_id,))
+        conn.commit()
+        if deleted:
             log("storage.py", f"Chat {chat_id} removido do histórico local.")
-            return True
-    return False
+        return bool(deleted)
 
 
 def delete_chats_by_origin(origin_url: str) -> int:
-    """Remove todos os chats associados a uma origin_url. Retorna a quantidade removida."""
     if not origin_url:
         return 0
-
+    data = load_chats()
     target_ids = _extract_origin_lookup_ids(origin_url)
     has_target_ids = any(v is not None for v in target_ids.values())
-
-    with _lock:
-        data = _load_chats_unlocked()
-        to_delete = []
-        for chat_id, chat in data.items():
-            chat_origin_url = chat.get('origin_url') or ''
-            chat_ids = _extract_origin_lookup_ids(chat_origin_url)
-
-            if has_target_ids:
-                if chat_ids == target_ids:
-                    to_delete.append(chat_id)
-            elif chat_origin_url == origin_url:
-                to_delete.append(chat_id)
-
-        for cid in to_delete:
-            del data[cid]
-
-        if to_delete:
-            _write_chats_unlocked(data)
-            log("storage.py", f"{len(to_delete)} chat(s) removido(s) por origin_url.")
-
+    to_delete = []
+    for chat_id, chat in data.items():
+        chat_origin_url = chat.get("origin_url") or ""
+        chat_ids = _extract_origin_lookup_ids(chat_origin_url)
+        if has_target_ids and chat_ids == target_ids:
+            to_delete.append(chat_id)
+        elif not has_target_ids and chat_origin_url == origin_url:
+            to_delete.append(chat_id)
+    if not to_delete:
+        return 0
+    db.init_db()
+    with _lock, db._connect() as conn:
+        conn.executemany("DELETE FROM messages WHERE chat_id=?", [(cid,) for cid in to_delete])
+        conn.executemany("DELETE FROM chats WHERE chat_id=?", [(cid,) for cid in to_delete])
+        conn.commit()
+    log("storage.py", f"{len(to_delete)} chat(s) removido(s) por origin_url.")
     return len(to_delete)

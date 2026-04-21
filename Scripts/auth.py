@@ -1,117 +1,134 @@
-# =============================================================================
-# auth.py — Autenticação e gerenciamento de sessões do ChatGPT Simulator
-# =============================================================================
-#
-# RESPONSABILIDADE:
-#   Gerencia login/logout de usuários, hash de senhas, tokens de sessão em
-#   memória e leitura/escrita do arquivo users.json. Não usa banco de dados
-#   externo — o estado de sessão vive apenas em memória (SESSIONS dict).
-#
-# RELAÇÕES:
-#   • Importado por: server.py (valida requisições HTTP)
-#   • Lê/escreve: config.USERS_FILE (db/users/users.json)
-#
-# FUNÇÕES PRINCIPAIS:
-#   verify_login(username, password) → token | None
-#   check_session(request)           → username | None
-#   get_user_info(token)             → {username, avatar} | None
-#   logout(token)
-#   change_password(username, new_password)
-#   update_avatar(username, filename)
-# =============================================================================
-import os
-import json
 import hashlib
+import json
+import os
 import uuid
-import sys
-import config
 from datetime import datetime, timedelta
 
-# ─────────────────────────────────────────────────────────────
-# CAPTURA CONFIGURAÇÃO DE DEBUG (que é estabelecida no arquivo "config.py").
-# ─────────────────────────────────────────────────────────────
-# Verifica se config já foi importado; se não, importa
-if 'config' not in sys.modules:
-    import config
+import config
+import db
 
-# Tenta importar DEBUG_LOG do módulo config já carregado
-try:
-    DEBUG_LOG = config.DEBUG_LOG
-except AttributeError:
-    DEBUG_LOG = False  # fallback se a variável não existir no config
-    print("⚠️ DEBUG_LOG não encontrado no config.py. Usando False como padrão.")
+SESSION_TTL_HOURS = int(getattr(config, "SESSION_TTL_HOURS", 24))
 
-# Sessões ativas: {token: user_id}
-SESSIONS = {}
-
-def load_users():
-    if not os.path.exists(config.USERS_FILE):
-        # Cria admin padrão se não existir.
-        # Senha inicial é "admin" — o usuário DEVE alterá-la no primeiro login.
-        # Esta senha só é restaurada quando config.py também está ausente
-        # (ver `0. start.bat`), indicando instalação em novo local.
-        default_users = {
-            "admin": {
-                "password": hash_password("admin"),
-                "avatar": None
-            }
-        }
-        save_users(default_users)
-        return default_users
-    
-    with open(config.USERS_FILE, 'r', encoding='utf-8') as f:
-        return json.load(f)
-
-def save_users(users_data):
-    with open(config.USERS_FILE, 'w', encoding='utf-8') as f:
-        json.dump(users_data, f, indent=4)
 
 def hash_password(password):
-    return hashlib.sha256(password.encode()).hexdigest()
+    return hashlib.sha256((password or "").encode()).hexdigest()
+
+
+def _ensure_default_admin(conn):
+    row = conn.execute("SELECT username FROM users WHERE username='admin'").fetchone()
+    if row:
+        return
+    conn.execute(
+        "INSERT INTO users(username,password,avatar) VALUES(?,?,?)",
+        ("admin", hash_password("admin"), None),
+    )
+    conn.commit()
+
+
+def load_users():
+    db.init_db()
+    with db._connect() as conn:
+        _ensure_default_admin(conn)
+        rows = conn.execute("SELECT username,password,avatar FROM users ORDER BY username").fetchall()
+        users = {r["username"]: {"password": r["password"], "avatar": r["avatar"]} for r in rows}
+
+    # compatibilidade: espelha em JSON se caminho existir
+    try:
+        os.makedirs(os.path.dirname(config.USERS_FILE), exist_ok=True)
+        with open(config.USERS_FILE, "w", encoding="utf-8") as f:
+            json.dump(users, f, indent=4, ensure_ascii=False)
+    except Exception:
+        pass
+    return users
+
+
+def save_users(users_data):
+    db.init_db()
+    with db._connect() as conn:
+        conn.execute("DELETE FROM users")
+        for username, user in (users_data or {}).items():
+            conn.execute(
+                "INSERT INTO users(username,password,avatar) VALUES(?,?,?)",
+                (username, user.get("password") or "", user.get("avatar")),
+            )
+        conn.commit()
+
+
+def _cleanup_sessions(conn):
+    conn.execute("DELETE FROM sessions WHERE expires_at < ?", (datetime.utcnow().isoformat(),))
+
 
 def verify_login(username, password):
-    users = load_users()
-    if username not in users: return None
-    
-    if users[username]['password'] == hash_password(password):
+    db.init_db()
+    with db._connect() as conn:
+        _cleanup_sessions(conn)
+        row = conn.execute("SELECT password FROM users WHERE username=?", (username,)).fetchone()
+        if not row or row["password"] != hash_password(password):
+            return None
         token = str(uuid.uuid4())
-        SESSIONS[token] = username
+        now = datetime.utcnow()
+        exp = now + timedelta(hours=max(1, SESSION_TTL_HOURS))
+        conn.execute(
+            "INSERT INTO sessions(token,username,expires_at,created_at) VALUES(?,?,?,?)",
+            (token, username, exp.isoformat(), now.isoformat()),
+        )
+        conn.commit()
         return token
-    return None
+
 
 def change_password(username, new_password):
-    users = load_users()
-    if username in users:
-        users[username]['password'] = hash_password(new_password)
-        save_users(users)
-        return True
-    return False
+    if not username or not new_password:
+        return False
+    db.init_db()
+    with db._connect() as conn:
+        updated = conn.execute(
+            "UPDATE users SET password=? WHERE username=?",
+            (hash_password(new_password), username),
+        ).rowcount
+        conn.commit()
+        return bool(updated)
+
 
 def update_avatar(username, filename):
-    users = load_users()
-    if username in users:
-        users[username]['avatar'] = filename
-        save_users(users)
-        return True
-    return False
+    db.init_db()
+    with db._connect() as conn:
+        updated = conn.execute("UPDATE users SET avatar=? WHERE username=?", (filename, username)).rowcount
+        conn.commit()
+        return bool(updated)
+
 
 def get_user_info(token):
-    user_id = SESSIONS.get(token)
-    if not user_id: return None
-    
-    users = load_users()
-    user_data = users.get(user_id, {})
-    return {
-        "username": user_id,
-        "avatar": user_data.get("avatar")
-    }
+    if not token:
+        return None
+    db.init_db()
+    with db._connect() as conn:
+        _cleanup_sessions(conn)
+        row = conn.execute(
+            "SELECT s.username, u.avatar FROM sessions s JOIN users u ON u.username=s.username WHERE s.token=?",
+            (token,),
+        ).fetchone()
+        conn.commit()
+        if not row:
+            return None
+        return {"username": row["username"], "avatar": row["avatar"]}
+
 
 def check_session(request):
-    cookie = request.cookies.get('session_token')
-    if cookie and cookie in SESSIONS:
-        return SESSIONS[cookie]
-    return None
+    token = request.cookies.get("session_token")
+    if not token:
+        return None
+    db.init_db()
+    with db._connect() as conn:
+        _cleanup_sessions(conn)
+        row = conn.execute("SELECT username FROM sessions WHERE token=?", (token,)).fetchone()
+        conn.commit()
+        return row["username"] if row else None
+
 
 def logout(token):
-    if token in SESSIONS:
-        del SESSIONS[token]
+    if not token:
+        return
+    db.init_db()
+    with db._connect() as conn:
+        conn.execute("DELETE FROM sessions WHERE token=?", (token,))
+        conn.commit()
