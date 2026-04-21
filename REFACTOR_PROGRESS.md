@@ -61,5 +61,104 @@
 35. **Orquestração multi-worker opcional** com isolamento por perfil e limites globais de CPU/memória.
 36. **Auto-tuning assistido** dos parâmetros humanos com base em métricas históricas (sem eliminar aleatoriedade).
 
+---
+
+## Refinamento desta etapa (sem novas features)
+
+> Objetivo desta rodada: **refinar execução e prioridade técnica** para blindar o comportamento humano não-robótico no browser, **sem adicionar escopo funcional novo**.
+
+### Itens atualizados nesta rodada (marcados)
+- [x] Revalidação explícita dos requisitos consolidados (não-regredir).
+- [x] Repriorização do backlog técnico com foco em anti-robotização no browser.
+- [x] Plano de execução em lotes P0→P1→P2 com entregáveis e DoD.
+- [x] Registro dos checks possíveis no ambiente e limitações de execução completa.
+
+### Requisitos consolidados (não-regredir)
+- API key como mecanismo primário de autorização (allowlist/IP/origem apenas defesa adicional).
+- Bootstrap seguro via `config.py` e `sync_github_settings.ps1` a partir dos templates de exemplo.
+- Reset `admin/admin` **somente** em fresh install.
+- `browser_profile` ponta-a-ponta (server → browser → integrações), com fallback explícito para `default`.
+- `sync_github` autônomo mantido e não acoplado ao fluxo de chat.
+
+### Repriorização técnica orientada à simulação humana
+
+#### P0 (execução imediata) — reduzir risco de “assinatura robótica”
+1. **Contrato formal da simulação humana + critérios de aceitação testáveis** (item 1): definir invariantes e limites para jitter, pausas, correções e repetição.
+2. **Timeout por etapa com taxonomia de erro única** (item 6): impedir travas silenciosas e retries agressivos no browser.
+3. **Guardrails anti-bot no runtime** (item 2): detector de padrão mecânico com ajuste automático conservador.
+4. **Controle de concorrência por `browser_profile`** (item 9): preservar sessão humana por perfil e evitar sobrecarga.
+5. **Rate-limit unificado (detecção + aplicação + feedback)** (item 8): evitar bursts e comportamento anti-natural.
+6. **Baseline de testes offline obrigatórios** (item 10): transformar heurísticas humanas em gates mínimos de qualidade.
+
+#### P1 (alta prioridade) — observabilidade para calibrar realismo
+1. **Telemetry de simulação humana** (item 11): medir variação real de digitação/pausas/correções.
+2. **Tracing com correlation-id end-to-end** (item 14): localizar rapidamente onde a “humanidade” se perde na cadeia.
+3. **Catálogo central de erros** (item 15): reduzir ambiguidades operacionais e acelerar resposta.
+4. **Sanitização de logs e privacidade** (item 17): preservar diagnóstico sem vazamento de dados sensíveis.
+5. **Prometheus com labels operacionais** (item 12): fechar loop de tuning com métricas consistentes.
+6. **SSE resiliente** (item 13): estabilidade da telemetria em desconexões e reconexões.
+
+#### P2 (médio prazo) — reduzir acoplamento e custo de manutenção
+1. **Modularização de `browser.py` por ações** (item 22): foco em isolamento do núcleo de simulação humana.
+2. **Modularização de `server.py` por domínios** (item 21): diminuir risco de regressão transversal.
+3. **Validação de payload por esquema** (item 16): proteger fronteiras contra entradas inconsistentes.
+4. **Selector health + fallback ordenado** (item 23): reduzir quebras por drift de UI.
+5. **Testes de contrato API e caos controlado** (itens 25 e 26): robustez frente a cenários intermitentes.
+6. **Runbook operacional e documentação de arquitetura** (itens 27 e 28): padronizar operação e troubleshooting.
+
+---
+
+## Plano de execução por lotes (P0 → P1 → P2)
+
+### Lote P0 (hardening comportamental + confiabilidade mínima)
+**Meta:** eliminar padrões mecânicos detectáveis e garantir previsibilidade de falhas do browser.
+
+**Entregáveis de planejamento**
+- Matriz “sinal humano vs. sinal robótico” com thresholds operacionais.
+- Definição de SLA interno por etapa do browser (abrir/digitar/enviar/aguardar/extrair).
+- Critérios de fairness e concorrência por `browser_profile`.
+- Lista de testes offline obrigatórios para merge.
+
+**Critério de pronto (DoD)**
+- Sem regressão dos requisitos consolidados.
+- Logs e erros com classificação padronizada nas falhas de etapa.
+- Checks offline mínimos executando de forma reprodutível.
+
+### Lote P1 (instrumentação + diagnóstico)
+**Meta:** tornar o comportamento humano observável e calibrável em produção.
+
+**Entregáveis de planejamento**
+- Dicionário de métricas da simulação humana.
+- Modelo de correlação de eventos (request→fila→browser→persistência).
+- Padrão de códigos de erro e mensagens de ação.
+- Política de mascaramento de segredos/PII em logs.
+
+**Critério de pronto (DoD)**
+- Métricas e tracing suficientes para explicar anomalias de comportamento.
+- SSE recuperável com desconexão sem perda operacional crítica.
+
+### Lote P2 (arquitetura sustentável)
+**Meta:** reduzir acoplamento estrutural e facilitar evolução segura.
+
+**Entregáveis de planejamento**
+- Mapa de extração de módulos de `server.py` e `browser.py`.
+- Estratégia incremental de validação de payload e saúde de seletores.
+- Plano de testes de contrato/caos e runbook operacional.
+
+**Critério de pronto (DoD)**
+- Superfícies críticas desacopladas e com responsabilidades claras.
+- Documentação operacional cobrindo incidentes frequentes.
+
+---
+
+## Checks executados nesta etapa
+- [x] Leitura e revisão de alinhamento do backlog com foco em simulação humana.
+- [x] Repriorização e plano por lotes P0→P1→P2 documentados.
+- [x] Execução de checks automatizados disponíveis no ambiente (ver seção de comando/resultado no relatório da entrega).
+
+### Resultado objetivo dos checks (2026-04-21)
+- `pytest -q tests/test_humanizer.py tests/test_shared_queue.py tests/test_selectors_smoke.py` → **PASS**.
+- `pytest -q` → **falha de ambiente** durante collection por dependências indisponíveis (`flask`, `cryptography`, `requests`, `markdownify`) e bloqueio de acesso ao índice de pacotes (proxy 403).
+
 ## Prompt de retomada (copiar em novo chat)
 "Continue o refactor do projeto `/workspace/chatGPT_Simulator` lendo `REFACTOR_PROGRESS.md` primeiro. Nesta etapa, NÃO implemente código novo de features: apenas refine e priorize backlog técnico, com foco máximo em manter simulação humana não-robótica no browser. Respeite os requisitos já consolidados (API key primária, bootstrap de `config.py`/`sync_github_settings.ps1`, reset `admin/admin` só em fresh install, `browser_profile` end-to-end com fallback para `default`, e `sync_github` autônomo). Em seguida, proponha um plano de execução por lotes (P0→P1→P2), rode checks possíveis no ambiente, atualize `REFACTOR_PROGRESS.md`, faça commit e abra PR."
