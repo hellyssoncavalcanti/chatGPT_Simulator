@@ -67,6 +67,12 @@
 
 > Objetivo desta rodada: **refinar execução e prioridade técnica** para blindar o comportamento humano não-robótico no browser, **sem adicionar escopo funcional novo**.
 
+### Itens atualizados nesta rodada (marcados)
+- [x] Revalidação explícita dos requisitos consolidados (não-regredir).
+- [x] Repriorização do backlog técnico com foco em anti-robotização no browser.
+- [x] Plano de execução em lotes P0→P1→P2 com entregáveis e DoD.
+- [x] Registro dos checks possíveis no ambiente e limitações de execução completa.
+
 ### Requisitos consolidados (não-regredir)
 - API key como mecanismo primário de autorização (allowlist/IP/origem apenas defesa adicional).
 - Bootstrap seguro via `config.py` e `sync_github_settings.ps1` a partir dos templates de exemplo.
