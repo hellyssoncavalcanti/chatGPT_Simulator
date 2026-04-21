@@ -1,59 +1,162 @@
-@echo off
-chcp 65001 >nul
-title ChatGPT Simulator
+.
 
-cd /d "C:\chatgpt_simulator"
-if not exist "logs" mkdir logs
-if not exist "db" mkdir db
+Essa inferência é permitida apenas no campo:
 
-set "PYTHON_BOOTSTRAP="
-if exist ".venv\pyvenv.cfg" if exist ".venv\Scripts\python.exe" set "PYTHON_BOOTSTRAP=.venv\Scripts\python.exe"
-if not defined PYTHON_BOOTSTRAP (
-    where py >nul 2>&1
-    if %errorLevel%==0 (
-        set "PYTHON_BOOTSTRAP=py -3"
-    ) else (
-        set "PYTHON_BOOTSTRAP=python"
-    )
-)
+seguimento_retorno_estimado
 
-:: Limpeza de processos (pode ser desativada quando iniciado pelo AutoDevAgent)
-if /I "%AUTODEV_AGENT_SKIP_CLEANUP%"=="1" (
-    echo [INFO] Limpando processos... (ignorado: AUTODEV_AGENT_SKIP_CLEANUP=1)
-) else (
-    echo [INFO] Limpando processos...
-    taskkill /F /IM python.exe >nul 2>&1
-    taskkill /F /IM ms-playwright.exe >nul 2>&1
-)
+A estimativa deve considerar:
 
-echo [INFO] Preparando ambiente Python...
+• farmacodinâmica do medicamento
+• tempo de resposta terapêutica
+• monitorização de efeitos adversos
+• tempo usual de seguimento neuropediátrico
+• início recente de tratamento
+• necessidade de reavaliar conduta recente
 
-:: Verifica se a regra de firewall ja existe — eleva SOMENTE se necessario
-netsh advfirewall firewall show rule name="ChatGPT-3002" >nul 2>&1
-if %errorLevel% neq 0 (
-    echo [INFO] Regra de firewall ausente. Adicionando ^(requer elevacao pontual^)...
-    powershell -Command "Start-Process powershell -ArgumentList '-NoProfile -ExecutionPolicy Bypass -Command \"netsh advfirewall firewall add rule name=''ChatGPT-3002'' dir=in action=allow protocol=TCP localport=3002\"' -Verb RunAs -Wait"
-    echo [INFO] Regra de firewall adicionada.
-) else (
-    echo [INFO] Regra de firewall ja existe. Nenhuma elevacao necessaria.
-)
+A estimativa deve incluir:
 
-echo.
-echo +-------------------------------------------------------+
-echo   CHATGPT SIMULATOR - INICIANDO
-echo   Acesse: https://localhost:3002
-echo   (Aceite o risco de certificado no navegador)
-echo +-------------------------------------------------------+
-echo.
+• intervalo estimado
+• data calendário estimada
+• motivo clínico
+• base clínica da estimativa
+• parâmetros a serem avaliados
+• nível de prioridade
 
-echo [INFO] O navegador sera aberto automaticamente apos o servidor HTTPS responder.
+Se houver medicação recém-iniciada ou recém-ajustada, priorizar o tempo típico necessário
+para avaliar resposta e tolerabilidade inicial.
 
-echo [INFO] Iniciando Sistema Modular...
-%PYTHON_BOOTSTRAP% Scripts\main.py
-if %errorLevel% neq 0 (
-    echo.
-    echo [ERRO] Falha ao iniciar o ChatGPT Simulator.
-    echo [ERRO] Verifique se o Python 3 esta instalado e disponivel no PATH.
-)
+Se houver início de terapia ou necessidade de observar evolução comportamental,
+considerar o tempo razoável para surgirem melhora, piora ou efeitos colaterais detectáveis.
 
-pause
+══════════════════════════════════════
+PRIORIZAÇÃO DO RETORNO
+══════════════════════════════════════
+
+O nível de prioridade deve considerar:
+
+baixo
+moderado
+alto
+
+Situações que aumentam prioridade:
+
+• regressão clínica
+• agressividade relevante
+• início recente de medicação
+• ajuste recente de dose
+• sintomas neurológicos novos
+• piora importante do comportamento
+• necessidade de avaliar tolerabilidade medicamentosa
+
+══════════════════════════════════════
+CLASSIFICAÇÃO DE GRAVIDADE
+══════════════════════════════════════
+
+Classificar gravidade clínica apenas se houver evidência suficiente.
+
+Valores possíveis:
+
+leve
+moderada
+grave
+
+Se não houver dados suficientes → null.
+
+══════════════════════════════════════
+CONDUTAS ESPECÍFICAS SUGERIDAS
+══════════════════════════════════════
+
+Podem ser sugeridas condutas adicionais baseadas em evidência científica.
+
+Cada conduta deve conter:
+
+conduta
+justificativa
+referencia
+fonte
+
+Fontes aceitáveis:
+
+• PubMed
+• AAP
+• AACAP
+• Cochrane
+• WHO
+• SBP
+• CFM
+• Ministério da Saúde
+
+Nunca inventar PMID.
+
+A referência deve ser coerente com:
+
+• o medicamento
+• a condição clínica
+• a intervenção sugerida
+
+Se não houver segurança sobre a referência, deixar referencia e fonte vazias ou não incluir a conduta.
+
+══════════════════════════════════════
+CONDUTAS GERAIS SUGERIDAS
+══════════════════════════════════════
+
+Condutas baseadas em boa prática clínica.
+
+Podem incluir:
+
+• orientações ao cuidador
+• monitorização clínica
+• sinais de alerta
+• acompanhamento clínico
+• observação da resposta a tratamento
+• atenção a efeitos adversos
+
+Evitar recomendações genéricas.
+
+Devem ser coerentes com o quadro clínico descrito.
+
+══════════════════════════════════════
+VERIFICAÇÃO FINAL DE CONSISTÊNCIA
+══════════════════════════════════════
+
+Antes de responder, verificar:
+
+• todos os medicamentos realmente aparecem no prontuário?
+• doses estão exatamente iguais ao texto?
+• nenhum diagnóstico foi criado?
+• nenhum exame foi inventado?
+• nenhuma terapia foi inventada?
+• nenhuma conduta específica foi baseada em referência inadequada?
+• o seguimento estimado é coerente com a medicação e o quadro clínico?
+
+Se qualquer uma dessas situações ocorrer, remover ou corrigir a informação.
+
+══════════════════════════════════════
+FORMATO DO JSON
+══════════════════════════════════════
+
+{
+  "diagnosticos_citados": [],
+
+  "idade_paciente": {
+    "valor": null,
+    "unidade": null
+  },
+
+  "pontos_chave": [],
+
+  "mudancas_relevantes": [],
+
+  "eventos_comportamentais": [],
+
+  "sinais_nucleares": [],
+
+  "medicacoes_em_uso": [
+    {
+      "nome": "",
+      "dose": "",
+      "posologia": "",
+      "desde": "",
+      "observacao": "",
+
+      "avaliacao_res
