@@ -2,7 +2,7 @@
 
 ## Visão geral
 
-O **ChatGPT_Simulator** é um sistema híbrido para automação do ChatGPT via navegador real (Chromium + Playwright), exposto como API HTTP/HTTPS e com interface web própria. O objetivo do projeto é permitir que outros clientes — frontend local, integrações PHP e processos de automação clínica — enviem mensagens para o ChatGPT, sincronizem históricos, façam pesquisas web no Google e operem chats existentes de forma programática, mas usando a interface real do ChatGPT por trás. 
+O **ChatGPT_Simulator** é um sistema híbrido para automação do ChatGPT via navegador real (Chromium + Playwright), exposto como API HTTP/HTTPS e com interface web própria. O objetivo do projeto é permitir que outros clientes — frontend local, integrações PHP e processos de automação clínica — enviem mensagens para o ChatGPT, sincronizem históricos, façam pesquisas web no Google e operem chats existentes de forma programática, mas usando a interface real do ChatGPT por trás.
 
 Em vez de falar diretamente com uma API oficial de modelo, o sistema usa um navegador persistente controlado por Playwright. O `server.py` recebe requisições REST, converte essas requisições em tarefas e as envia para o `browser.py` por uma fila thread-safe. O `browser.py` executa as ações no Chromium e devolve eventos de progresso, streaming e resultado final para o servidor Flask, que então responde ao cliente chamador.
 
@@ -12,10 +12,10 @@ Em vez de falar diretamente com uma API oficial de modelo, o sistema usa um nave
 
 Este repositório resolve quatro necessidades principais:
 
-1. **Automação do ChatGPT usando navegador real**  
+1. **Automação do ChatGPT usando navegador real**
    O sistema abre o ChatGPT em um perfil persistente de Chromium e interage com a UI real: digita mensagens, cola blocos longos, anexa arquivos, sincroniza histórico e clica em menus de contexto.
 
-2. **Exposição de uma API estável para terceiros**  
+2. **Exposição de uma API estável para terceiros**
    Clientes externos podem chamar endpoints REST para:
    - enviar prompts;
    - receber resposta em streaming;
@@ -24,10 +24,10 @@ Este repositório resolve quatro necessidades principais:
    - deletar chats;
    - realizar pesquisa web automatizada.
 
-3. **Frontend local para operação humana**  
+3. **Frontend local para operação humana**
    O projeto também sobe uma interface web estilo ChatGPT para uso manual, incluindo login, histórico, upload de arquivos, compartilhamento e documentação de API.
 
-4. **Uso em automações clínicas**  
+4. **Uso em automações clínicas**
    O arquivo `analisador_prontuarios.py` roda como daemon e usa o simulador para analisar prontuários, consultar dados via PHP, enriquecer condutas com pesquisa web e persistir resultados estruturados.
 
 ---
@@ -52,28 +52,31 @@ Cliente humano / PHP / analisador_prontuarios.py
 
 ### Componentes centrais
 
-- **`Scripts/main.py`**  
+- **`Scripts/main.py`**
   Ponto de entrada. Sobe o browser em uma thread, o servidor HTTP auxiliar em outra thread e o servidor HTTPS principal no processo principal.
 
-- **`Scripts/server.py`**  
+- **`Scripts/server.py`**
   Camada HTTP/REST. Autentica, valida origem, recebe chamadas da UI/API, envia tarefas para o browser e consolida respostas em JSON ou streaming.
 
-- **`Scripts/browser.py`**  
+- **`Scripts/browser.py`**
   Motor de automação com Playwright. É responsável por abrir o ChatGPT, digitar/colar mensagens, anexar arquivos, sincronizar histórico, pesquisar no Google e manipular menus de contexto.
 
-- **`Scripts/shared.py`**  
+- **`Scripts/shared.py`**
   Define a fila `browser_queue`, que desacopla o Flask do loop assíncrono do Playwright.
 
-- **`Scripts/storage.py`**  
-  Persistência local em JSON do histórico de chats (`db/history.json`).
+- **`Scripts/db.py`**
+  Camada SQLite compartilhada com schema/migração inicial (chats, mensagens, usuários e sessões).
 
-- **`Scripts/auth.py`**  
-  Login, sessão em memória e gerenciamento simples de usuários/avatares em `db/users/users.json`.
+- **`Scripts/storage.py`**
+  Persistência local do histórico de chats em SQLite (`db/app.db`), mantendo API compatível (`load_chats`, `save_chat`, `append_message`, etc.).
 
-- **`Scripts/utils.py`**  
+- **`Scripts/auth.py`**
+  Login, sessão persistente em SQLite com TTL (`SIMULATOR_SESSION_TTL_HOURS`) e gerenciamento de usuários/avatares.
+
+- **`Scripts/utils.py`**
   Infraestrutura auxiliar: geração de certificados TLS, logging e materialização do frontend HTML.
 
-- **`Scripts/analisador_prontuarios.py`**  
+- **`Scripts/analisador_prontuarios.py`**
   Serviço de automação clínica que usa o simulador como backend LLM local.
 
 ---
@@ -82,12 +85,11 @@ Cliente humano / PHP / analisador_prontuarios.py
 
 Ao iniciar pelo `0. start.bat`, o sistema segue, em essência, esta ordem:
 
-1. prepara pastas e mata processos antigos;
-2. ativa a virtualenv;
-3. instala dependências Python e o Chromium do Playwright;
-4. garante regra de firewall da porta 3002;
-5. abre `https://localhost:3002` no navegador;
-6. executa `Scripts/main.py`.
+1. verifica se `Scripts/config.py` e `Scripts/sync_github_settings.ps1` existem; se não, cria a partir dos templates versionados (`*.example.*`);
+2. quando detecta instalação nova (`config.py` ausente), limpa `db/users/users.json` e `db/app.db` para reset seguro de credenciais default;
+3. cria/ativa `.venv`;
+4. instala dependências de `requirements.txt` (runtime) e `requirements-test.txt` (testes), quando presentes;
+5. executa `Scripts/main.py`.
 
 Dentro do `main.py`, a inicialização acontece assim:
 
@@ -101,10 +103,10 @@ Dentro do `main.py`, a inicialização acontece assim:
 
 ## Portas e modos de acesso
 
-- **HTTPS local:** `https://localhost:3002`  
+- **HTTPS local:** `https://localhost:3002`
   Interface principal “segura”, com certificado autoassinado.
 
-- **HTTP auxiliar/remoto:** `http://<IP>:3003`  
+- **HTTP auxiliar/remoto:** `http://<IP>:3003`
   Usado para integrações remotas e automações que não querem lidar com TLS local.
 
 ---
@@ -149,10 +151,10 @@ cenários com múltiplas origens concorrendo por execução no navegador.
 
 No avatar/menu superior direito foram adicionadas duas ações:
 
-1. **Status da Fila**  
+1. **Status da Fila**
    Abre um toast com atualização em tempo real do `/api/queue/status`.
 
-2. **Log em tempo real**  
+2. **Log em tempo real**
    Abre um toast com **abas**:
    - **Log** → tail via `/api/logs/tail`
    - **Métricas** → painel em tempo real via `/api/metrics`
@@ -183,6 +185,7 @@ facilitar auditoria e melhorar rastreabilidade:
 - `SIMULATOR_CORS_ALLOWED_ORIGINS` (CSV de origens permitidas)
 - `SIMULATOR_SESSION_COOKIE_SECURE` (`true/false`)
 - `SIMULATOR_SESSION_COOKIE_SAMESITE` (`Lax`, `Strict`, `None`)
+- `SIMULATOR_SESSION_TTL_HOURS` (default `24`)
 - `SIMULATOR_RATE_LIMIT_PER_MIN` (default `120`)
 - `SIMULATOR_LOGIN_MAX_FAILS` (default `8`)
 - `SIMULATOR_LOGIN_BLOCK_SEC` (default `900`)
@@ -402,9 +405,9 @@ registra no histórico (chatgpt_chats.mensagens) e reseta notificacao_pendente =
 
 ### Guia rápido de configuração (modo isolado)
 
-1. Garanta acesso ao WhatsApp Web:  
+1. Garanta acesso ao WhatsApp Web:
    https://web.whatsapp.com/
-2. Garanta Playwright + Chromium instalados:  
+2. Garanta Playwright + Chromium instalados:
    https://playwright.dev/python/
 3. Faça login via QR Code na primeira execução e mantenha o perfil persistente.
 
@@ -424,18 +427,15 @@ A API pode ser autenticada por:
 A UI usa login com cookie `session_token`.
 
 ### 3. Restrições de origem
-O `server.py` aplica validação de `Origin`, `Referer` e IP remoto. O sistema está preparado para aceitar chamadas vindas de:
-- `https://conexaovida.org`
-- `https://www.conexaovida.org`
-- `127.0.0.1`
-- `151.106.97.30`
+A autenticação primária é por API key (Bearer/body/query) e sessão web. A validação de `Origin`/`Referer`/IP funciona como defesa em profundidade quando a requisição não traz credencial válida.
 
 ### 4. Usuário padrão
-Se `users.json` não existir, o sistema cria automaticamente o usuário:
+Em instalação nova (quando `config.py` é recriado), o sistema inicializa:
 - **usuário:** `admin`
-- **senha:** `32713091`
+- **senha:** `admin`
 
-> Observação importante para outra LLM: a autenticação é funcional, mas simples. As sessões vivem em memória no dict `SESSIONS`; portanto reiniciar o processo invalida sessões ativas.
+### 5. Sessões
+As sessões web agora são persistidas em SQLite (`db/app.db`) com expiração por TTL configurável (`SIMULATOR_SESSION_TTL_HOURS`). Reiniciar o processo não invalida todas as sessões imediatamente; sessões expiradas são limpas automaticamente.
 
 ---
 
@@ -479,22 +479,22 @@ Esse mecanismo desacopla o Flask (thread síncrona) do Playwright (loop assíncr
 
 O `browser.py` aceita tarefas com `action`:
 
-- **`CHAT`**  
+- **`CHAT`**
   Envia mensagem ao ChatGPT e devolve resposta em streaming.
 
-- **`SYNC`**  
+- **`SYNC`**
   Faz scraping completo de um chat existente para alinhar o histórico local.
 
-- **`GET_MENU`**  
+- **`GET_MENU`**
   Lê as opções do menu de contexto de um chat.
 
-- **`EXEC_MENU`**  
+- **`EXEC_MENU`**
   Executa uma opção do menu (por exemplo excluir ou renomear).
 
-- **`SEARCH`**  
+- **`SEARCH`**
   Abre o Google, digita a busca, aguarda resultados e devolve resultados estruturados.
 
-- **`STOP`**  
+- **`STOP`**
   Encerra o loop principal do browser.
 
 ---
@@ -517,14 +517,15 @@ são colados via clipboard (`navigator.clipboard.writeText` + `Ctrl+V`). Isso ac
 
 ## Persistência local
 
-O simulador persiste histórico local em JSON, não em banco relacional.
+O simulador agora usa SQLite como persistência principal, com migração automática dos JSONs legados no primeiro boot.
 
 ### Arquivos principais
-- **`db/history.json`** — histórico local dos chats
-- **`db/users/users.json`** — usuários, hash de senha e avatar
+- **`db/app.db`** — histórico local de chats, mensagens, usuários e sessões
+- **`db/history.json`** — legado (fonte de migração inicial, quando existir)
+- **`db/users/users.json`** — legado/espelho para compatibilidade
 
-### Papel do `storage.py`
-`storage.py` faz leitura e escrita com `threading.Lock`, para evitar corrupção quando múltiplas threads acessam o mesmo arquivo. Ele também possui lógica de sincronização para atualizar mensagens locais quando a versão do navegador é mais completa.
+### Papel do `storage.py` e `db.py`
+`db.py` garante schema e migração inicial; `storage.py` mantém a API histórica do projeto (incluindo deduplicação/sync por chat) usando operações SQL transacionais, reduzindo risco de corrupção sob concorrência.
 
 ---
 
@@ -632,6 +633,7 @@ Todas as constantes configuráveis do analisador estão **centralizadas em `Scri
 | `ANALISADOR_PHP_URL` | URL do ConexaoVida | Endpoint PHP remoto |
 | `ANALISADOR_LLM_URL` | `http://127.0.0.1:3003/v1/chat/completions` | URL do Simulator local |
 | `ANALISADOR_LLM_MODEL` | `ChatGPT Simulator` | Nome do modelo LLM |
+| `ANALISADOR_BROWSER_PROFILE` | `default` | Perfil Chromium enviado ao server (`browser_profile`) com fallback para `default` |
 | `ANALISADOR_POLL_INTERVAL` | `30` | Segundos entre ciclos do loop principal |
 | `ANALISADOR_MAX_TENTATIVAS` | `3` | Máximo de retentativas por análise com erro |
 | `ANALISADOR_BATCH_SIZE` | `10` | Quantidade de registros processados por lote |
@@ -668,7 +670,7 @@ Cada análise envia 2-4 mensagens ao ChatGPT em sequência (análise principal +
 
 ### Filtro de horário útil
 
-O analisador compartilha a mesma conta e interface do ChatGPT Plus que o usuário humano. O plano Plus impõe um **limite de mensagens por janela de tempo** (estimado em ~160 mensagens / 3 horas para GPT-5.4 Thinking). Se o analisador consumir esse limite durante o expediente, o usuário ficará impossibilitado de usar o ChatGPT manualmente.
+Por padrão, o analisador usa o perfil `default` (mesma conta/interface do usuário humano). Opcionalmente, pode usar um perfil dedicado via `ANALISADOR_BROWSER_PROFILE` (ex.: `analisador`) para reduzir disputa de rate-limit. O plano Plus impõe um **limite de mensagens por janela de tempo**; se o analisador consumir esse limite durante o expediente, o usuário humano pode ficar temporariamente bloqueado.
 
 Quando `FILTRO_HORARIO_UTIL_ATIVO = True`, o analisador entra em espera nos dias úteis (seg-sex) entre `HORARIO_UTIL_INICIO` e `HORARIO_UTIL_FIM`, reavaliando a cada 5 minutos. Fora desse horário (noites, madrugadas e fins de semana), roda normalmente.
 
@@ -706,22 +708,25 @@ Pontos importantes dessa ponte PHP para outra LLM:
 
 ## Arquivos de entrada para operação no Windows
 
-- **`0. start.bat`**  
+- **`0. start.bat`**
   Inicializa o sistema principal completo.
 
-- **`1. start_apenas_analisador_prontuarios.bat`**  
+- **`1. start_apenas_analisador_prontuarios.bat`**
   Sobe apenas o analisador de prontuários.
 
-- **`DDNS_automatico.bat`**  
+- **`DDNS_automatico.bat`**
   Executa o cliente PowerShell de DDNS.
 
 - **`sync_github.bat`** / **`Scripts/sync_github.ps1`**
   Sincronizam o repositório no Windows, tentam mergear automaticamente o PR aberto mais recente, fecham PRs mais antigos, atualizam os arquivos locais e, quando houver mudanças, reiniciam em sequência o `Scripts/main.py` e o `Scripts/analisador_prontuarios.py`. Também aceitam `install-task` para registrar uma tarefa agendada no Windows a cada 10 minutos.
 
 - **`Scripts\config.py`**
-  Configuração central do sync automático (token/usuário/repo/branch, diretório local, task scheduler e padrões de processo), além das demais configurações do sistema.
+  Configuração local da instância (não versionada; gerada a partir de `Scripts/config.example.py` quando ausente).
 
-- **`abrir_cmd_nesta_pasta.bat`**  
+- **`Scripts\config.example.py`**
+  Template versionado e limpo, usado para bootstrap em novos ambientes.
+
+- **`abrir_cmd_nesta_pasta.bat`**
   Abre um CMD elevado com menu para executar os `.bat` do projeto.
 
 ---
@@ -731,7 +736,7 @@ Pontos importantes dessa ponte PHP para outra LLM:
 Esta automação existe para manter a pasta `C:\chatgpt_simulator` alinhada com o GitHub sem intervenção manual. O fluxo pensado para outra LLM entender é este:
 
 1. `sync_github.bat` chama `Scripts\sync_github.ps1`.
-2. O PowerShell carrega as configurações a partir de `Scripts\config.py` (com fallback para variáveis de ambiente `CHATGPT_SIMULATOR_*`).
+2. O PowerShell carrega as configurações a partir de `Scripts\config.py` (arquivo local não versionado, gerado via template quando necessário), com fallback para variáveis de ambiente `CHATGPT_SIMULATOR_*`.
 3. O script cria um lock para evitar duas execuções simultâneas quando a tarefa agendada roda a cada 10 minutos.
 4. Se houver token GitHub configurado, ele lista PRs abertos na branch alvo, fecha os mais antigos e tenta mergear o PR aberto mais recente.
 5. Em seguida ele faz um clone temporário da branch principal, compara os arquivos rastreados e copia apenas os novos/alterados para `C:\chatgpt_simulator`, **ignorando artefatos de cache** (ex.: `__pycache__`, `.pyc`, `.pyo`, `.pyd`, `.pytest_cache`, `.mypy_cache`, `.ruff_cache`).
@@ -779,7 +784,7 @@ Uma LLM que vá trabalhar neste projeto deve prestar atenção especial a estes 
 1. **`config.py` contém API key, caminhos absolutos Windows e TODAS as variáveis configuráveis do sistema (inclusive do analisador, prefixo `ANALISADOR_*`).**
    O código assume `C:\chatgpt_simulator` como diretório base. Os demais módulos importam daqui com fallback local.
 
-2. **`chrome_profile/` é altamente stateful.**  
+2. **`chrome_profile/` é altamente stateful.**
    Ali vivem sessão do navegador, cache e estado do ChatGPT.
 
 3. **seletores Playwright podem quebrar com mudanças no site do ChatGPT ou Google.**
