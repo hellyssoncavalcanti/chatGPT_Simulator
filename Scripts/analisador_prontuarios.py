@@ -5141,6 +5141,7 @@ def gerar_dados_auxiliares_llm(resultado: dict, chat_url: str = None, chat_id: s
         "messages": [
             {"role": "user", "content": user_content},
         ],
+        "browser_profile": BROWSER_PROFILE,
     }
     if chat_url:
         payload["url"] = chat_url
@@ -5242,6 +5243,7 @@ def gerar_queries_pesquisa_llm(resultado: dict, chat_url: str = None, chat_id: s
         "messages": [
             {"role": "user", "content": user_content},
         ],
+        "browser_profile": BROWSER_PROFILE,
     }
 
     if chat_url:
@@ -5430,6 +5432,7 @@ def enriquecer_com_evidencias(resultado: dict, resultados_web: list,
         "messages": [
             {"role": "user", "content": user_content},
         ],
+        "browser_profile": BROWSER_PROFILE,
     }
 
     # Retoma o mesmo chat para ter contexto da análise anterior
