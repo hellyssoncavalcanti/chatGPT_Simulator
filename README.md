@@ -664,8 +664,7 @@ Todas as constantes configuráveis do analisador estão **centralizadas em `Scri
 | `ANALISADOR_BATCH_SIZE` | `10` | Quantidade de registros processados por lote |
 | `ANALISADOR_MIN_CHARS` | `80` | Tamanho mínimo de texto do prontuário após limpeza HTML |
 | `ANALISADOR_TIMEOUT_PROCESSANDO_MIN` | `15` | Minutos antes de considerar uma análise travada |
-| `ANALISADOR_PAUSA_MIN` / `_MAX` | `25` / `60` | Intervalo base (seg) entre análises individuais para proteção anti-rate-limit |
-| `ANALISADOR_INTERVALO_ANTI_RATE_LIMIT_MULT` | `0.5` | Multiplicador aplicado ao intervalo anti-rate-limit (padrão reduz pela metade) |
+| `ANALISADOR_PAUSA_MIN` / `_MAX` | `25` / `60` | Intervalo base (seg) anti-rate-limit aplicado a QUALQUER pedido Python; o `server.py` divide pelo número de perfis ChatGPT ativos em `config.CHROMIUM_PROFILES` |
 | `ANALISADOR_FILTRO_HORARIO_UTIL_ATIVO` | `False` | `True` para bloquear em horário útil (seg-sex) |
 | `ANALISADOR_HORARIO_UTIL_INICIO` | `7` | Hora de início do bloqueio (07:00, formato 24h) |
 | `ANALISADOR_HORARIO_UTIL_FIM` | `19` | Hora de fim do bloqueio (19:00, exclusivo) |
@@ -688,14 +687,27 @@ Toda a lógica roda no SQL via `CASE WHEN` + `DATE_SUB(NOW(), INTERVAL 30 DAY)`,
 
 ### Throttle e proteção contra rate limit
 
-Cada análise envia 2-4 mensagens ao ChatGPT em sequência (análise principal + planejamento de queries + enriquecimento com evidências + refinamento opcional). Atualmente, o projeto está em modo de **pacing majoritariamente centralizado no Simulator**, mantendo apenas um intervalo anti-rate-limit entre análises:
+Cada análise envia 2-4 mensagens ao ChatGPT em sequência (análise principal + planejamento de queries + enriquecimento com evidências + refinamento opcional). Atualmente, o projeto está em modo de **pacing centralizado no Simulator**:
 
 - **Throttle local do analisador**: desativado por padrão (`ANALISADOR_LLM_THROTTLE_MIN/MAX = 0`).
 - **Cooldown local de rate limit**: desativado por padrão (`ANALISADOR_LLM_RATE_LIMIT_RETRY_BASE_S = 0`, retry imediato).
-- **Intervalo anti-rate-limit entre análises**: ativo por padrão via `ANALISADOR_PAUSA_MIN/MAX`, mas reduzido pela metade com `ANALISADOR_INTERVALO_ANTI_RATE_LIMIT_MULT = 0.5`.
+- **Intervalo anti-rate-limit entre pedidos Python**: enforçado no próprio `server.py` (não mais no analisador) para **qualquer** request cujo `request_source` seja um script Python — `analisador_prontuarios.py`, `acompanhamento_whatsapp.py`, `auto_dev_agent.py`, etc. A base é sorteada entre `ANALISADOR_PAUSA_MIN` e `ANALISADOR_PAUSA_MAX` e então **dividida pela quantidade de perfis Chromium ativos em `config.CHROMIUM_PROFILES`** (atualmente 2 perfis → intervalo cai pela metade). O call-site histórico `_aguardar_intervalo_entre_analises()` do analisador virou no-op.
+- **Pedidos remotos não-Python**: UI local, frontend PHP e qualquer outro cliente que não seja `.py` **passam imediatamente**, sem intervalo anti-rate-limit.
 - **Proteção no parse**: a detecção de rate limit continua dentro de `_parse_json_llm()` para evitar confundir erro de limite com “JSON inválido”.
 
-Ou seja, a cadência passa a ser majoritariamente controlada pelo `browser.py`/worker (incluindo alternância de perfis e fallback automático de perfil).
+Ou seja, a cadência passa a ser totalmente controlada pelo `server.py`/`browser.py` (incluindo alternância de perfis e fallback automático de perfil).
+
+#### Como o servidor calcula o intervalo
+
+No `server.py` (função `_wait_python_request_interval_if_needed`):
+
+1. Se `request_source` **não** for Python → retorna imediatamente (sem espera).
+2. Se for Python, sorteia `base = random.uniform(ANALISADOR_PAUSA_MIN, ANALISADOR_PAUSA_MAX)`.
+3. Conta `N = len(config.CHROMIUM_PROFILES)` (atualmente 2: `default` + `analisador`/`segunda_chance`).
+4. Calcula `alvo = base / N` e aguarda o tempo restante desde o último pedido Python liberado.
+5. Atualiza o timestamp global (`_python_anti_rate_limit_last_ts`) ao liberar o pedido.
+
+Durante a espera, o servidor publica eventos de `status` na stream com `phase = "python_anti_rate_limit_interval"` expondo `target_seconds`, `base_seconds` e `profile_count` para observabilidade.
 
 ### Filtro de horário útil
 

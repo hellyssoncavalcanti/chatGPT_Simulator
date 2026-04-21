@@ -174,9 +174,12 @@ ANALISADOR_BATCH_SIZE               = _env_int("ANALISADOR_BATCH_SIZE", 10)
 ANALISADOR_MIN_CHARS                = _env_int("ANALISADOR_MIN_CHARS", 80)
 ANALISADOR_TIMEOUT_PROCESSANDO_MIN  = _env_int("ANALISADOR_TIMEOUT_PROCESSANDO_MIN", 15)
 
+# Base (seg) do intervalo anti-rate-limit aplicado pelo server.py a QUALQUER
+# pedido Python ao Simulator. O servidor divide automaticamente pela quantidade
+# de perfis Chromium ativos em CHROMIUM_PROFILES (atualmente 2 → metade).
+# Pedidos remotos não-Python (UI, PHP) passam sem espera.
 ANALISADOR_PAUSA_MIN = _env_int("ANALISADOR_PAUSA_MIN", 25)
 ANALISADOR_PAUSA_MAX = _env_int("ANALISADOR_PAUSA_MAX", 60)
-ANALISADOR_INTERVALO_ANTI_RATE_LIMIT_MULT = float(_env("ANALISADOR_INTERVALO_ANTI_RATE_LIMIT_MULT", "0.5"))
 
 ANALISADOR_FILTRO_HORARIO_UTIL_ATIVO = _env_bool("ANALISADOR_FILTRO_HORARIO_UTIL_ATIVO", False)
 ANALISADOR_HORARIO_UTIL_INICIO       = _env_int("ANALISADOR_HORARIO_UTIL_INICIO", 7)
