@@ -186,6 +186,25 @@ def setup_frontend():
     .share-label { font-size: 0.8rem; }
     .copy-toast { position: fixed; top: 20px; left: 50%; transform: translateX(-50%); background: #343541; border: 1px solid #555; color: white; padding: 10px 20px; border-radius: 8px; font-size: 0.9rem; opacity: 0; transition: opacity 0.3s; pointer-events: none; z-index: 10000; box-shadow: 0 4px 12px rgba(0,0,0,0.3); }
     .copy-toast.visible { opacity: 1; margin-top: 10px; }
+    .monitor-toast {
+        position: fixed; right: 20px; bottom: 20px; width: 420px; max-width: calc(100vw - 40px);
+        background: #202123; border: 1px solid #4a4a4a; border-radius: 10px; z-index: 10050;
+        box-shadow: 0 10px 30px rgba(0,0,0,0.5); display: none; overflow: hidden;
+    }
+    .monitor-toast.visible { display: block; }
+    .monitor-header {
+        display: flex; justify-content: space-between; align-items: center;
+        padding: 10px 12px; font-size: 0.92rem; font-weight: 700;
+        background: #2a2b32; border-bottom: 1px solid #3c3d45;
+    }
+    .monitor-close { cursor: pointer; color: #bbb; font-weight: bold; }
+    .monitor-close:hover { color: #fff; }
+    .monitor-body {
+        max-height: 340px; overflow: auto; padding: 10px 12px;
+        font-size: 0.82rem; line-height: 1.45; color: #d8d8d8;
+        font-family: Consolas, Menlo, Monaco, monospace; white-space: pre-wrap;
+    }
+    .monitor-meta { color: #9aa0aa; font-size: 0.78rem; margin-bottom: 8px; font-family: 'Segoe UI', sans-serif; }
     .simple-modal { background: #202123; border: 1px solid #444; border-radius: 8px; padding: 20px; width: 300px; max-width: 90%; color: #ececf1; display: flex; flex-direction: column; gap: 15px; box-shadow: 0 10px 25px rgba(0,0,0,0.5); }
     .simple-modal h3 { margin: 0; font-size: 1.1rem; }
     .simple-modal input { background: #343541; border: 1px solid #555; color: white; padding: 8px; border-radius: 4px; outline: none; }
@@ -224,6 +243,8 @@ def setup_frontend():
         <div class="user-option" onclick="openModal('passModal')">Alterar Senha</div>
         <div class="user-option" onclick="openModal('avatarModal')">Alterar Avatar</div>
         <div class="user-option" onclick="openApiModal()">Guia de API</div>
+        <div class="user-option" onclick="openQueueMonitorToast()">Status da Fila</div>
+        <div class="user-option" onclick="openLogMonitorToast()">Log em tempo real</div>
         <div class="user-option" style="color:#ff6b6b" onclick="doLogout()">Sair</div>
     </div>
 </div>
@@ -295,6 +316,20 @@ def setup_frontend():
 </div>
 
 <div id="copyToast" class="copy-toast">Copiado!</div>
+<div id="queueMonitorToast" class="monitor-toast">
+    <div class="monitor-header">
+        <span>📊 Status da fila (tempo real)</span>
+        <span class="monitor-close" onclick="closeMonitorToast('queueMonitorToast')">✖</span>
+    </div>
+    <div class="monitor-body" id="queueMonitorBody">Carregando...</div>
+</div>
+<div id="logMonitorToast" class="monitor-toast" style="bottom: 380px;">
+    <div class="monitor-header">
+        <span>🧾 Log do ChatGPT Simulator (tempo real)</span>
+        <span class="monitor-close" onclick="closeMonitorToast('logMonitorToast')">✖</span>
+    </div>
+    <div class="monitor-body" id="logMonitorBody">Carregando...</div>
+</div>
 <input type="text" id="hiddenCopyInput" style="position:absolute; left:-9999px; opacity:0;">
 
 <script>
@@ -320,6 +355,8 @@ def setup_frontend():
     let currentChatId = null;
     let currentFiles = [];
     let pendingAction = null; 
+    let queueMonitorTimer = null;
+    let logMonitorTimer = null;
 
     function setStatus(text) {
         const el = document.getElementById('statusFloat');
@@ -332,6 +369,80 @@ def setup_frontend():
     }
     function openModal(id) { document.getElementById(id).classList.add('visible'); document.getElementById('userDropdown').classList.remove('visible'); }
     function closeModal(id) { document.getElementById(id).classList.remove('visible'); }
+
+    function closeMonitorToast(id) {
+        document.getElementById(id)?.classList.remove('visible');
+        if (id === 'queueMonitorToast' && queueMonitorTimer) {
+            clearInterval(queueMonitorTimer);
+            queueMonitorTimer = null;
+        }
+        if (id === 'logMonitorToast' && logMonitorTimer) {
+            clearInterval(logMonitorTimer);
+            logMonitorTimer = null;
+        }
+    }
+
+    function openQueueMonitorToast() {
+        document.getElementById('userDropdown').classList.remove('visible');
+        const el = document.getElementById('queueMonitorToast');
+        el.classList.add('visible');
+        const render = async () => {
+            const body = document.getElementById('queueMonitorBody');
+            try {
+                const res = await fetch('/api/queue/status');
+                const json = await res.json();
+                if (!json.success) {
+                    body.innerText = `Falha: ${json.error || 'erro desconhecido'}`;
+                    return;
+                }
+                const q = json.queue || {};
+                const lines = [
+                    `qsize: ${q.qsize ?? 0}`,
+                    `enqueued_total: ${q.enqueued_total ?? 0}`,
+                    `dequeued_total: ${q.dequeued_total ?? 0}`,
+                    `avg_wait_ms: ${q.avg_wait_ms ?? 0}`,
+                    `max_wait_ms: ${q.max_wait_ms ?? 0}`,
+                    '',
+                    `by_origin_enqueued: ${JSON.stringify(q.by_origin_enqueued || {})}`,
+                    `by_origin_dequeued: ${JSON.stringify(q.by_origin_dequeued || {})}`,
+                    `lane_sizes: ${JSON.stringify(q.lane_sizes || {})}`,
+                    '',
+                    `Atualizado em: ${new Date().toLocaleTimeString()}`
+                ];
+                body.innerText = lines.join('\\n');
+            } catch (e) {
+                body.innerText = `Erro ao consultar fila: ${e}`;
+            }
+        };
+        render();
+        if (queueMonitorTimer) clearInterval(queueMonitorTimer);
+        queueMonitorTimer = setInterval(render, 1500);
+    }
+
+    function openLogMonitorToast() {
+        document.getElementById('userDropdown').classList.remove('visible');
+        const el = document.getElementById('logMonitorToast');
+        el.classList.add('visible');
+        const render = async () => {
+            const body = document.getElementById('logMonitorBody');
+            try {
+                const res = await fetch('/api/logs/tail?lines=120');
+                const json = await res.json();
+                if (!json.success) {
+                    body.innerText = `Falha: ${json.error || 'erro desconhecido'}`;
+                    return;
+                }
+                const header = `[${json.path || 'log'}]\\nlinhas: ${json.line_count || 0}\\n---\\n`;
+                body.innerText = header + (json.lines || []).join('\\n');
+                body.scrollTop = body.scrollHeight;
+            } catch (e) {
+                body.innerText = `Erro ao consultar log: ${e}`;
+            }
+        };
+        render();
+        if (logMonitorTimer) clearInterval(logMonitorTimer);
+        logMonitorTimer = setInterval(render, 2000);
+    }
 
     // --- LOGIN ---
     async function doLogin() {
