@@ -647,12 +647,18 @@ def setup_frontend():
             <div class="api-modal-body" style="padding: 20px; overflow-y: auto; flex: 1; background: #343541;">
                 
                 <div id="tab-send" class="api-pane active">
-                    <p style="font-size: 0.9rem; color: #ccc; margin-top: 0;">Envie prompts e arquivos (em base64) para a LLM, suportando respostas em Stream (NDJSON) ou bloco único.</p>
+                    <p style="font-size: 0.9rem; color: #ccc; margin-top: 0;">Envie prompts e arquivos (em base64) para a LLM, suportando respostas em Stream (NDJSON) ou bloco único. Para usar um perfil Chromium diferente por requisição, envie <code>browser_profile</code> no body (ex.: <code>"analisador"</code>); se omitir ou enviar valor inválido, o servidor usa <code>"default"</code>.</p>
                     <div class="api-info-box">
                         <span style="color: #e6a23c; font-weight: bold;">POST</span> ${apiUrl}<br>
                         <span style="color: #888;">Header:</span> Authorization: Bearer ${API_KEY}<br>
-                        <span style="color: #888;">Body:</span> { "api_key": "${API_KEY}", "message": "...", "chat_id": null, "stream": true, "attachments": [{"name": "...", "data": "base64..."}] }
+                        <span style="color: #888;">Body:</span> { "api_key": "${API_KEY}", "message": "...", "chat_id": null, "stream": true, "browser_profile": "default", "attachments": [{"name": "...", "data": "base64..."}] }
                     </div>
+
+                    <h4>Perfil Chromium por Requisição:</h4>
+                    <pre class="api-code-block"><code style="color: #ececf1;">// Use browser_profile para escolher qual sessão/perfil do Chromium executa a tarefa.
+// Exemplos: "default" (perfil humano compartilhado), "analisador" (perfil dedicado).
+// Requer que a chave exista em config.CHROMIUM_PROFILES no servidor.
+// Se ausente/inválido, cai automaticamente no perfil "default".</code></pre>
                     
                     <h4>Exemplo Python (Com Arquivo PDF):</h4>
                     <pre class="api-code-block"><code>import requests, base64
@@ -666,6 +672,7 @@ payload = {
     "message": "Analise este documento e me dê um resumo.",
     "chat_id": None, # Deixe nulo para novo chat, ou use um UUID existente
     "stream": True,  # True para receber linha por linha
+    "browser_profile": "analisador", # Opcional: perfil Chromium desta requisição
     "attachments": [
         {"name": "relatorio.pdf", "data": get_b64("relatorio.pdf")}
     ]
@@ -691,6 +698,7 @@ reader.onload = async () => {
             api_key: "${API_KEY}",
             message: "O que tem nesta imagem?",
             stream: false,
+            browser_profile: "default", // Opcional: ex. "default" ou "analisador"
             attachments: [{ name: file.name, data: reader.result }]
         })
     });
