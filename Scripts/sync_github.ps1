@@ -92,21 +92,16 @@ function Disable-GitHubAuth([string]$Reason = '') {
 }
 
 function Show-GitHubCredentialFixGuide {
-    $cfgPath = 'Scripts/config.py'
-    if ($script:Config -and $script:Config.settingsPath) {
-        $cfgPath = $script:Config.settingsPath
-    }
-    Write-Warn "Como corrigir credenciais GitHub (passo a passo):"
-    Write-Warn "1) Acesse https://github.com/settings/personal-access-tokens/new (Fine-grained token)."
-    Write-Warn "2) Selecione o repositório alvo e conceda permissões: Contents=Read and write, Pull requests=Read and write."
-    Write-Warn "3) Copie o token gerado (ele aparece uma única vez)."
-    Write-Warn "4) Abra $cfgPath e ajuste:"
-    Write-Warn "   - GITHUB_TOKEN = \"<seu_token>\""
-    Write-Warn "   - GH_USER = \"<seu_usuario_ou_org>\""
-    Write-Warn "   - GITHUB_REPO = \"chatGPT_Simulator\" (ou seu repo)"
-    Write-Warn "   - GITHUB_BRANCH = \"main\" (ou branch alvo)"
-    Write-Warn "5) Salve e execute novamente: sync_github.bat"
-    Write-Warn "Documentação oficial de autenticação GitHub REST: https://docs.github.com/rest"
+    Write-Warn 'Como corrigir credenciais GitHub (passo a passo):'
+    Write-Warn '1) Acesse: https://github.com/settings/personal-access-tokens/new'
+    Write-Warn '2) Crie um token Fine-grained para o repositório alvo.'
+    Write-Warn '3) Permissões mínimas: Contents=Read and write, Pull requests=Read and write.'
+    Write-Warn '4) Edite Scripts\sync_github_settings.ps1 e ajuste:'
+    Write-Warn '   - $githubToken = ''<seu_token>'''
+    Write-Warn '   - $ghUser = ''<seu_usuario_ou_org>'''
+    Write-Warn '   - $repo / $branch conforme seu repositório.'
+    Write-Warn '5) Salve o arquivo e execute novamente: sync_github.bat'
+    Write-Warn 'Documentação: https://docs.github.com/rest'
 }
 
 function Write-Log([string]$Message) {
