@@ -83,6 +83,14 @@ def _env_bool(name: str, default: bool) -> bool:
         return False
     return default
 
+
+def _env_csv(name: str, default: list[str]) -> list[str]:
+    raw = os.getenv(name)
+    if raw is None:
+        return list(default)
+    values = [v.strip() for v in raw.split(",") if v.strip()]
+    return values if values else list(default)
+
 VERSION = "11.0"
 PORT = _env_int("SIMULATOR_PORT", 3002)
 API_KEY = _env("SIMULATOR_API_KEY", "CVAPI_2b9c80c2abf94a76baf8b3e68d89cb7e")
@@ -93,6 +101,17 @@ BASE_DIR = _env(
 
 # Debug: exibe todas as queries SQL no console (útil para auditoria)
 DEBUG_LOG = _env_bool("SIMULATOR_DEBUG_LOG", False)   # Altere para True para ativar o debug
+
+# Segurança HTTP/API
+CORS_ALLOWED_ORIGINS = _env_csv(
+    "SIMULATOR_CORS_ALLOWED_ORIGINS",
+    ["https://conexaovida.org", "https://www.conexaovida.org"]
+)
+SESSION_COOKIE_SECURE = _env_bool("SIMULATOR_SESSION_COOKIE_SECURE", False)
+SESSION_COOKIE_SAMESITE = _env("SIMULATOR_SESSION_COOKIE_SAMESITE", "Lax")
+SECURITY_RATE_LIMIT_PER_MIN = _env_int("SIMULATOR_RATE_LIMIT_PER_MIN", 120)
+SECURITY_LOGIN_MAX_FAILS = _env_int("SIMULATOR_LOGIN_MAX_FAILS", 8)
+SECURITY_LOGIN_BLOCK_SEC = _env_int("SIMULATOR_LOGIN_BLOCK_SEC", 900)
 
 # Timeout universal (segundos) para requisições longas de automações Python.
 # Prioridade:
@@ -108,8 +127,12 @@ AUTODEV_AGENT_REQUEST_TIMEOUT = REQUEST_TIMEOUT_SEC
 
 # GitHub sync (compatibilidade com scripts legados que liam credenciais daqui)
 GITHUB_TOKEN = _env("CHATGPT_SIMULATOR_GITHUB_TOKEN", "")
-GH_USER = _env("CHATGPT_SIMULATOR_GITHUB_USER", "")
+GH_USER = _env("CHATGPT_SIMULATOR_GITHUB_USER", "hellyssoncavalcanti")
 GITHUB_REPO = _env("CHATGPT_SIMULATOR_GITHUB_REPO", "chatGPT_Simulator")
+GITHUB_ORIGIN = _env(
+    "CHATGPT_SIMULATOR_GITHUB_ORIGIN",
+    "https://github.com/hellyssoncavalcanti/chatGPT_Simulator",
+)
 GITHUB_BRANCH = _env("CHATGPT_SIMULATOR_GITHUB_BRANCH", "main")
 GITHUB_LOCAL_DIR = _env("CHATGPT_SIMULATOR_DIR", BASE_DIR)
 GITHUB_TASK_NAME = _env("CHATGPT_SIMULATOR_GITHUB_TASK_NAME", "chatGPT_Simulator_AutoSync")

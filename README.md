@@ -109,6 +109,131 @@ Dentro do `main.py`, a inicialização acontece assim:
 
 ---
 
+## Estrutura da fila interna (server → browser) e priorização
+
+Para reduzir gargalos e starvation entre chats concorrentes, a fila global
+`browser_queue` foi evoluída para uma estrutura com:
+
+1. **Lanes por prioridade** (ações críticas primeiro, como `STOP`);
+2. **Subfilas por tenant/chat** (`chat_id` / `url` / `request_source`);
+3. **Round-robin entre tenants da mesma prioridade**, evitando que um único
+   chat monopolize a execução;
+4. **Priorização explícita de pedidos remotos** sobre pedidos oriundos de
+   scripts Python/autônomos (ex.: analisador).
+
+Isso mantém compatibilidade de uso com `put/get` e melhora previsibilidade em
+cenários com múltiplas origens concorrendo por execução no navegador.
+
+### Endpoint de observabilidade da fila
+
+- `GET /api/queue/status`
+  - Retorna `qsize`, contadores de enfileiramento/consumo, métricas de espera
+    (`avg_wait_ms`, `max_wait_ms`) e distribuição por origem/prioridade.
+  - Exige autenticação (mesma política dos demais endpoints privados).
+
+### Endpoint de log em tempo real (polling)
+
+- `GET /api/logs/tail?lines=120`
+  - Retorna as últimas linhas do arquivo de log ativo (`config.LOG_PATH`).
+  - Ideal para atualização periódica no frontend sem abrir shell.
+  - Exige autenticação.
+
+### Endpoint de métricas operacionais (polling)
+
+- `GET /api/metrics`
+  - Retorna uptime do servidor, estado de `ACTIVE_CHATS`, status de syncs,
+    janela de rate-limit e snapshot da fila (`browser_queue`).
+  - Exige autenticação.
+
+### Frontend: novos itens no menu do usuário (`userDropdown`)
+
+No avatar/menu superior direito foram adicionadas duas ações:
+
+1. **Status da Fila**  
+   Abre um toast com atualização em tempo real do `/api/queue/status`.
+
+2. **Log em tempo real**  
+   Abre um toast com **abas**:
+   - **Log** → tail via `/api/logs/tail`
+   - **Métricas** → painel em tempo real via `/api/metrics`
+
+Esses painéis são focados em observabilidade operacional durante uso em
+produção/local, sem interromper a conversa ativa.
+
+---
+
+## Hardening de segurança da API (issue #522)
+
+Foi adicionado um conjunto de proteções no `server.py` para reduzir abuso,
+facilitar auditoria e melhorar rastreabilidade:
+
+1. **Rate limiting por IP/path** (janela de 60s) em `before_request`;
+2. **Bloqueio temporário de IP por brute force de login**;
+3. **Auditoria estruturada de segurança** em formato JSON (`[SECURITY_AUDIT]`)
+   para eventos de acesso sensível, falha de autenticação, CSRF e bloqueios;
+4. **Validação CSRF para fluxo de sessão/cookie**, com cookie `csrf_token`
+   emitido no login;
+5. **CORS configurável via ambiente** (`SIMULATOR_CORS_ALLOWED_ORIGINS`) com
+   `supports_credentials=True`;
+6. **Política de cookie de sessão configurável** (`secure`/`samesite`) por
+   variáveis de ambiente.
+
+### Variáveis novas de segurança (config.py)
+
+- `SIMULATOR_CORS_ALLOWED_ORIGINS` (CSV de origens permitidas)
+- `SIMULATOR_SESSION_COOKIE_SECURE` (`true/false`)
+- `SIMULATOR_SESSION_COOKIE_SAMESITE` (`Lax`, `Strict`, `None`)
+- `SIMULATOR_RATE_LIMIT_PER_MIN` (default `120`)
+- `SIMULATOR_LOGIN_MAX_FAILS` (default `8`)
+- `SIMULATOR_LOGIN_BLOCK_SEC` (default `900`)
+
+Essas medidas ajudam na prevenção de acesso indevido/acidental e na evidência
+de eventos suspeitos para auditoria operacional (incluindo conformidade LGPD).
+
+---
+
+## Testes automatizados e CI/CD (issue #528)
+
+Foi adicionada uma base de testes com **pytest** e um workflow de CI no
+**GitHub Actions** para execução automática e geração de cobertura.
+
+### Estrutura de testes adicionada
+
+- `tests/test_shared_queue.py`
+  - cobre priorização de chats remotos vs origem Python;
+  - cobre round-robin entre tenants na mesma prioridade.
+
+- `tests/test_storage.py`
+  - cobre persistência e deduplicação de mensagens;
+  - cobre busca por `origin_url` com resolução do chat mais recente.
+
+- `tests/test_server_api.py`
+  - smoke de `/health` e `/api/metrics`;
+  - valida bloqueio por brute force de login;
+  - valida endpoint `/api/logs/tail`.
+
+- `tests/conftest.py`
+  - prepara `PYTHONPATH` para módulos em `Scripts/` durante execução.
+
+### CI em GitHub Actions
+
+- Workflow: `.github/workflows/tests.yml`
+- Executa em `push` e `pull_request`:
+  1. instala Python 3.11;
+  2. instala dependências de teste (`requirements-test.txt`);
+  3. roda `pytest` com cobertura (`--cov=Scripts`);
+  4. publica `coverage.xml` como artifact;
+  5. envia para **Codecov** quando `CODECOV_TOKEN` estiver configurado.
+
+### Como rodar localmente
+
+```bash
+pip install -r requirements-test.txt
+pytest --cov=Scripts --cov-report=term-missing
+```
+
+---
+
 ## Servidor de acompanhamento WhatsApp Web (modo isolado, sem Meta)
 
 Foi adicionado o script `Scripts/acompanhamento_whatsapp.py`, responsável por:
