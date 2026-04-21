@@ -1,3 +1,38 @@
-Scripts/sync_github.settings.ps1
+# Arquivos sensíveis — NUNCA versionar. Seus templates (*.example.*) são versionados.
+Scripts/config.py
+Scripts/sync_github_settings.ps1
+Scripts/sync_github_BOM.ps1
+
+# Banco SQLite (histórico, usuários, sessões) — contém dados do usuário
+db/*.db
+db/*.db-journal
+db/*.db-wal
+db/*.db-shm
+
+# JSONs legados (mantidos para migração on-boot, mas nunca versionados)
+db/history.json
+db/users/users.json
+db/pywa_followup_state.json
+
+# Caches e artefatos
 __pycache__/
 *.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Perfis Chromium persistentes (sessão logada do usuário)
+chrome_profile/
+chrome_profile_whatsapp/
+chrome_profile_analisador/
+
+# Certificados e logs locais
+certs/
+logs/
+temp/
+downloads/
+
+# venv
+.venv/
