@@ -185,7 +185,11 @@ cfg_path = r'''$configPath'''
 spec = importlib.util.spec_from_file_location('sim_cfg', cfg_path)
 mod = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(mod)
-keys = ['GITHUB_TOKEN','GH_USER','GITHUB_USER','GITHUB_REPO','GITHUB_BRANCH','BASE_DIR']
+keys = [
+    'GITHUB_TOKEN','GH_USER','GITHUB_USER','GITHUB_REPO','GITHUB_BRANCH',
+    'BASE_DIR','GITHUB_LOCAL_DIR','GITHUB_TASK_NAME','GITHUB_SYNC_INTERVAL_MINUTES',
+    'GITHUB_CHAT_PROCESS_PATTERN','GITHUB_ANALYZER_PATTERN','GITHUB_REMOTE_PHP_API_KEY'
+]
 data = {k: getattr(mod, k, None) for k in keys}
 print(json.dumps(data, ensure_ascii=False))
 "@
@@ -199,6 +203,12 @@ print(json.dumps(data, ensure_ascii=False))
             if ($parsed.GITHUB_REPO) { $result.repo = [string]$parsed.GITHUB_REPO }
             if ($parsed.GITHUB_BRANCH) { $result.branch = [string]$parsed.GITHUB_BRANCH }
             if ($parsed.BASE_DIR) { $result.localDir = [string]$parsed.BASE_DIR }
+            if ($parsed.GITHUB_LOCAL_DIR) { $result.localDir = [string]$parsed.GITHUB_LOCAL_DIR }
+            if ($parsed.GITHUB_TASK_NAME) { $result.taskName = [string]$parsed.GITHUB_TASK_NAME }
+            if ($parsed.GITHUB_SYNC_INTERVAL_MINUTES) { $result.syncIntervalMinutes = [int]$parsed.GITHUB_SYNC_INTERVAL_MINUTES }
+            if ($parsed.GITHUB_CHAT_PROCESS_PATTERN) { $result.chatProcessPattern = [string]$parsed.GITHUB_CHAT_PROCESS_PATTERN }
+            if ($parsed.GITHUB_ANALYZER_PATTERN) { $result.analyzerPattern = [string]$parsed.GITHUB_ANALYZER_PATTERN }
+            if ($parsed.GITHUB_REMOTE_PHP_API_KEY) { $result.remotePhpApiKey = [string]$parsed.GITHUB_REMOTE_PHP_API_KEY }
         }
     } catch {
         # Fallback silencioso: sync continua com settings/env.
@@ -216,13 +226,6 @@ function Import-Settings {
     }
 
     $scriptDir = Split-Path -Parent $scriptPath
-    $settingsCandidates = @(
-        (Join-Path $scriptDir 'sync_github_settings.ps1'),
-        (Join-Path $scriptDir 'sync_github.settings.ps1')
-    )
-
-    $settingsPath = $settingsCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
-    if (-not $settingsPath) { $settingsPath = $settingsCandidates[0] }
 
     $defaults = [ordered]@{
         githubToken         = $env:CHATGPT_SIMULATOR_GITHUB_TOKEN
@@ -248,29 +251,19 @@ function Import-Settings {
         remotePhpTargetPath2 = if ($env:CHATGPT_SIMULATOR_REMOTE_PHP_TARGET_PATH_2) { $env:CHATGPT_SIMULATOR_REMOTE_PHP_TARGET_PATH_2 } else { 'scripts/js/chatgpt_free_openai.js.php' }
     }
 
-    if (Test-Path $settingsPath) {
-        . $settingsPath
-        Write-Host "Usando configuracao do sync: $settingsPath" -ForegroundColor DarkGray
-    } else {
-        Write-Host "Configuracao do sync nao encontrada em disco; usando defaults internos do script." -ForegroundColor DarkGray
-    }
-
     foreach ($key in $defaults.Keys) {
-        if (Get-Variable -Name $key -Scope Local -ErrorAction SilentlyContinue) {
-            $script:Config[$key] = (Get-Variable -Name $key -ValueOnly)
-        } else {
-            $script:Config[$key] = $defaults[$key]
-        }
+        $script:Config[$key] = $defaults[$key]
     }
 
-    # Compatibilidade: quando token/usuário não vierem de settings/env,
-    # tenta restaurar credenciais definidas no Scripts/config.py.
+    # Configuração central em Scripts/config.py (com fallback para env/defaults).
     $cfgPy = Get-ConfigPySettings -ScriptDir $scriptDir -LocalDirHint $script:Config.localDir
-    foreach ($key in @('githubToken', 'ghUser', 'repo', 'branch', 'localDir')) {
-        $current = [string]($script:Config[$key] ?? '')
-        $isUnset = [string]::IsNullOrWhiteSpace($current) -or (Test-IsPlaceholderValue $current)
-        if ($isUnset -and $cfgPy.ContainsKey($key) -and -not [string]::IsNullOrWhiteSpace([string]$cfgPy[$key])) {
-            $script:Config[$key] = [string]$cfgPy[$key]
+    foreach ($key in @('githubToken', 'ghUser', 'repo', 'branch', 'localDir', 'taskName', 'syncIntervalMinutes', 'chatProcessPattern', 'analyzerPattern', 'remotePhpApiKey')) {
+        if ($cfgPy.ContainsKey($key) -and -not [string]::IsNullOrWhiteSpace([string]$cfgPy[$key])) {
+            if ($key -eq 'syncIntervalMinutes') {
+                $script:Config[$key] = [int]$cfgPy[$key]
+            } else {
+                $script:Config[$key] = [string]$cfgPy[$key]
+            }
         }
     }
 
@@ -279,13 +272,13 @@ function Import-Settings {
     }
     
     if (Test-IsPlaceholderValue $script:Config.ghUser) {
-        throw "Configuracao invalida em ${settingsPath}: substitua 'seu_usuario_ou_org' pelo usuario real do GitHub."
+        throw "Configuracao invalida em Scripts/config.py: preencha GH_USER (ou CHATGPT_SIMULATOR_GITHUB_USER) com o usuario real do GitHub."
     }
 
     $script:Config.scriptDir = $scriptDir
     $script:Config.syncBatPath = Join-Path $script:Config.localDir 'sync_github.bat'
     $script:Config.syncPs1Path = Join-Path $script:Config.localDir 'Scripts\sync_github.ps1'
-    $script:Config.settingsPath = $settingsPath
+    $script:Config.settingsPath = Join-Path $scriptDir 'config.py'
     $tempRoot = Resolve-TempRoot
     $script:Config.tempDir = Join-Path $tempRoot 'sync_chatgpt'
     $script:Config.lockFile = Join-Path $script:Config.tempDir 'sync_github.lock'
@@ -300,8 +293,6 @@ function Import-Settings {
     $script:Config.protectedItems = @(
         'sync_github.bat',
         'Scripts\sync_github.ps1',
-        'Scripts\sync_github_settings.ps1',
-        'Scripts\sync_github.settings.ps1',
         'chrome_profile'
     )
     # Garante que Scripts\sync_github.py nunca fique protegido contra update.
