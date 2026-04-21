@@ -162,6 +162,36 @@ produção/local, sem interromper a conversa ativa.
 
 ---
 
+## Hardening de segurança da API (issue #522)
+
+Foi adicionado um conjunto de proteções no `server.py` para reduzir abuso,
+facilitar auditoria e melhorar rastreabilidade:
+
+1. **Rate limiting por IP/path** (janela de 60s) em `before_request`;
+2. **Bloqueio temporário de IP por brute force de login**;
+3. **Auditoria estruturada de segurança** em formato JSON (`[SECURITY_AUDIT]`)
+   para eventos de acesso sensível, falha de autenticação, CSRF e bloqueios;
+4. **Validação CSRF para fluxo de sessão/cookie**, com cookie `csrf_token`
+   emitido no login;
+5. **CORS configurável via ambiente** (`SIMULATOR_CORS_ALLOWED_ORIGINS`) com
+   `supports_credentials=True`;
+6. **Política de cookie de sessão configurável** (`secure`/`samesite`) por
+   variáveis de ambiente.
+
+### Variáveis novas de segurança (config.py)
+
+- `SIMULATOR_CORS_ALLOWED_ORIGINS` (CSV de origens permitidas)
+- `SIMULATOR_SESSION_COOKIE_SECURE` (`true/false`)
+- `SIMULATOR_SESSION_COOKIE_SAMESITE` (`Lax`, `Strict`, `None`)
+- `SIMULATOR_RATE_LIMIT_PER_MIN` (default `120`)
+- `SIMULATOR_LOGIN_MAX_FAILS` (default `8`)
+- `SIMULATOR_LOGIN_BLOCK_SEC` (default `900`)
+
+Essas medidas ajudam na prevenção de acesso indevido/acidental e na evidência
+de eventos suspeitos para auditoria operacional (incluindo conformidade LGPD).
+
+---
+
 ## Servidor de acompanhamento WhatsApp Web (modo isolado, sem Meta)
 
 Foi adicionado o script `Scripts/acompanhamento_whatsapp.py`, responsável por:

@@ -39,6 +39,7 @@ import time
 import copy
 import logging
 import sys
+from collections import deque
 from flask import Flask, request, jsonify, Response, send_from_directory, stream_with_context, make_response
 from flask_cors import CORS
 import config
@@ -135,13 +136,139 @@ except ImportError:
 app = Flask(__name__, static_folder=config.DIRS["frontend"])
 # Permite que apenas o seu site oficial faça requisições via navegador
 CORS(app, resources={r"/*": {"origins": [
-    "https://conexaovida.org",
-    "https://www.conexaovida.org"
-]}})
+    *getattr(config, "CORS_ALLOWED_ORIGINS", ["https://conexaovida.org", "https://www.conexaovida.org"])
+]}}, supports_credentials=True)
+
+_security_lock = threading.Lock()
+_rate_limit_hits: dict[str, deque[float]] = {}
+_blocked_ips: dict[str, dict] = {}
+_failed_login_attempts: dict[str, deque[float]] = {}
+RATE_LIMIT_WINDOW_SEC = 60
+RATE_LIMIT_PER_MIN = max(20, int(getattr(config, "SECURITY_RATE_LIMIT_PER_MIN", 120)))
+LOGIN_MAX_FAILS = max(3, int(getattr(config, "SECURITY_LOGIN_MAX_FAILS", 8)))
+LOGIN_BLOCK_SEC = max(60, int(getattr(config, "SECURITY_LOGIN_BLOCK_SEC", 900)))
+SENSITIVE_AUDIT_ENDPOINTS = {
+    "/login",
+    "/logout",
+    "/api/user/update_password",
+    "/api/menu/execute",
+    "/api/delete",
+    "/v1/chat/completions",
+    "/api/queue/status",
+    "/api/logs/tail",
+    "/api/metrics",
+}
 
 
 def log(msg):
     file_log("server.py", msg)
+
+
+def _client_ip() -> str:
+    fwd = request.headers.get("X-Forwarded-For", "").strip()
+    if fwd:
+        return fwd.split(",")[0].strip()
+    return (request.remote_addr or "unknown").strip()
+
+
+def _audit_event(event_type: str, **extra):
+    payload = {
+        "event": event_type,
+        "ts": int(time.time()),
+        "ip": _client_ip() if request else "unknown",
+        "method": getattr(request, "method", ""),
+        "path": getattr(request, "path", ""),
+    }
+    payload.update(extra or {})
+    try:
+        log(f"[SECURITY_AUDIT] {json.dumps(payload, ensure_ascii=False)}")
+    except Exception:
+        log(f"[SECURITY_AUDIT] {payload}")
+
+
+def _prune_old_attempts(dq: deque[float], window_sec: int):
+    cutoff = time.time() - window_sec
+    while dq and dq[0] < cutoff:
+        dq.popleft()
+
+
+def _is_ip_blocked(ip: str) -> tuple[bool, float, str]:
+    with _security_lock:
+        rec = _blocked_ips.get(ip)
+        if not rec:
+            return False, 0.0, ""
+        until = float(rec.get("until", 0.0))
+        if until <= time.time():
+            _blocked_ips.pop(ip, None)
+            return False, 0.0, ""
+        return True, max(0.0, until - time.time()), str(rec.get("reason", "blocked"))
+
+
+def _register_rate_limit_hit(ip: str, key: str) -> tuple[bool, float]:
+    map_key = f"{ip}:{key}"
+    with _security_lock:
+        dq = _rate_limit_hits.setdefault(map_key, deque())
+        now = time.time()
+        dq.append(now)
+        _prune_old_attempts(dq, RATE_LIMIT_WINDOW_SEC)
+        if len(dq) > RATE_LIMIT_PER_MIN:
+            retry_after = max(1.0, RATE_LIMIT_WINDOW_SEC - (now - dq[0]))
+            return True, retry_after
+        return False, 0.0
+
+
+def _register_login_failure(ip: str):
+    now = time.time()
+    with _security_lock:
+        dq = _failed_login_attempts.setdefault(ip, deque())
+        dq.append(now)
+        _prune_old_attempts(dq, LOGIN_BLOCK_SEC)
+        if len(dq) >= LOGIN_MAX_FAILS:
+            _blocked_ips[ip] = {
+                "until": now + LOGIN_BLOCK_SEC,
+                "reason": "bruteforce_login",
+            }
+
+
+def _clear_login_failures(ip: str):
+    with _security_lock:
+        _failed_login_attempts.pop(ip, None)
+
+
+def _generate_csrf_token() -> str:
+    return uuid.uuid4().hex + uuid.uuid4().hex
+
+
+def _validate_csrf_for_session() -> bool:
+    # Exige CSRF apenas para autenticação por sessão/cookie em métodos mutáveis.
+    if request.method in {"GET", "HEAD", "OPTIONS"}:
+        return True
+    if request.path in {"/login", "/health"}:
+        return True
+    if request.path.startswith("/static"):
+        return True
+
+    # Se request autenticou por API key/Bearer, não depende de cookie de sessão.
+    auth_header = request.headers.get("Authorization") or ""
+    data = request.get_json(silent=True) or {}
+    if auth_header.startswith("Bearer ") or data.get("api_key") == config.API_KEY or request.args.get("api_key") == config.API_KEY:
+        return True
+
+    session_token = request.cookies.get("session_token")
+    if not session_token:
+        return True
+
+    origin = (request.headers.get("Origin") or "").strip()
+    referer = (request.headers.get("Referer") or "").strip()
+    host_url = (request.host_url or "").rstrip("/")
+    if origin.startswith(host_url) or referer.startswith(host_url):
+        return True
+
+    csrf_cookie = request.cookies.get("csrf_token", "")
+    csrf_header = request.headers.get("X-CSRF-Token", "")
+    csrf_body = str((data or {}).get("csrf_token") or "")
+    provided = csrf_header or csrf_body
+    return bool(csrf_cookie and provided and csrf_cookie == provided)
 
 
 def _format_wait_seconds(seconds):
@@ -563,18 +690,91 @@ def before_request():
     if request.path in public_routes or request.path in self_auth_routes or request.path.startswith('/static'):
         return
     if request.method == "OPTIONS": return
+
+    ip = _client_ip()
+    blocked, remaining_block, block_reason = _is_ip_blocked(ip)
+    if blocked:
+        _audit_event(
+            "blocked_ip_request",
+            reason=block_reason,
+            retry_after_sec=round(remaining_block, 1),
+        )
+        return jsonify({
+            "error": "Too many suspicious attempts. IP temporarily blocked.",
+            "retry_after_sec": int(max(1, remaining_block))
+        }), 429
+
+    rl_key = request.path if request.path.startswith("/api/") or request.path.startswith("/v1/") else "__other__"
+    limited, retry_after = _register_rate_limit_hit(ip, rl_key)
+    if limited:
+        _audit_event(
+            "rate_limit_exceeded",
+            key=rl_key,
+            retry_after_sec=round(retry_after, 1),
+        )
+        return jsonify({
+            "error": "Rate limit exceeded",
+            "retry_after_sec": int(max(1, retry_after))
+        }), 429
+
+    if not _validate_csrf_for_session():
+        _audit_event("csrf_validation_failed")
+        return jsonify({"error": "CSRF validation failed"}), 403
+
     if not check_auth():
+        _audit_event("unauthorized_request")
         return jsonify({"error": "Unauthorized", "auth_required": True}), 401
+
+
+@app.after_request
+def after_request_audit(response):
+    try:
+        if request.path in SENSITIVE_AUDIT_ENDPOINTS:
+            _audit_event(
+                "endpoint_access",
+                status_code=int(getattr(response, "status_code", 0)),
+                user_agent=(request.headers.get("User-Agent", "")[:180]),
+            )
+    except Exception:
+        pass
+    return response
 
 # --- ROTAS AUTH ---
 @app.route("/login", methods=["POST"])
 def login_route():
     data = request.get_json() or {}
+    ip = _client_ip()
+    blocked, remaining_block, block_reason = _is_ip_blocked(ip)
+    if blocked:
+        _audit_event(
+            "login_blocked",
+            reason=block_reason,
+            retry_after_sec=round(remaining_block, 1),
+            username=(data.get("username") or "")[:80]
+        )
+        return jsonify({"success": False, "error": "IP temporariamente bloqueado", "retry_after_sec": int(max(1, remaining_block))}), 429
+
     token = auth.verify_login(data.get("username"), data.get("password"))
     if token:
+        _clear_login_failures(ip)
+        csrf_token = _generate_csrf_token()
         resp = jsonify({"success": True, "token": token})
-        resp.set_cookie('session_token', token, max_age=60*60*24*30, httponly=True, samesite='Lax')
+        resp.set_cookie(
+            'session_token', token, max_age=60*60*24*30,
+            httponly=True,
+            samesite=getattr(config, "SESSION_COOKIE_SAMESITE", "Lax"),
+            secure=bool(getattr(config, "SESSION_COOKIE_SECURE", False)),
+        )
+        resp.set_cookie(
+            'csrf_token', csrf_token, max_age=60*60*24*30,
+            httponly=False,
+            samesite=getattr(config, "SESSION_COOKIE_SAMESITE", "Lax"),
+            secure=bool(getattr(config, "SESSION_COOKIE_SECURE", False)),
+        )
+        _audit_event("login_success", username=(data.get("username") or "")[:80])
         return resp
+    _register_login_failure(ip)
+    _audit_event("login_failed", username=(data.get("username") or "")[:80])
     return jsonify({"success": False, "error": "Credenciais inválidas"}), 401
 
 @app.route("/logout", methods=["POST"])
