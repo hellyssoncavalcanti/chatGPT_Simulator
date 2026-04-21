@@ -59,13 +59,10 @@ Cliente humano / PHP / analisador_prontuarios.py
   Camada HTTP/REST. Autentica, valida origem, recebe chamadas da UI/API, envia tarefas para o browser e consolida respostas em JSON ou streaming.
 
 - **`Scripts/browser.py`**
-  Motor de automação com Playwright. É responsável por abrir o ChatGPT, digitar/colar mensagens, anexar arquivos, sincronizar histórico, pesquisar no Google e manipular menus de contexto. Falhas assíncronas de tarefas são registradas na DLQ da fila.
+  Motor de automação com Playwright. É responsável por abrir o ChatGPT, digitar/colar mensagens, anexar arquivos, sincronizar histórico, pesquisar no Google e manipular menus de contexto.
 
 - **`Scripts/shared.py`**
-  Define a fila `browser_queue`, que desacopla o Flask do loop assíncrono do Playwright. Inclui DLQ (dead-letter queue) para inspeção e retry manual de tarefas com erro.
-
-- **`Scripts/app_selectors.py`**
-  Catálogo central de seletores críticos (chat/sync/menu/download), com metadados da última validação e smoke-test.
+  Define a fila `browser_queue`, que desacopla o Flask do loop assíncrono do Playwright.
 
 - **`Scripts/db.py`**
   Camada SQLite compartilhada com schema/migração inicial (chats, mensagens, usuários e sessões).

@@ -1,87 +1,25 @@
-# REFACTOR_PROGRESS.md
+# Refactor Progress (ChatGPT Simulator)
 
-## Contexto e requisitos obrigatórios do usuário
+## Status geral
+- [x] Bootstrap seguro com templates (`config.example.py` + `sync_github_settings.example.ps1`) no `0. start.bat`.
+- [x] Credencial padrão alinhada para `admin/admin` apenas em instalação nova.
+- [x] Allowlist priorizando API key (fallback por origem/IP apenas defesa em profundidade).
+- [x] Suporte a perfil Chromium por request (`browser_profile`) no fluxo `server.py -> browser.py`.
+- [x] `analisador_prontuarios.py` envia `browser_profile` em todos os payloads LLM.
+- [x] Migração de persistência JSON para SQLite (`Scripts/db.py`, `storage.py`, `auth.py`).
+- [x] README atualizado para refletir bootstrap seguro, SQLite/sessões persistentes e perfil dedicado do analisador.
+- [ ] DLQ de fila (`/api/queue/failed`) pendente.
+- [ ] SSE de logs (`/api/logs/stream`) pendente.
+- [ ] Prometheus em `/metrics` pendente.
+- [ ] Centralização completa de seletores Playwright em `selectors.py` pendente.
+- [ ] Split completo do README em `docs/` pendente.
 
-### Requisitos mandatórios (texto consolidado)
-1. **Allowlist deve priorizar API key**, pois IP pode variar.
-2. **Arquivos sensíveis locais** (`Scripts/config.py`, `Scripts/sync_github_settings.ps1`) devem ser recriados limpos quando ausentes.
-3. **Credencial padrão** deve ser `admin/admin`, resetando apenas em instalação nova (quando `config.py` não existe).
-4. **`0. start.bat`** deve cuidar do bootstrap/dependências.
-5. **Analisador com perfil dedicado opcional**: campo `browser_profile` no payload até `browser.py`, com fallback para perfil default.
-6. **sync_github** permanece autônomo.
+## Próximos passos sugeridos
+1. Implementar DLQ no `BrowserTaskQueue` e endpoints de retry manual no `server.py`.
+2. Adicionar SSE de logs reaproveitando leitura incremental de `LOG_PATH`.
+3. Expor `/metrics` no formato Prometheus com `prometheus_client`.
+4. Introduzir `Scripts/selectors.py` com hash/data de validação e smoke-test.
+5. Quebrar README em `docs/` (arquitetura, whatsapp, analisador, agente autônomo, sync) e manter README raiz como índice.
 
----
-
-## Plano por fases (modelo completo)
-
-### Fase 1 — Segurança e bootstrap
-- [x] Criar `Scripts/config.example.py` versionado (sem segredo de produção).
-- [x] Criar `Scripts/sync_github_settings.example.ps1` versionado.
-- [x] Atualizar `.gitignore` para ignorar `config.py`, `.env`, settings locais e bancos locais.
-- [x] Implementar bootstrap no `0. start.bat` para copiar templates quando ausentes.
-- [x] Aplicar reset de credenciais apenas em `fresh install`.
-
-### Fase 2 — Controle de acesso
-- [x] Consolidar política de acesso no `server.py` priorizando API key/sessão.
-- [x] Manter origem/IP como camada secundária (defesa em profundidade).
-
-### Fase 3 — Perfil Chromium por requisição
-- [x] Definir `CHROMIUM_PROFILES` em config.
-- [x] Propagar `browser_profile` em `server.py` -> `browser.py`.
-- [x] Implementar fallback para `default` quando perfil inválido.
-- [x] Atualizar `analisador_prontuarios.py` para enviar `browser_profile` em todos payloads LLM.
-
-### Fase 4 — Migração de persistência para SQLite
-- [x] Criar `Scripts/db.py` com schema (`chats`, `messages`, `users`, `sessions`).
-- [x] Migrar automaticamente JSON legado para SQLite no primeiro init.
-- [x] Migrar `storage.py` preservando API pública.
-- [x] Migrar `auth.py` para sessões persistentes em SQLite com TTL.
-
-### Fase 5 — Portabilidade e config hygiene
-- [x] Derivar `BASE_DIR` de `Path(__file__).resolve().parent.parent`.
-- [x] Adicionar suporte a `.env` (python-dotenv opcional).
-- [x] Introduzir `requirements.txt` para runtime reprodutível.
-- [x] Validar variáveis críticas (`ANALISADOR_*`, `AUTODEV_AGENT_*`) com Pydantic em startup.
-
-### Fase 6 — Resiliência de fila e seletores
-- [x] Implementar DLQ em `BrowserTaskQueue` (`mark_failed`, listagem e retry manual).
-- [x] Expor DLQ em API (`GET /api/queue/failed`, `POST /api/queue/failed/retry`).
-- [x] Centralizar seletores críticos em `Scripts/app_selectors.py` com metadados de validação.
-- [x] Adicionar smoke test de seletores (`tests/test_selectors_smoke.py`).
-
-### Fase 7 — Observabilidade
-- [x] Adicionar SSE de logs (`GET /api/logs/stream`).
-- [x] Adicionar endpoint Prometheus (`GET /metrics`).
-- [x] Manter métricas JSON existentes (`GET /api/metrics`).
-
-### Fase 8 — Qualidade/manutenção
-- [x] Ajustar `AUTODEV_AGENT_AUTOCOMMIT` para dry-run por padrão.
-- [x] Atualizar documentação técnica para refletir arquitetura atual.
-- [x] Dividir documentação em `docs/` e manter README raiz como índice.
-
-### Fase 9 — Encerramento do refactor
-- [x] Rodar validações de sintaxe (`py_compile`) nos módulos alterados.
-- [x] Rodar testes unitários de fila/storage/selectors.
-- [x] Atualizar este arquivo com status final.
-
----
-
-## Estado final
-
-### Entregas concluídas
-- Bootstrap seguro e replicável em novos ambientes.
-- Persistência robusta em SQLite com migração automática.
-- Sessões persistentes com TTL.
-- Perfil Chromium dedicado opcional para analisador.
-- DLQ com retry manual.
-- Logs em SSE + métrica Prometheus.
-- Seletores críticos centralizados e smoke-tested.
-- README enxuto + docs segmentadas.
-
-### Observações
-- Itens de arquitetura de longo prazo (plugin de domínio e fila distribuída com Redis/RQ) foram **documentados como próximos passos**, mas não eram necessários para fechar este ciclo de refactor local.
-
----
-
-## Prompt de retomada (se necessário)
-"Leia `REFACTOR_PROGRESS.md`, valide que todos os itens marcados [x] continuam íntegros após merges recentes e prossiga apenas em melhorias incrementais (pluginização de integrações de domínio, fila distribuída, dashboards Grafana versionados e hardening de smoke tests end-to-end)."
+## Prompt de retomada (copiar em novo chat)
+"Continue o refactor do projeto `/workspace/chatGPT_Simulator` lendo `REFACTOR_PROGRESS.md` primeiro. Respeite os requisitos do usuário: API key como autenticação primária (allowlist apenas fallback), bootstrap de `Scripts/config.py` e `Scripts/sync_github_settings.ps1` via `0. start.bat` quando ausentes, reset para `admin/admin` apenas em fresh install, suporte de `browser_profile` end-to-end com fallback para perfil default, e manter `sync_github` autônomo. Finalize os itens pendentes (DLQ, SSE logs, Prometheus, selectors centralizados e split docs), rode testes, atualize `REFACTOR_PROGRESS.md`, faça commit e abra PR."
