@@ -106,6 +106,22 @@ REQUEST_TIMEOUT_SEC = _env_int(
 # Alias explícito para manter compatibilidade com scripts legados.
 AUTODEV_AGENT_REQUEST_TIMEOUT = REQUEST_TIMEOUT_SEC
 
+# GitHub sync (compatibilidade com scripts legados que liam credenciais daqui)
+GITHUB_TOKEN = _env("CHATGPT_SIMULATOR_GITHUB_TOKEN", "")
+GH_USER = _env("CHATGPT_SIMULATOR_GITHUB_USER", "hellyssoncavalcanti")
+GITHUB_REPO = _env("CHATGPT_SIMULATOR_GITHUB_REPO", "chatGPT_Simulator")
+GITHUB_ORIGIN = _env(
+    "CHATGPT_SIMULATOR_GITHUB_ORIGIN",
+    "https://github.com/hellyssoncavalcanti/chatGPT_Simulator",
+)
+GITHUB_BRANCH = _env("CHATGPT_SIMULATOR_GITHUB_BRANCH", "main")
+GITHUB_LOCAL_DIR = _env("CHATGPT_SIMULATOR_DIR", BASE_DIR)
+GITHUB_TASK_NAME = _env("CHATGPT_SIMULATOR_GITHUB_TASK_NAME", "chatGPT_Simulator_AutoSync")
+GITHUB_SYNC_INTERVAL_MINUTES = _env_int("CHATGPT_SIMULATOR_GITHUB_SYNC_INTERVAL_MINUTES", 10)
+GITHUB_CHAT_PROCESS_PATTERN = _env("CHATGPT_SIMULATOR_GITHUB_CHAT_PROCESS_PATTERN", r"Scripts\\main.py")
+GITHUB_ANALYZER_PATTERN = _env("CHATGPT_SIMULATOR_GITHUB_ANALYZER_PATTERN", r"Scripts\\analisador_prontuarios.py")
+GITHUB_REMOTE_PHP_API_KEY = _env("CHATGPT_SIMULATOR_REMOTE_PHP_API_KEY", "")
+
 
 DIRS = {
     "certs": os.path.join(BASE_DIR, "certs"),

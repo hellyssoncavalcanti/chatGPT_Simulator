@@ -751,6 +751,28 @@ def health_check():
 
     return jsonify({"status": "ok", "service": "ChatGPT Simulator"}), 200
 
+
+@app.route("/api/queue/status", methods=["GET"])
+def queue_status():
+    """
+    Observabilidade da fila interna server → browser.
+    Requer autenticação padrão (before_request/check_auth).
+    """
+    stats = {}
+    try:
+        if hasattr(browser_queue, "snapshot_stats"):
+            stats = browser_queue.snapshot_stats() or {}
+    except Exception as e:
+        stats = {"error": str(e)}
+
+    return jsonify({
+        "success": True,
+        "queue": {
+            "qsize": int(browser_queue.qsize()),
+            **stats
+        }
+    }), 200
+
 @app.route("/", methods=["GET", "POST"])
 def index(): 
     # Força o mime-type correto para evitar erro de texto no navegador
@@ -1667,6 +1689,7 @@ def chat_completions():
         'url':              url,
         'chat_id':          chat_id,
         'message':          message,
+        'is_analyzer':      bool(is_analyzer),
         'sender':           sender_label,
         'request_source':   source_hint or sender_label,
         'attachment_paths': saved_paths,

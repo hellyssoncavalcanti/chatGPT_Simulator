@@ -4526,7 +4526,57 @@ def analisar_prontuario(
                 )
                 time.sleep(espera)
                 continue
-            raise RuntimeError(f"Falha ao consumir stream do simulador após {tentativa_stream} tentativas: {e}") from e
+            last_status = msg
+            _inline_status('⏳', msg)
+            inline_active = True
+            continue
+
+        if t == "log":
+            if inline_active:
+                _newline()
+                inline_active = False
+            cleaned_log = _clean_simulator_log_for_local_view(obj.get("content", ""))
+            if cleaned_log:
+                log.info(f"  🔧 {cleaned_log}")
+            continue
+
+        if t == "chatid":
+            if inline_active:
+                _newline()
+                inline_active = False
+            new_chat_id = obj.get("content") or new_chat_id
+            log.info(f"  📎 chat_id: {new_chat_id}")
+            continue
+
+        if t == "markdown":
+            markdown = obj.get("content", "")
+            markdown_visivel = _extrair_markdown_visivel_llm(markdown)
+            if markdown_visivel:
+                _inline_status('📝', f"Recebendo: {len(markdown_visivel)} chars...")
+            else:
+                _inline_status('⏳', "Pensando...")
+            inline_active = True
+            continue
+
+        if t == "finish":
+            if inline_active:
+                _newline()
+                inline_active = False
+            fin = obj.get("content", {})
+            new_chat_url = fin.get("url") or new_chat_url
+            new_chat_title = fin.get("title") or new_chat_title
+            new_chat_id = fin.get("chat_id") or new_chat_id
+            # fallback: extrai chat_id da URL caso ainda não tenha sido recebido
+            if not new_chat_id and new_chat_url:
+                new_chat_id = new_chat_url.rstrip('/').split('/')[-1] or new_chat_id
+            log.info(f"  🔗 chat_url: {new_chat_url} | chat_id: {new_chat_id}")
+            continue
+
+        if t == "error":
+            if inline_active:
+                _newline()
+                inline_active = False
+            raise RuntimeError(f"Simulador retornou erro: {obj.get('content')}")
 
     if not markdown:
         raise ValueError("Simulador não retornou conteúdo markdown.")
