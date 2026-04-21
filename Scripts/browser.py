@@ -41,6 +41,7 @@ import contextvars
 import requests
 from playwright.async_api import async_playwright
 import config
+import app_selectors
 from shared import browser_queue, register_file
 from utils import log as file_log
 from markdownify import markdownify as md
@@ -72,6 +73,10 @@ _SCREENSHOT_INLINE_LAST_LEN = 0
 _SCREENSHOT_INLINE_LAST_MSG = ""
 _SCREENSHOT_LOG_STATE = {}
 _CURRENT_TASK_SENDER = contextvars.ContextVar("current_task_sender", default="usuario_remoto")
+CHAT_INPUT_SELECTORS = app_selectors.selector_group("chat_input")
+SEND_BUTTON_SELECTORS = app_selectors.selector_group("send_button")
+MENU_BUTTON_SELECTORS = app_selectors.selector_group("menu_button")
+DOWNLOAD_LINK_SELECTORS = app_selectors.selector_group("download_link")
 
 def emit_log(q, msg):
     sender = _CURRENT_TASK_SENDER.get()
@@ -469,8 +474,8 @@ async def _submit_prompt(page, q=None, timeout: float = 12.0) -> bool:
                  f"ChatGPT converteu a cola em {state.get('attachmentCount')} anexo(s); enviando pelo botão.")
 
     submit_attempts = [
-        ('click', lambda: page.locator('button[data-testid="send-button"]').first.click(timeout=2000)),
-        ('force_click', lambda: page.locator('button[data-testid="send-button"]').first.click(timeout=2000, force=True)),
+        ('click', lambda: page.locator(SEND_BUTTON_SELECTORS[0] if SEND_BUTTON_SELECTORS else 'button[data-testid=\"send-button\"]').first.click(timeout=2000)),
+        ('force_click', lambda: page.locator(SEND_BUTTON_SELECTORS[0] if SEND_BUTTON_SELECTORS else 'button[data-testid=\"send-button\"]').first.click(timeout=2000, force=True)),
         ('dom_click', lambda: page.evaluate("""() => {
             const btn = document.querySelector('button[data-testid=\"send-button\"]');
             if (!btn) return false;
@@ -633,7 +638,7 @@ def _ensure_paste_wrappers(text: str) -> tuple[str, bool]:
 async def smart_input(page, message, q=None, activityts=None):
     import re
 
-    selector = "#prompt-textarea"
+    selector = CHAT_INPUT_SELECTORS[0] if CHAT_INPUT_SELECTORS else "#prompt-textarea"
     await _dismiss_rate_limit_modal_if_any(page, q=q)
     await page.wait_for_selector(selector, timeout=10000)
     try:
@@ -941,7 +946,7 @@ async def wait_for_chat_ready(page, url: str, q=None, timeout: int = 30) -> bool
 
     # 1. Textarea presente — pré-requisito mínimo
     try:
-        await page.wait_for_selector("#prompt-textarea", timeout=10_000)
+        await page.wait_for_selector(CHAT_INPUT_SELECTORS[0] if CHAT_INPUT_SELECTORS else "#prompt-textarea", timeout=10_000)
     except Exception:
         # Antes de declarar falha genérica, confere se é rate-limit (causa comum
         # de sumiço do composer). Isso transforma um "Timeout waiting for
@@ -4786,6 +4791,26 @@ async def browser_loop_async():
         browsers["default"] = await start_browser(default_dir)
         file_log("browser.py", "🟢 Async Worker Online. Aguardando tarefas...")
 
+        def _spawn_task(coro, task_payload: dict, action_name: str):
+            t = asyncio.create_task(coro)
+
+            def _done_cb(fut: asyncio.Task):
+                try:
+                    err = fut.exception()
+                except Exception as cb_err:
+                    err = cb_err
+                if err is None:
+                    return
+                file_log("browser.py", f"❌ Falha na action {action_name}: {err}")
+                try:
+                    if hasattr(browser_queue, "mark_failed"):
+                        browser_queue.mark_failed(task_payload, str(err))
+                except Exception as dlq_err:
+                    file_log("browser.py", f"⚠️ Falha ao registrar DLQ: {dlq_err}")
+
+            t.add_done_callback(_done_cb)
+            return t
+
         try:
             while True:
                 try:
@@ -4801,17 +4826,17 @@ async def browser_loop_async():
                     action = task.get('action', 'CHAT')
 
                     if action in ['GET_MENU', 'EXEC_MENU']:
-                        asyncio.create_task(handle_menu_task(browser, task))
+                        _spawn_task(handle_menu_task(browser, task), task, action)
                     elif action == 'SYNC':
-                        asyncio.create_task(handle_sync_task(browser, task))
+                        _spawn_task(handle_sync_task(browser, task), task, action)
                     elif action == 'SEARCH':
-                        asyncio.create_task(handle_search_task(browser, task))
+                        _spawn_task(handle_search_task(browser, task), task, action)
                     elif action == 'UPTODATE_SEARCH':
-                        asyncio.create_task(handle_uptodate_search_task(browser, task))
+                        _spawn_task(handle_uptodate_search_task(browser, task), task, action)
                     elif action == 'DOWNLOAD_FILE':
-                        asyncio.create_task(handle_download_file(browser, task))
+                        _spawn_task(handle_download_file(browser, task), task, action)
                     else:
-                        asyncio.create_task(handle_chat_task(browser, task))
+                        _spawn_task(handle_chat_task(browser, task), task, action)
 
                 except Exception as e:
                     print(f"Erro no loop principal: {e}")

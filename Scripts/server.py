@@ -48,6 +48,12 @@ import storage
 import auth
 from utils import log as file_log
 import threading
+try:
+    from prometheus_client import Counter, Gauge, generate_latest, CONTENT_TYPE_LATEST
+except Exception:
+    Counter = Gauge = None
+    generate_latest = None
+    CONTENT_TYPE_LATEST = "text/plain; version=0.0.4; charset=utf-8"
 
 # ─────────────────────────────────────────────────────────────
 # CAPTURA CONFIGURAÇÃO DE DEBUG (que é estabelecida no arquivo "config.py").
@@ -97,6 +103,9 @@ _python_chat_queue_lock = threading.Lock()
 _python_chat_queue_cond = threading.Condition(_python_chat_queue_lock)
 _python_chat_queue_waiting = []
 _python_chat_queue_active = None
+PROM_QUEUE_SIZE = Gauge("simulator_queue_size", "Tamanho atual da fila") if Gauge else None
+PROM_ACTIVE_CHATS = Gauge("simulator_active_chats", "Chats ativos em processamento") if Gauge else None
+PROM_HTTP_ERRORS = Counter("simulator_http_errors_total", "Total de erros HTTP por status", ["status"]) if Counter else None
 
 
 def _cleanup_active_chats():
@@ -155,8 +164,12 @@ SENSITIVE_AUDIT_ENDPOINTS = {
     "/api/delete",
     "/v1/chat/completions",
     "/api/queue/status",
+    "/api/queue/failed",
+    "/api/queue/failed/retry",
     "/api/logs/tail",
+    "/api/logs/stream",
     "/api/metrics",
+    "/metrics",
 }
 
 
@@ -743,6 +756,13 @@ def before_request():
 @app.after_request
 def after_request_audit(response):
     try:
+        if PROM_QUEUE_SIZE is not None:
+            PROM_QUEUE_SIZE.set(float(browser_queue.qsize()))
+        if PROM_ACTIVE_CHATS is not None:
+            active = sum(1 for _k, meta in list(ACTIVE_CHATS.items()) if not meta.get("finished"))
+            PROM_ACTIVE_CHATS.set(float(active))
+        if PROM_HTTP_ERRORS is not None and int(getattr(response, "status_code", 0)) >= 400:
+            PROM_HTTP_ERRORS.labels(status=str(int(response.status_code))).inc()
         if request.path in SENSITIVE_AUDIT_ENDPOINTS:
             _audit_event(
                 "endpoint_access",
@@ -989,6 +1009,33 @@ def queue_status():
     }), 200
 
 
+@app.route("/api/queue/failed", methods=["GET"])
+def queue_failed():
+    """DLQ: lista tarefas que falharam no browser loop."""
+    try:
+        limit = int(request.args.get("limit", 100))
+    except Exception:
+        limit = 100
+    items = browser_queue.list_failed(limit=limit) if hasattr(browser_queue, "list_failed") else []
+    return jsonify({"success": True, "failed": items, "count": len(items)}), 200
+
+
+@app.route("/api/queue/failed/retry", methods=["POST"])
+def queue_failed_retry():
+    """Reinsere item da DLQ na fila principal por índice."""
+    data = request.get_json(silent=True) or {}
+    try:
+        idx = int(data.get("index", -1))
+    except Exception:
+        idx = -1
+    if not hasattr(browser_queue, "retry_failed"):
+        return jsonify({"success": False, "error": "dlq_not_supported"}), 400
+    retried = browser_queue.retry_failed(idx)
+    if not retried:
+        return jsonify({"success": False, "error": "invalid_index"}), 404
+    return jsonify({"success": True, "task": retried}), 200
+
+
 @app.route("/api/logs/tail", methods=["GET"])
 def logs_tail():
     """
@@ -1028,6 +1075,42 @@ def logs_tail():
         "lines": tail_lines,
         "line_count": len(tail_lines),
     }), 200
+
+
+@app.route("/api/logs/stream", methods=["GET"])
+def logs_stream():
+    """
+    Stream SSE de logs para reduzir polling no frontend.
+    query:
+      - from_end=1|0 (default 1): inicia no fim do arquivo
+    """
+    path = getattr(config, "LOG_PATH", "")
+    if not path or not os.path.exists(path):
+        return jsonify({"success": False, "error": "log_not_found", "path": path}), 404
+
+    from_end = str(request.args.get("from_end", "1")).strip().lower() not in {"0", "false", "no"}
+
+    @stream_with_context
+    def generate():
+        try:
+            with open(path, "r", encoding="utf-8", errors="replace") as f:
+                if from_end:
+                    f.seek(0, os.SEEK_END)
+                while True:
+                    line = f.readline()
+                    if line:
+                        payload = json.dumps({"line": line.rstrip("\n"), "path": path}, ensure_ascii=False)
+                        yield f"event: log\ndata: {payload}\n\n"
+                    else:
+                        yield "event: ping\ndata: {}\n\n"
+                        time.sleep(1.0)
+        except GeneratorExit:
+            return
+        except Exception as e:
+            payload = json.dumps({"error": str(e), "path": path}, ensure_ascii=False)
+            yield f"event: error\ndata: {payload}\n\n"
+
+    return Response(generate(), mimetype="text/event-stream")
 
 
 @app.route("/api/metrics", methods=["GET"])
@@ -1073,6 +1156,19 @@ def api_metrics():
         "request_timeout_sec": int(PYTHON_CHAT_QUEUE_TIMEOUT_SEC),
     }
     return jsonify({"success": True, "metrics": metrics}), 200
+
+
+@app.route("/metrics", methods=["GET"])
+def prometheus_metrics():
+    """Endpoint Prometheus text exposition."""
+    if generate_latest is None:
+        return Response("# prometheus_client not installed\n", mimetype=CONTENT_TYPE_LATEST)
+    if PROM_QUEUE_SIZE is not None:
+        PROM_QUEUE_SIZE.set(float(browser_queue.qsize()))
+    if PROM_ACTIVE_CHATS is not None:
+        active = sum(1 for _k, meta in list(ACTIVE_CHATS.items()) if not meta.get("finished"))
+        PROM_ACTIVE_CHATS.set(float(active))
+    return Response(generate_latest(), mimetype=CONTENT_TYPE_LATEST)
 
 @app.route("/", methods=["GET", "POST"])
 def index(): 
