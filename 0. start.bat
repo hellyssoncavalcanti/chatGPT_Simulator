@@ -131,34 +131,55 @@ goto :eof
 set "HTML_FILE=%~1"
 set "HTML_PROFILE=%~2"
 set "HTML_DIR=%~3"
->"%HTML_FILE%" (
-  echo ^<!doctype html^>
-  echo ^<html lang="pt-BR"^>
-  echo ^<head^>
-  echo   ^<meta charset="utf-8" /^>
-  echo   ^<title^>Configurar perfil %HTML_PROFILE% ^| ChatGPT Simulator^</title^>
-  echo   ^<style^>
-  echo     body { font-family: Arial, sans-serif; margin: 0; padding: 32px; background: #111827; color: #e5e7eb; }
-  echo     .card { max-width: 900px; margin: 0 auto; background: #1f2937; border-radius: 12px; padding: 24px; }
-  echo     h1 { margin-top: 0; color: #93c5fd; }
-  echo     code { background: #374151; padding: 2px 6px; border-radius: 4px; color: #bfdbfe; }
-  echo     li { margin: 10px 0; line-height: 1.4; }
-  echo   ^</style^>
-  echo ^</head^>
-  echo ^<body^>
-  echo   ^<div class="card"^>
-  echo     ^<h1^>Configuracao obrigatoria do perfil "%HTML_PROFILE%"^</h1^>
-  echo     ^<p^>Este Chromium foi aberto somente para preparar o perfil persistente usado pelo ChatGPT Simulator.^</p^>
-  echo     ^<p^>Pasta do perfil: ^<code^>%HTML_DIR%^</code^>^</p^>
-  echo     ^<ol^>
-  echo       ^<li^>Abra ^<strong^>https://chatgpt.com/^</strong^> nesta mesma janela.^</li^>
-  echo       ^<li^>Realize login completo na conta desejada para este perfil.^</li^>
-  echo       ^<li^>Aguarde a pagina principal do ChatGPT carregar normalmente.^</li^>
-  echo       ^<li^>Feche totalmente esta janela do Chromium para liberar a continuacao do script.^</li^>
-  echo     ^</ol^>
-  echo     ^<p^>Tipo de perfil detectado: ^<strong^>%HTML_PROFILE%^</strong^>. Se for "default", use a conta principal. Se for "analisador", use a conta dedicada do analisador (quando aplicavel).^</p^>
-  echo   ^</div^>
-  echo ^</body^>
-  echo ^</html^>
-)
+where powershell.exe >nul 2>&1
+if errorlevel 1 goto :write_profile_html_fallback
+
+powershell -NoProfile -ExecutionPolicy Bypass -Command ^
+  "$f=$args[0]; $profileName=$args[1]; $profileDir=$args[2];" ^
+  "$html=@'" ^
+"<!doctype html>" ^
+"<html lang=""pt-BR"">" ^
+"<head>" ^
+"  <meta charset=""utf-8"" />" ^
+"  <title>Configurar perfil $profileName ^| ChatGPT Simulator</title>" ^
+"  <style>" ^
+"    body { font-family: Arial, sans-serif; margin: 0; padding: 32px; background: #111827; color: #e5e7eb; }" ^
+"    .card { max-width: 900px; margin: 0 auto; background: #1f2937; border-radius: 12px; padding: 24px; }" ^
+"    h1 { margin-top: 0; color: #93c5fd; }" ^
+"    code { background: #374151; padding: 2px 6px; border-radius: 4px; color: #bfdbfe; }" ^
+"    li { margin: 10px 0; line-height: 1.4; }" ^
+"  </style>" ^
+"</head>" ^
+"<body>" ^
+"  <div class=""card"">" ^
+"    <h1>Configuracao obrigatoria do perfil ""$profileName""</h1>" ^
+"    <p>Este Chromium foi aberto somente para preparar o perfil persistente usado pelo ChatGPT Simulator.</p>" ^
+"    <p>Pasta do perfil: <code>$profileDir</code></p>" ^
+"    <ol>" ^
+"      <li>Abra <strong>https://chatgpt.com/</strong> nesta mesma janela.</li>" ^
+"      <li>Realize login completo na conta desejada para este perfil.</li>" ^
+"      <li>Aguarde a pagina principal do ChatGPT carregar normalmente.</li>" ^
+"      <li>Feche totalmente esta janela do Chromium para liberar a continuacao do script.</li>" ^
+"    </ol>" ^
+"    <p>Tipo de perfil detectado: <strong>$profileName</strong>. Se for ""default"", use a conta principal. Se for ""analisador"", use a conta dedicada do analisador quando aplicavel.</p>" ^
+"  </div>" ^
+"</body>" ^
+"</html>" ^
+"'@; [System.IO.File]::WriteAllText($f, $html, [System.Text.Encoding]::UTF8);" ^
+  -- "%HTML_FILE%" "%HTML_PROFILE%" "%HTML_DIR%"
+if not errorlevel 1 goto :eof
+
+:write_profile_html_fallback
+>"%HTML_FILE%" echo ^<!doctype html^>
+>>"%HTML_FILE%" echo ^<html lang="pt-BR"^>
+>>"%HTML_FILE%" echo ^<head^>
+>>"%HTML_FILE%" echo   ^<meta charset="utf-8" /^>
+>>"%HTML_FILE%" echo   ^<title^>Configurar perfil %HTML_PROFILE% ^| ChatGPT Simulator^</title^>
+>>"%HTML_FILE%" echo ^</head^>
+>>"%HTML_FILE%" echo ^<body^>
+>>"%HTML_FILE%" echo   ^<h1^>Configuracao obrigatoria do perfil "%HTML_PROFILE%"^</h1^>
+>>"%HTML_FILE%" echo   ^<p^>Abra https://chatgpt.com/, realize login e depois feche esta janela.^</p^>
+>>"%HTML_FILE%" echo   ^<p^>Pasta do perfil: %HTML_DIR%^</p^>
+>>"%HTML_FILE%" echo ^</body^>
+>>"%HTML_FILE%" echo ^</html^>
 goto :eof
