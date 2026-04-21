@@ -493,7 +493,7 @@ if __name__ == "__main__":
     print("\n[SERVIDOR ONLINE]")
     print(f" 🔒 HTTPS (Seguro):   {local_https_url}")
     print(f" 🌍 HTTP (Remoto):    http://{local_ip}:{config.PORT + 1}")
-    print("\n[ADMIN] User: admin | Pass: 32713091")
+    print("\n[ADMIN] User: admin | Pass: admin (altere no primeiro login)")
     print("--------------------------------------------------\n")
 
     open_urls_when_server_is_ready(config.PORT, [local_https_url])
