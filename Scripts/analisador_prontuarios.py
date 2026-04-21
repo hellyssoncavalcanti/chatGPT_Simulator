@@ -5670,46 +5670,24 @@ def executar_busca_evidencias(resultado: dict, chat_url: str = None, chat_id: st
 # LOOP PRINCIPAL
 # ─────────────────────────────────────────────────────────────
 
-# Intervalo de pausa entre análises (segundos) — vindo de config.py com fallback
+# Intervalo anti-rate-limit agora é aplicado centralmente pelo servidor
+# (`server.py::_wait_python_request_interval_if_needed`) para TODO pedido
+# Python (não apenas analisador), com o intervalo dividido pela quantidade
+# de perfis Chromium ativos em `config.CHROMIUM_PROFILES`. Os valores base
+# continuam em `ANALISADOR_PAUSA_MIN/MAX` (config.py). Esta função virou
+# um no-op mantido por compatibilidade histórica com os call-sites locais.
 PAUSA_MIN = _cfg("ANALISADOR_PAUSA_MIN", 25)
 PAUSA_MAX = _cfg("ANALISADOR_PAUSA_MAX", 60)
-# Redutor aplicado ao intervalo anti-rate-limit quando múltiplos perfis
-# Chromium estão ativos (ex.: default + segunda_chance).
-INTERVALO_ANTI_RATE_LIMIT_MULT = float(_cfg("ANALISADOR_INTERVALO_ANTI_RATE_LIMIT_MULT", 0.5))
-_ultima_analise_iniciada_ts = 0.0
 
 
 def _aguardar_intervalo_entre_analises(contexto: str = "próxima análise"):
     """
-    Impõe intervalo humano entre análises para reduzir risco de CHAT_RATE_LIMIT.
-    O intervalo é sorteado entre ANALISADOR_PAUSA_MIN/MAX (config.py) e aplicado
-    globalmente entre qualquer análise LLM (prontuário normal e síntese compilada).
+    No-op: o intervalo anti-rate-limit entre pedidos Python ao ChatGPT
+    Simulator passou a ser enforçado no próprio servidor (`server.py`),
+    aplicado a qualquer request_source Python e dividido pela quantidade
+    de perfis ChatGPT ativos em `config.CHROMIUM_PROFILES`.
     """
-    global _ultima_analise_iniciada_ts
-    if PAUSA_MIN <= 0 and PAUSA_MAX <= 0:
-        _ultima_analise_iniciada_ts = time.time()
-        return
-    if _ultima_analise_iniciada_ts <= 0:
-        _ultima_analise_iniciada_ts = time.time()
-        return
-
-    pausa_base = int(random.uniform(PAUSA_MIN, PAUSA_MAX))
-    pausa_alvo = int(max(0, pausa_base * max(0.0, INTERVALO_ANTI_RATE_LIMIT_MULT)))
-    decorrido = int(time.time() - _ultima_analise_iniciada_ts)
-    restante = pausa_alvo - decorrido
-    if restante > 0:
-        log.info(
-            f"  ⏸  Intervalo anti-rate-limit ({contexto}): "
-            f"aguardando {restante}s (alvo reduzido {pausa_alvo}s; base {pausa_base}s; já decorridos {decorrido}s)."
-        )
-        try:
-            countdown(restante, "intervalo entre análises")
-        except (KeyboardInterrupt, SystemExit):
-            raise
-        except Exception:
-            time.sleep(restante)
-
-    _ultima_analise_iniciada_ts = time.time()
+    return
 
 def processar_lote(pendentes: list):
     total = len(pendentes)
@@ -5842,8 +5820,8 @@ def processar_lote(pendentes: list):
             salvar_erro(idat, str(e))
             log.error(f"  ❌ ID={idat} erro: {e}")
 
-        # intervalo entre análises agora é aplicado globalmente no início de cada análise
-        # via _aguardar_intervalo_entre_analises(), evitando bursts entre lotes/ciclos.
+        # intervalo anti-rate-limit agora é aplicado no server.py para todo
+        # pedido Python (dividido pelo número de perfis ChatGPT ativos).
 
 
 def atualizar_analise_compilada_paciente(id_paciente: str):

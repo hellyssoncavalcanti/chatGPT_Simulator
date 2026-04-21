@@ -103,6 +103,28 @@ _python_chat_queue_lock = threading.Lock()
 _python_chat_queue_cond = threading.Condition(_python_chat_queue_lock)
 _python_chat_queue_waiting = []
 _python_chat_queue_active = None
+
+# ─────────────────────────────────────────────────────────────
+# Intervalo anti-rate-limit para pedidos oriundos de scripts Python.
+# Aplicado GLOBALMENTE a qualquer requisição cuja origem (request_source)
+# termine com ".py" ou comece por "python:" (ex.: analisador_prontuarios.py,
+# acompanhamento_whatsapp.py, auto_dev_agent.py). Pedidos de usuários remotos
+# que NÃO são Python (frontend PHP, UI local, integrações humanas) passam
+# direto, sem espera. Base em `ANALISADOR_PAUSA_MIN/MAX` — o nome histórico
+# foi mantido, mas o escopo agora é "todo pedido Python".
+# O intervalo efetivo é dividido pela quantidade de perfis Chromium ChatGPT
+# ativos (`config.CHROMIUM_PROFILES`), refletindo a capacidade paralela real
+# do navegador (atualmente 2 perfis → intervalo cai pela metade).
+# ─────────────────────────────────────────────────────────────
+PYTHON_ANTI_RATE_LIMIT_PAUSA_MIN = max(0, int(getattr(config, "ANALISADOR_PAUSA_MIN", 25) or 0))
+PYTHON_ANTI_RATE_LIMIT_PAUSA_MAX = max(
+    PYTHON_ANTI_RATE_LIMIT_PAUSA_MIN,
+    int(getattr(config, "ANALISADOR_PAUSA_MAX", 60) or 0),
+)
+PYTHON_ANTI_RATE_LIMIT_TICK_SEC = 1.0
+_python_anti_rate_limit_lock = threading.Lock()
+_python_anti_rate_limit_last_ts = 0.0
+
 PROM_QUEUE_SIZE = Gauge("simulator_queue_size", "Tamanho atual da fila") if Gauge else None
 PROM_ACTIVE_CHATS = Gauge("simulator_active_chats", "Chats ativos em processamento") if Gauge else None
 PROM_HTTP_ERRORS = Counter("simulator_http_errors_total", "Total de erros HTTP por status", ["status"]) if Counter else None
@@ -382,6 +404,81 @@ def _wait_chat_rate_limit_if_needed(stream_queue=None):
         sys.stdout.flush()
         inline_open = True
         time.sleep(min(CHAT_RATE_LIMIT_PROGRESS_TICK_SEC, remaining))
+
+
+def _count_active_chatgpt_profiles() -> int:
+    """
+    Quantidade de perfis Chromium/ChatGPT que o Simulator pode acionar em
+    paralelo. Lida com `config.CHROMIUM_PROFILES` (mapa chave→diretório),
+    sempre retornando pelo menos 1 para evitar divisão por zero.
+    """
+    profiles = getattr(config, "CHROMIUM_PROFILES", None)
+    if not profiles:
+        return 1
+    try:
+        return max(1, len(profiles))
+    except Exception:
+        return 1
+
+
+def _wait_python_request_interval_if_needed(is_python_source: bool, stream_queue=None):
+    """
+    Enforça um intervalo anti-rate-limit GLOBAL entre requisições cujo
+    `request_source` indica origem Python (qualquer script .py consumindo
+    `/v1/chat/completions`). Pedidos remotos de usuários humanos
+    (frontend PHP, UI local, etc.) passam sem espera.
+
+    O intervalo base é sorteado entre `ANALISADOR_PAUSA_MIN` e
+    `ANALISADOR_PAUSA_MAX` (config.py) e dividido pela quantidade de perfis
+    ChatGPT ativos em `config.CHROMIUM_PROFILES` (atualmente 2 → metade).
+    """
+    if not is_python_source:
+        return
+
+    global _python_anti_rate_limit_last_ts
+
+    pmin = PYTHON_ANTI_RATE_LIMIT_PAUSA_MIN
+    pmax = PYTHON_ANTI_RATE_LIMIT_PAUSA_MAX
+    if pmin <= 0 and pmax <= 0:
+        with _python_anti_rate_limit_lock:
+            _python_anti_rate_limit_last_ts = time.time()
+        return
+
+    with _python_anti_rate_limit_lock:
+        last_ts = _python_anti_rate_limit_last_ts
+        if last_ts <= 0:
+            _python_anti_rate_limit_last_ts = time.time()
+            return
+
+    profile_count = _count_active_chatgpt_profiles()
+    base = random.uniform(max(0, pmin), max(pmin, pmax))
+    target = max(0.0, base / float(profile_count))
+
+    while True:
+        now = time.time()
+        elapsed = now - last_ts
+        remaining = target - elapsed
+        if remaining <= 0:
+            break
+        status_text = (
+            f"⏳ Intervalo anti-rate-limit para pedidos Python "
+            f"({profile_count} perfil(is) ChatGPT ativos, alvo {int(target)}s; "
+            f"base {int(base)}s): aguardando {int(remaining)}s."
+        )
+        if stream_queue is not None:
+            stream_queue.put(json.dumps({
+                "type": "status",
+                "content": status_text,
+                "phase": "python_anti_rate_limit_interval",
+                "wait_seconds": round(remaining, 1),
+                "target_seconds": round(target, 1),
+                "base_seconds": round(base, 1),
+                "profile_count": int(profile_count),
+            }, ensure_ascii=False))
+        time.sleep(min(PYTHON_ANTI_RATE_LIMIT_TICK_SEC, remaining))
+
+    with _python_anti_rate_limit_lock:
+        _python_anti_rate_limit_last_ts = time.time()
 
 
 def _has_active_remote_user_chat():
@@ -2150,6 +2247,13 @@ def chat_completions():
                 slot_acquired = True
             _wait_remote_user_priority_if_needed(is_analyzer, stream_q if stream else None)
             _wait_chat_rate_limit_if_needed(stream_q if stream else None)
+            # Intervalo anti-rate-limit aplicado a QUALQUER pedido Python
+            # (analisador, acompanhamento_whatsapp, auto_dev_agent, etc.).
+            # Pedidos de usuários remotos não-Python passam sem espera.
+            _wait_python_request_interval_if_needed(
+                is_python_source,
+                stream_q if stream else None,
+            )
             browser_queue.put(chat_task_payload)
         except TimeoutError as queue_timeout:
             stream_q.put(json.dumps({
