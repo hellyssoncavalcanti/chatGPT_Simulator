@@ -77,6 +77,7 @@ _chat_rate_limit_lock = threading.Lock()
 _chat_rate_limit_until = 0.0
 _chat_rate_limit_strikes = 0
 ACTIVE_CHAT_STALE_SEC = 900
+SERVER_STARTED_AT = time.time()
 PYTHON_CHAT_QUEUE_TICK_SEC = 1.0
 PYTHON_CHAT_QUEUE_TIMEOUT_SEC = max(
     30,
@@ -750,6 +751,114 @@ def health_check():
         _health_ping_count = 0  # reseta contador após logar
 
     return jsonify({"status": "ok", "service": "ChatGPT Simulator"}), 200
+
+
+@app.route("/api/queue/status", methods=["GET"])
+def queue_status():
+    """
+    Observabilidade da fila interna server → browser.
+    Requer autenticação padrão (before_request/check_auth).
+    """
+    stats = {}
+    try:
+        if hasattr(browser_queue, "snapshot_stats"):
+            stats = browser_queue.snapshot_stats() or {}
+    except Exception as e:
+        stats = {"error": str(e)}
+
+    return jsonify({
+        "success": True,
+        "queue": {
+            "qsize": int(browser_queue.qsize()),
+            **stats
+        }
+    }), 200
+
+
+@app.route("/api/logs/tail", methods=["GET"])
+def logs_tail():
+    """
+    Retorna as últimas linhas do log atual do simulator.
+    Ideal para polling leve no frontend (toast de observabilidade).
+    """
+    try:
+        requested = int(request.args.get("lines", 120))
+    except Exception:
+        requested = 120
+    lines_limit = max(10, min(800, requested))
+
+    path = getattr(config, "LOG_PATH", "")
+    if not path or not os.path.exists(path):
+        return jsonify({"success": False, "error": "log_not_found", "path": path}), 404
+
+    try:
+        with open(path, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            file_size = f.tell()
+            chunk_size = 4096
+            data = b""
+            pos = file_size
+            while pos > 0 and data.count(b"\n") <= lines_limit:
+                read_size = min(chunk_size, pos)
+                pos -= read_size
+                f.seek(pos)
+                data = f.read(read_size) + data
+            text = data.decode("utf-8", errors="replace")
+            tail_lines = text.splitlines()[-lines_limit:]
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e), "path": path}), 500
+
+    return jsonify({
+        "success": True,
+        "path": path,
+        "lines": tail_lines,
+        "line_count": len(tail_lines),
+    }), 200
+
+
+@app.route("/api/metrics", methods=["GET"])
+def api_metrics():
+    """
+    Métricas operacionais leves para observabilidade em tempo real.
+    """
+    now = time.time()
+    active_total = 0
+    active_analyzer = 0
+    active_remote = 0
+    stale_candidates = 0
+    for _chat_id, meta in list(ACTIVE_CHATS.items()):
+        if meta.get("finished"):
+            continue
+        active_total += 1
+        if meta.get("is_analyzer"):
+            active_analyzer += 1
+        else:
+            active_remote += 1
+        last_event_at = float(meta.get("last_event_at") or 0.0)
+        if last_event_at and (now - last_event_at) > ACTIVE_CHAT_STALE_SEC:
+            stale_candidates += 1
+
+    queue_stats = {}
+    try:
+        if hasattr(browser_queue, "snapshot_stats"):
+            queue_stats = browser_queue.snapshot_stats() or {}
+    except Exception as e:
+        queue_stats = {"error": str(e)}
+
+    metrics = {
+        "timestamp": int(now),
+        "uptime_sec": int(max(0, now - SERVER_STARTED_AT)),
+        "queue_qsize": int(browser_queue.qsize()),
+        "queue": queue_stats,
+        "active_chats_total": active_total,
+        "active_chats_remote": active_remote,
+        "active_chats_analyzer": active_analyzer,
+        "active_chats_stale_candidates": stale_candidates,
+        "syncs_in_progress": len(ACTIVE_SYNCS),
+        "rate_limit_remaining_sec": round(_get_chat_rate_limit_remaining_seconds(), 1),
+        "request_timeout_sec": int(PYTHON_CHAT_QUEUE_TIMEOUT_SEC),
+    }
+    return jsonify({"success": True, "metrics": metrics}), 200
 
 @app.route("/", methods=["GET", "POST"])
 def index(): 
@@ -1667,6 +1776,7 @@ def chat_completions():
         'url':              url,
         'chat_id':          chat_id,
         'message':          message,
+        'is_analyzer':      bool(is_analyzer),
         'sender':           sender_label,
         'request_source':   source_hint or sender_label,
         'attachment_paths': saved_paths,
