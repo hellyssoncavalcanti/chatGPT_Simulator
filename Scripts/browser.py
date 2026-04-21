@@ -3236,6 +3236,47 @@ async def handle_chat_task(context, task):
         max_attempts = 2
         handled = False
         page = None
+        async def _resume_stream_after_reopen(probe_page, initial_markdown: str) -> str:
+            """Retoma streaming de uma resposta já iniciada após reabrir a aba."""
+            current = (initial_markdown or "").strip()
+            if current:
+                emit_event(q, "markdown", current)
+
+            deadline = time.time() + 180
+            last_change = time.time()
+            while time.time() < deadline:
+                try:
+                    snap = await _read_last_assistant_snapshot(probe_page)
+                    html = clean_html(snap.get("html", ""))
+                    md_now = md(html, heading_style="ATX").strip()
+                    md_now = md_now.replace("\\_", "_").replace("\\*", "*")
+                except Exception as e_snap:
+                    emit_log(q, f"⚠️ Falha ao ler resposta após reabertura: {e_snap}")
+                    break
+
+                if md_now and md_now != current:
+                    current = md_now
+                    last_change = time.time()
+                    emit_event(q, "markdown", current)
+
+                try:
+                    gen_state = await probe_page.evaluate("""() => {
+                        const stopBtn = document.querySelector('button[aria-label="Stop generating"], button[data-testid="stop-button"]');
+                        const ta = document.querySelector('#prompt-textarea');
+                        return {
+                            generating: !!(stopBtn && stopBtn.offsetParent !== null),
+                            busy: !!(ta && ta.getAttribute('aria-busy') === 'true')
+                        };
+                    }""")
+                except Exception:
+                    gen_state = {"generating": False, "busy": False}
+
+                idle_sec = time.time() - last_change
+                if current and (not gen_state.get("generating")) and (not gen_state.get("busy")) and idle_sec >= 6:
+                    break
+                await asyncio.sleep(1.0)
+            return current
+
         try:
             for attempt in range(1, max_attempts + 1):
                 stop_event = asyncio.Event()
@@ -3266,6 +3307,7 @@ async def handle_chat_task(context, task):
                     )
                     if recoverable and attempt < max_attempts:
                         emit_log(q, "⚠️ Interrupção detectada. Reabrindo aba para verificar status/resposta...")
+                        emit_event(q, "status", "Conexão instável: reabrindo aba para retomar stream da resposta...")
                         probe_ok = False
                         probe_page = None
                         try:
@@ -3278,10 +3320,12 @@ async def handle_chat_task(context, task):
                             probe_md = md(probe_html, heading_style="ATX").strip()
                             probe_md = probe_md.replace("\\_", "_").replace("\\*", "*")
                             if probe_md:
-                                emit_log(q, "✅ Resposta recuperada após reabrir aba; concluindo sem reenvio.")
-                                emit_event(q, "markdown", probe_md)
+                                emit_log(q, "✅ Resposta recuperada após reabrir aba; retomando stream...")
+                                final_md = await _resume_stream_after_reopen(probe_page, probe_md)
                                 final_title = await get_chat_title(probe_page)
                                 emit_event(q, "finish", {"chat_id": task.get("chat_id"), "title": final_title, "url": probe_page.url})
+                                if final_md and final_md != probe_md:
+                                    emit_log(q, f"✅ Stream retomado após reabertura ({len(final_md)} chars).")
                                 probe_ok = True
                                 handled = True
                         except Exception as probe_err:
