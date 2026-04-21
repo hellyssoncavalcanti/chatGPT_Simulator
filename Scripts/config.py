@@ -51,7 +51,14 @@
 # =============================================================================
 # -*- coding: utf-8 -*-
 import os
+from pathlib import Path
 from datetime import datetime
+
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except Exception:
+    pass
 
 
 def _env(name: str, default: str) -> str:
@@ -94,10 +101,7 @@ def _env_csv(name: str, default: list[str]) -> list[str]:
 VERSION = "11.0"
 PORT = _env_int("SIMULATOR_PORT", 3002)
 API_KEY = _env("SIMULATOR_API_KEY", "CVAPI_2b9c80c2abf94a76baf8b3e68d89cb7e")
-BASE_DIR = _env(
-    "SIMULATOR_BASE_DIR",
-    r"C:\chatgpt_simulator" if os.name == "nt" else os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-)
+BASE_DIR = _env("SIMULATOR_BASE_DIR", str(Path(__file__).resolve().parent.parent))
 
 # Debug: exibe todas as queries SQL no console (útil para auditoria)
 DEBUG_LOG = _env_bool("SIMULATOR_DEBUG_LOG", False)   # Altere para True para ativar o debug
@@ -113,6 +117,7 @@ CORS_ALLOWED_ORIGINS = _env_csv(
 ALLOWED_IPS = _env_csv("SIMULATOR_ALLOWED_IPS", ["127.0.0.1", "151.106.97.30"])
 SESSION_COOKIE_SECURE = _env_bool("SIMULATOR_SESSION_COOKIE_SECURE", False)
 SESSION_COOKIE_SAMESITE = _env("SIMULATOR_SESSION_COOKIE_SAMESITE", "Lax")
+SESSION_TTL_HOURS = _env_int("SIMULATOR_SESSION_TTL_HOURS", 24)
 SECURITY_RATE_LIMIT_PER_MIN = _env_int("SIMULATOR_RATE_LIMIT_PER_MIN", 120)
 SECURITY_LOGIN_MAX_FAILS = _env_int("SIMULATOR_LOGIN_MAX_FAILS", 8)
 SECURITY_LOGIN_BLOCK_SEC = _env_int("SIMULATOR_LOGIN_BLOCK_SEC", 900)
@@ -234,3 +239,45 @@ ANALISADOR_LLM_THROTTLE_MAX         = 15   # seg máximos (aleatoriza entre MIN 
 ANALISADOR_LLM_RATE_LIMIT_RETRY_MAX     = 3    # tentativas antes de desistir
 ANALISADOR_LLM_RATE_LIMIT_RETRY_BASE_S  = 60   # espera base (seg) no 1.º rate limit
 ANALISADOR_LLM_RATE_LIMIT_RETRY_MULT    = 2.0  # multiplicador exponencial
+
+# =============================================================================
+# Validação antecipada de configuração (ANALISADOR_* / AUTODEV_AGENT_*)
+# =============================================================================
+try:
+    from pydantic import BaseModel, Field, ValidationError
+
+    class _RuntimeConfigValidator(BaseModel):
+        ANALISADOR_POLL_INTERVAL: int = Field(ge=1)
+        ANALISADOR_MAX_TENTATIVAS: int = Field(ge=1)
+        ANALISADOR_BATCH_SIZE: int = Field(ge=1, le=200)
+        ANALISADOR_MIN_CHARS: int = Field(ge=10)
+        ANALISADOR_TIMEOUT_PROCESSANDO_MIN: int = Field(ge=1)
+        ANALISADOR_PAUSA_MIN: int = Field(ge=0)
+        ANALISADOR_PAUSA_MAX: int = Field(ge=0)
+        ANALISADOR_LLM_THROTTLE_MIN: int = Field(ge=0)
+        ANALISADOR_LLM_THROTTLE_MAX: int = Field(ge=0)
+        ANALISADOR_LLM_RATE_LIMIT_RETRY_MAX: int = Field(ge=0)
+        ANALISADOR_LLM_RATE_LIMIT_RETRY_BASE_S: int = Field(ge=1)
+        ANALISADOR_LLM_RATE_LIMIT_RETRY_MULT: float = Field(ge=1.0)
+        AUTODEV_AGENT_REQUEST_TIMEOUT: int = Field(ge=30)
+
+    _RuntimeConfigValidator(
+        ANALISADOR_POLL_INTERVAL=ANALISADOR_POLL_INTERVAL,
+        ANALISADOR_MAX_TENTATIVAS=ANALISADOR_MAX_TENTATIVAS,
+        ANALISADOR_BATCH_SIZE=ANALISADOR_BATCH_SIZE,
+        ANALISADOR_MIN_CHARS=ANALISADOR_MIN_CHARS,
+        ANALISADOR_TIMEOUT_PROCESSANDO_MIN=ANALISADOR_TIMEOUT_PROCESSANDO_MIN,
+        ANALISADOR_PAUSA_MIN=ANALISADOR_PAUSA_MIN,
+        ANALISADOR_PAUSA_MAX=ANALISADOR_PAUSA_MAX,
+        ANALISADOR_LLM_THROTTLE_MIN=ANALISADOR_LLM_THROTTLE_MIN,
+        ANALISADOR_LLM_THROTTLE_MAX=ANALISADOR_LLM_THROTTLE_MAX,
+        ANALISADOR_LLM_RATE_LIMIT_RETRY_MAX=ANALISADOR_LLM_RATE_LIMIT_RETRY_MAX,
+        ANALISADOR_LLM_RATE_LIMIT_RETRY_BASE_S=ANALISADOR_LLM_RATE_LIMIT_RETRY_BASE_S,
+        ANALISADOR_LLM_RATE_LIMIT_RETRY_MULT=ANALISADOR_LLM_RATE_LIMIT_RETRY_MULT,
+        AUTODEV_AGENT_REQUEST_TIMEOUT=AUTODEV_AGENT_REQUEST_TIMEOUT,
+    )
+except Exception as cfg_err:
+    if cfg_err.__class__.__name__ == "ValidationError":
+        raise RuntimeError(f"Configuração inválida detectada em config.py: {cfg_err}") from cfg_err
+    # pydantic opcional em ambientes legados
+    pass

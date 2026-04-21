@@ -224,7 +224,7 @@ MAX_CODEX_FORWARD_ATTEMPTS = int(_env("AUTODEV_AGENT_CODEX_FORWARD_MAX", "2"))
 # CONFIGURAÇÃO — Segurança e Políticas
 # =============================================================================
 ENABLE_AUTOFIX = _env_bool("AUTODEV_AGENT_AUTOFIX", True, "AUTON_AGENT_UNSAFE")
-ENABLE_AUTOCOMMIT = _env_bool("AUTODEV_AGENT_AUTOCOMMIT", True)
+ENABLE_AUTOCOMMIT = _env_bool("AUTODEV_AGENT_AUTOCOMMIT", False)
 ENABLE_AUTOPUSH = _env_bool("AUTODEV_AGENT_AUTOPUSH", False)
 REUSE_CHAT_CONVERSATION = _env_bool("AUTODEV_AGENT_REUSE_CHAT", True)
 
