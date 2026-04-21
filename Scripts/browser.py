@@ -3900,6 +3900,20 @@ async def _recover_closed_page(page, q, reason: str = ""):
         raise RuntimeError(f"Falha no navegador: página/contexto fechados e recuperação falhou ({exc})") from exc
 
 
+async def _goto_with_recovery(page, q, url: str, *, wait_until: str = "domcontentloaded", timeout: int = 30000, reason: str = ""):
+    """Executa goto com recuperação de page fechada durante o fluxo Codex."""
+    page = await _recover_closed_page(page, q, reason=reason or f"antes de navegar para {url}")
+    try:
+        await page.goto(url, wait_until=wait_until, timeout=timeout)
+        return page
+    except Exception as exc:
+        if "target page, context or browser has been closed" in str(exc).lower():
+            page = await _recover_closed_page(page, q, reason=f"{reason or 'goto'} (retry)")
+            await page.goto(url, wait_until=wait_until, timeout=timeout)
+            return page
+        raise
+
+
 async def handle_codex_task_inner(task, page, q, stop_event, activityts=None):
     """Fluxo dedicado ao Codex (chatgpt.com/codex/cloud):
       1) Navega para a Codex URL.
@@ -3911,16 +3925,8 @@ async def handle_codex_task_inner(task, page, q, stop_event, activityts=None):
     msg = task.get('message') or ''
     codex_repo = task.get('codex_repo')
 
-    page = await _recover_closed_page(page, q, reason="início do fluxo Codex")
     emit_log(q, f'Codex: abrindo {url}')
-    try:
-        await page.goto(url, wait_until='domcontentloaded', timeout=30000)
-    except Exception as exc:
-        if "target page, context or browser has been closed" in str(exc).lower():
-            page = await _recover_closed_page(page, q, reason="goto inicial Codex")
-            await page.goto(url, wait_until='domcontentloaded', timeout=30000)
-        else:
-            raise
+    page = await _goto_with_recovery(page, q, url, wait_until='domcontentloaded', timeout=30000, reason="goto inicial Codex")
     await asyncio.sleep(1.2)
 
     if stop_event.is_set():
@@ -3955,7 +3961,14 @@ async def handle_codex_task_inner(task, page, q, stop_event, activityts=None):
     # Último fallback: voltar para a home /codex/cloud para abrir nova tarefa.
     if not composer_sel:
         emit_log(q, "⚠️ Codex: composer não encontrado na tarefa atual. Voltando para /codex/cloud...")
-        await page.goto("https://chatgpt.com/codex/cloud", wait_until='domcontentloaded', timeout=30000)
+        page = await _goto_with_recovery(
+            page,
+            q,
+            "https://chatgpt.com/codex/cloud",
+            wait_until='domcontentloaded',
+            timeout=30000,
+            reason="fallback para home Codex após composer ausente",
+        )
         await asyncio.sleep(1.0)
         composer_sel = await _codex_wait_for_composer(page, q, timeout_ms=20000)
 
@@ -3990,7 +4003,14 @@ async def handle_codex_task_inner(task, page, q, stop_event, activityts=None):
     while time.time() < deadline:
         if hasattr(page, "is_closed") and page.is_closed():
             page = await _recover_closed_page(page, q, reason="espera por URL da tarefa Codex")
-            await page.goto(url, wait_until='domcontentloaded', timeout=15000)
+            page = await _goto_with_recovery(
+                page,
+                q,
+                url,
+                wait_until='domcontentloaded',
+                timeout=15000,
+                reason="espera por URL da tarefa Codex",
+            )
         cur = (page.url or '')
         m = re.search(r"https://chatgpt\.com/codex/cloud/tasks/([A-Za-z0-9_\-]+)", cur)
         if m:
