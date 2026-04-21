@@ -107,6 +107,10 @@ CORS_ALLOWED_ORIGINS = _env_csv(
     "SIMULATOR_CORS_ALLOWED_ORIGINS",
     ["https://conexaovida.org", "https://www.conexaovida.org"]
 )
+# Allowlist opcional de IPs (camada adicional de defesa em profundidade). A
+# autenticação primária é SEMPRE por API key — esta lista só entra em jogo
+# quando a requisição NÃO traz API key nem sessão válida.
+ALLOWED_IPS = _env_csv("SIMULATOR_ALLOWED_IPS", ["127.0.0.1", "151.106.97.30"])
 SESSION_COOKIE_SECURE = _env_bool("SIMULATOR_SESSION_COOKIE_SECURE", False)
 SESSION_COOKIE_SAMESITE = _env("SIMULATOR_SESSION_COOKIE_SAMESITE", "Lax")
 SECURITY_RATE_LIMIT_PER_MIN = _env_int("SIMULATOR_RATE_LIMIT_PER_MIN", 120)
@@ -149,12 +153,22 @@ DIRS = {
     "users": os.path.join(BASE_DIR, "db", "users"), # Novo diretório
     "logs": os.path.join(BASE_DIR, "logs"),
     "profile": os.path.join(BASE_DIR, "chrome_profile"),
+    "profile_analisador": os.path.join(BASE_DIR, "chrome_profile_analisador"),
     "temp": os.path.join(BASE_DIR, "temp"),
     "downloads": os.path.join(BASE_DIR, "downloads")
 }
 
+# Perfis Chromium nomeados para seleção por request (ver browser.py / analisador).
+# Cliente da API pode enviar "browser_profile": "<chave>" no body; o browser.py
+# resolve para este mapa, caindo em "default" quando a chave não existe.
+CHROMIUM_PROFILES = {
+    "default": DIRS["profile"],
+    "analisador": DIRS["profile_analisador"],
+}
+
 CHATS_FILE = os.path.join(DIRS["db"], "history.json")
 USERS_FILE = os.path.join(DIRS["users"], "users.json") # Arquivo de usuários
+APP_DB_FILE = os.path.join(DIRS["db"], "app.db")
 CERT_FILE = os.path.join(DIRS["certs"], "cert.pem")
 KEY_FILE = os.path.join(DIRS["certs"], "key.pem")
 FRONTEND_FILE = os.path.join(DIRS["frontend"], "index.html")
@@ -175,6 +189,13 @@ ANALISADOR_PHP_URL        = "https://conexaovida.org/scripts/js/chatgpt_integrac
 ANALISADOR_LLM_URL        = "http://127.0.0.1:3003/v1/chat/completions"
 ANALISADOR_LLM_MODEL      = "ChatGPT Simulator"
 ANALISADOR_PROMPT_VERSION  = "v16.1"  # v16.1: + busca web + enriquecimento com evidências
+
+# Perfil Chromium usado pelo analisador em chamadas ao /v1/chat/completions.
+# "default" = compartilha a conta ChatGPT Plus do usuário humano.
+# Qualquer outra chave presente em CHROMIUM_PROFILES (ex.: "analisador") abre
+# um contexto Chromium separado, permitindo uma conta Plus dedicada para o
+# pipeline clínico sem disputar rate-limit com o humano.
+ANALISADOR_BROWSER_PROFILE = _env("ANALISADOR_BROWSER_PROFILE", "default")
 
 # Banco e loop
 ANALISADOR_TABELA                   = "chatgpt_atendimentos_analise"
