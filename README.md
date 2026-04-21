@@ -138,6 +138,13 @@ cenários com múltiplas origens concorrendo por execução no navegador.
   - Ideal para atualização periódica no frontend sem abrir shell.
   - Exige autenticação.
 
+### Endpoint de métricas operacionais (polling)
+
+- `GET /api/metrics`
+  - Retorna uptime do servidor, estado de `ACTIVE_CHATS`, status de syncs,
+    janela de rate-limit e snapshot da fila (`browser_queue`).
+  - Exige autenticação.
+
 ### Frontend: novos itens no menu do usuário (`userDropdown`)
 
 No avatar/menu superior direito foram adicionadas duas ações:
@@ -146,7 +153,9 @@ No avatar/menu superior direito foram adicionadas duas ações:
    Abre um toast com atualização em tempo real do `/api/queue/status`.
 
 2. **Log em tempo real**  
-   Abre um toast com tail do log via `/api/logs/tail`.
+   Abre um toast com **abas**:
+   - **Log** → tail via `/api/logs/tail`
+   - **Métricas** → painel em tempo real via `/api/metrics`
 
 Esses painéis são focados em observabilidade operacional durante uso em
 produção/local, sem interromper a conversa ativa.

@@ -204,6 +204,11 @@ def setup_frontend():
         font-size: 0.82rem; line-height: 1.45; color: #d8d8d8;
         font-family: Consolas, Menlo, Monaco, monospace; white-space: pre-wrap;
     }
+    .monitor-tabs { display: flex; border-bottom: 1px solid #353741; background: #24252c; }
+    .monitor-tab { flex: 1; text-align: center; padding: 8px; cursor: pointer; font-size: 0.82rem; color: #c9c9cf; }
+    .monitor-tab.active { background: #343541; color: #fff; font-weight: 700; }
+    .monitor-panel { display: none; }
+    .monitor-panel.active { display: block; }
     .monitor-meta { color: #9aa0aa; font-size: 0.78rem; margin-bottom: 8px; font-family: 'Segoe UI', sans-serif; }
     .simple-modal { background: #202123; border: 1px solid #444; border-radius: 8px; padding: 20px; width: 300px; max-width: 90%; color: #ececf1; display: flex; flex-direction: column; gap: 15px; box-shadow: 0 10px 25px rgba(0,0,0,0.5); }
     .simple-modal h3 { margin: 0; font-size: 1.1rem; }
@@ -328,7 +333,16 @@ def setup_frontend():
         <span>🧾 Log do ChatGPT Simulator (tempo real)</span>
         <span class="monitor-close" onclick="closeMonitorToast('logMonitorToast')">✖</span>
     </div>
-    <div class="monitor-body" id="logMonitorBody">Carregando...</div>
+    <div class="monitor-tabs">
+        <div class="monitor-tab active" id="logTabBtn" onclick="switchLogMonitorTab('log')">Log</div>
+        <div class="monitor-tab" id="metricsTabBtn" onclick="switchLogMonitorTab('metrics')">Métricas</div>
+    </div>
+    <div class="monitor-panel active" id="logPanel">
+        <div class="monitor-body" id="logMonitorBody">Carregando...</div>
+    </div>
+    <div class="monitor-panel" id="metricsPanel">
+        <div class="monitor-body" id="metricsMonitorBody">Carregando...</div>
+    </div>
 </div>
 <input type="text" id="hiddenCopyInput" style="position:absolute; left:-9999px; opacity:0;">
 
@@ -423,25 +437,74 @@ def setup_frontend():
         document.getElementById('userDropdown').classList.remove('visible');
         const el = document.getElementById('logMonitorToast');
         el.classList.add('visible');
+        switchLogMonitorTab('log');
         const render = async () => {
-            const body = document.getElementById('logMonitorBody');
+            const logBody = document.getElementById('logMonitorBody');
+            const metricsBody = document.getElementById('metricsMonitorBody');
             try {
                 const res = await fetch('/api/logs/tail?lines=120');
                 const json = await res.json();
                 if (!json.success) {
-                    body.innerText = `Falha: ${json.error || 'erro desconhecido'}`;
+                    logBody.innerText = `Falha: ${json.error || 'erro desconhecido'}`;
+                } else {
+                    const header = `[${json.path || 'log'}]\\nlinhas: ${json.line_count || 0}\\n---\\n`;
+                    logBody.innerText = header + (json.lines || []).join('\\n');
+                    logBody.scrollTop = logBody.scrollHeight;
+                }
+            } catch (e) {
+                logBody.innerText = `Erro ao consultar log: ${e}`;
+            }
+
+            try {
+                const resm = await fetch('/api/metrics');
+                const jm = await resm.json();
+                if (!jm.success) {
+                    metricsBody.innerText = `Falha: ${jm.error || 'erro desconhecido'}`;
                     return;
                 }
-                const header = `[${json.path || 'log'}]\\nlinhas: ${json.line_count || 0}\\n---\\n`;
-                body.innerText = header + (json.lines || []).join('\\n');
-                body.scrollTop = body.scrollHeight;
+                const m = jm.metrics || {};
+                const lines = [
+                    `uptime_sec: ${m.uptime_sec ?? 0}`,
+                    `queue_qsize: ${m.queue_qsize ?? 0}`,
+                    `active_chats_total: ${m.active_chats_total ?? 0}`,
+                    `active_chats_remote: ${m.active_chats_remote ?? 0}`,
+                    `active_chats_analyzer: ${m.active_chats_analyzer ?? 0}`,
+                    `active_chats_stale_candidates: ${m.active_chats_stale_candidates ?? 0}`,
+                    `syncs_in_progress: ${m.syncs_in_progress ?? 0}`,
+                    `rate_limit_remaining_sec: ${m.rate_limit_remaining_sec ?? 0}`,
+                    `request_timeout_sec: ${m.request_timeout_sec ?? 0}`,
+                    '',
+                    `queue.by_origin_enqueued: ${JSON.stringify((m.queue || {}).by_origin_enqueued || {})}`,
+                    `queue.by_origin_dequeued: ${JSON.stringify((m.queue || {}).by_origin_dequeued || {})}`,
+                    `queue.lane_sizes: ${JSON.stringify((m.queue || {}).lane_sizes || {})}`,
+                    `queue.avg_wait_ms: ${(m.queue || {}).avg_wait_ms ?? 0}`,
+                    `queue.max_wait_ms: ${(m.queue || {}).max_wait_ms ?? 0}`,
+                    '',
+                    `Atualizado em: ${new Date().toLocaleTimeString()}`
+                ];
+                metricsBody.innerText = lines.join('\\n');
+                if (document.getElementById('metricsPanel').classList.contains('active')) {
+                    metricsBody.scrollTop = metricsBody.scrollHeight;
+                }
             } catch (e) {
-                body.innerText = `Erro ao consultar log: ${e}`;
+                metricsBody.innerText = `Erro ao consultar métricas: ${e}`;
             }
         };
         render();
         if (logMonitorTimer) clearInterval(logMonitorTimer);
         logMonitorTimer = setInterval(render, 2000);
+    }
+
+    function switchLogMonitorTab(tab) {
+        const logBtn = document.getElementById('logTabBtn');
+        const metricsBtn = document.getElementById('metricsTabBtn');
+        const logPanel = document.getElementById('logPanel');
+        const metricsPanel = document.getElementById('metricsPanel');
+        const isLog = tab === 'log';
+        logBtn.classList.toggle('active', isLog);
+        metricsBtn.classList.toggle('active', !isLog);
+        logPanel.classList.toggle('active', isLog);
+        metricsPanel.classList.toggle('active', !isLog);
     }
 
     // --- LOGIN ---
