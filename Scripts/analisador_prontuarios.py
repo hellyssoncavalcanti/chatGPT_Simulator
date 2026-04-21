@@ -255,6 +255,13 @@ LLM_URL        = _cfg("ANALISADOR_LLM_URL",       "http://127.0.0.1:3003/v1/chat
 LLM_MODEL      = _cfg("ANALISADOR_LLM_MODEL",     "ChatGPT Simulator")
 PROMPT_VERSION = _cfg("ANALISADOR_PROMPT_VERSION", "v16.1")
 
+# Perfil Chromium a ser usado pelas chamadas deste analisador ao Simulator.
+# Fallback "default" = compartilha a conta Plus do usuário humano.
+# Configure ANALISADOR_BROWSER_PROFILE="analisador" (ou outra chave em
+# config.CHROMIUM_PROFILES) para usar uma conta dedicada sem disputar
+# rate-limit com o uso manual do ChatGPT.
+BROWSER_PROFILE = _cfg("ANALISADOR_BROWSER_PROFILE", "default")
+
 TABELA         = _cfg("ANALISADOR_TABELA",         "chatgpt_atendimentos_analise")
 POLL_INTERVAL  = _cfg("ANALISADOR_POLL_INTERVAL",  30)
 MAX_TENTATIVAS = _cfg("ANALISADOR_MAX_TENTATIVAS", 3)
@@ -4374,6 +4381,7 @@ def analisar_prontuario(
             {"role": "system", "content": buscar_prompt_db(id_atendimento=id_atendimento) or SYSTEM_PROMPT},
             {"role": "user",   "content": user_content},
         ],
+        "browser_profile": BROWSER_PROFILE,
     }
 
     # Retoma conversa existente se disponível
