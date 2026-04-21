@@ -134,10 +134,10 @@ except ImportError:
     HAS_PIL = False
 
 app = Flask(__name__, static_folder=config.DIRS["frontend"])
-# Permite que apenas o seu site oficial faça requisições via navegador
-CORS(app, resources={r"/*": {"origins": [
-    *getattr(config, "CORS_ALLOWED_ORIGINS", ["https://conexaovida.org", "https://www.conexaovida.org"])
-]}}, supports_credentials=True)
+# CORS: apenas origens explicitamente configuradas em config.CORS_ALLOWED_ORIGINS.
+# Vazio = nenhuma origem cross-site (mas chamadas same-origin/API-key funcionam).
+CORS(app, resources={r"/*": {"origins": list(getattr(config, "CORS_ALLOWED_ORIGINS", []))}},
+     supports_credentials=True)
 
 _security_lock = threading.Lock()
 _rate_limit_hits: dict[str, deque[float]] = {}
@@ -630,36 +630,50 @@ def _execute_single_uptodate_search(query_str, stream_queue=None, sender_label=N
         sender_label=sender_label,
     )
 
-# --- BLOQUEIO DE SEGURANÇA POR DOMÍNIO E IP ---
+# --- POLÍTICA DE ACESSO ---
+# Ordem de verificação (primeira que aprovar, libera):
+#   1. Rotas públicas (página inicial, health-check, login, estáticos).
+#   2. API key válida (Bearer Authorization, body.api_key ou query.api_key).
+#      → Esta é a autenticação PRIMÁRIA para integrações externas. O IP do
+#        solicitante pode mudar (residencial, móvel, proxies), então a chave
+#        é a fonte de verdade.
+#   3. Sessão de usuário válida (cookie session_token).
+#   4. Somente quando as três acima falham, verificamos origem/IP como
+#      camada extra de defesa contra bots não autenticados.
 @app.before_request
-def enforce_domain_origin():
-    # Permite acesso livre à página inicial, health check e arquivos públicos
-    if request.path in ['/', '/health', '/robots.txt', '/favicon.ico'] or request.path.startswith('/static'):
+def enforce_access_policy():
+    # 1. Rotas totalmente públicas
+    if request.path in ['/', '/health', '/robots.txt', '/favicon.ico', '/login'] or request.path.startswith('/static'):
         return
-        
-    origin = request.headers.get('Origin')
-    referer = request.headers.get('Referer')
-    
-    # Domínios autorizados
-    allowed_domains = ["https://conexaovida.org", "https://www.conexaovida.org"]
-    
-    is_allowed = False
-    
-    # Valida se a requisição veio do seu site (pelo navegador)
+
+    # 2. API key (Bearer / body / query) — autenticação primária
+    auth_header = request.headers.get("Authorization") or ""
+    if auth_header.startswith("Bearer ") and auth_header.split(" ", 1)[1] == config.API_KEY:
+        return
+    data = request.get_json(silent=True) or {}
+    if data.get("api_key") == config.API_KEY:
+        return
+    if request.args.get("api_key") == config.API_KEY:
+        return
+
+    # 3. Sessão de usuário válida
+    if auth.check_session(request):
+        return
+
+    # 4. Fallback: origem/IP explicitamente na allowlist (defesa em profundidade)
+    origin = request.headers.get('Origin') or ''
+    referer = request.headers.get('Referer') or ''
+    allowed_domains = getattr(config, 'CORS_ALLOWED_ORIGINS', []) or []
+    allowed_ips = getattr(config, 'ALLOWED_IPS', ['127.0.0.1']) or []
+
     if origin and any(origin.startswith(domain) for domain in allowed_domains):
-        is_allowed = True
+        return
     if referer and any(referer.startswith(domain) for domain in allowed_domains):
-        is_allowed = True
-
-    # Valida se a requisição veio do IP do seu servidor PHP (importante para o seu script proxy)
-    # Substitua '151.106.97.30' pelo IP real do seu servidor se for diferente
-    allowed_ips = ["127.0.0.1", "151.106.97.30"] 
+        return
     if request.remote_addr in allowed_ips:
-        is_allowed = True
+        return
 
-    if not is_allowed:
-        # Bloqueia bots e scanners (Retorna Erro 403)
-        return jsonify({"error": "Acesso negado. Origem nao autorizada."}), 403
+    return jsonify({"error": "Acesso negado. Autenticação ausente ou origem não autorizada."}), 403
 
 
 # --- MIDDLEWARE ---
@@ -1986,6 +2000,10 @@ def chat_completions():
         # https://chatgpt.com/codex/cloud antes do paste da mensagem.
         # Opcional — quando ausente, browser.py usa a seleção atual do UI.
         'codex_repo':       (data.get('codex_repo') or '').strip() or None,
+        # Perfil Chromium alvo (ex.: "default", "analisador"). Opcional.
+        # browser.py resolve contra config.CHROMIUM_PROFILES; valor ausente
+        # ou chave inválida → fallback para "default" (perfil compartilhado).
+        'browser_profile':  (data.get('browser_profile') or '').strip() or None,
     }
 
     def _dispatch_chat_task():
