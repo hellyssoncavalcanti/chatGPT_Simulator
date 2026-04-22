@@ -91,10 +91,21 @@ _web_search_timing_lock = threading.Lock()
 _web_search_last_started_at = 0.0
 _web_search_last_interval_sec = 0.0
 CHAT_RATE_LIMIT_DEFAULT_COOLDOWN_SEC = 240
+CHAT_RATE_LIMIT_MAX_COOLDOWN_SEC = 1800
+CHAT_RATE_LIMIT_MAX_STRIKES = 6
 CHAT_RATE_LIMIT_PROGRESS_TICK_SEC = 1.0
-_chat_rate_limit_lock = threading.Lock()
-_chat_rate_limit_until = 0.0
-_chat_rate_limit_strikes = 0
+
+from chat_rate_limit_cooldown import ChatRateLimitCooldown
+
+_CHAT_RATE_LIMIT_COOLDOWN = ChatRateLimitCooldown(
+    default_cooldown_sec=CHAT_RATE_LIMIT_DEFAULT_COOLDOWN_SEC,
+    max_cooldown_sec=CHAT_RATE_LIMIT_MAX_COOLDOWN_SEC,
+    max_strikes=CHAT_RATE_LIMIT_MAX_STRIKES,
+)
+
+# Aliases preservados para compat com código que acessava diretamente o lock
+# do cooldown. Nomes históricos mantidos como propriedades do singleton.
+_chat_rate_limit_lock = _CHAT_RATE_LIMIT_COOLDOWN._lock
 ACTIVE_CHAT_STALE_SEC = 900
 SERVER_STARTED_AT = time.time()
 PYTHON_CHAT_QUEUE_TICK_SEC = 1.0
@@ -357,21 +368,7 @@ def _extract_rate_limit_details(error_payload):
 
 
 def _register_chat_rate_limit(retry_after_seconds=None, reason=""):
-    global _chat_rate_limit_until, _chat_rate_limit_strikes
-    cooldown = retry_after_seconds or CHAT_RATE_LIMIT_DEFAULT_COOLDOWN_SEC
-    cooldown = max(1, int(cooldown))
-    now = time.time()
-    with _chat_rate_limit_lock:
-        remaining = max(0.0, _chat_rate_limit_until - now)
-        if remaining > 0:
-            _chat_rate_limit_strikes = min(6, _chat_rate_limit_strikes + 1)
-        else:
-            _chat_rate_limit_strikes = 0
-        backoff_multiplier = 2 ** _chat_rate_limit_strikes
-        adjusted_cooldown = min(1800, int(cooldown * backoff_multiplier))
-        until_ts = now + adjusted_cooldown
-        _chat_rate_limit_until = max(_chat_rate_limit_until, until_ts)
-    cooldown = adjusted_cooldown
+    cooldown = _CHAT_RATE_LIMIT_COOLDOWN.register(retry_after_seconds, reason)
     if reason:
         log(f"[CHAT_RATE_LIMIT] cooldown de {cooldown}s registrado. Motivo: {reason}")
     else:
@@ -379,8 +376,7 @@ def _register_chat_rate_limit(retry_after_seconds=None, reason=""):
 
 
 def _get_chat_rate_limit_remaining_seconds():
-    with _chat_rate_limit_lock:
-        return max(0.0, _chat_rate_limit_until - time.time())
+    return _CHAT_RATE_LIMIT_COOLDOWN.remaining_seconds()
 
 
 def _wait_chat_rate_limit_if_needed(stream_queue=None):
