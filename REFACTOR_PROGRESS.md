@@ -402,7 +402,7 @@ Coletadas em `2026-04-22` via `wc -l` / `grep -nE "def "`:
 ### Estado atual (consolidado) — branch `claude/fix-rate-limit-interval-QmRpK`
 
 **Commits relevantes (mais recente → mais antigo):**
-- `PENDING` — Extrair ChatRateLimitCooldown (backoff exponencial) para módulo puro *(esta sessão)*
+- `ea0b197` — Extrair ChatRateLimitCooldown (backoff exponencial) para módulo puro *(esta sessão)*
 - `77417b9` — Merge PR #564 (trabalho anterior de `1vPbB` integrado em `main`)
 - `67d3b39` — Extrair SecurityState (rate-limit + login brute-force) para módulo puro
 - `5dc4928` — Integrar log_sanitizer e autoexplicar 409 benigno de /api/sync
@@ -551,4 +551,4 @@ Se precisar tocar em browser.py (async/Playwright) ou analisador_prontuarios.py,
 - **2026-04-22 quater** — `c5c45dc` → `3646da1` → `a87a61a` → `be785a3`: passos 2-5 do Lote P0 + log_sanitizer + unificação analisador.
 - **2026-04-22 quinquies** — `3b06256`: gravação do primeiro PONTO DE RETOMADA autocontido.
 - **2026-04-22 sexies** — `5dc4928` + `67d3b39`: integração de `log_sanitizer` em `_audit_event` e `utils.log`; correção/autoexplicação do 409 em `/api/sync`; extração de `SecurityState`. 240 testes offline passando. Merge via PR #564 em `main`.
-- **2026-04-22 septies** (esta sessão, branch `claude/fix-rate-limit-interval-QmRpK`) — extração de `ChatRateLimitCooldown` (backoff exponencial 2^strikes, clamp 1800s) para módulo puro. 257 testes offline passando (+17 novos).
+- **2026-04-22 septies** (esta sessão, branch `claude/fix-rate-limit-interval-QmRpK`) — `ea0b197`: extração de `ChatRateLimitCooldown` (backoff exponencial 2^strikes, clamp 1800s) para módulo puro. 257 testes offline passando (+17 novos).
