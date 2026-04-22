@@ -58,6 +58,7 @@ from server_helpers import (
     count_active_chatgpt_profiles as _count_active_chatgpt_profiles_impl,
 )
 import error_catalog as _error_catalog
+from log_sanitizer import sanitize_mapping as _sanitize_audit_payload
 import threading
 try:
     from prometheus_client import Counter, Gauge, generate_latest, CONTENT_TYPE_LATEST
@@ -166,6 +167,16 @@ class No401AuthLog(logging.Filter):
         # Suprime log repetitivo de GET /health (ping do analisador)
         if "GET /health" in msg and " 200 " in msg:
             return False
+        # Acrescenta explicação curta ao 409 de /api/sync para evitar
+        # interpretação como erro real. O 409 ali é dedup defensivo de
+        # sincronização concorrente (mesmo chat_id/url em janela de 120s).
+        if "POST /api/sync" in msg and " 409 " in msg:
+            record.msg = (
+                f"{record.msg}  ← sync_in_progress (dedup 120s: "
+                f"já há sincronização ativa para este chat_id/url; "
+                f"benigno, a sync anterior continua rodando)"
+            )
+            record.args = ()
         return True
 logging.getLogger("werkzeug").addFilter(No401AuthLog())
 
@@ -226,10 +237,14 @@ def _audit_event(event_type: str, **extra):
         "path": getattr(request, "path", ""),
     }
     payload.update(extra or {})
+    # Sanitiza valores string (api_key, Bearer tokens, cookies de sessão,
+    # caminhos de perfil Chromium) antes de emitir no log de auditoria.
+    safe_payload = _sanitize_audit_payload(payload)
     try:
-        log(f"[SECURITY_AUDIT] {json.dumps(payload, ensure_ascii=False)}")
+        log(f"[SECURITY_AUDIT] {json.dumps(safe_payload, ensure_ascii=False)}")
     except Exception:
-        log(f"[SECURITY_AUDIT] {payload}")
+        # Mesmo no fallback (falha no json.dumps), emitir a versão sanitizada.
+        log(f"[SECURITY_AUDIT] {safe_payload}")
 
 
 def _prune_old_attempts(dq: deque[float], window_sec: int):
@@ -1395,10 +1410,22 @@ def api_sync():
     with ACTIVE_SYNCS_LOCK:
         started_at = ACTIVE_SYNCS.get(sync_key)
         if started_at and (time.time() - started_at) < 120:
+            elapsed = int(time.time() - started_at)
+            retry_after = max(1, 120 - elapsed)
+            explanation = (
+                f"[🔄 SYNC] ⚠️ sync_in_progress (benigno): já existe sincronização "
+                f"ativa para sync_key={sync_key!r} há {elapsed}s. "
+                f"Dedup automático (janela 120s) → respondendo 409 e preservando a "
+                f"sync anterior. Retry seguro em ~{retry_after}s."
+            )
+            print(explanation)
+            log(f"[SYNC_DEDUP] sync_key={sync_key} elapsed={elapsed}s → 409 sync_in_progress")
             return jsonify({
                 "success": False,
                 "error": "sync_in_progress",
-                "message": "Já existe sincronização ativa para este chat."
+                "message": "Já existe sincronização ativa para este chat.",
+                "retry_after_seconds": retry_after,
+                "elapsed_seconds": elapsed,
             }), 409
         ACTIVE_SYNCS[sync_key] = time.time()
 
