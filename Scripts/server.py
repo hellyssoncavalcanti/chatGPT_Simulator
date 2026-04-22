@@ -57,6 +57,7 @@ from server_helpers import (
     prune_old_attempts as _prune_old_attempts_impl,
     count_active_chatgpt_profiles as _count_active_chatgpt_profiles_impl,
 )
+import error_catalog as _error_catalog
 import threading
 try:
     from prometheus_client import Counter, Gauge, generate_latest, CONTENT_TYPE_LATEST
@@ -322,6 +323,15 @@ def _extract_rate_limit_details(error_payload):
     """
     Identifica sinalização de rate-limit enviada pelo browser.py.
     Aceita payload string ou dict.
+
+    Decisão de rate-limit usa duas fontes, nesta ordem:
+      1. Campo explícito `code` ∈ {rate_limit, too_many_requests} —
+         sinal autoritativo enviado pelo browser.py.
+      2. Classificação heurística do texto via `error_catalog.classify_from_text`
+         (PT-BR + EN; cobre "excesso de solicita", "too many request",
+         "rate limit", "chegou ao limite", etc.).
+
+    Contrato de retorno preservado: `(is_rate_limited, message, retry_after)`.
     """
     code = ""
     message = ""
@@ -339,12 +349,9 @@ def _extract_rate_limit_details(error_payload):
     else:
         message = str(error_payload or "").strip()
 
-    lowered = f"{code} {message}".lower()
     is_rate_limited = (
         code in {"rate_limit", "too_many_requests"}
-        or "excesso de solicita" in lowered
-        or "too many request" in lowered
-        or "too many requests" in lowered
+        or _error_catalog.classify_from_text(f"{code} {message}") == _error_catalog.RATE_LIMIT
     )
     return is_rate_limited, message, retry_after
 
