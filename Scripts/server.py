@@ -47,6 +47,10 @@ from shared import browser_queue, get_file_info
 import storage
 import auth
 from utils import log as file_log
+from request_source import (
+    is_python_chat_request as _is_python_chat_request_impl,
+    is_codex_chat_request as _is_codex_chat_request_impl,
+)
 import threading
 try:
     from prometheus_client import Counter, Gauge, generate_latest, CONTENT_TYPE_LATEST
@@ -519,17 +523,11 @@ def _wait_remote_user_priority_if_needed(is_analyzer: bool, stream_queue=None):
 
 
 def _is_python_chat_request(source_hint_norm: str) -> bool:
-    src = (source_hint_norm or "").strip().lower()
-    return src.endswith(".py") or ".py/" in src or src.startswith("python:")
+    return _is_python_chat_request_impl(source_hint_norm)
 
 
 def _is_codex_chat_request(source_hint_norm: str, url: str, origin_url: str) -> bool:
-    hay = " ".join([
-        str(source_hint_norm or "").lower(),
-        str(url or "").lower(),
-        str(origin_url or "").lower(),
-    ])
-    return ("codex" in hay) or ("/codex/cloud" in hay) or ("/codex/" in hay)
+    return _is_codex_chat_request_impl(source_hint_norm, url, origin_url)
 
 
 def _queue_status_payload(wait_seconds: float, position: int, total: int, sender_label: str) -> str:
