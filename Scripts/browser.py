@@ -45,6 +45,14 @@ import app_selectors
 import humanizer
 from shared import browser_queue, register_file
 from utils import log as file_log
+from browser_predicates import (
+    extract_task_sender as _extract_task_sender_impl,
+    is_known_orphan_tab_url as _is_known_orphan_tab_url_impl,
+    response_looks_incomplete_json as _response_looks_incomplete_json_impl,
+    response_requests_followup_actions as _response_requests_followup_actions_impl,
+    replace_inline_base64_payloads as _replace_inline_base64_payloads_impl,
+    ensure_paste_wrappers as _ensure_paste_wrappers_impl,
+)
 from markdownify import markdownify as md
 
 # ─────────────────────────────────────────────────────────────
@@ -112,16 +120,7 @@ def emit_event(q, type_, content):
 
 def _extract_task_sender(task: dict | None) -> str:
     """Resolve sender label attached to the queued task."""
-    if not isinstance(task, dict):
-        return "usuario_remoto"
-    sender = (
-        task.get("sender")
-        or task.get("request_source")
-        or task.get("remetente")
-        or ""
-    )
-    sender = str(sender or "").strip()
-    return sender or "usuario_remoto"
+    return _extract_task_sender_impl(task)
 
 
 def _is_python_sender(sender_hint: str) -> bool:
@@ -148,12 +147,7 @@ async def close_ephemeral_pages(context, baseline_pages, q=None, keep_pages=None
 
 
 def _is_known_orphan_tab_url(url: str) -> bool:
-    if not url:
-        return False
-    u = url.strip().lower()
-    if "residenciapediatrica.com.br/content/pdf/" in u:
-        return True
-    return False
+    return _is_known_orphan_tab_url_impl(url)
 
 
 async def cleanup_known_orphan_tabs(context, q=None):
@@ -536,43 +530,7 @@ async def _dismiss_rate_limit_modal_if_any(page, q=None):
 
 
 def _response_looks_incomplete_json(markdown_text: str) -> bool:
-    texto = (markdown_text or '').strip()
-    if not texto:
-        return False
-
-    if texto.startswith('```'):
-        texto = re.sub(r'^```(?:json)?\s*', '', texto, flags=re.IGNORECASE)
-        texto = re.sub(r'\s*```$', '', texto)
-    texto = texto.strip()
-    if not texto.startswith('{'):
-        return False
-
-    depth_obj = 0
-    depth_arr = 0
-    in_string = False
-    escape = False
-    for ch in texto:
-        if in_string:
-            if escape:
-                escape = False
-            elif ch == '\\':
-                escape = True
-            elif ch == '"':
-                in_string = False
-            continue
-
-        if ch == '"':
-            in_string = True
-        elif ch == '{':
-            depth_obj += 1
-        elif ch == '}':
-            depth_obj -= 1
-        elif ch == '[':
-            depth_arr += 1
-        elif ch == ']':
-            depth_arr -= 1
-
-    return in_string or depth_obj > 0 or depth_arr > 0 or not texto.rstrip().endswith('}')
+    return _response_looks_incomplete_json_impl(markdown_text)
 
 
 def _response_requests_followup_actions(markdown_text: str) -> bool:
@@ -580,61 +538,16 @@ def _response_requests_followup_actions(markdown_text: str) -> bool:
     Detecta respostas intermediárias que normalmente exigem rodada adicional
     (ex.: sql_queries/search_queries/json de ferramenta) antes da resposta final.
     """
-    texto = (markdown_text or "").strip().lower()
-    if not texto:
-        return False
-
-    if texto.startswith("```"):
-        texto = re.sub(r'^```(?:json)?\s*', '', texto, flags=re.IGNORECASE)
-        texto = re.sub(r'\s*```$', '', texto)
-        texto = texto.strip().lower()
-
-    hints = (
-        '"sql_queries"', "'sql_queries'", "sql_queries",
-        '"search_queries"', "'search_queries'", "search_queries",
-        '"queries_sql"', "'queries_sql'", "queries_sql",
-        '"tool_name"', '"tool_calls"', '"function_call"',
-    )
-    return any(h in texto for h in hints)
+    return _response_requests_followup_actions_impl(markdown_text)
 
 
 def _replace_inline_base64_payloads(text: str) -> tuple[str, int]:
     """Substitui blobs base64 inline (principalmente imagens) por placeholder."""
-    if not text:
-        return text, 0
-    out = str(text)
-    replaced = 0
-
-    # data:image/...;base64,AAAA...
-    out, n1 = re.subn(
-        r"data:image/[a-zA-Z0-9.+-]+;base64,[A-Za-z0-9+/=\s]{120,}",
-        "[BASE64_IMAGE_REMOVIDA]",
-        out,
-        flags=re.IGNORECASE,
-    )
-    replaced += n1
-
-    # Campos JSON comuns com payload base64 gigante.
-    out, n2 = re.subn(
-        r'("(?:data_base64|image_base64|base64|image_data)"\s*:\s*")[A-Za-z0-9+/=\s]{120,}(")',
-        r'\1[BASE64_IMAGE_REMOVIDA]\2',
-        out,
-        flags=re.IGNORECASE,
-    )
-    replaced += n2
-
-    return out, replaced
+    return _replace_inline_base64_payloads_impl(text)
 
 
 def _ensure_paste_wrappers(text: str) -> tuple[str, bool]:
-    start_marker = "[INICIO_TEXTO_COLADO]"
-    end_marker = "[FIM_TEXTO_COLADO]"
-    content = str(text or "")
-    if not content.strip():
-        return content, False
-    if start_marker in content and end_marker in content:
-        return content, False
-    return f"{start_marker}{content}{end_marker}", True
+    return _ensure_paste_wrappers_impl(text)
 
 
 async def smart_input(page, message, q=None, activityts=None):
