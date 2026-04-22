@@ -322,16 +322,211 @@ Coletadas em `2026-04-22` via `wc -l` / `grep -nE "def "`:
 ### Checks (2026-04-22 ter)
 - `pytest tests/test_humanizer.py tests/test_shared_queue.py tests/test_selectors_smoke.py tests/test_request_source.py tests/test_error_catalog.py` → **74 passed** (18 baseline + 56 novos).
 
-### Progresso no Lote P0 (checklist)
-- [x] **Passo 1** — `Scripts/error_catalog.py` + testes (entregue nesta sessão).
-- [ ] **Passo 2** — extrair `_format_wait_seconds`, `_queue_status_payload`, `_prune_old_attempts`, `_count_active_chatgpt_profiles` de `server.py` para `Scripts/server_helpers.py` + testes.
-- [ ] **Passo 3** — extrair predicados puros de `browser.py` para `Scripts/browser_predicates.py` + testes (sem tocar async/Playwright).
-- [ ] **Passo 4** — invariantes testáveis de `HumanTypingProfile` via `random.seed`.
-- [ ] **Passo 5** — consumir catálogo em `_extract_rate_limit_details` / `_register_chat_rate_limit` / `_resposta_eh_rate_limit`. **Ponto de atenção:** manter wrapper que ainda devolve a tupla `(is_rate_limited, message, retry_after)` para não quebrar chamadores atuais — trocar apenas a fonte da decisão.
-- [ ] **Passo 6** — (condicional) plano de design de concorrência por `browser_profile` antes de qualquer edição em `browser.py`.
+### Progresso no Lote P0 (checklist atualizado em 2026-04-22 quater)
+- [x] **Passo 1** — `Scripts/error_catalog.py` + `tests/test_error_catalog.py` (56 casos).
+- [x] **Passo 2** — `Scripts/server_helpers.py` + `tests/test_server_helpers.py` (29 casos). Commit `c5c45dc`.
+- [x] **Passo 3** — `Scripts/browser_predicates.py` + `tests/test_browser_predicates.py` (38 casos). Commit `e6a9cc2`.
+- [x] **Passo 4** — invariantes observáveis em `tests/test_humanizer.py` (15 casos novos). Commit `c676cbc`.
+- [x] **Passo 5** — catálogo integrado em `server._extract_rate_limit_details` + `tests/test_rate_limit_integration.py` (18 casos). Commit `3646da1`.
+- [ ] **Passo 6** — (condicional) plano de design de concorrência por `browser_profile` antes de qualquer edição em `browser.py`. **Requer confirmação explícita do usuário** — toca loop async/Playwright.
 
-### Prompt de retomada (próximo ciclo)
-"Continue o refactor do `/home/user/chatGPT_Simulator` na branch `claude/fix-rate-limit-interval-1vPbB`. Leia `REFACTOR_PROGRESS.md` — seção `Progresso 2026-04-22 ter` — antes de qualquer edição. Execute o **Lote P0, passo 2**: criar `Scripts/server_helpers.py` movendo (com wrapper mantido em `server.py`) as funções puras `_format_wait_seconds`, `_queue_status_payload`, `_prune_old_attempts`, `_count_active_chatgpt_profiles`. Criar `tests/test_server_helpers.py` com ≥3 casos por função. Regras: (a) módulo puro, sem Flask/config; (b) wrappers finos em `server.py` preservam nomes e assinaturas atuais; (c) zero mudança no fluxo de `/v1/chat/completions`; (d) manter `pytest tests/test_humanizer.py tests/test_shared_queue.py tests/test_selectors_smoke.py tests/test_request_source.py tests/test_error_catalog.py tests/test_server_helpers.py` passando; (e) ATUALIZAR esta seção ao se aproximar do limite, antes de commit/push; (f) commit e push para `claude/fix-rate-limit-interval-1vPbB`. Se algum helper precisar de acesso a `config`, **parar e discutir design** — helper puro não lê config."
+> Lote P0 executado (exceto passo 6 condicional). Suite offline: **175 passed** em 8 arquivos de teste.
+
+---
+
+## Progresso 2026-04-22 quater — Lote P0 passos 2-5 concluídos em sequência
+
+### Entregue nesta sessão (quater)
+1. `Scripts/server_helpers.py` (+tests, 29 casos) — `format_wait_seconds`, `queue_status_payload`, `prune_old_attempts` (com ganchos `now`/`now_func`), `count_active_chatgpt_profiles` (recebe mapa por argumento; wrapper em `server.py` é quem lê `config.CHROMIUM_PROFILES`). Commit `c5c45dc`.
+2. `Scripts/browser_predicates.py` (+tests, 38 casos) — `extract_task_sender`, `is_known_orphan_tab_url`, `response_looks_incomplete_json`, `response_requests_followup_actions`, `replace_inline_base64_payloads`, `ensure_paste_wrappers`. Regexes preservadas byte-a-byte. Commit `e6a9cc2`.
+3. `tests/test_humanizer.py` ampliado (+15 casos) — invariantes anti-robotização: variância mínima em 200 amostras (≥5 valores distintos com 3 casas decimais, ≤5% delays consecutivos idênticos), piso de pausa em pontuação, determinismo via `random.seed`, normalização de swap `min>max` sem rebaixar piso, typos sempre de `DEFAULT_NEARBY_KEYS`, janela de hesitação respeitada. Commit `c676cbc`.
+4. Integração drop-in — `server._extract_rate_limit_details` agora delega a classificação heurística para `error_catalog.classify_from_text(...) == RATE_LIMIT`, removendo o string-match ad-hoc do caminho quente. Contrato `(is_rate_limited, message, retry_after)` preservado. `tests/test_rate_limit_integration.py` (+18 casos) replica a lógica offline (server.py continua precisando de Flask para import). Commit `3646da1`.
+
+### Invariantes de não-regressão adicionados
+- **Wrappers finos obrigatórios**: qualquer função movida de `server.py`/`browser.py` para módulo puro DEVE deixar wrapper no original com mesmo nome/assinatura. Já cumprido em `_format_wait_seconds`, `_queue_status_payload`, `_prune_old_attempts`, `_count_active_chatgpt_profiles`, `_extract_task_sender`, `_is_known_orphan_tab_url`, `_response_looks_incomplete_json`, `_response_requests_followup_actions`, `_replace_inline_base64_payloads`, `_ensure_paste_wrappers`, `_is_python_chat_request`, `_is_codex_chat_request`.
+- **Módulos puros** (sem Flask/Playwright/config no import): `request_source.py`, `error_catalog.py`, `server_helpers.py`, `browser_predicates.py`, `humanizer.py`.
+- **Checks offline atuais**: `pytest tests/test_humanizer.py tests/test_shared_queue.py tests/test_selectors_smoke.py tests/test_request_source.py tests/test_error_catalog.py tests/test_server_helpers.py tests/test_browser_predicates.py tests/test_rate_limit_integration.py` → **175 passed**.
+
+### Padrões estabelecidos para os próximos ciclos
+1. **Padrão de extração**: novo módulo puro → wrappers finos nos arquivos originais → testes offline ≥3 casos por função pública.
+2. **Padrão de integração com catálogo**: quando substituir uma string-match, preservar o contrato de retorno e testar via **cópia offline** da função (ex.: `test_rate_limit_integration.py`) já que `server.py` não importa sem Flask.
+3. **Padrão de commit**: 1 passo = 1 PR/commit ≤ 300 linhas líquidas de diff; título no imperativo PT-BR; corpo com lista de testes novos e resultado do `pytest`.
+
+### Próximo ciclo — opções (ordem sugerida)
+
+> Escolher UMA por sessão e deixar as outras para as sessões seguintes.
+
+**Opção A (recomendada, menor risco) — Lote P1 passo 1: sanitização de logs/PII**
+- Criar `Scripts/log_sanitizer.py` (puro) com funções `mask_api_key(str)`, `mask_bearer_token(str)`, `mask_session_cookie(str)`, `mask_file_path(str)`, `sanitize(str)` combinando todas.
+- Criar `tests/test_log_sanitizer.py` com ≥3 casos por máscara + casos compostos.
+- **NÃO integrar ainda** em `_audit_event`/`file_log` — integração é um segundo passo (preservar padrão "módulo puro primeiro").
+- Baixo risco: módulo isolado, sem dependência em server.py/browser.py.
+
+**Opção B — Extrair mais helpers puros do `analisador_prontuarios.py`**
+- Candidatos: `_resposta_eh_rate_limit(texto)`, `_headers_llm()` (puro após receber `api_key` por argumento), parsers de JSON/markdown do LLM.
+- Risco médio: arquivo gigante (6134 linhas) porém com muitos pure helpers.
+- Valor: melhora a cobertura de testes do caminho do analisador (hoje 0%).
+
+**Opção C — Lote P0 passo 6: plano de concorrência por `browser_profile`**
+- **Requer confirmação explícita do usuário** antes de editar `browser.py`.
+- Entregável: documento de design em `docs/concurrency_per_profile.md` (sem código).
+
+**Opção D — Extrair mais helpers de `server.py`**
+- Candidatos: `_format_wait_seconds` já saiu; `_extract_rate_limit_details` pode virar pure com catálogo; `_client_ip`, `_is_ip_blocked`, `_register_rate_limit_hit`, `_register_login_failure`.
+- Cuidado: `_is_ip_blocked` + `_register_*` usam `_security_lock` e dicts globais — extração precisa de um "security_state" store injetável, parecido com o padrão usado no passo 2.
+
+### Prompt de retomada — próximo ciclo (copiar em novo chat)
+"Continue o refactor do `/home/user/chatGPT_Simulator` na branch `claude/fix-rate-limit-interval-1vPbB`. Leia `REFACTOR_PROGRESS.md` — seção `Progresso 2026-04-22 quater` — antes de qualquer edição. Executar **Opção A do próximo ciclo**: criar `Scripts/log_sanitizer.py` (módulo puro, sem Flask/Playwright/config) com `mask_api_key`, `mask_bearer_token`, `mask_session_cookie`, `mask_file_path`, `sanitize` (combina todas). Criar `tests/test_log_sanitizer.py` com ≥3 casos por máscara + casos compostos. Regras: (a) módulo puro; (b) NÃO integrar ainda em `_audit_event` / `file_log` — esse é um passo separado; (c) preservar requisitos consolidados; (d) manter offline suite passando (`pytest tests/test_humanizer.py tests/test_shared_queue.py tests/test_selectors_smoke.py tests/test_request_source.py tests/test_error_catalog.py tests/test_server_helpers.py tests/test_browser_predicates.py tests/test_rate_limit_integration.py tests/test_log_sanitizer.py`); (e) ATUALIZAR esta seção ao se aproximar do limite, antes de commit/push; (f) commit e push para `claude/fix-rate-limit-interval-1vPbB`. Padrões já estabelecidos em `Refinamento 2026-04-22 bis` e `Progresso 2026-04-22 quater` — reusá-los sem redesign."
+
+### Estado atual dos arquivos (para quem retoma)
+- `Scripts/request_source.py` (34 loc) — extração original, request-source classification.
+- `Scripts/error_catalog.py` (~230 loc) — 11 códigos + `classify_from_text` PT-BR/EN.
+- `Scripts/server_helpers.py` (~115 loc) — 4 helpers puros de server.py.
+- `Scripts/browser_predicates.py` (~180 loc) — 6 predicados puros de browser.py.
+- `Scripts/humanizer.py` (124 loc) — inalterado nesta rodada; apenas testes expandidos.
+- `Scripts/server.py` — wrappers finos; integração do catálogo no `_extract_rate_limit_details`; resto intacto.
+- `Scripts/browser.py` — wrappers finos; loop async Playwright intacto.
+- `tests/` — 175 testes offline. Arquivos novos: `test_request_source.py`, `test_error_catalog.py`, `test_server_helpers.py`, `test_browser_predicates.py`, `test_rate_limit_integration.py`; ampliados: `test_humanizer.py`.
 
 ## Prompt de retomada ORIGINAL (ainda válido para sessões de replanejamento)
 "Continue o refactor do projeto `/workspace/chatGPT_Simulator` lendo `REFACTOR_PROGRESS.md` primeiro. Nesta etapa, NÃO implemente código novo de features: apenas refine e priorize backlog técnico, com foco máximo em manter simulação humana não-robótica no browser. Respeite os requisitos já consolidados (API key primária, bootstrap de `config.py`/`sync_github_settings.ps1`, reset `admin/admin` só em fresh install, `browser_profile` end-to-end com fallback para `default`, e `sync_github` autônomo). Em seguida, proponha um plano de execução por lotes (P0→P1→P2), rode checks possíveis no ambiente, atualize `REFACTOR_PROGRESS.md`, faça commit e abra PR."
+
+---
+
+## 🆕 PONTO DE RETOMADA (última atualização em 2026-04-22 quinquies)
+
+> **Leia APENAS esta seção ao retomar em outro chat.** Ela é autocontida: não
+> é necessário reler seções anteriores a não ser que haja dúvida sobre algum
+> detalhe específico.
+
+### Estado atual (consolidado) — branch `claude/fix-rate-limit-interval-1vPbB`
+
+**PR aberto:** https://github.com/hellyssoncavalcanti/chatGPT_Simulator/pull/559 (contém todo o trabalho até aqui).
+
+**Commits relevantes (mais recente → mais antigo):**
+- `be785a3` — Unificar detecção de rate-limit no analisador via error_catalog
+- `a87a61a` — Adicionar log_sanitizer.py (Lote P1 passo 1)
+- `1061af3` — docs: consolidar progresso Lote P0 passos 2-5
+- `3646da1` — Integrar catálogo em _extract_rate_limit_details (P0 passo 5)
+- `c676cbc` — Invariantes testáveis de HumanTypingProfile (P0 passo 4)
+- `e6a9cc2` — Extrair predicados puros de browser.py (P0 passo 3)
+- `c5c45dc` — Extrair helpers puros de server.py (P0 passo 2)
+- `3334bf6` — Adicionar catálogo central de erros (P0 passo 1)
+- `1f3374b` — Extrair detecção de origem de request para módulo testável offline
+- `0c6216e` — docs: refinar backlog P0-P1-P2 com evidências concretas
+
+**Suite offline atual: `pytest` em 10 arquivos → 218 passed.**
+
+Lista exata de comandos para validar antes de qualquer mudança:
+```
+pip install pytest  # se necessário
+python3 -m pytest \
+  tests/test_humanizer.py \
+  tests/test_shared_queue.py \
+  tests/test_selectors_smoke.py \
+  tests/test_request_source.py \
+  tests/test_error_catalog.py \
+  tests/test_server_helpers.py \
+  tests/test_browser_predicates.py \
+  tests/test_rate_limit_integration.py \
+  tests/test_log_sanitizer.py \
+  tests/test_analisador_rate_limit.py
+```
+Esperado: **218 passed**.
+
+### Mapa de módulos puros já criados
+
+| Módulo | LOC | Papel | Testes |
+|---|---|---|---|
+| `Scripts/request_source.py` | 34 | Classifica origem (`is_python_chat_request`, `is_codex_chat_request`). | `tests/test_request_source.py` (10) |
+| `Scripts/error_catalog.py` | ~230 | 11 códigos + `classify_from_text` (PT-BR + EN). | `tests/test_error_catalog.py` (56) |
+| `Scripts/server_helpers.py` | ~115 | `format_wait_seconds`, `queue_status_payload`, `prune_old_attempts`, `count_active_chatgpt_profiles`. | `tests/test_server_helpers.py` (29) |
+| `Scripts/browser_predicates.py` | ~180 | `extract_task_sender`, `is_known_orphan_tab_url`, `response_looks_incomplete_json`, `response_requests_followup_actions`, `replace_inline_base64_payloads`, `ensure_paste_wrappers`. | `tests/test_browser_predicates.py` (38) |
+| `Scripts/log_sanitizer.py` | ~170 | `mask_api_key`, `mask_bearer_token`, `mask_session_cookie`, `mask_file_path`, `sanitize`, `sanitize_iter`, `sanitize_mapping`. | `tests/test_log_sanitizer.py` (31) |
+| `Scripts/humanizer.py` | 124 | Módulo original (inalterado); testes ampliados com invariantes anti-robotização. | `tests/test_humanizer.py` (18+15) |
+
+### Integrações já feitas
+- `server._extract_rate_limit_details` usa `error_catalog.classify_from_text`.
+- `analisador_prontuarios._resposta_eh_rate_limit` usa `error_catalog.classify_from_text` (com fallback).
+- Todos os helpers movidos mantêm wrapper fino com o nome original em `server.py`/`browser.py`.
+
+### Integrações pendentes (NÃO feitas)
+1. `log_sanitizer.sanitize*` em `server._audit_event` e `utils.file_log` — P1, próximo passo natural.
+2. Catálogo em `_register_chat_rate_limit` e `browser._dismiss_rate_limit_modal_if_any`.
+3. Concorrência por `browser_profile` — **bloqueado por confirmação do usuário** (toca `browser.py` async).
+
+### Requisitos consolidados (não-regredir)
+- API key é autorização primária; IP/origem são defesa adicional.
+- Bootstrap via `config.py` + `sync_github_settings.ps1` a partir dos `*.example.*`.
+- Reset `admin/admin` SOMENTE em fresh install.
+- `browser_profile` ponta-a-ponta com fallback `default`.
+- `sync_github` autônomo, desacoplado de chat.
+- Intervalo anti-rate-limit global para requests Python (server.py:428).
+- **Wrapper fino obrigatório**: qualquer extração futura deve deixar wrapper com nome/assinatura original.
+- **Módulo puro**: sem `flask`, `playwright` nem `config` no import.
+
+### Instruções facilitadoras (padrões já validados 3x nesta branch)
+
+**Como extrair um helper puro** (passos 2, 3, log_sanitizer seguiram isso):
+1. Identificar a função em `server.py`/`browser.py`/outro arquivo grande.
+2. Criar `Scripts/<nome>.py` com a versão pura (se depende de config/global, receber como argumento).
+3. No arquivo original, manter a função com o mesmo nome, reduzindo o corpo a 1 linha que delega.
+4. Criar `tests/test_<nome>.py` com ≥3 casos por função pública.
+5. Rodar a suite offline completa. Só commit se passar.
+6. Commit com título em PT-BR no imperativo; corpo descreve módulo, testes e resultado `pytest`.
+
+**Como integrar um módulo puro em caminho quente** (passo 5 e analisador seguiram isso):
+1. Adicionar `import <modulo>` no arquivo alvo (Flask/Playwright OK no chamador).
+2. Substituir apenas a fonte da decisão — nunca o contrato de retorno da função.
+3. Criar `tests/test_<integracao>.py` com cópia offline da função modificada (já que Flask/Playwright bloqueiam import em testes) e cobertura do contrato.
+4. Se houver chance de import falhar em ambiente truncado, adicionar `try/except` com fallback local (ver `analisador_prontuarios._resposta_eh_rate_limit`).
+
+### Próximas opções (ordem recomendada por risco crescente)
+
+**1. Integrar `log_sanitizer` em `_audit_event` e `utils.file_log` (P1, BAIXO risco)**
+- Tocar apenas 2 funções pequenas (`server.py:213` e `Scripts/utils.py:log`).
+- Garantir que nenhum `api_key`/`Bearer`/cookie vaza em SECURITY_AUDIT.
+- Criar `tests/test_audit_sanitization.py` com cópia offline de `_audit_event` exercitando cenários reais.
+
+**2. Extrair helpers de segurança de `server.py` (P1, MÉDIO risco)**
+- `_client_ip`, `_is_ip_blocked`, `_register_rate_limit_hit`, `_register_login_failure`, `_clear_login_failures`.
+- Criar `Scripts/security_state.py` com `SecurityState` dataclass/class contendo os dicts e locks.
+- `server.py` instancia um singleton e usa métodos públicos; wrappers `_is_ip_blocked(ip)` → `_SECURITY_STATE.is_ip_blocked(ip)`.
+
+**3. Extrair mais helpers de `analisador_prontuarios.py` (P2, MÉDIO risco)**
+- Parsers de JSON/markdown do LLM (hoje sem testes).
+- `_verificar_rate_limit_no_markdown`, `_parse_json_llm` (parte pura).
+
+**4. Plano de concorrência por `browser_profile` (P0 passo 6, ALTO risco, BLOQUEADO)**
+- Requer aprovação do usuário antes de editar `browser.py`.
+- Entregável inicial: documento em `docs/concurrency_per_profile.md` (sem código).
+
+### Prompt de retomada (COPIAR EXATAMENTE EM NOVO CHAT)
+
+```
+Continue o refactor do /home/user/chatGPT_Simulator na branch claude/fix-rate-limit-interval-1vPbB.
+Leia APENAS a seção "PONTO DE RETOMADA (última atualização em 2026-04-22 quinquies)" em REFACTOR_PROGRESS.md — é autocontida.
+
+Execute a Opção 1 da lista "Próximas opções" (integrar log_sanitizer em _audit_event e utils.file_log).
+
+Regras obrigatórias:
+(a) módulo puro log_sanitizer JÁ existe e está testado — não reescrever, apenas importar e usar;
+(b) NÃO criar novas features — apenas a integração sanitária;
+(c) preservar todos os requisitos consolidados (ver seção correspondente no REFACTOR_PROGRESS.md);
+(d) adicionar tests/test_audit_sanitization.py com cópia offline do _audit_event modificado;
+(e) manter todos os 218 testes offline passando + novos;
+(f) se aproximar do limite: ATUALIZAR a seção "PONTO DE RETOMADA" no REFACTOR_PROGRESS.md com o novo estado (commits, suite, próxima opção) ANTES de commit/push final;
+(g) commit com título em PT-BR no imperativo; corpo com lista de testes novos e resultado pytest;
+(h) push para claude/fix-rate-limit-interval-1vPbB.
+
+Se encontrar algo inesperado em server.py ou utils.py, PARAR e pedir confirmação antes de editar.
+Se precisar tocar em browser.py (async/Playwright), PARAR — requer aprovação explícita.
+```
+
+### Checklist de "antes de terminar a sessão"
+- [ ] Todos os testes offline passando (`python3 -m pytest tests/test_* tests/test_analisador_rate_limit.py`).
+- [ ] `python3 -c "import ast; ast.parse(open('Scripts/server.py').read())"` OK.
+- [ ] `python3 -c "import ast; ast.parse(open('Scripts/browser.py').read())"` OK.
+- [ ] `python3 -c "import ast; ast.parse(open('Scripts/analisador_prontuarios.py').read())"` OK.
+- [ ] Seção "PONTO DE RETOMADA" em `REFACTOR_PROGRESS.md` atualizada com commits novos, contagem de testes e próxima opção escolhida.
+- [ ] `git status` limpo e último commit pushado.

@@ -339,7 +339,10 @@ def _headers_llm() -> dict:
 
 _ultimo_envio_llm = 0.0   # timestamp do último POST ao LLM_URL
 
-# Padrões de texto que indicam rate limit na resposta do ChatGPT
+# Padrões de texto que indicam rate limit na resposta do ChatGPT.
+# Mantidos aqui apenas como referência/documentação; a detecção real
+# passou a ser feita via `error_catalog.classify_from_text` (Scripts/error_catalog.py),
+# que cobre um superset destes padrões (PT-BR + EN) e é testável offline.
 _RATE_LIMIT_PATTERNS = [
     "chegou ao limite",
     "excesso de solicitações",
@@ -347,6 +350,14 @@ _RATE_LIMIT_PATTERNS = [
     "rate limit",
     "too many requests",
 ]
+
+try:
+    # Import isolado — em caso de erro (ex.: módulo removido em ambiente de
+    # fallback), cai no matcher local antigo para não quebrar o analisador.
+    import error_catalog as _error_catalog
+except Exception:  # pragma: no cover - defensivo
+    _error_catalog = None
+
 
 def _aguardar_throttle_llm():
     """Espera o tempo restante do throttle antes de enviar a próxima mensagem ao ChatGPT."""
@@ -368,9 +379,16 @@ def _registrar_envio_llm():
     _ultimo_envio_llm = time.time()
 
 def _resposta_eh_rate_limit(texto: str) -> bool:
-    """Detecta se o texto da resposta do ChatGPT indica rate limit."""
+    """Detecta se o texto da resposta do ChatGPT indica rate limit.
+
+    Delega a classificação para `error_catalog.classify_from_text`
+    (superset dos padrões históricos). Em caso de import indisponível
+    no ambiente, usa fallback local com a lista original.
+    """
     if not texto:
         return False
+    if _error_catalog is not None:
+        return _error_catalog.classify_from_text(texto) == _error_catalog.RATE_LIMIT
     texto_lower = texto.lower()
     return any(p in texto_lower for p in _RATE_LIMIT_PATTERNS)
 
