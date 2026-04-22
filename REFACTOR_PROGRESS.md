@@ -393,17 +393,17 @@ Coletadas em `2026-04-22` via `wc -l` / `grep -nE "def "`:
 
 ---
 
-## 🆕 PONTO DE RETOMADA (última atualização em 2026-04-22 sexies)
+## 🆕 PONTO DE RETOMADA (última atualização em 2026-04-22 septies)
 
 > **Leia APENAS esta seção ao retomar em outro chat.** Ela é autocontida:
 > não é necessário reler seções anteriores a menos que haja dúvida sobre
 > detalhe específico. Seções históricas acima existem apenas para auditoria.
 
-### Estado atual (consolidado) — branch `claude/fix-rate-limit-interval-1vPbB`
-
-**PR aberto:** https://github.com/hellyssoncavalcanti/chatGPT_Simulator/pull/559 (contém todo o trabalho até aqui).
+### Estado atual (consolidado) — branch `claude/fix-rate-limit-interval-QmRpK`
 
 **Commits relevantes (mais recente → mais antigo):**
+- `ea0b197` — Extrair ChatRateLimitCooldown (backoff exponencial) para módulo puro *(esta sessão)*
+- `77417b9` — Merge PR #564 (trabalho anterior de `1vPbB` integrado em `main`)
 - `67d3b39` — Extrair SecurityState (rate-limit + login brute-force) para módulo puro
 - `5dc4928` — Integrar log_sanitizer e autoexplicar 409 benigno de /api/sync
 - `3b06256` — docs: gravar ponto de retomada autocontido
@@ -418,7 +418,7 @@ Coletadas em `2026-04-22` via `wc -l` / `grep -nE "def "`:
 - `1f3374b` — Extrair detecção de origem de request para módulo testável offline
 - `0c6216e` — docs: refinar backlog P0-P1-P2 com evidências concretas
 
-**Suite offline atual: 12 arquivos → 240 passed.**
+**Suite offline atual: 13 arquivos → 257 passed** (240 baseline + 17 novos para `ChatRateLimitCooldown`).
 
 Comando exato de validação:
 ```
@@ -435,9 +435,10 @@ python3 -m pytest \
   tests/test_log_sanitizer.py \
   tests/test_analisador_rate_limit.py \
   tests/test_audit_sanitization.py \
-  tests/test_security_state.py
+  tests/test_security_state.py \
+  tests/test_chat_rate_limit_cooldown.py
 ```
-Esperado: **240 passed**. (NÃO usar `python3 -m pytest tests/` cru — `tests/test_server_api.py` e `tests/test_storage.py` falham por requerer `flask` / `cryptography` indisponíveis neste ambiente.)
+Esperado: **257 passed**. (NÃO usar `python3 -m pytest tests/` cru — `tests/test_server_api.py` e `tests/test_storage.py` falham por requerer `flask` / `cryptography` indisponíveis neste ambiente.)
 
 ### Mapa de módulos puros já criados
 
@@ -449,6 +450,7 @@ Esperado: **240 passed**. (NÃO usar `python3 -m pytest tests/` cru — `tests/t
 | `Scripts/browser_predicates.py` | ~180 | `extract_task_sender`, `is_known_orphan_tab_url`, `response_looks_incomplete_json`, `response_requests_followup_actions`, `replace_inline_base64_payloads`, `ensure_paste_wrappers`. | `tests/test_browser_predicates.py` (38) |
 | `Scripts/log_sanitizer.py` | ~170 | `mask_api_key`, `mask_bearer_token`, `mask_session_cookie`, `mask_file_path`, `sanitize`, `sanitize_iter`, `sanitize_mapping`. | `tests/test_log_sanitizer.py` (31) |
 | `Scripts/security_state.py` | ~120 | Classe `SecurityState` (rate-limit per-(ip,key), brute-force de login, expiração automática, `now_func` injetável). | `tests/test_security_state.py` (12) |
+| `Scripts/chat_rate_limit_cooldown.py` | ~100 | Classe `ChatRateLimitCooldown` (cooldown global com backoff exponencial 2^strikes, clamp em `max_cooldown_sec`, `now_func` injetável). | `tests/test_chat_rate_limit_cooldown.py` (17) |
 | `Scripts/humanizer.py` | 124 | Módulo original (inalterado); testes ampliados com invariantes anti-robotização. | `tests/test_humanizer.py` (33) |
 
 ### Integrações já feitas (em caminho quente)
@@ -457,14 +459,14 @@ Esperado: **240 passed**. (NÃO usar `python3 -m pytest tests/` cru — `tests/t
 - `server._audit_event` usa `log_sanitizer.sanitize_mapping` antes de `json.dumps` (inclusive no fallback exception).
 - `utils.log(source, msg)` usa `log_sanitizer.sanitize` antes de escrever (import defensivo; sem mascaramento se módulo não disponível).
 - `server._is_ip_blocked` / `_register_rate_limit_hit` / `_register_login_failure` / `_clear_login_failures` são agora wrappers 1-liner sobre o singleton `_SECURITY_STATE: SecurityState`. Aliases `_security_lock`, `_rate_limit_hits`, `_blocked_ips`, `_failed_login_attempts` preservados para compat (tests/test_server_api.py reseta diretamente).
+- `server._register_chat_rate_limit` / `_get_chat_rate_limit_remaining_seconds` são agora wrappers finos sobre o singleton `_CHAT_RATE_LIMIT_COOLDOWN: ChatRateLimitCooldown`. Backoff exponencial (2^strikes), clamp em 1800s e reset de strikes fora da janela foram preservados byte-a-byte. Alias `_chat_rate_limit_lock` mantido.
 - Filtro de log werkzeug (`No401AuthLog`) acrescenta sufixo explicativo ao 409 de `/api/sync` (dedup benigno 120s).
 - `api_sync()` emite `[🔄 SYNC] ⚠️ sync_in_progress` com `elapsed` e `retry_after` antes de retornar 409, e inclui `retry_after_seconds` / `elapsed_seconds` no JSON.
 
 ### Integrações pendentes (NÃO feitas)
-1. Catálogo em `_register_chat_rate_limit` (server.py:~359) e `browser._dismiss_rate_limit_modal_if_any` — próxima melhoria de unificação.
-2. Extrair `ChatRateLimitCooldown` (state de `_chat_rate_limit_until`, `_chat_rate_limit_strikes`, `_chat_rate_limit_lock`) para módulo puro análogo a `SecurityState`.
-3. Concorrência por `browser_profile` — **BLOQUEADO: requer aprovação do usuário** (toca `browser.py` async).
-4. Extrair parsers puros de `analisador_prontuarios.py` (`_verificar_rate_limit_no_markdown`, parte pura de `_parse_json_llm`).
+1. Catálogo em `_register_chat_rate_limit` (server.py:~357) e `browser._dismiss_rate_limit_modal_if_any` — próxima melhoria de unificação (agora mais simples: já há singleton puro isolando o state).
+2. Concorrência por `browser_profile` — **BLOQUEADO: requer aprovação do usuário** (toca `browser.py` async).
+3. Extrair parsers puros de `analisador_prontuarios.py` (`_verificar_rate_limit_no_markdown`, parte pura de `_parse_json_llm`).
 
 ### Requisitos consolidados (não-regredir)
 - API key é autorização primária; IP/origem são defesa adicional.
@@ -478,17 +480,18 @@ Esperado: **240 passed**. (NÃO usar `python3 -m pytest tests/` cru — `tests/t
 - **Módulo puro**: sem `flask`, `playwright` nem `config` no import.
 - **Log sanitizado**: `_audit_event` e `utils.log` já mascaram `api_key`, `Bearer`, cookies de sessão e caminhos `/home/<user>` ou `C:\Users\<user>`.
 
-### Padrões validados nesta branch (7 extrações bem-sucedidas)
+### Padrões validados nesta branch (8 extrações bem-sucedidas)
 
 **A. Helper puro sem state** (`request_source`, `error_catalog`, `server_helpers`, `browser_predicates`, `log_sanitizer`):
 1. Criar `Scripts/<nome>.py` com funções puras.
 2. Em server.py/browser.py: 1 import + wrappers 1-liner preservando nomes.
 3. `tests/test_<nome>.py` com ≥3 casos por função pública.
 
-**B. Helper puro com state** (`security_state`):
+**B. Helper puro com state** (`security_state`, `chat_rate_limit_cooldown`):
 1. Criar classe encapsulando dicts + lock; construtor recebe thresholds; `now_func` injetável.
 2. Server.py instancia singleton com valores de config; wrappers delegam.
-3. Preservar aliases (`_security_lock = _STATE._lock`) se tests externos acessam diretamente.
+3. Preservar aliases (`_security_lock = _STATE._lock`, `_chat_rate_limit_lock = _COOLDOWN._lock`) se tests externos acessam diretamente.
+4. Módulo puro NÃO loga — o wrapper em `server.py` lê o retorno e emite o log (mantém a mesma linha `[CHAT_RATE_LIMIT] cooldown de Xs registrado.`).
 
 **C. Integração em caminho quente** (`_extract_rate_limit_details`, `_audit_event`, `utils.log`, `_resposta_eh_rate_limit`):
 1. Import no topo (try/except defensivo se arquivo pode rodar em ambiente truncado).
@@ -497,55 +500,49 @@ Esperado: **240 passed**. (NÃO usar `python3 -m pytest tests/` cru — `tests/t
 
 ### Próximas opções (ordem recomendada por risco crescente)
 
-**1. Extrair `ChatRateLimitCooldown` de `server.py` (BAIXO risco, ~30 linhas)**
-- State: `_chat_rate_limit_until`, `_chat_rate_limit_strikes`, `_chat_rate_limit_lock`.
-- API: `register(retry_after_seconds, reason) -> adjusted_cooldown`, `remaining_seconds() -> float`, `snapshot() -> dict`.
-- Seguir padrão B (`SecurityState`).
-- Ganho: backoff exponencial testável offline; pré-requisito para integrar catálogo nesse caminho.
+**1. Integrar catálogo em `_register_chat_rate_limit` e no reason (BAIXO risco)**
+- Agora que `ChatRateLimitCooldown` está isolado, é trivial: o wrapper em `server.py` já recebe `reason` e decide a linha do log — basta normalizá-lo via `error_catalog.classify_from_text` quando vier de mensagem livre.
+- Opcional: propagar `reason` via método `register(...)` (já aceita, só não é persistido no singleton).
 
-**2. Integrar catálogo em `_register_chat_rate_limit` e no reason (BAIXO risco)**
-- Depende do item 1 (extração primeiro).
-- Substituir `reason` livre por `error_catalog.get(RATE_LIMIT).message` quando aplicável.
-
-**3. Extrair parsers puros de `analisador_prontuarios.py` (MÉDIO risco)**
+**2. Extrair parsers puros de `analisador_prontuarios.py` (MÉDIO risco)**
 - `_verificar_rate_limit_no_markdown` (já usa `_resposta_eh_rate_limit` integrado → extração trivial).
 - Parte pura de `_parse_json_llm` (strip de fences, validação estrutural).
 - Ganho: cobertura de testes do analisador hoje é ~0%.
 
-**4. Plano de concorrência por `browser_profile` (ALTO risco, BLOQUEADO)**
+**3. Plano de concorrência por `browser_profile` (ALTO risco, BLOQUEADO)**
 - Entregável inicial: documento em `docs/concurrency_per_profile.md` (sem código).
 - Depois: alteração em `browser.py` com aprovação explícita.
 
 ### Prompt de retomada (COPIAR EXATAMENTE EM NOVO CHAT)
 
 ```
-Continue o refactor do /home/user/chatGPT_Simulator na branch claude/fix-rate-limit-interval-1vPbB.
-Leia APENAS a seção "PONTO DE RETOMADA (última atualização em 2026-04-22 sexies)" em REFACTOR_PROGRESS.md — é autocontida.
+Continue o refactor do /home/user/chatGPT_Simulator na branch claude/fix-rate-limit-interval-QmRpK.
+Leia APENAS a seção "PONTO DE RETOMADA (última atualização em 2026-04-22 septies)" em REFACTOR_PROGRESS.md — é autocontida.
 
-Execute a Opção 1 da lista "Próximas opções" (extrair ChatRateLimitCooldown de server.py para módulo puro).
+Execute a Opção 1 da lista "Próximas opções" (integrar `error_catalog` em `_register_chat_rate_limit` e no `reason`).
 
 Regras obrigatórias:
-(a) criar Scripts/chat_rate_limit_cooldown.py seguindo o padrão B já validado com SecurityState (ver seção "Padrões validados");
-(b) server.py mantém wrappers finos _register_chat_rate_limit / _get_chat_rate_limit_remaining_seconds (nomes e assinaturas inalterados) delegando ao singleton;
+(a) NÃO recriar estado — `_CHAT_RATE_LIMIT_COOLDOWN` já é singleton de `ChatRateLimitCooldown`;
+(b) em server.py, normalizar `reason` via `error_catalog.classify_from_text(reason)` quando a string for livre; preservar o formato da linha `[CHAT_RATE_LIMIT] cooldown de Xs registrado. Motivo: ...`;
 (c) preservar todos os "Requisitos consolidados (não-regredir)" listados no PONTO DE RETOMADA;
-(d) tests/test_chat_rate_limit_cooldown.py com ≥3 casos por método + teste do backoff exponencial (strikes crescem de 0 a 6, cooldown clampa em 1800s);
-(e) manter todos os 240 testes offline passando + novos (comando listado no PONTO DE RETOMADA);
+(d) novos testes em tests/test_rate_limit_integration.py (ou arquivo novo) cobrindo a normalização de `reason`;
+(e) manter todos os 257 testes offline passando + novos (comando listado no PONTO DE RETOMADA);
 (f) ANTES do commit/push final, se aproximando do limite, ATUALIZAR a seção "PONTO DE RETOMADA" com novo commit hash, contagem de testes, e próxima opção;
 (g) commit com título em PT-BR no imperativo; corpo com lista de testes novos e resultado pytest;
-(h) push para claude/fix-rate-limit-interval-1vPbB.
+(h) push para claude/fix-rate-limit-interval-QmRpK.
 
 Se encontrar algo inesperado em server.py, PARAR e pedir confirmação antes de editar.
 Se precisar tocar em browser.py (async/Playwright) ou analisador_prontuarios.py, PARAR — não está no escopo da Opção 1.
 ```
 
 ### Checklist de "antes de terminar a sessão" (rodar sempre)
-- [ ] Suite offline passa: `python3 -m pytest tests/test_humanizer.py tests/test_shared_queue.py tests/test_selectors_smoke.py tests/test_request_source.py tests/test_error_catalog.py tests/test_server_helpers.py tests/test_browser_predicates.py tests/test_rate_limit_integration.py tests/test_log_sanitizer.py tests/test_analisador_rate_limit.py tests/test_audit_sanitization.py tests/test_security_state.py`
+- [ ] Suite offline passa: `python3 -m pytest tests/test_humanizer.py tests/test_shared_queue.py tests/test_selectors_smoke.py tests/test_request_source.py tests/test_error_catalog.py tests/test_server_helpers.py tests/test_browser_predicates.py tests/test_rate_limit_integration.py tests/test_log_sanitizer.py tests/test_analisador_rate_limit.py tests/test_audit_sanitization.py tests/test_security_state.py tests/test_chat_rate_limit_cooldown.py`
 - [ ] `python3 -c "import ast; ast.parse(open('Scripts/server.py').read())"` OK.
 - [ ] `python3 -c "import ast; ast.parse(open('Scripts/browser.py').read())"` OK.
 - [ ] `python3 -c "import ast; ast.parse(open('Scripts/analisador_prontuarios.py').read())"` OK.
 - [ ] `python3 -c "import ast; ast.parse(open('Scripts/utils.py').read())"` OK.
 - [ ] Seção "PONTO DE RETOMADA" atualizada com commits novos, contagem de testes, próxima opção.
-- [ ] `git status` limpo e último commit pushado para `origin/claude/fix-rate-limit-interval-1vPbB`.
+- [ ] `git status` limpo e último commit pushado para `origin/claude/fix-rate-limit-interval-QmRpK`.
 
 ### Histórico de sessões (para auditoria — NÃO precisa reler)
 - **2026-04-22** (sessão original) — `1f3374b`: extração de `request_source.py`.
@@ -553,4 +550,5 @@ Se precisar tocar em browser.py (async/Playwright) ou analisador_prontuarios.py,
 - **2026-04-22 ter** — `3334bf6`: catálogo central de erros (Lote P0 passo 1).
 - **2026-04-22 quater** — `c5c45dc` → `3646da1` → `a87a61a` → `be785a3`: passos 2-5 do Lote P0 + log_sanitizer + unificação analisador.
 - **2026-04-22 quinquies** — `3b06256`: gravação do primeiro PONTO DE RETOMADA autocontido.
-- **2026-04-22 sexies** (esta sessão) — `5dc4928` + `67d3b39`: integração de `log_sanitizer` em `_audit_event` e `utils.log`; correção/autoexplicação do 409 em `/api/sync`; extração de `SecurityState`. 240 testes offline passando.
+- **2026-04-22 sexies** — `5dc4928` + `67d3b39`: integração de `log_sanitizer` em `_audit_event` e `utils.log`; correção/autoexplicação do 409 em `/api/sync`; extração de `SecurityState`. 240 testes offline passando. Merge via PR #564 em `main`.
+- **2026-04-22 septies** (esta sessão, branch `claude/fix-rate-limit-interval-QmRpK`) — `ea0b197`: extração de `ChatRateLimitCooldown` (backoff exponencial 2^strikes, clamp 1800s) para módulo puro. 257 testes offline passando (+17 novos).
