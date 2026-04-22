@@ -187,5 +187,107 @@ Ordem sugerida, todos com escopo pequeno e testáveis offline (preserva simulaç
 ### Prompt de retomada (copiar em novo chat)
 "Continue o refactor do `/home/user/chatGPT_Simulator` na branch `claude/fix-rate-limit-interval-1vPbB`. Leia `REFACTOR_PROGRESS.md` (seção `Progresso 2026-04-22`) primeiro. Implemente o próximo item pendente da lista `Próximos itens sugeridos` (começar pelo item 1 — catálogo central de erros). Regras: (a) sem novas features além do item sugerido; (b) preservar os requisitos consolidados (API key primária, bootstrap `config.py`/`sync_github_settings.ps1`, reset `admin/admin` só em fresh install, `browser_profile` end-to-end com fallback `default`, `sync_github` autônomo, intervalo anti-rate-limit global para requests Python já em server.py:424); (c) manter testes offline passando (`pytest tests/test_humanizer.py tests/test_shared_queue.py tests/test_selectors_smoke.py tests/test_request_source.py`); (d) sempre que estiver próximo ao limite do chat, ATUALIZAR esta seção com o que foi feito e o próximo passo ANTES de commit/push; (e) commit e push para `claude/fix-rate-limit-interval-1vPbB`. Se o item escolhido envolver `browser.py`, parar e pedir confirmação antes de editar."
 
+---
+
+## Refinamento 2026-04-22 bis (replanejamento sem novo código de feature)
+
+> Escopo desta rodada: **apenas refinar prioridades e plano**, com base em evidências concretas do código atual. Nenhum código de feature foi adicionado nesta seção — apenas documentação, teste de baseline e atualização do roadmap.
+
+### Requisitos consolidados (revalidados, permanecem intactos)
+- API key como mecanismo primário de autorização (IP/origem são defesa adicional).
+- Bootstrap seguro via `config.py` + `sync_github_settings.ps1` a partir dos `*.example.*`.
+- Reset `admin/admin` **somente** em fresh install.
+- `browser_profile` ponta-a-ponta (server → browser → analisador) com fallback `default`.
+- `sync_github` autônomo, não acoplado ao fluxo de chat.
+- **Adicionado:** intervalo anti-rate-limit global para requests Python (server.py:428, `_wait_python_request_interval_if_needed`) — aplicado a qualquer `request_source` terminando em `.py`, contendo `.py/`, ou com prefixo `python:`; isento para Codex Cloud.
+- **Adicionado:** detecção de origem de request centralizada em `Scripts/request_source.py` (módulo puro, testável sem Flask).
+
+### Evidências medidas do código atual (subsídio para priorização)
+Coletadas em `2026-04-22` via `wc -l` / `grep -nE "def "`:
+
+| Arquivo | Linhas | Defs | Observação |
+|---|---|---|---|
+| `Scripts/browser.py` | 5086 | 27 | Maior hotspot arquitetural. Async Playwright entrelaçado com predicados puros. |
+| `Scripts/analisador_prontuarios.py` | 6134 | — | Maior arquivo. Contém muitos helpers puros (regex, parse, heurísticas) sem testes. |
+| `Scripts/server.py` | 2522 | 68 | Organizado por seções. Vários helpers puros prontos para extração. |
+| `Scripts/humanizer.py` | 124 | 4 | Já é módulo puro com testes — **template validado** de como extrair. |
+| `Scripts/request_source.py` | 34 | 2 | Criado em 2026-04-22, padrão confirmado. |
+
+**Conclusão operacional:** o padrão "extrair helper puro → testar offline → manter wrapper fino no chamador" já foi validado duas vezes (`humanizer.py`, `request_source.py`) e deve virar **prática obrigatória antes de qualquer mudança comportamental** nos itens P0 (#1, #2, #6, #8, #9).
+
+### Repriorização do backlog (alinhamento com evidências)
+
+#### P0 (revisado) — priorizar o que blinda simulação humana
+1. **(Promovido)** **Catálogo central de erros** (backlog #15, antes P1) — hoje `_extract_rate_limit_details` (server.py:319) já faz catálogo ad-hoc por string-match; consolidar é **pré-requisito** para `Rate-limit unificado` (#8). Entregável inicial: `Scripts/error_catalog.py` + testes offline; sem tocar em `browser.py`.
+2. **(Novo)** **Extração contínua de helpers puros para módulos testáveis** — padrão `humanizer.py`/`request_source.py` aplicado a:
+   - `server.py`: `_format_wait_seconds`, `_extract_rate_limit_details`, `_queue_status_payload`, `_count_active_chatgpt_profiles`, `_prune_old_attempts`.
+   - `browser.py` (pure only, sem async): `_is_known_orphan_tab_url`, `_is_python_sender`, `_response_looks_incomplete_json`, `_response_requests_followup_actions`, `_replace_inline_base64_payloads`, `_ensure_paste_wrappers`.
+   - DoD por helper extraído: módulo novo + ≥3 testes offline + wrapper mantido no chamador original.
+3. **Contrato formal da simulação humana + critérios de aceitação testáveis** (backlog #1) — já parcialmente atendido por `HumanTypingProfile` em `humanizer.py`; falta escrever os **invariantes observáveis** (ex.: "nunca dois delays consecutivos idênticos até 3 casas decimais", "pausa mínima após pontuação ≥ 80ms p95").
+4. **Timeout por etapa com taxonomia de erro única** (backlog #6) — depende do item 1 (catálogo) para nomear erros consistentemente.
+5. **Guardrails anti-bot no runtime** (backlog #2) — após itens 1–3; watchdog consome taxonomia de erros e telemetria do humanizer.
+6. **Rate-limit unificado** (backlog #8) — após itens 1 e 4; agora há base para unificar detecção browser ↔ aplicação server.
+7. **Controle de concorrência por `browser_profile`** (backlog #9) — **continua último P0**: toca `browser.py` estrutural; requer plano de design explícito e confirmação antes de editar código.
+8. **Baseline de testes offline obrigatórios** (backlog #10) — já parcialmente atendido (`test_humanizer.py`, `test_shared_queue.py`, `test_selectors_smoke.py`, `test_request_source.py` = 18 testes). **Novo DoD:** qualquer PR que toque server.py/browser.py deve adicionar pelo menos um teste offline.
+
+#### P1 (revisado) — observabilidade dirigida por taxonomia
+1. **Sanitização de logs/PII** (backlog #17) — **independente** dos P0; pode ser executado em paralelo (escopo pequeno, módulo puro `Scripts/log_sanitizer.py`).
+2. **Telemetry da simulação humana** (backlog #11) — depende de P0 item 3 (invariantes observáveis).
+3. **Tracing com correlation-id end-to-end** (backlog #14) — depende de P0 itens 1 e 4 (taxonomia nomeada).
+4. **Prometheus com labels operacionais** (backlog #12) — depende de P0 itens 1 e 4.
+5. **SSE resiliente** (backlog #13) — menor acoplamento; reclassificado para P2.
+
+#### P2 (inalterado na ordem, DoD refinado)
+1. **Modularização de `browser.py` por ações** — DoD novo: **apenas após** conclusão dos itens P0 1, 2, 3 (senão extração embaralha simulação humana).
+2. **Modularização de `server.py` por domínios** — DoD novo: começar por `_security_*` (já coeso) e depois `_rate_limit_*`; **nunca** tocar `/v1/chat/completions` sem plano de contrato.
+3. Demais itens (validação de payload, selector health, testes de contrato/caos, runbook) — ordem inalterada.
+
+### Plano de execução por lotes (DoD refinados em 2026-04-22 bis)
+
+#### Lote P0 — hardening comportamental
+**Meta:** eliminar padrões mecânicos detectáveis e garantir previsibilidade de falhas.
+
+**Sequência sugerida (cada item em PR pequeno e isolado):**
+1. `Scripts/error_catalog.py` + `tests/test_error_catalog.py` (puro).
+2. Extração lote-A em `server.py` (`_format_wait_seconds`, `_queue_status_payload`, `_prune_old_attempts`, `_count_active_chatgpt_profiles`) → `Scripts/server_helpers.py` + testes.
+3. Extração lote-B de predicados puros em `browser.py` → `Scripts/browser_predicates.py` + testes. **Não tocar async/Playwright.**
+4. Invariantes testáveis de `HumanTypingProfile` (ex.: geração determinística via `random.seed`) → ampliar `tests/test_humanizer.py`.
+5. Uso do catálogo em `_extract_rate_limit_details` + `_register_chat_rate_limit` (server.py).
+6. (Condicional) Plano de design de concorrência por `browser_profile` antes de qualquer edição em `browser.py`.
+
+**Critério de pronto (DoD do Lote P0):**
+- Cada PR do lote: ≤200 linhas de diff líquido fora de testes; wrapper fino no chamador; ≥3 testes offline novos; `pytest` offline passa.
+- Nenhuma regressão nos requisitos consolidados (checados por code review).
+- `_extract_rate_limit_details` consome catálogo central (string-match removido do caminho quente).
+
+#### Lote P1 — instrumentação dirigida
+**Sequência sugerida:**
+1. `Scripts/log_sanitizer.py` + testes + integração em `_audit_event` (server.py:213) e `utils.file_log`.
+2. Dicionário de métricas da simulação humana (documento em `docs/` + labels no humanizer).
+3. `X-Correlation-Id` ponta-a-ponta (pass-through sem lógica nova).
+4. Labels operacionais em Prometheus (mudança incremental).
+
+**DoD Lote P1:**
+- Logs nunca emitem `api_key=<valor>`, `Authorization: Bearer ...`, cookies de sessão, caminho absoluto de perfil Chromium sem máscara.
+- Correlation-id propagado request → `browser_queue` → stream.
+
+#### Lote P2 — arquitetura sustentável
+**Sequência inalterada; início condicionado à conclusão dos Lotes P0 e P1.**
+
+### Checks executados nesta etapa (2026-04-22 bis)
+- `pytest tests/test_humanizer.py tests/test_shared_queue.py tests/test_selectors_smoke.py tests/test_request_source.py` → **18 passed** (baseline preservada).
+- `wc -l Scripts/server.py Scripts/browser.py Scripts/humanizer.py Scripts/analisador_prontuarios.py Scripts/request_source.py` → tabela acima.
+- `grep -nE "def " Scripts/server.py Scripts/browser.py` → identificação de helpers puros candidatos à extração.
+- `pytest -q` completo não executado — mesma limitação histórica de ambiente (sem `flask`, `cryptography`, `requests`, `markdownify` e sem acesso ao índice PyPI).
+
+### Escopo explicitamente NÃO executado nesta etapa
+- Nenhum código de feature novo.
+- Nenhuma extração real de helper (apenas mapeada).
+- Nenhuma alteração em `browser.py`, `analisador_prontuarios.py`, `humanizer.py`, `request_source.py`.
+- Esta rodada produz **somente** planejamento documental + checks de baseline.
+
+### Prompt de retomada (atualizado para o próximo ciclo)
+"Continue o refactor do `/home/user/chatGPT_Simulator` na branch `claude/fix-rate-limit-interval-1vPbB`. Leia `REFACTOR_PROGRESS.md` — em especial a seção `Refinamento 2026-04-22 bis` — antes de qualquer edição. Execute o **Lote P0, passo 1**: criar `Scripts/error_catalog.py` (códigos `RATE_LIMIT`, `QUEUE_TIMEOUT`, `BROWSER_TIMEOUT`, `SELECTOR_MISSING`, `CONFIG_MISSING`, `AUTH_FAILED`, `UPSTREAM_UNAVAILABLE`, etc., com mensagem curta e ação recomendada) + `tests/test_error_catalog.py` (≥3 casos por código). Regras: (a) módulo puro, sem Flask/Playwright; (b) NÃO substituir nenhum uso ainda — essa integração é o passo 5 do Lote P0; (c) preservar todos os requisitos consolidados (ver seção correspondente); (d) manter `pytest tests/test_humanizer.py tests/test_shared_queue.py tests/test_selectors_smoke.py tests/test_request_source.py tests/test_error_catalog.py` passando; (e) ATUALIZAR esta seção ao se aproximar do limite, antes de commit/push; (f) commit e push para `claude/fix-rate-limit-interval-1vPbB`."
+
 ## Prompt de retomada ORIGINAL (ainda válido para sessões de replanejamento)
 "Continue o refactor do projeto `/workspace/chatGPT_Simulator` lendo `REFACTOR_PROGRESS.md` primeiro. Nesta etapa, NÃO implemente código novo de features: apenas refine e priorize backlog técnico, com foco máximo em manter simulação humana não-robótica no browser. Respeite os requisitos já consolidados (API key primária, bootstrap de `config.py`/`sync_github_settings.ps1`, reset `admin/admin` só em fresh install, `browser_profile` end-to-end com fallback para `default`, e `sync_github` autônomo). Em seguida, proponha um plano de execução por lotes (P0→P1→P2), rode checks possíveis no ambiente, atualize `REFACTOR_PROGRESS.md`, faça commit e abra PR."
