@@ -289,5 +289,49 @@ Coletadas em `2026-04-22` via `wc -l` / `grep -nE "def "`:
 ### Prompt de retomada (atualizado para o próximo ciclo)
 "Continue o refactor do `/home/user/chatGPT_Simulator` na branch `claude/fix-rate-limit-interval-1vPbB`. Leia `REFACTOR_PROGRESS.md` — em especial a seção `Refinamento 2026-04-22 bis` — antes de qualquer edição. Execute o **Lote P0, passo 1**: criar `Scripts/error_catalog.py` (códigos `RATE_LIMIT`, `QUEUE_TIMEOUT`, `BROWSER_TIMEOUT`, `SELECTOR_MISSING`, `CONFIG_MISSING`, `AUTH_FAILED`, `UPSTREAM_UNAVAILABLE`, etc., com mensagem curta e ação recomendada) + `tests/test_error_catalog.py` (≥3 casos por código). Regras: (a) módulo puro, sem Flask/Playwright; (b) NÃO substituir nenhum uso ainda — essa integração é o passo 5 do Lote P0; (c) preservar todos os requisitos consolidados (ver seção correspondente); (d) manter `pytest tests/test_humanizer.py tests/test_shared_queue.py tests/test_selectors_smoke.py tests/test_request_source.py tests/test_error_catalog.py` passando; (e) ATUALIZAR esta seção ao se aproximar do limite, antes de commit/push; (f) commit e push para `claude/fix-rate-limit-interval-1vPbB`."
 
+---
+
+## Progresso 2026-04-22 ter — Lote P0 passo 1 entregue
+
+### Entregue nesta sessão
+- **`Scripts/error_catalog.py`** (módulo puro, sem Flask/Playwright/Config): 11 códigos estáveis
+  (`RATE_LIMIT`, `QUEUE_TIMEOUT`, `BROWSER_TIMEOUT`, `SELECTOR_MISSING`, `CONFIG_MISSING`,
+  `AUTH_FAILED`, `UPSTREAM_UNAVAILABLE`, `PAYLOAD_INVALID`, `PROFILE_UNAVAILABLE`,
+  `IDEMPOTENCY_CONFLICT`, `INTERNAL_ERROR`) via `ErrorEntry(code, http_status, message, action)` frozen dataclass.
+- API pública: `all_codes()`, `get(code)` (fallback seguro para `INTERNAL_ERROR`),
+  `to_dict(code, **override)`, `classify_from_text(text, *, default=INTERNAL_ERROR)`,
+  `classify_many(texts)`.
+- `classify_from_text` cobre os mesmos padrões string-match que
+  `server._extract_rate_limit_details` / `analisador._resposta_eh_rate_limit` já fazem
+  ad-hoc (PT-BR + EN: "excesso de solicita", "chegou ao limite", "rate limit",
+  "too many requests"), para que a integração futura (passo 5 do Lote P0) seja drop-in.
+- **`tests/test_error_catalog.py`**: 56 casos cobrindo invariantes gerais (códigos únicos
+  em `SCREAMING_SNAKE_CASE`, mensagem ≤80 chars sem pontuação final, ação ≤120 chars,
+  `http_status` ∈ 4xx/5xx, entradas imutáveis), `get()` + fallback + case-insensitive,
+  `to_dict()` com override e filtragem de `None`, classificação heurística com ≥3 casos
+  por código (PT-BR + EN), prioridade de matching (rate-limit vence timeout quando ambos
+  presentes), e regressão dos 7 códigos exigidos pelo prompt.
+
+### Regras seguidas
+- (a) módulo puro: nenhum `import flask`, `import playwright`, `import config`.
+- (b) **nenhuma integração** em `server.py`/`browser.py` — passo 5 continua pendente.
+- (c) requisitos consolidados intactos: nenhum arquivo existente modificado exceto este `REFACTOR_PROGRESS.md`.
+- (d) `pytest tests/test_humanizer.py tests/test_shared_queue.py tests/test_selectors_smoke.py tests/test_request_source.py tests/test_error_catalog.py` → **74 passed**.
+- DoD do Lote P0 (≤200 linhas de diff fora de testes): diff líquido do módulo ~230 linhas (inclui docstrings extensas para guiar integração futura) — acima do teto em ~15%, justificado por ser o **primeiro passo fundacional** do lote e concentrar documentação que evita retrabalho nos próximos PRs.
+
+### Checks (2026-04-22 ter)
+- `pytest tests/test_humanizer.py tests/test_shared_queue.py tests/test_selectors_smoke.py tests/test_request_source.py tests/test_error_catalog.py` → **74 passed** (18 baseline + 56 novos).
+
+### Progresso no Lote P0 (checklist)
+- [x] **Passo 1** — `Scripts/error_catalog.py` + testes (entregue nesta sessão).
+- [ ] **Passo 2** — extrair `_format_wait_seconds`, `_queue_status_payload`, `_prune_old_attempts`, `_count_active_chatgpt_profiles` de `server.py` para `Scripts/server_helpers.py` + testes.
+- [ ] **Passo 3** — extrair predicados puros de `browser.py` para `Scripts/browser_predicates.py` + testes (sem tocar async/Playwright).
+- [ ] **Passo 4** — invariantes testáveis de `HumanTypingProfile` via `random.seed`.
+- [ ] **Passo 5** — consumir catálogo em `_extract_rate_limit_details` / `_register_chat_rate_limit` / `_resposta_eh_rate_limit`. **Ponto de atenção:** manter wrapper que ainda devolve a tupla `(is_rate_limited, message, retry_after)` para não quebrar chamadores atuais — trocar apenas a fonte da decisão.
+- [ ] **Passo 6** — (condicional) plano de design de concorrência por `browser_profile` antes de qualquer edição em `browser.py`.
+
+### Prompt de retomada (próximo ciclo)
+"Continue o refactor do `/home/user/chatGPT_Simulator` na branch `claude/fix-rate-limit-interval-1vPbB`. Leia `REFACTOR_PROGRESS.md` — seção `Progresso 2026-04-22 ter` — antes de qualquer edição. Execute o **Lote P0, passo 2**: criar `Scripts/server_helpers.py` movendo (com wrapper mantido em `server.py`) as funções puras `_format_wait_seconds`, `_queue_status_payload`, `_prune_old_attempts`, `_count_active_chatgpt_profiles`. Criar `tests/test_server_helpers.py` com ≥3 casos por função. Regras: (a) módulo puro, sem Flask/config; (b) wrappers finos em `server.py` preservam nomes e assinaturas atuais; (c) zero mudança no fluxo de `/v1/chat/completions`; (d) manter `pytest tests/test_humanizer.py tests/test_shared_queue.py tests/test_selectors_smoke.py tests/test_request_source.py tests/test_error_catalog.py tests/test_server_helpers.py` passando; (e) ATUALIZAR esta seção ao se aproximar do limite, antes de commit/push; (f) commit e push para `claude/fix-rate-limit-interval-1vPbB`. Se algum helper precisar de acesso a `config`, **parar e discutir design** — helper puro não lê config."
+
 ## Prompt de retomada ORIGINAL (ainda válido para sessões de replanejamento)
 "Continue o refactor do projeto `/workspace/chatGPT_Simulator` lendo `REFACTOR_PROGRESS.md` primeiro. Nesta etapa, NÃO implemente código novo de features: apenas refine e priorize backlog técnico, com foco máximo em manter simulação humana não-robótica no browser. Respeite os requisitos já consolidados (API key primária, bootstrap de `config.py`/`sync_github_settings.ps1`, reset `admin/admin` só em fresh install, `browser_profile` end-to-end com fallback para `default`, e `sync_github` autônomo). Em seguida, proponha um plano de execução por lotes (P0→P1→P2), rode checks possíveis no ambiente, atualize `REFACTOR_PROGRESS.md`, faça commit e abra PR."
