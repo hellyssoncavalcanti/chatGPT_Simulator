@@ -192,14 +192,26 @@ app = Flask(__name__, static_folder=config.DIRS["frontend"])
 CORS(app, resources={r"/*": {"origins": list(getattr(config, "CORS_ALLOWED_ORIGINS", []))}},
      supports_credentials=True)
 
-_security_lock = threading.Lock()
-_rate_limit_hits: dict[str, deque[float]] = {}
-_blocked_ips: dict[str, dict] = {}
-_failed_login_attempts: dict[str, deque[float]] = {}
+from security_state import SecurityState
+
 RATE_LIMIT_WINDOW_SEC = 60
 RATE_LIMIT_PER_MIN = max(20, int(getattr(config, "SECURITY_RATE_LIMIT_PER_MIN", 120)))
 LOGIN_MAX_FAILS = max(3, int(getattr(config, "SECURITY_LOGIN_MAX_FAILS", 8)))
 LOGIN_BLOCK_SEC = max(60, int(getattr(config, "SECURITY_LOGIN_BLOCK_SEC", 900)))
+
+_SECURITY_STATE = SecurityState(
+    rate_limit_window_sec=RATE_LIMIT_WINDOW_SEC,
+    rate_limit_per_min=RATE_LIMIT_PER_MIN,
+    login_max_fails=LOGIN_MAX_FAILS,
+    login_block_sec=LOGIN_BLOCK_SEC,
+)
+
+# Aliases preservados para compat com código que acessava diretamente o lock
+# e os dicts (ex.: testes existentes em tests/test_server_api.py).
+_security_lock = _SECURITY_STATE._lock
+_rate_limit_hits = _SECURITY_STATE._rate_limit_hits
+_blocked_ips = _SECURITY_STATE._blocked_ips
+_failed_login_attempts = _SECURITY_STATE._failed_login_attempts
 SENSITIVE_AUDIT_ENDPOINTS = {
     "/login",
     "/logout",
@@ -252,46 +264,19 @@ def _prune_old_attempts(dq: deque[float], window_sec: int):
 
 
 def _is_ip_blocked(ip: str) -> tuple[bool, float, str]:
-    with _security_lock:
-        rec = _blocked_ips.get(ip)
-        if not rec:
-            return False, 0.0, ""
-        until = float(rec.get("until", 0.0))
-        if until <= time.time():
-            _blocked_ips.pop(ip, None)
-            return False, 0.0, ""
-        return True, max(0.0, until - time.time()), str(rec.get("reason", "blocked"))
+    return _SECURITY_STATE.is_ip_blocked(ip)
 
 
 def _register_rate_limit_hit(ip: str, key: str) -> tuple[bool, float]:
-    map_key = f"{ip}:{key}"
-    with _security_lock:
-        dq = _rate_limit_hits.setdefault(map_key, deque())
-        now = time.time()
-        dq.append(now)
-        _prune_old_attempts(dq, RATE_LIMIT_WINDOW_SEC)
-        if len(dq) > RATE_LIMIT_PER_MIN:
-            retry_after = max(1.0, RATE_LIMIT_WINDOW_SEC - (now - dq[0]))
-            return True, retry_after
-        return False, 0.0
+    return _SECURITY_STATE.register_rate_limit_hit(ip, key)
 
 
 def _register_login_failure(ip: str):
-    now = time.time()
-    with _security_lock:
-        dq = _failed_login_attempts.setdefault(ip, deque())
-        dq.append(now)
-        _prune_old_attempts(dq, LOGIN_BLOCK_SEC)
-        if len(dq) >= LOGIN_MAX_FAILS:
-            _blocked_ips[ip] = {
-                "until": now + LOGIN_BLOCK_SEC,
-                "reason": "bruteforce_login",
-            }
+    _SECURITY_STATE.register_login_failure(ip)
 
 
 def _clear_login_failures(ip: str):
-    with _security_lock:
-        _failed_login_attempts.pop(ip, None)
+    _SECURITY_STATE.clear_login_failures(ip)
 
 
 def _generate_csrf_token() -> str:
