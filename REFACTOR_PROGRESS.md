@@ -160,5 +160,32 @@
 - `pytest -q tests/test_humanizer.py tests/test_shared_queue.py tests/test_selectors_smoke.py` → **PASS**.
 - `pytest -q` → **falha de ambiente** durante collection por dependências indisponíveis (`flask`, `cryptography`, `requests`, `markdownify`) e bloqueio de acesso ao índice de pacotes (proxy 403).
 
-## Prompt de retomada (copiar em novo chat)
+---
+
+## Progresso 2026-04-22 (branch `claude/fix-rate-limit-interval-1vPbB`)
+
+### Entregue nesta sessão
+- **Extração de `_is_python_chat_request` e `_is_codex_chat_request` para `Scripts/request_source.py`** — módulo puro, sem Flask/HTTP, reutilizado por `server.py` via import e wrappers internos (nomes `_is_python_chat_request` / `_is_codex_chat_request` preservados para não alterar o fluxo de `/v1/chat/completions`).
+- **Novo `tests/test_request_source.py`** cobrindo:
+  - sufixo `.py`, `.py/<lane>` e prefixo `python:`;
+  - inputs vazios/`None`, frontend PHP, chatgpt-ui;
+  - classificação de Codex por `source_hint`, `url` e `origin_url`, incluindo case-insensitive.
+- Objetivo: tornar o gating do intervalo anti-rate-limit (`_wait_python_request_interval_if_needed`) e da fila Python FIFO testável offline, sem exigir `flask`/`cryptography` no ambiente.
+
+### Resultado dos checks (2026-04-22)
+- `pytest tests/test_humanizer.py tests/test_shared_queue.py tests/test_selectors_smoke.py tests/test_request_source.py` → **18 passed**.
+- `python3 -c "import ast; ast.parse(open('Scripts/server.py').read())"` → OK.
+- `pytest -q` completo ainda não executável neste ambiente (mesma limitação de dependências).
+
+### Próximos itens sugeridos (continuar em outro chat se necessário)
+Ordem sugerida, todos com escopo pequeno e testáveis offline (preserva simulação humana):
+1. **Catálogo central de erros (backlog P1 #15)** — criar `Scripts/error_catalog.py` com códigos (`RATE_LIMIT`, `QUEUE_TIMEOUT`, `BROWSER_TIMEOUT`, `SELECTOR_MISSING`, etc.), mensagens e ação recomendada. Substituir strings livres nos pontos críticos de `server.py` e `browser.py`. Adicionar `tests/test_error_catalog.py`.
+2. **Sanitização de logs/PII (backlog P1 #17)** — criar `Scripts/log_sanitizer.py` com mascaramento de `api_key`, tokens `Bearer`, cookies de sessão, caminhos de perfil Chromium. Integrar em `_audit_event` (server.py:209) e em `utils.file_log`. Adicionar `tests/test_log_sanitizer.py`.
+3. **Teste puro do cálculo do intervalo anti-rate-limit** — extrair `compute_python_interval_target(pmin, pmax, profile_count, rng)` de `_wait_python_request_interval_if_needed` para módulo puro e cobrir bordas (`pmin>pmax`, zero, profile_count=1/2/N). Item vinculado ao backlog P0 #8.
+4. **Concorrência por `browser_profile` (backlog P0 #9)** — modelar como sessão semáforo limitada em `browser.py`. **Não implementar sem passar por planejamento**: toca o loop do navegador e exige plano explícito antes de mudar código.
+
+### Prompt de retomada (copiar em novo chat)
+"Continue o refactor do `/home/user/chatGPT_Simulator` na branch `claude/fix-rate-limit-interval-1vPbB`. Leia `REFACTOR_PROGRESS.md` (seção `Progresso 2026-04-22`) primeiro. Implemente o próximo item pendente da lista `Próximos itens sugeridos` (começar pelo item 1 — catálogo central de erros). Regras: (a) sem novas features além do item sugerido; (b) preservar os requisitos consolidados (API key primária, bootstrap `config.py`/`sync_github_settings.ps1`, reset `admin/admin` só em fresh install, `browser_profile` end-to-end com fallback `default`, `sync_github` autônomo, intervalo anti-rate-limit global para requests Python já em server.py:424); (c) manter testes offline passando (`pytest tests/test_humanizer.py tests/test_shared_queue.py tests/test_selectors_smoke.py tests/test_request_source.py`); (d) sempre que estiver próximo ao limite do chat, ATUALIZAR esta seção com o que foi feito e o próximo passo ANTES de commit/push; (e) commit e push para `claude/fix-rate-limit-interval-1vPbB`. Se o item escolhido envolver `browser.py`, parar e pedir confirmação antes de editar."
+
+## Prompt de retomada ORIGINAL (ainda válido para sessões de replanejamento)
 "Continue o refactor do projeto `/workspace/chatGPT_Simulator` lendo `REFACTOR_PROGRESS.md` primeiro. Nesta etapa, NÃO implemente código novo de features: apenas refine e priorize backlog técnico, com foco máximo em manter simulação humana não-robótica no browser. Respeite os requisitos já consolidados (API key primária, bootstrap de `config.py`/`sync_github_settings.ps1`, reset `admin/admin` só em fresh install, `browser_profile` end-to-end com fallback para `default`, e `sync_github` autônomo). Em seguida, proponha um plano de execução por lotes (P0→P1→P2), rode checks possíveis no ambiente, atualize `REFACTOR_PROGRESS.md`, faça commit e abra PR."
