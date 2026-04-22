@@ -67,7 +67,19 @@ except AttributeError:
     logging.warning("⚠️ DEBUG_LOG não encontrado no config.py. Usando False como padrão.")
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s", handlers=[logging.FileHandler(config.LOG_PATH, encoding='utf-8'), logging.StreamHandler()])
-def log(source, msg): logging.info(f"[{source}] {msg}")
+
+try:
+    # Sanitização de segredos/PII antes da gravação do log.
+    # Import defensivo: se o módulo falhar ao carregar em ambiente
+    # truncado, o log continua funcionando sem mascaramento.
+    from log_sanitizer import sanitize as _log_sanitize
+except Exception:  # pragma: no cover - defensivo
+    _log_sanitize = None
+
+
+def log(source, msg):
+    safe_msg = _log_sanitize(str(msg)) if _log_sanitize else msg
+    logging.info(f"[{source}] {safe_msg}")
 
 def ensure_certificates():
     if os.path.exists(config.CERT_FILE) and os.path.exists(config.KEY_FILE): return

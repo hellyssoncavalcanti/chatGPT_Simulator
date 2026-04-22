@@ -58,6 +58,7 @@ from server_helpers import (
     count_active_chatgpt_profiles as _count_active_chatgpt_profiles_impl,
 )
 import error_catalog as _error_catalog
+from log_sanitizer import sanitize_mapping as _sanitize_audit_payload
 import threading
 try:
     from prometheus_client import Counter, Gauge, generate_latest, CONTENT_TYPE_LATEST
@@ -166,6 +167,16 @@ class No401AuthLog(logging.Filter):
         # Suprime log repetitivo de GET /health (ping do analisador)
         if "GET /health" in msg and " 200 " in msg:
             return False
+        # Acrescenta explicação curta ao 409 de /api/sync para evitar
+        # interpretação como erro real. O 409 ali é dedup defensivo de
+        # sincronização concorrente (mesmo chat_id/url em janela de 120s).
+        if "POST /api/sync" in msg and " 409 " in msg:
+            record.msg = (
+                f"{record.msg}  ← sync_in_progress (dedup 120s: "
+                f"já há sincronização ativa para este chat_id/url; "
+                f"benigno, a sync anterior continua rodando)"
+            )
+            record.args = ()
         return True
 logging.getLogger("werkzeug").addFilter(No401AuthLog())
 
@@ -181,14 +192,26 @@ app = Flask(__name__, static_folder=config.DIRS["frontend"])
 CORS(app, resources={r"/*": {"origins": list(getattr(config, "CORS_ALLOWED_ORIGINS", []))}},
      supports_credentials=True)
 
-_security_lock = threading.Lock()
-_rate_limit_hits: dict[str, deque[float]] = {}
-_blocked_ips: dict[str, dict] = {}
-_failed_login_attempts: dict[str, deque[float]] = {}
+from security_state import SecurityState
+
 RATE_LIMIT_WINDOW_SEC = 60
 RATE_LIMIT_PER_MIN = max(20, int(getattr(config, "SECURITY_RATE_LIMIT_PER_MIN", 120)))
 LOGIN_MAX_FAILS = max(3, int(getattr(config, "SECURITY_LOGIN_MAX_FAILS", 8)))
 LOGIN_BLOCK_SEC = max(60, int(getattr(config, "SECURITY_LOGIN_BLOCK_SEC", 900)))
+
+_SECURITY_STATE = SecurityState(
+    rate_limit_window_sec=RATE_LIMIT_WINDOW_SEC,
+    rate_limit_per_min=RATE_LIMIT_PER_MIN,
+    login_max_fails=LOGIN_MAX_FAILS,
+    login_block_sec=LOGIN_BLOCK_SEC,
+)
+
+# Aliases preservados para compat com código que acessava diretamente o lock
+# e os dicts (ex.: testes existentes em tests/test_server_api.py).
+_security_lock = _SECURITY_STATE._lock
+_rate_limit_hits = _SECURITY_STATE._rate_limit_hits
+_blocked_ips = _SECURITY_STATE._blocked_ips
+_failed_login_attempts = _SECURITY_STATE._failed_login_attempts
 SENSITIVE_AUDIT_ENDPOINTS = {
     "/login",
     "/logout",
@@ -226,10 +249,14 @@ def _audit_event(event_type: str, **extra):
         "path": getattr(request, "path", ""),
     }
     payload.update(extra or {})
+    # Sanitiza valores string (api_key, Bearer tokens, cookies de sessão,
+    # caminhos de perfil Chromium) antes de emitir no log de auditoria.
+    safe_payload = _sanitize_audit_payload(payload)
     try:
-        log(f"[SECURITY_AUDIT] {json.dumps(payload, ensure_ascii=False)}")
+        log(f"[SECURITY_AUDIT] {json.dumps(safe_payload, ensure_ascii=False)}")
     except Exception:
-        log(f"[SECURITY_AUDIT] {payload}")
+        # Mesmo no fallback (falha no json.dumps), emitir a versão sanitizada.
+        log(f"[SECURITY_AUDIT] {safe_payload}")
 
 
 def _prune_old_attempts(dq: deque[float], window_sec: int):
@@ -237,46 +264,19 @@ def _prune_old_attempts(dq: deque[float], window_sec: int):
 
 
 def _is_ip_blocked(ip: str) -> tuple[bool, float, str]:
-    with _security_lock:
-        rec = _blocked_ips.get(ip)
-        if not rec:
-            return False, 0.0, ""
-        until = float(rec.get("until", 0.0))
-        if until <= time.time():
-            _blocked_ips.pop(ip, None)
-            return False, 0.0, ""
-        return True, max(0.0, until - time.time()), str(rec.get("reason", "blocked"))
+    return _SECURITY_STATE.is_ip_blocked(ip)
 
 
 def _register_rate_limit_hit(ip: str, key: str) -> tuple[bool, float]:
-    map_key = f"{ip}:{key}"
-    with _security_lock:
-        dq = _rate_limit_hits.setdefault(map_key, deque())
-        now = time.time()
-        dq.append(now)
-        _prune_old_attempts(dq, RATE_LIMIT_WINDOW_SEC)
-        if len(dq) > RATE_LIMIT_PER_MIN:
-            retry_after = max(1.0, RATE_LIMIT_WINDOW_SEC - (now - dq[0]))
-            return True, retry_after
-        return False, 0.0
+    return _SECURITY_STATE.register_rate_limit_hit(ip, key)
 
 
 def _register_login_failure(ip: str):
-    now = time.time()
-    with _security_lock:
-        dq = _failed_login_attempts.setdefault(ip, deque())
-        dq.append(now)
-        _prune_old_attempts(dq, LOGIN_BLOCK_SEC)
-        if len(dq) >= LOGIN_MAX_FAILS:
-            _blocked_ips[ip] = {
-                "until": now + LOGIN_BLOCK_SEC,
-                "reason": "bruteforce_login",
-            }
+    _SECURITY_STATE.register_login_failure(ip)
 
 
 def _clear_login_failures(ip: str):
-    with _security_lock:
-        _failed_login_attempts.pop(ip, None)
+    _SECURITY_STATE.clear_login_failures(ip)
 
 
 def _generate_csrf_token() -> str:
@@ -1395,10 +1395,22 @@ def api_sync():
     with ACTIVE_SYNCS_LOCK:
         started_at = ACTIVE_SYNCS.get(sync_key)
         if started_at and (time.time() - started_at) < 120:
+            elapsed = int(time.time() - started_at)
+            retry_after = max(1, 120 - elapsed)
+            explanation = (
+                f"[🔄 SYNC] ⚠️ sync_in_progress (benigno): já existe sincronização "
+                f"ativa para sync_key={sync_key!r} há {elapsed}s. "
+                f"Dedup automático (janela 120s) → respondendo 409 e preservando a "
+                f"sync anterior. Retry seguro em ~{retry_after}s."
+            )
+            print(explanation)
+            log(f"[SYNC_DEDUP] sync_key={sync_key} elapsed={elapsed}s → 409 sync_in_progress")
             return jsonify({
                 "success": False,
                 "error": "sync_in_progress",
-                "message": "Já existe sincronização ativa para este chat."
+                "message": "Já existe sincronização ativa para este chat.",
+                "retry_after_seconds": retry_after,
+                "elapsed_seconds": elapsed,
             }), 409
         ACTIVE_SYNCS[sync_key] = time.time()
 
