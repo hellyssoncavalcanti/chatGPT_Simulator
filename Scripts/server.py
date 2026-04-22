@@ -51,6 +51,12 @@ from request_source import (
     is_python_chat_request as _is_python_chat_request_impl,
     is_codex_chat_request as _is_codex_chat_request_impl,
 )
+from server_helpers import (
+    format_wait_seconds as _format_wait_seconds_impl,
+    queue_status_payload as _queue_status_payload_impl,
+    prune_old_attempts as _prune_old_attempts_impl,
+    count_active_chatgpt_profiles as _count_active_chatgpt_profiles_impl,
+)
 import threading
 try:
     from prometheus_client import Counter, Gauge, generate_latest, CONTENT_TYPE_LATEST
@@ -226,9 +232,7 @@ def _audit_event(event_type: str, **extra):
 
 
 def _prune_old_attempts(dq: deque[float], window_sec: int):
-    cutoff = time.time() - window_sec
-    while dq and dq[0] < cutoff:
-        dq.popleft()
+    _prune_old_attempts_impl(dq, window_sec)
 
 
 def _is_ip_blocked(ip: str) -> tuple[bool, float, str]:
@@ -311,9 +315,7 @@ def _validate_csrf_for_session() -> bool:
 
 
 def _format_wait_seconds(seconds):
-    remaining = max(0, int(round(seconds)))
-    mins, secs = divmod(remaining, 60)
-    return f"{mins:02d}:{secs:02d}"
+    return _format_wait_seconds_impl(seconds)
 
 
 def _extract_rate_limit_details(error_payload):
@@ -411,18 +413,12 @@ def _wait_chat_rate_limit_if_needed(stream_queue=None):
 
 
 def _count_active_chatgpt_profiles() -> int:
+    """Wrapper fino — delega para `server_helpers.count_active_chatgpt_profiles`
+    passando o mapa `config.CHROMIUM_PROFILES` (ou `None` se ausente).
     """
-    Quantidade de perfis Chromium/ChatGPT que o Simulator pode acionar em
-    paralelo. Lida com `config.CHROMIUM_PROFILES` (mapa chave→diretório),
-    sempre retornando pelo menos 1 para evitar divisão por zero.
-    """
-    profiles = getattr(config, "CHROMIUM_PROFILES", None)
-    if not profiles:
-        return 1
-    try:
-        return max(1, len(profiles))
-    except Exception:
-        return 1
+    return _count_active_chatgpt_profiles_impl(
+        getattr(config, "CHROMIUM_PROFILES", None)
+    )
 
 
 def _wait_python_request_interval_if_needed(is_python_source: bool, stream_queue=None):
@@ -531,18 +527,7 @@ def _is_codex_chat_request(source_hint_norm: str, url: str, origin_url: str) -> 
 
 
 def _queue_status_payload(wait_seconds: float, position: int, total: int, sender_label: str) -> str:
-    return json.dumps({
-        "type": "status",
-        "content": (
-            f"⏳ Fila interna do servidor: posição {position}/{max(1, total)}. "
-            f"Tempo restante estimado para liberação: {_format_wait_seconds(wait_seconds)}."
-        ),
-        "phase": "server_python_queue_wait",
-        "wait_seconds": round(max(0.0, wait_seconds), 1),
-        "queue_position": int(position),
-        "queue_size": int(total),
-        "sender": sender_label,
-    }, ensure_ascii=False)
+    return _queue_status_payload_impl(wait_seconds, position, total, sender_label)
 
 
 def _acquire_python_chat_slot(request_key: str,
