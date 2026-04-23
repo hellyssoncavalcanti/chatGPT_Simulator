@@ -172,3 +172,35 @@ class TestConstructorGuards:
         c, _ = _cooldown()
         adjusted = c.register(retry_after_seconds=None)
         assert adjusted == 240
+
+
+class TestSnapshotIsObservabilityContract:
+    """Pin o formato publicado por `/api/metrics` e gauges Prometheus.
+
+    Mudar esses campos quebra dashboards externos — trate como contrato.
+    """
+
+    def test_snapshot_keys_are_stable(self):
+        c, _ = _cooldown()
+        assert set(c.snapshot().keys()) == {"remaining_seconds", "strikes", "until_ts"}
+
+    def test_snapshot_values_are_json_serializable(self):
+        import json
+
+        c, clock = _cooldown()
+        c.register(retry_after_seconds=60)
+        clock["t"] += 2
+        c.register(retry_after_seconds=60)
+        payload = json.dumps(c.snapshot())
+        parsed = json.loads(payload)
+        assert parsed["strikes"] == 1
+        assert parsed["remaining_seconds"] > 0
+        assert parsed["until_ts"] > 0
+
+    def test_snapshot_types_are_primitive(self):
+        c, _ = _cooldown()
+        c.register(retry_after_seconds=30)
+        snap = c.snapshot()
+        assert isinstance(snap["remaining_seconds"], (int, float))
+        assert isinstance(snap["strikes"], int)
+        assert isinstance(snap["until_ts"], (int, float))

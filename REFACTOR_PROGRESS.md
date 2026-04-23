@@ -393,7 +393,7 @@ Coletadas em `2026-04-22` via `wc -l` / `grep -nE "def "`:
 
 ---
 
-## 🆕 PONTO DE RETOMADA (última atualização em 2026-04-22 octies)
+## 🆕 PONTO DE RETOMADA (última atualização em 2026-04-22 nonies)
 
 > **Leia APENAS esta seção ao retomar em outro chat.** Ela é autocontida:
 > não é necessário reler seções anteriores a menos que haja dúvida sobre
@@ -402,7 +402,9 @@ Coletadas em `2026-04-22` via `wc -l` / `grep -nE "def "`:
 ### Estado atual (consolidado) — branch `claude/fix-rate-limit-interval-QmRpK`
 
 **Commits relevantes (mais recente → mais antigo):**
-- `addc3d6` — Integrar error_catalog.format_reason em _register_chat_rate_limit *(esta sessão)*
+- `PENDING` — Expor snapshots de rate-limit e security em /api/metrics + gauges Prometheus *(esta sessão)*
+- `e46a0ce` — docs: gravar hash addc3d6 no PONTO DE RETOMADA octies
+- `addc3d6` — Integrar error_catalog.format_reason em _register_chat_rate_limit
 - `70464c2` — docs: gravar hash ea0b197 no PONTO DE RETOMADA septies
 - `ea0b197` — Extrair ChatRateLimitCooldown (backoff exponencial) para módulo puro
 - `77417b9` — Merge PR #564 (trabalho anterior de `1vPbB` integrado em `main`)
@@ -420,7 +422,7 @@ Coletadas em `2026-04-22` via `wc -l` / `grep -nE "def "`:
 - `1f3374b` — Extrair detecção de origem de request para módulo testável offline
 - `0c6216e` — docs: refinar backlog P0-P1-P2 com evidências concretas
 
-**Suite offline atual: 13 arquivos → 273 passed** (257 anterior + 9 em `test_error_catalog` para `format_reason` + 7 em `test_rate_limit_integration` para o contrato do wrapper).
+**Suite offline atual: 13 arquivos → 279 passed** (273 anterior + 3 em `test_chat_rate_limit_cooldown::TestSnapshotIsObservabilityContract` + 3 em `test_security_state::TestSnapshotIsObservabilityContract`).
 
 Comando exato de validação:
 ```
@@ -440,7 +442,7 @@ python3 -m pytest \
   tests/test_security_state.py \
   tests/test_chat_rate_limit_cooldown.py
 ```
-Esperado: **273 passed**. (NÃO usar `python3 -m pytest tests/` cru — `tests/test_server_api.py` e `tests/test_storage.py` falham por requerer `flask` / `cryptography` indisponíveis neste ambiente.)
+Esperado: **279 passed**. (NÃO usar `python3 -m pytest tests/` cru — `tests/test_server_api.py` e `tests/test_storage.py` falham por requerer `flask` / `cryptography` indisponíveis neste ambiente.)
 
 ### Mapa de módulos puros já criados
 
@@ -463,6 +465,8 @@ Esperado: **273 passed**. (NÃO usar `python3 -m pytest tests/` cru — `tests/t
 - `server._is_ip_blocked` / `_register_rate_limit_hit` / `_register_login_failure` / `_clear_login_failures` são agora wrappers 1-liner sobre o singleton `_SECURITY_STATE: SecurityState`. Aliases `_security_lock`, `_rate_limit_hits`, `_blocked_ips`, `_failed_login_attempts` preservados para compat (tests/test_server_api.py reseta diretamente).
 - `server._register_chat_rate_limit` / `_get_chat_rate_limit_remaining_seconds` são agora wrappers finos sobre o singleton `_CHAT_RATE_LIMIT_COOLDOWN: ChatRateLimitCooldown`. Backoff exponencial (2^strikes), clamp em 1800s e reset de strikes fora da janela foram preservados byte-a-byte. Alias `_chat_rate_limit_lock` mantido.
 - `server._register_chat_rate_limit` normaliza `reason` via `error_catalog.format_reason(reason)` antes de logar. Reasons classificáveis ganham prefixo `[CODE]` (ex.: `[RATE_LIMIT] excesso de solicitações...`); reasons não classificáveis são logados sem prefixo (evita ruído `[INTERNAL_ERROR]`). Format do log preservado: `[CHAT_RATE_LIMIT] cooldown de Xs registrado. Motivo: …`. Contrato testado em `tests/test_rate_limit_integration.py::TestRegisterWrapperNormalizesReason`.
+- `/api/metrics` expõe `chat_rate_limit: {remaining_seconds, strikes, until_ts}` e `security: {rate_limit_keys, blocked_ips, tracked_login_ips}` (snapshots dos dois singletons). `rate_limit_remaining_sec` legado preservado para compat com dashboards existentes.
+- `/metrics` (Prometheus) ganha 4 gauges: `simulator_chat_rate_limit_remaining_sec`, `simulator_chat_rate_limit_strikes`, `simulator_security_blocked_ips`, `simulator_security_tracked_login_ips`. Atualização centralizada em `_update_rate_limit_prom_gauges()`. Silencioso se `prometheus_client` ausente.
 - Filtro de log werkzeug (`No401AuthLog`) acrescenta sufixo explicativo ao 409 de `/api/sync` (dedup benigno 120s).
 - `api_sync()` emite `[🔄 SYNC] ⚠️ sync_in_progress` com `elapsed` e `retry_after` antes de retornar 409, e inclui `retry_after_seconds` / `elapsed_seconds` no JSON.
 
@@ -510,10 +514,9 @@ Esperado: **273 passed**. (NÃO usar `python3 -m pytest tests/` cru — `tests/t
 - Ganho: cobertura de testes do analisador hoje é ~0%.
 - Módulo-alvo sugerido: `Scripts/analisador_parsers.py` (puro, sem dependências de OpenAI/requests).
 
-**2. Consolidar observabilidade de rate-limit (BAIXO risco)**
-- Expor `ChatRateLimitCooldown.snapshot()` em `/api/metrics` junto com `SecurityState.snapshot()`.
-- Adicionar contador Prometheus `simulator_chat_rate_limit_strikes_total`.
-- Exige só adição — não toca o caminho quente.
+**2. Extrair helpers puros adicionais de `server.py` (BAIXO risco)**
+- Candidatos: helpers de merge de histórico, normalização de payloads JSON de storage.
+- Seguir padrão A (helper puro sem state).
 
 **3. Integrar catálogo em `browser._dismiss_rate_limit_modal_if_any` (ALTO risco, BLOQUEADO)**
 - Último caminho que ainda usa string livre para rate-limit.
@@ -527,16 +530,16 @@ Esperado: **273 passed**. (NÃO usar `python3 -m pytest tests/` cru — `tests/t
 
 ```
 Continue o refactor do /home/user/chatGPT_Simulator na branch claude/fix-rate-limit-interval-QmRpK.
-Leia APENAS a seção "PONTO DE RETOMADA (última atualização em 2026-04-22 octies)" em REFACTOR_PROGRESS.md — é autocontida.
+Leia APENAS a seção "PONTO DE RETOMADA (última atualização em 2026-04-22 nonies)" em REFACTOR_PROGRESS.md — é autocontida.
 
 Execute a Opção 1 da lista "Próximas opções" (extrair parsers puros de analisador_prontuarios.py).
 
 Regras obrigatórias:
 (a) criar Scripts/analisador_parsers.py com funções puras — SEM importar openai, requests, config ou playwright;
 (b) extrair `_verificar_rate_limit_no_markdown` e a parte pura de `_parse_json_llm` (strip de fences ```, parsing JSON com validação estrutural);
-(c) manter wrappers finos em analisador_prontuarios.py com nomes e assinaturas originais — análogo ao padrão B (`SecurityState`, `ChatRateLimitCooldown`);
+(c) manter wrappers finos em analisador_prontuarios.py com nomes e assinaturas originais — análogo ao padrão A (helper puro sem state);
 (d) tests/test_analisador_parsers.py com ≥3 casos por função pública;
-(e) manter todos os 273 testes offline passando + novos (comando listado no PONTO DE RETOMADA);
+(e) manter todos os 279 testes offline passando + novos (comando listado no PONTO DE RETOMADA);
 (f) ANTES do commit/push final, ATUALIZAR a seção "PONTO DE RETOMADA" com novo commit hash, contagem de testes, e próxima opção;
 (g) commit com título em PT-BR no imperativo; corpo com lista de testes novos e resultado pytest;
 (h) push para claude/fix-rate-limit-interval-QmRpK.
@@ -563,4 +566,5 @@ Se precisar tocar em browser.py (async/Playwright) ou em server.py além do impo
 - **2026-04-22 quinquies** — `3b06256`: gravação do primeiro PONTO DE RETOMADA autocontido.
 - **2026-04-22 sexies** — `5dc4928` + `67d3b39`: integração de `log_sanitizer` em `_audit_event` e `utils.log`; correção/autoexplicação do 409 em `/api/sync`; extração de `SecurityState`. 240 testes offline passando. Merge via PR #564 em `main`.
 - **2026-04-22 septies** — `ea0b197`: extração de `ChatRateLimitCooldown` (backoff exponencial 2^strikes, clamp 1800s) para módulo puro. 257 testes offline passando (+17 novos).
-- **2026-04-22 octies** (esta sessão, branch `claude/fix-rate-limit-interval-QmRpK`) — `addc3d6`: integração de `error_catalog.format_reason` em `_register_chat_rate_limit`; helper idempotente no catálogo para prefixar `[CODE] <reason>` em logs operacionais; 273 testes offline passando (+16 novos).
+- **2026-04-22 octies** — `addc3d6`: integração de `error_catalog.format_reason` em `_register_chat_rate_limit`; helper idempotente no catálogo para prefixar `[CODE] <reason>` em logs operacionais; 273 testes offline passando (+16 novos).
+- **2026-04-22 nonies** (esta sessão, branch `claude/fix-rate-limit-interval-QmRpK`) — expõe `ChatRateLimitCooldown.snapshot()` e `SecurityState.snapshot()` em `/api/metrics`; adiciona 4 gauges Prometheus (`simulator_chat_rate_limit_remaining_sec`, `simulator_chat_rate_limit_strikes`, `simulator_security_blocked_ips`, `simulator_security_tracked_login_ips`); testes de contrato JSON-serializable nos snapshots. 279 testes offline passando (+6 novos).

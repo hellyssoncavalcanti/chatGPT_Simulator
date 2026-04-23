@@ -107,3 +107,36 @@ class TestSnapshotAndConstructorGuards:
     def test_is_ip_blocked_unknown_ip(self):
         s, _ = _state()
         assert s.is_ip_blocked("nunca_viu") == (False, 0.0, "")
+
+
+class TestSnapshotIsObservabilityContract:
+    """Pin o formato publicado por `/api/metrics` e gauges Prometheus.
+
+    Mudar esses campos quebra dashboards externos — trate como contrato.
+    """
+
+    def test_snapshot_keys_are_stable(self):
+        s, _ = _state()
+        assert set(s.snapshot().keys()) == {
+            "rate_limit_keys",
+            "blocked_ips",
+            "tracked_login_ips",
+        }
+
+    def test_snapshot_values_are_json_serializable(self):
+        import json
+
+        s, _ = _state()
+        s.register_rate_limit_hit("1.2.3.4", "GET:/x")
+        s.register_login_failure("1.2.3.4")
+        payload = json.dumps(s.snapshot())
+        parsed = json.loads(payload)
+        assert parsed["rate_limit_keys"] == 1
+        assert parsed["tracked_login_ips"] == 1
+        assert parsed["blocked_ips"] == 0
+
+    def test_snapshot_types_are_primitive_ints(self):
+        s, _ = _state()
+        snap = s.snapshot()
+        for key in ("rate_limit_keys", "blocked_ips", "tracked_login_ips"):
+            assert isinstance(snap[key], int)

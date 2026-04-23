@@ -151,6 +151,22 @@ _python_anti_rate_limit_last_ts = 0.0
 PROM_QUEUE_SIZE = Gauge("simulator_queue_size", "Tamanho atual da fila") if Gauge else None
 PROM_ACTIVE_CHATS = Gauge("simulator_active_chats", "Chats ativos em processamento") if Gauge else None
 PROM_HTTP_ERRORS = Counter("simulator_http_errors_total", "Total de erros HTTP por status", ["status"]) if Counter else None
+PROM_CHAT_RATE_LIMIT_REMAINING_SEC = Gauge(
+    "simulator_chat_rate_limit_remaining_sec",
+    "Segundos restantes de cooldown global do chat-ChatGPT (0 quando livre)",
+) if Gauge else None
+PROM_CHAT_RATE_LIMIT_STRIKES = Gauge(
+    "simulator_chat_rate_limit_strikes",
+    "Strikes consecutivos de rate-limit do chat (0 a max_strikes; 2^strikes vira multiplicador do cooldown)",
+) if Gauge else None
+PROM_SECURITY_BLOCKED_IPS = Gauge(
+    "simulator_security_blocked_ips",
+    "Quantidade de IPs atualmente bloqueados por brute-force de login",
+) if Gauge else None
+PROM_SECURITY_TRACKED_LOGIN_IPS = Gauge(
+    "simulator_security_tracked_login_ips",
+    "Quantidade de IPs com falhas de login recentes (ainda dentro da janela)",
+) if Gauge else None
 
 
 def _cleanup_active_chats():
@@ -1237,6 +1253,8 @@ def api_metrics():
         "active_chats_stale_candidates": stale_candidates,
         "syncs_in_progress": len(ACTIVE_SYNCS),
         "rate_limit_remaining_sec": round(_get_chat_rate_limit_remaining_seconds(), 1),
+        "chat_rate_limit": _CHAT_RATE_LIMIT_COOLDOWN.snapshot(),
+        "security": _SECURITY_STATE.snapshot(),
         "request_timeout_sec": int(PYTHON_CHAT_QUEUE_TIMEOUT_SEC),
     }
     return jsonify({"success": True, "metrics": metrics}), 200
@@ -1252,7 +1270,24 @@ def prometheus_metrics():
     if PROM_ACTIVE_CHATS is not None:
         active = sum(1 for _k, meta in list(ACTIVE_CHATS.items()) if not meta.get("finished"))
         PROM_ACTIVE_CHATS.set(float(active))
+    _update_rate_limit_prom_gauges()
     return Response(generate_latest(), mimetype=CONTENT_TYPE_LATEST)
+
+
+def _update_rate_limit_prom_gauges():
+    """Sincroniza gauges Prometheus com os snapshots atuais dos singletons
+    de rate-limit / security. Chamado no endpoint `/metrics`. Silencioso
+    em ambientes sem `prometheus_client` (todos os gauges vêm `None`)."""
+    chat_snap = _CHAT_RATE_LIMIT_COOLDOWN.snapshot()
+    sec_snap = _SECURITY_STATE.snapshot()
+    if PROM_CHAT_RATE_LIMIT_REMAINING_SEC is not None:
+        PROM_CHAT_RATE_LIMIT_REMAINING_SEC.set(float(chat_snap.get("remaining_seconds", 0.0)))
+    if PROM_CHAT_RATE_LIMIT_STRIKES is not None:
+        PROM_CHAT_RATE_LIMIT_STRIKES.set(float(chat_snap.get("strikes", 0)))
+    if PROM_SECURITY_BLOCKED_IPS is not None:
+        PROM_SECURITY_BLOCKED_IPS.set(float(sec_snap.get("blocked_ips", 0)))
+    if PROM_SECURITY_TRACKED_LOGIN_IPS is not None:
+        PROM_SECURITY_TRACKED_LOGIN_IPS.set(float(sec_snap.get("tracked_login_ips", 0)))
 
 @app.route("/", methods=["GET", "POST"])
 def index(): 
