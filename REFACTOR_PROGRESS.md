@@ -402,7 +402,7 @@ Coletadas em `2026-04-22` via `wc -l` / `grep -nE "def "`:
 ### Estado atual (consolidado) — branch `claude/fix-rate-limit-interval-QmRpK`
 
 **Commits relevantes (mais recente → mais antigo):**
-- `PENDING` — Integrar error_catalog.format_reason em _register_chat_rate_limit *(esta sessão)*
+- `addc3d6` — Integrar error_catalog.format_reason em _register_chat_rate_limit *(esta sessão)*
 - `70464c2` — docs: gravar hash ea0b197 no PONTO DE RETOMADA septies
 - `ea0b197` — Extrair ChatRateLimitCooldown (backoff exponencial) para módulo puro
 - `77417b9` — Merge PR #564 (trabalho anterior de `1vPbB` integrado em `main`)
@@ -563,4 +563,4 @@ Se precisar tocar em browser.py (async/Playwright) ou em server.py além do impo
 - **2026-04-22 quinquies** — `3b06256`: gravação do primeiro PONTO DE RETOMADA autocontido.
 - **2026-04-22 sexies** — `5dc4928` + `67d3b39`: integração de `log_sanitizer` em `_audit_event` e `utils.log`; correção/autoexplicação do 409 em `/api/sync`; extração de `SecurityState`. 240 testes offline passando. Merge via PR #564 em `main`.
 - **2026-04-22 septies** — `ea0b197`: extração de `ChatRateLimitCooldown` (backoff exponencial 2^strikes, clamp 1800s) para módulo puro. 257 testes offline passando (+17 novos).
-- **2026-04-22 octies** (esta sessão, branch `claude/fix-rate-limit-interval-QmRpK`) — integração de `error_catalog.format_reason` em `_register_chat_rate_limit`; helper idempotente no catálogo para prefixar `[CODE] <reason>` em logs operacionais; 273 testes offline passando (+16 novos).
+- **2026-04-22 octies** (esta sessão, branch `claude/fix-rate-limit-interval-QmRpK`) — `addc3d6`: integração de `error_catalog.format_reason` em `_register_chat_rate_limit`; helper idempotente no catálogo para prefixar `[CODE] <reason>` em logs operacionais; 273 testes offline passando (+16 novos).
