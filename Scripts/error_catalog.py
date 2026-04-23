@@ -254,3 +254,34 @@ def classify_from_text(text: str, *, default: str = INTERNAL_ERROR) -> str:
 def classify_many(texts: Iterable[str]) -> list[str]:
     """Classifica uma lista de mensagens; conveniência para triagem em lote."""
     return [classify_from_text(t) for t in texts]
+
+
+def format_reason(reason: str) -> str:
+    """Normaliza uma string livre de "motivo" prefixando-a com o código do
+    catálogo quando classificável.
+
+    Contrato estável (usado por `server._register_chat_rate_limit` e futuros
+    caminhos de logging):
+      - `reason` vazio/`None`/apenas-whitespace → retorna `""`.
+      - Classificável em algum código ≠ `INTERNAL_ERROR` → retorna
+        `"[<CODE>] <reason_stripped>"` (tag style consistente com o resto
+        dos logs do projeto, ex.: `[CHAT_RATE_LIMIT]`, `[SECURITY_AUDIT]`).
+      - Apenas INTERNAL_ERROR (nada casou) → retorna o texto stripped sem
+        prefixo, evitando ruído `[INTERNAL_ERROR]` em logs operacionais.
+
+    Idempotente: chamar duas vezes não duplica o prefixo, pois o próprio
+    texto prefixado continua classificando para o mesmo código — mas a
+    regex de deteção do prefixo é checada antes para ser explícita.
+    """
+    normalized = (reason or "").strip()
+    if not normalized:
+        return ""
+    # Idempotência: se já vier prefixado com `[CODE] `, respeita.
+    if normalized.startswith("[") and "] " in normalized:
+        candidate = normalized[1 : normalized.index("] ")].strip()
+        if candidate and candidate == candidate.upper() and candidate in _CATALOG:
+            return normalized
+    code = classify_from_text(normalized)
+    if code == INTERNAL_ERROR:
+        return normalized
+    return f"[{code}] {normalized}"

@@ -262,3 +262,44 @@ class TestRequiredCodesPresent:
     def test_required_code_is_registered(self, code):
         entry = ec.get(code)
         assert entry.code == code
+
+
+# ─────────────────────────────────────────────────────────────
+# `format_reason`: helper usado por server._register_chat_rate_limit
+# para normalizar a string livre em `Motivo: ...` do log.
+# ─────────────────────────────────────────────────────────────
+class TestFormatReason:
+    def test_empty_string_returns_empty(self):
+        assert ec.format_reason("") == ""
+
+    def test_none_returns_empty(self):
+        assert ec.format_reason(None) == ""  # type: ignore[arg-type]
+
+    def test_only_whitespace_returns_empty(self):
+        assert ec.format_reason("   \t\n ") == ""
+
+    def test_rate_limit_pt_br_gets_tag(self):
+        out = ec.format_reason("excesso de solicitações, tente depois")
+        assert out == "[RATE_LIMIT] excesso de solicitações, tente depois"
+
+    def test_rate_limit_en_gets_tag(self):
+        out = ec.format_reason("HTTP 429 - too many requests")
+        assert out == "[RATE_LIMIT] HTTP 429 - too many requests"
+
+    def test_browser_timeout_gets_tag(self):
+        out = ec.format_reason("page.goto: Timeout ao carregar")
+        assert out.startswith("[BROWSER_TIMEOUT] ")
+
+    def test_unclassifiable_returns_stripped_original(self):
+        # Não deve prefixar com [INTERNAL_ERROR] para evitar ruído em logs.
+        out = ec.format_reason("  erro genérico de rede qualquer  ")
+        assert out == "erro genérico de rede qualquer"
+
+    def test_idempotent_on_already_prefixed(self):
+        original = "[RATE_LIMIT] excesso de solicitações, tente depois"
+        assert ec.format_reason(original) == original
+
+    def test_does_not_double_prefix_even_in_two_passes(self):
+        once = ec.format_reason("excesso de solicitações, tente depois")
+        twice = ec.format_reason(once)
+        assert once == twice
