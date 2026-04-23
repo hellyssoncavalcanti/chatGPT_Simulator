@@ -402,7 +402,7 @@ Coletadas em `2026-04-22` via `wc -l` / `grep -nE "def "`:
 ### Estado atual (consolidado) — branch `claude/fix-rate-limit-interval-QmRpK`
 
 **Commits relevantes (mais recente → mais antigo):**
-- `PENDING` — Expor snapshots de rate-limit e security em /api/metrics + gauges Prometheus *(esta sessão)*
+- `d8636dc` — Expor snapshots de rate-limit e security em /api/metrics + gauges Prometheus *(esta sessão)*
 - `e46a0ce` — docs: gravar hash addc3d6 no PONTO DE RETOMADA octies
 - `addc3d6` — Integrar error_catalog.format_reason em _register_chat_rate_limit
 - `70464c2` — docs: gravar hash ea0b197 no PONTO DE RETOMADA septies
@@ -567,4 +567,4 @@ Se precisar tocar em browser.py (async/Playwright) ou em server.py além do impo
 - **2026-04-22 sexies** — `5dc4928` + `67d3b39`: integração de `log_sanitizer` em `_audit_event` e `utils.log`; correção/autoexplicação do 409 em `/api/sync`; extração de `SecurityState`. 240 testes offline passando. Merge via PR #564 em `main`.
 - **2026-04-22 septies** — `ea0b197`: extração de `ChatRateLimitCooldown` (backoff exponencial 2^strikes, clamp 1800s) para módulo puro. 257 testes offline passando (+17 novos).
 - **2026-04-22 octies** — `addc3d6`: integração de `error_catalog.format_reason` em `_register_chat_rate_limit`; helper idempotente no catálogo para prefixar `[CODE] <reason>` em logs operacionais; 273 testes offline passando (+16 novos).
-- **2026-04-22 nonies** (esta sessão, branch `claude/fix-rate-limit-interval-QmRpK`) — expõe `ChatRateLimitCooldown.snapshot()` e `SecurityState.snapshot()` em `/api/metrics`; adiciona 4 gauges Prometheus (`simulator_chat_rate_limit_remaining_sec`, `simulator_chat_rate_limit_strikes`, `simulator_security_blocked_ips`, `simulator_security_tracked_login_ips`); testes de contrato JSON-serializable nos snapshots. 279 testes offline passando (+6 novos).
+- **2026-04-22 nonies** (esta sessão, branch `claude/fix-rate-limit-interval-QmRpK`) — `d8636dc`: expõe `ChatRateLimitCooldown.snapshot()` e `SecurityState.snapshot()` em `/api/metrics`; adiciona 4 gauges Prometheus (`simulator_chat_rate_limit_remaining_sec`, `simulator_chat_rate_limit_strikes`, `simulator_security_blocked_ips`, `simulator_security_tracked_login_ips`); testes de contrato JSON-serializable nos snapshots. 279 testes offline passando (+6 novos).
