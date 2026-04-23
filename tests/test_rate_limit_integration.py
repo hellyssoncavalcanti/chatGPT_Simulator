@@ -165,3 +165,116 @@ class TestStringPayload:
         is_rl, msg, _ = _extract_rate_limit_details_offline("")
         assert is_rl is False
         assert msg == ""
+
+
+# ─────────────────────────────────────────────────────────────
+# Contrato do wrapper server._register_chat_rate_limit
+# ─────────────────────────────────────────────────────────────
+# server.py não importa em ambiente offline (puxa Flask). Reimplementamos
+# o wrapper ponto-a-ponto usando o mesmo singleton `ChatRateLimitCooldown`
+# e o mesmo helper `error_catalog.format_reason`, e checamos que a linha
+# de log final sai no formato esperado.
+#
+# Se este teste quebrar, quebrou o contrato do log operacional — mudanças
+# precisam atualizar dashboards/alertas que dependem do prefixo `[CODE]`.
+
+from chat_rate_limit_cooldown import ChatRateLimitCooldown
+
+
+def _fake_log_and_register(cooldown_state, retry_after, reason, log_sink):
+    """Réplica exata de server._register_chat_rate_limit com o mesmo
+    singleton (cooldown_state) e o mesmo sink de log (log_sink.append)."""
+    adjusted = cooldown_state.register(retry_after, reason)
+    normalized_reason = ec.format_reason(reason)
+    if normalized_reason:
+        log_sink.append(
+            f"[CHAT_RATE_LIMIT] cooldown de {adjusted}s registrado. "
+            f"Motivo: {normalized_reason}"
+        )
+    else:
+        log_sink.append(
+            f"[CHAT_RATE_LIMIT] cooldown de {adjusted}s registrado."
+        )
+    return adjusted
+
+
+def _cooldown():
+    clock = {"t": 1000.0}
+    return (
+        ChatRateLimitCooldown(
+            default_cooldown_sec=240,
+            max_cooldown_sec=1800,
+            max_strikes=6,
+            now_func=lambda: clock["t"],
+        ),
+        clock,
+    )
+
+
+class TestRegisterWrapperNormalizesReason:
+    def test_rate_limit_reason_gets_rate_limit_tag(self):
+        state, _ = _cooldown()
+        logs = []
+        _fake_log_and_register(
+            state, None, "excesso de solicitações, tente depois", logs
+        )
+        assert len(logs) == 1
+        line = logs[0]
+        assert line.startswith("[CHAT_RATE_LIMIT] cooldown de 240s registrado.")
+        assert "Motivo: [RATE_LIMIT] excesso de solicitações, tente depois" in line
+
+    def test_english_rate_limit_reason_gets_tag(self):
+        state, _ = _cooldown()
+        logs = []
+        _fake_log_and_register(state, 120, "Rate limit reached", logs)
+        assert "Motivo: [RATE_LIMIT] Rate limit reached" in logs[0]
+        # retry_after=120 com strikes=0 → cooldown = 120.
+        assert "cooldown de 120s" in logs[0]
+
+    def test_empty_reason_omits_motivo_suffix(self):
+        state, _ = _cooldown()
+        logs = []
+        _fake_log_and_register(state, None, "", logs)
+        assert logs[0] == "[CHAT_RATE_LIMIT] cooldown de 240s registrado."
+        assert "Motivo:" not in logs[0]
+
+    def test_unclassifiable_reason_kept_without_tag(self):
+        state, _ = _cooldown()
+        logs = []
+        _fake_log_and_register(state, None, "erro genérico de rede qualquer", logs)
+        # Fallback: texto original, sem prefixo `[INTERNAL_ERROR]`.
+        assert "Motivo: erro genérico de rede qualquer" in logs[0]
+        assert "[INTERNAL_ERROR]" not in logs[0]
+
+    def test_consecutive_hits_still_normalize_and_grow_cooldown(self):
+        state, clock = _cooldown()
+        logs = []
+        # Primeiro hit: strikes=0, cooldown=60.
+        _fake_log_and_register(state, 60, "excesso de solicitações", logs)
+        # Segundo hit dentro da janela: strikes=1, cooldown=120.
+        clock["t"] += 5
+        _fake_log_and_register(state, 60, "rate limit", logs)
+        # Terceiro hit ainda dentro da janela: strikes=2, cooldown=240.
+        clock["t"] += 5
+        _fake_log_and_register(state, 60, "too many requests", logs)
+        assert "cooldown de 60s" in logs[0]
+        assert "cooldown de 120s" in logs[1]
+        assert "cooldown de 240s" in logs[2]
+        for line in logs:
+            assert "Motivo: [RATE_LIMIT] " in line
+
+    def test_whitespace_only_reason_behaves_like_empty(self):
+        state, _ = _cooldown()
+        logs = []
+        _fake_log_and_register(state, None, "   \n", logs)
+        assert logs[0] == "[CHAT_RATE_LIMIT] cooldown de 240s registrado."
+
+    def test_pre_tagged_reason_is_idempotent(self):
+        state, _ = _cooldown()
+        logs = []
+        _fake_log_and_register(
+            state, None, "[RATE_LIMIT] excesso de solicitações", logs
+        )
+        # Não deve virar "[RATE_LIMIT] [RATE_LIMIT] excesso...".
+        assert logs[0].count("[RATE_LIMIT]") == 1
+        assert "Motivo: [RATE_LIMIT] excesso de solicitações" in logs[0]

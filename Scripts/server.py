@@ -369,8 +369,9 @@ def _extract_rate_limit_details(error_payload):
 
 def _register_chat_rate_limit(retry_after_seconds=None, reason=""):
     cooldown = _CHAT_RATE_LIMIT_COOLDOWN.register(retry_after_seconds, reason)
-    if reason:
-        log(f"[CHAT_RATE_LIMIT] cooldown de {cooldown}s registrado. Motivo: {reason}")
+    normalized_reason = _error_catalog.format_reason(reason)
+    if normalized_reason:
+        log(f"[CHAT_RATE_LIMIT] cooldown de {cooldown}s registrado. Motivo: {normalized_reason}")
     else:
         log(f"[CHAT_RATE_LIMIT] cooldown de {cooldown}s registrado.")
 
