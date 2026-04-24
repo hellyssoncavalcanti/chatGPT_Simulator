@@ -271,6 +271,68 @@ def extract_visible_llm_markdown(texto: str) -> str:
     return sem_think.strip()
 
 
+# ─────────────────────────────────────────────────────────
+# Fallback tolerante para queries de pesquisa em markdown LLM
+# ─────────────────────────────────────────────────────────
+_SEARCH_PAIR_PATTERN = re.compile(
+    r'"query"\s*:\s*"(?P<query>(?:\\.|[^"\\])*)"\s*,?\s*"reason"\s*:\s*"(?P<reason>(?:\\.|[^"\\])*)"',
+    re.IGNORECASE | re.DOTALL,
+)
+_SEARCH_LINE_PATTERN = re.compile(
+    r'^\s*(?:[-*]|\d+[.)])\s*(?P<query>.+?)(?:\s+[—-]\s+|\s+\|\s+motivo:\s+)(?P<reason>.+?)\s*$',
+    re.IGNORECASE | re.MULTILINE,
+)
+
+
+def extract_search_queries_fallback(markdown: str, max_queries: int = 16) -> list:
+    """Extrai `[{"query", "reason"}]` quando a LLM não entrega JSON estrito.
+
+    Dois passes tolerantes:
+      1. `"query": "..."  "reason": "..."` (JSON truncado ou sem vírgulas).
+      2. linhas formato `- query — motivo` ou `1) query | motivo: motivo`.
+
+    Deduplica por `query.lower()`. Corta em `max_queries` itens no total.
+    `max_queries` é injetado pelo chamador (em `analisador_prontuarios.py`,
+    virá de `config.ANALISADOR_SEARCH_MAX_QUERIES`). Default `16` é
+    defensivo — o caller real deve passar o valor configurado.
+    """
+    texto = strip_code_fences(markdown)
+    if not texto:
+        return []
+
+    queries: list[dict] = []
+    vistos: set[str] = set()
+    limit = max(1, int(max_queries))
+
+    for match in _SEARCH_PAIR_PATTERN.finditer(texto):
+        query = re.sub(r"\s+", " ", decode_json_string_fragment(match.group("query"))).strip()
+        reason = re.sub(r"\s+", " ", decode_json_string_fragment(match.group("reason"))).strip()
+        if not query:
+            continue
+        chave = query.lower()
+        if chave in vistos:
+            continue
+        vistos.add(chave)
+        queries.append({"query": query, "reason": reason})
+        if len(queries) >= limit:
+            return queries
+
+    for match in _SEARCH_LINE_PATTERN.finditer(texto):
+        query = re.sub(r"\s+", " ", match.group("query")).strip(' "\'')
+        reason = re.sub(r"\s+", " ", match.group("reason")).strip(' "\'')
+        if not query:
+            continue
+        chave = query.lower()
+        if chave in vistos:
+            continue
+        vistos.add(chave)
+        queries.append({"query": query, "reason": reason})
+        if len(queries) >= limit:
+            break
+
+    return queries
+
+
 __all__ = [
     "detect_rate_limit_preview",
     "build_rate_limit_error_message",
@@ -281,4 +343,5 @@ __all__ = [
     "json_looks_incomplete",
     "decode_json_string_fragment",
     "extract_visible_llm_markdown",
+    "extract_search_queries_fallback",
 ]
