@@ -402,7 +402,7 @@ Coletadas em `2026-04-22` via `wc -l` / `grep -nE "def "`:
 ### Estado atual (consolidado) — branch `claude/fix-rate-limit-interval-QmRpK`
 
 **Commits relevantes (mais recente → mais antigo):**
-- `PENDING` — Extrair helpers de payload de /v1/chat/completions para módulos puros *(esta sessão)*
+- `68c00b6` — Extrair helpers puros de chat_completions para server_helpers e request_source *(esta sessão)*
 - `c233bba` — docs: gravar hash 403427b no PONTO DE RETOMADA duodecies
 - `403427b` — Extrair extract_search_queries_fallback com max_queries injetável
 - `54ae14c` — docs: gravar hash 4d84ab1 no PONTO DE RETOMADA undecies
@@ -583,4 +583,4 @@ Se precisar tocar em browser.py (async/Playwright) ou em analisador_prontuarios.
 - **2026-04-22 decies** — `393af83`: extração de parsers puros (`Scripts/analisador_parsers.py`): `detect_rate_limit_preview`, `build_rate_limit_error_message`, `strip_code_fences`, `extract_json_block`, `normalize_llm_json`, `parse_json_block`. Wrappers finos preservam nomes e assinaturas em `analisador_prontuarios.py`. Exceção `ChatGPTRateLimitError` permanece no analisador; matcher de rate-limit é injetável. 311 testes offline passando (+32 novos).
 - **2026-04-22 undecies** — `4d84ab1`: extensão de `analisador_parsers.py` com `json_looks_incomplete`, `decode_json_string_fragment` e `extract_visible_llm_markdown`. Wrappers finos em `analisador_prontuarios.py` preservam nomes. README.md atualizado com inventário de módulos puros e comando offline. 333 testes offline passando (+22 novos).
 - **2026-04-22 duodecies** — `403427b`: extração de `extract_search_queries_fallback` para `analisador_parsers.py` com `max_queries` injetável (módulo puro sem dependência de `config`). Wrapper em `analisador_prontuarios.py` passa `SEARCH_MAX_QUERIES` ao delegar. 343 testes offline passando (+10 novos).
-- **2026-04-22 terdecies** (esta sessão, branch `claude/fix-rate-limit-interval-QmRpK`) — extração de 5 helpers puros de `chat_completions`: `is_analyzer_chat_request` (em `request_source.py`); `combine_openai_messages`, `build_sender_label`, `wrap_paste_if_python_source`, `coalesce_origin_url` (em `server_helpers.py`). Integração de todos em `server.chat_completions` preservando assinaturas. README.md + REFACTOR_PROGRESS.md atualizados. 369 testes offline passando (+26 novos).
+- **2026-04-22 terdecies** (esta sessão, branch `claude/fix-rate-limit-interval-QmRpK`) — `68c00b6`: extração de 5 helpers puros de `chat_completions`: `is_analyzer_chat_request` (em `request_source.py`); `combine_openai_messages`, `build_sender_label`, `wrap_paste_if_python_source`, `coalesce_origin_url` (em `server_helpers.py`). Integração de todos em `server.chat_completions` preservando assinaturas. README.md + REFACTOR_PROGRESS.md atualizados. 369 testes offline passando (+26 novos).
