@@ -582,7 +582,13 @@ def _parse_json_llm(texto: str) -> dict:
 
 
 def _json_parece_incompleto(texto: str) -> bool:
-    """Heurística para identificar respostas JSON possivelmente truncadas/incompletas."""
+    """Heurística para identificar respostas JSON possivelmente truncadas/incompletas.
+
+    Wrapper fino sobre `analisador_parsers.json_looks_incomplete`.
+    """
+    if _parsers is not None:
+        return _parsers.json_looks_incomplete(texto)
+    # Fallback defensivo: replica a lógica original.
     bruto = _strip_code_fences(texto or "").strip()
     if not bruto or not bruto.startswith('{'):
         return False
@@ -619,16 +625,17 @@ def _extrair_markdown_visivel_llm(texto: str) -> str:
     """
     Remove blocos/markers de raciocínio interno para identificar apenas a
     resposta visível já entregue pela LLM ao usuário.
+
+    Wrapper fino sobre `analisador_parsers.extract_visible_llm_markdown`.
     """
+    if _parsers is not None:
+        return _parsers.extract_visible_llm_markdown(texto)
+    # Fallback defensivo.
     bruto = texto or ""
     if not bruto.strip():
         return ""
-
-    # Caso o bloco <think> ainda esteja aberto, consideramos que a resposta
-    # visível ainda não começou.
     if "<think>" in bruto and "</think>" not in bruto:
         return ""
-
     sem_think = re.sub(r"<think>[\s\S]*?</think>", "", bruto, flags=re.IGNORECASE)
     return sem_think.strip()
 
@@ -752,7 +759,13 @@ def _reativar_erros_conexao_no_startup():
 
 
 def _decode_json_string_fragment(value: str) -> str:
-    """Decodifica um fragmento de string JSON sem perder caracteres UTF-8."""
+    """Decodifica um fragmento de string JSON sem perder caracteres UTF-8.
+
+    Wrapper fino sobre `analisador_parsers.decode_json_string_fragment`.
+    """
+    if _parsers is not None:
+        return _parsers.decode_json_string_fragment(value)
+    # Fallback defensivo.
     try:
         return json.loads(f'"{value}"')
     except json.JSONDecodeError:
