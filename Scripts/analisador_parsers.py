@@ -191,6 +191,86 @@ def parse_json_block(texto: str) -> dict:
         return json.loads(candidato_normalizado)
 
 
+# ─────────────────────────────────────────────────────────
+# Heurísticas e fragmentos auxiliares
+# ─────────────────────────────────────────────────────────
+def json_looks_incomplete(texto: str) -> bool:
+    """Heurística para identificar respostas JSON possivelmente
+    truncadas/incompletas.
+
+    Conta chaves/colchetes abertos vs fechados, ignorando conteúdo
+    dentro de strings (com escape). Retorna `True` quando:
+      - a string iniciada não foi fechada;
+      - `depth_obj > 0` (chaves ainda abertas);
+      - `depth_arr > 0` (colchetes ainda abertos);
+      - o texto não termina em `}`.
+
+    Não levanta. Entrada vazia ou sem `{` inicial retorna `False`.
+    """
+    bruto = strip_code_fences(texto or "").strip()
+    if not bruto or not bruto.startswith('{'):
+        return False
+
+    depth_obj = 0
+    depth_arr = 0
+    in_string = False
+    escape = False
+    for ch in bruto:
+        if in_string:
+            if escape:
+                escape = False
+            elif ch == '\\':
+                escape = True
+            elif ch == '"':
+                in_string = False
+            continue
+
+        if ch == '"':
+            in_string = True
+        elif ch == '{':
+            depth_obj += 1
+        elif ch == '}':
+            depth_obj -= 1
+        elif ch == '[':
+            depth_arr += 1
+        elif ch == ']':
+            depth_arr -= 1
+
+    return in_string or depth_obj > 0 or depth_arr > 0 or not bruto.rstrip().endswith('}')
+
+
+def decode_json_string_fragment(value: str) -> str:
+    """Decodifica um fragmento de string JSON (sem aspas externas)
+    preservando UTF-8 e escapes comuns.
+
+    Fallback: se `json.loads('"<value>"')` falhar, faz substituições
+    manuais de `\\"`, `\\n`, `\\t` — mantendo o contrato histórico."""
+    try:
+        return json.loads(f'"{value}"')
+    except json.JSONDecodeError:
+        return value.replace('\\"', '"').replace("\\n", "\n").replace("\\t", "\t")
+
+
+def extract_visible_llm_markdown(texto: str) -> str:
+    """Remove blocos `<think>…</think>` para isolar a resposta visível
+    entregue pela LLM.
+
+    Regras:
+      - Entrada vazia/whitespace retorna `""`.
+      - Se há `<think>` mas sem `</think>` fechado ainda, devolve `""`
+        (a resposta visível ainda não começou).
+      - Caso contrário, remove todos os blocos `<think>…</think>` (case-
+        insensitive, multiline) e faz `.strip()` no resultado.
+    """
+    bruto = texto or ""
+    if not bruto.strip():
+        return ""
+    if "<think>" in bruto and "</think>" not in bruto:
+        return ""
+    sem_think = re.sub(r"<think>[\s\S]*?</think>", "", bruto, flags=re.IGNORECASE)
+    return sem_think.strip()
+
+
 __all__ = [
     "detect_rate_limit_preview",
     "build_rate_limit_error_message",
@@ -198,4 +278,7 @@ __all__ = [
     "extract_json_block",
     "normalize_llm_json",
     "parse_json_block",
+    "json_looks_incomplete",
+    "decode_json_string_fragment",
+    "extract_visible_llm_markdown",
 ]

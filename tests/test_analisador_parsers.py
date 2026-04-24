@@ -178,3 +178,105 @@ class TestParseJsonBlock:
     def test_raises_json_decode_when_normalization_also_fails(self):
         with pytest.raises(json.JSONDecodeError):
             ap.parse_json_block('{bad json without quotes}')
+
+
+# ─────────────────────────────────────────────────────────
+# json_looks_incomplete
+# ─────────────────────────────────────────────────────────
+class TestJsonLooksIncomplete:
+    def test_empty_returns_false(self):
+        assert ap.json_looks_incomplete("") is False
+        assert ap.json_looks_incomplete(None) is False  # type: ignore[arg-type]
+
+    def test_text_not_starting_with_brace_returns_false(self):
+        assert ap.json_looks_incomplete("plain text without json") is False
+
+    def test_balanced_closed_object_returns_false(self):
+        assert ap.json_looks_incomplete('{"a": 1}') is False
+
+    def test_unclosed_object_returns_true(self):
+        assert ap.json_looks_incomplete('{"a": 1') is True
+
+    def test_unclosed_string_returns_true(self):
+        assert ap.json_looks_incomplete('{"a": "valor sem fechar') is True
+
+    def test_unclosed_array_returns_true(self):
+        assert ap.json_looks_incomplete('{"lst": [1, 2, 3') is True
+
+    def test_escaped_quotes_inside_string_do_not_confuse(self):
+        # String com aspas escapadas continua fechada corretamente.
+        assert ap.json_looks_incomplete('{"a": "x\\"y"}') is False
+
+    def test_strips_fences_before_evaluating(self):
+        # Fenced JSON completo deve retornar False mesmo com cercas ```.
+        assert ap.json_looks_incomplete('```json\n{"a": 1}\n```') is False
+
+    def test_does_not_end_with_brace_returns_true(self):
+        # Balanceado mas com lixo após o último `}`.
+        assert ap.json_looks_incomplete('{"a": 1} trailing') is True
+
+
+# ─────────────────────────────────────────────────────────
+# decode_json_string_fragment
+# ─────────────────────────────────────────────────────────
+class TestDecodeJsonStringFragment:
+    def test_simple_ascii_survives(self):
+        assert ap.decode_json_string_fragment("abc") == "abc"
+
+    def test_utf8_preserved(self):
+        assert ap.decode_json_string_fragment("pediátrico") == "pediátrico"
+
+    def test_escaped_newline_decoded(self):
+        assert ap.decode_json_string_fragment("linha1\\nlinha2") == "linha1\nlinha2"
+
+    def test_escaped_quote_decoded(self):
+        assert ap.decode_json_string_fragment('ab\\"cd') == 'ab"cd'
+
+    def test_escaped_tab_decoded(self):
+        assert ap.decode_json_string_fragment("a\\tb") == "a\tb"
+
+    def test_invalid_escape_falls_back_manually(self):
+        # Backslash inválido para json.loads — fallback substitui só os
+        # escapes conhecidos e mantém o resto como está.
+        out = ap.decode_json_string_fragment('xyz\\q')
+        assert out == 'xyz\\q'
+
+
+# ─────────────────────────────────────────────────────────
+# extract_visible_llm_markdown
+# ─────────────────────────────────────────────────────────
+class TestExtractVisibleLlmMarkdown:
+    def test_empty_returns_empty(self):
+        assert ap.extract_visible_llm_markdown("") == ""
+        assert ap.extract_visible_llm_markdown("   \n\t ") == ""
+
+    def test_none_returns_empty(self):
+        assert ap.extract_visible_llm_markdown(None) == ""  # type: ignore[arg-type]
+
+    def test_text_without_think_block_returned_stripped(self):
+        assert ap.extract_visible_llm_markdown("  resposta final  ") == "resposta final"
+
+    def test_open_think_without_close_returns_empty(self):
+        # A LLM ainda está raciocinando — nada visível ainda.
+        assert ap.extract_visible_llm_markdown("<think>estou pensando...") == ""
+
+    def test_closed_think_block_removed(self):
+        out = ap.extract_visible_llm_markdown(
+            "<think>raciocínio interno</think>\nresposta visível"
+        )
+        assert "raciocínio" not in out
+        assert "resposta visível" in out
+
+    def test_multiple_think_blocks_all_removed(self):
+        out = ap.extract_visible_llm_markdown(
+            "<think>A</think>parte 1\n<think>B</think>parte 2"
+        )
+        assert "A" not in out and "B" not in out
+        assert "parte 1" in out and "parte 2" in out
+
+    def test_think_tag_case_insensitive(self):
+        out = ap.extract_visible_llm_markdown(
+            "<THINK>oculto</THINK>visível"
+        )
+        assert "oculto" not in out
+        assert out == "visível"

@@ -239,6 +239,55 @@ pip install -r requirements-test.txt
 pytest --cov=Scripts --cov-report=term-missing
 ```
 
+### Suite offline de módulos puros (refactor em andamento)
+
+O refactor (branch `claude/fix-rate-limit-interval-*`) vem extraindo lógica
+pura de `server.py`, `browser.py` e `analisador_prontuarios.py` para
+módulos testáveis sem Flask/Playwright/config. A suite offline correspondente
+roda em ambientes mínimos (só `pytest` instalado):
+
+```bash
+python3 -m pytest \
+  tests/test_humanizer.py \
+  tests/test_shared_queue.py \
+  tests/test_selectors_smoke.py \
+  tests/test_request_source.py \
+  tests/test_error_catalog.py \
+  tests/test_server_helpers.py \
+  tests/test_browser_predicates.py \
+  tests/test_rate_limit_integration.py \
+  tests/test_log_sanitizer.py \
+  tests/test_analisador_rate_limit.py \
+  tests/test_audit_sanitization.py \
+  tests/test_security_state.py \
+  tests/test_chat_rate_limit_cooldown.py \
+  tests/test_analisador_parsers.py
+```
+
+Esperado: **333 passed**. (Os arquivos `tests/test_server_api.py` e
+`tests/test_storage.py` são excluídos porque exigem `flask` e
+`cryptography`, que não estão nesta lista de smoke offline — eles
+rodam no CI completo via o comando da seção anterior.)
+
+#### Inventário de módulos puros (extraídos do caminho quente)
+
+| Módulo | Responsabilidade | Testes |
+|---|---|---|
+| `Scripts/request_source.py` | Detecção de origem Python/Codex no request HTTP. | `tests/test_request_source.py` |
+| `Scripts/error_catalog.py` | 11 códigos estáveis + classificador PT/EN + `format_reason` (tag `[CODE]`). | `tests/test_error_catalog.py` |
+| `Scripts/server_helpers.py` | `format_wait_seconds`, `queue_status_payload`, `prune_old_attempts`, `count_active_chatgpt_profiles`. | `tests/test_server_helpers.py` |
+| `Scripts/browser_predicates.py` | Predicados do DOM do ChatGPT (extract sender, orphan tabs, incomplete JSON, inline base64, paste wrappers). | `tests/test_browser_predicates.py` |
+| `Scripts/log_sanitizer.py` | `mask_api_key`, `mask_bearer_token`, `mask_session_cookie`, `mask_file_path`, `sanitize*`. | `tests/test_log_sanitizer.py` |
+| `Scripts/security_state.py` | Classe `SecurityState` — rate-limit per-(ip,key) + brute-force de login, expiração automática. | `tests/test_security_state.py` |
+| `Scripts/chat_rate_limit_cooldown.py` | Classe `ChatRateLimitCooldown` — cooldown global com backoff exponencial 2^strikes (clamp 1800s). | `tests/test_chat_rate_limit_cooldown.py` |
+| `Scripts/analisador_parsers.py` | Detecção de rate-limit em texto, strip/extract/normalize/parse JSON tolerante, heurística de truncamento, remoção de `<think>…</think>`. | `tests/test_analisador_parsers.py` |
+
+Os callers (`server.py`, `browser.py`, `analisador_prontuarios.py`,
+`utils.py`) mantêm wrappers finos com as mesmas assinaturas originais —
+mudanças no comportamento são capturadas pelos testes offline antes de
+chegarem ao caminho Flask/Playwright. Progresso detalhado e histórico
+de sessões ficam em `REFACTOR_PROGRESS.md` (seção "PONTO DE RETOMADA").
+
 ---
 
 ## Servidor de acompanhamento WhatsApp Web (modo isolado, sem Meta)
