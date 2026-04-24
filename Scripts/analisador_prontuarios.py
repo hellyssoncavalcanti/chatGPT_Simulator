@@ -358,6 +358,13 @@ try:
 except Exception:  # pragma: no cover - defensivo
     _error_catalog = None
 
+try:
+    # Parsers puros (strip de fences, extração/normalização/parse de JSON,
+    # detecção de rate-limit em texto). Padrão A (helper puro sem state).
+    import analisador_parsers as _parsers
+except Exception:  # pragma: no cover - defensivo
+    _parsers = None
+
 
 def _aguardar_throttle_llm():
     """Espera o tempo restante do throttle antes de enviar a próxima mensagem ao ChatGPT."""
@@ -490,7 +497,18 @@ def _verificar_rate_limit_no_markdown(markdown: str, tentativa_atual: int = 0):
     """
     Chamada após receber o markdown completo da LLM.
     Se detectar rate limit no texto, levanta ChatGPTRateLimitError.
+
+    Wrapper fino sobre `analisador_parsers.detect_rate_limit_preview` com
+    injeção do matcher `_resposta_eh_rate_limit` (que já delega ao
+    `error_catalog`). A camada de exceção (`ChatGPTRateLimitError`)
+    permanece aqui — o módulo puro não levanta tipos específicos.
     """
+    if _parsers is not None:
+        preview = _parsers.detect_rate_limit_preview(markdown, _resposta_eh_rate_limit)
+        if preview is not None:
+            raise ChatGPTRateLimitError(_parsers.build_rate_limit_error_message(preview))
+        return
+    # Fallback defensivo (módulo puro indisponível): replica comportamento original.
     if _resposta_eh_rate_limit(markdown):
         raise ChatGPTRateLimitError(
             f"ChatGPT retornou rate limit (detectado no texto da resposta). "
@@ -499,7 +517,13 @@ def _verificar_rate_limit_no_markdown(markdown: str, tentativa_atual: int = 0):
 
 
 def _strip_code_fences(texto: str) -> str:
-    """Remove cercas Markdown ```...``` mantendo apenas o conteúdo interno."""
+    """Remove cercas Markdown ```...``` mantendo apenas o conteúdo interno.
+
+    Wrapper fino sobre `analisador_parsers.strip_code_fences`.
+    """
+    if _parsers is not None:
+        return _parsers.strip_code_fences(texto)
+    # Fallback defensivo (módulo puro indisponível).
     texto = (texto or "").strip()
     if texto.startswith("```"):
         texto = re.sub(r"^```(?:json)?\s*", "", texto, flags=re.IGNORECASE)
@@ -508,7 +532,13 @@ def _strip_code_fences(texto: str) -> str:
 
 
 def _extrair_bloco_json(texto: str) -> str:
-    """Extrai o primeiro objeto JSON aparente do texto retornado pela LLM."""
+    """Extrai o primeiro objeto JSON aparente do texto retornado pela LLM.
+
+    Wrapper fino sobre `analisador_parsers.extract_json_block`.
+    """
+    if _parsers is not None:
+        return _parsers.extract_json_block(texto)
+    # Fallback defensivo.
     texto = _strip_code_fences(texto)
     match = re.search(r'\{[\s\S]*\}', texto)
     return match.group().strip() if match else ""
@@ -516,97 +546,34 @@ def _extrair_bloco_json(texto: str) -> str:
 
 def _normalizar_json_llm(raw_json: str) -> str:
     """
-    Corrige problemas comuns de JSON quase-válido retornado por LLMs:
-    - aspas tipográficas;
-    - vírgulas faltando entre pares chave/valor consecutivos;
-    - vírgulas faltando entre objetos de uma lista;
-    - vírgulas sobrando antes de ] ou }.
+    Corrige problemas comuns de JSON quase-válido retornado por LLMs.
+
+    Wrapper fino sobre `analisador_parsers.normalize_llm_json`. Mantido
+    por compat com os callers internos do analisador (vide call sites
+    em `_extrair_markdown_visivel_llm` e `_salvar_debug_json_falha`).
     """
-    texto = (raw_json or "").strip()
-    if not texto:
-        return ""
-
-    texto = (
-        texto
-        .replace("“", '"')
-        .replace("”", '"')
-        .replace("’", "'")
-        .replace("‘", "'")
-        .replace("`", '"')
-    )
-
-    # Escapa aspas internas não-escapadas dentro de valores string.
-    # Exemplo comum de LLM: "titulo": "Expressive language delay ("late talking") in..."
-    # JSON válido exigiria: \"late talking\".
-    chars = []
-    in_string = False
-    escape = False
-    n = len(texto)
-    i = 0
-    while i < n:
-        ch = texto[i]
-        if not in_string:
-            chars.append(ch)
-            if ch == '"':
-                in_string = True
-            i += 1
-            continue
-
-        if escape:
-            chars.append(ch)
-            escape = False
-            i += 1
-            continue
-
-        if ch == '\\':
-            chars.append(ch)
-            escape = True
-            i += 1
-            continue
-
-        if ch == '"':
-            # Se após aspas houver delimitador de fim de string JSON, encerra string.
-            # Caso contrário, trata como aspas internas e escapa.
-            j = i + 1
-            while j < n and texto[j] in ' \t\r\n':
-                j += 1
-            next_ch = texto[j] if j < n else ''
-            if next_ch in [',', '}', ']', ':', '']:
-                chars.append('"')
-                in_string = False
-            else:
-                chars.append('\\"')
-            i += 1
-            continue
-
-        chars.append(ch)
-        i += 1
-
-    texto = ''.join(chars)
-
-    # Ex.: "query": "..."   "reason": "..."
-    texto = re.sub(r'("(?:(?:\\.|[^"\\])*)")(\s*)"([A-Za-z0-9_\-]+)"\s*:', r'\1,\2"\3":', texto)
-    # Ex.: } {   ou   ] {
-    texto = re.sub(r'([}\]])(\s*)(\{)', r'\1,\2', texto)
-    # Ex.: } "outra_chave":
-    texto = re.sub(r'([}\]])(\s*)"([A-Za-z0-9_\-]+)"\s*:', r'\1,\2"\3":', texto)
-    # Remove trailing commas antes de fechar objeto/lista
-    texto = re.sub(r',(\s*[}\]])', r'\1', texto)
-    return texto
+    if _parsers is not None:
+        return _parsers.normalize_llm_json(raw_json)
+    # Fallback defensivo: caminho histórico (sem extração para módulo puro).
+    return raw_json or ""
 
 
 def _parse_json_llm(texto: str) -> dict:
     """
     Faz o parse de um objeto JSON retornado pela LLM com pequenas correções
     tolerantes a formatação imperfeita.
+
+    Wrapper fino sobre `analisador_parsers.parse_json_block`, precedido
+    pela verificação de rate-limit (que levanta `ChatGPTRateLimitError`).
     """
     # Detecta rate limit antes de tentar parse (evita contar como "JSON inválido")
     _verificar_rate_limit_no_markdown(texto)
-
+    if _parsers is not None:
+        return _parsers.parse_json_block(texto)
+    # Fallback defensivo (caminho sem módulo puro).
     candidato = _extrair_bloco_json(texto)
     if not candidato:
         raise ValueError("LLM não retornou bloco JSON.")
-
     try:
         return json.loads(candidato)
     except json.JSONDecodeError:
