@@ -393,7 +393,7 @@ Coletadas em `2026-04-22` via `wc -l` / `grep -nE "def "`:
 
 ---
 
-## 🆕 PONTO DE RETOMADA (última atualização em 2026-04-22 duodecies)
+## 🆕 PONTO DE RETOMADA (última atualização em 2026-04-22 terdecies)
 
 > **Leia APENAS esta seção ao retomar em outro chat.** Ela é autocontida:
 > não é necessário reler seções anteriores a menos que haja dúvida sobre
@@ -402,7 +402,9 @@ Coletadas em `2026-04-22` via `wc -l` / `grep -nE "def "`:
 ### Estado atual (consolidado) — branch `claude/fix-rate-limit-interval-QmRpK`
 
 **Commits relevantes (mais recente → mais antigo):**
-- `403427b` — Extrair extract_search_queries_fallback com max_queries injetável *(esta sessão)*
+- `PENDING` — Extrair helpers de payload de /v1/chat/completions para módulos puros *(esta sessão)*
+- `c233bba` — docs: gravar hash 403427b no PONTO DE RETOMADA duodecies
+- `403427b` — Extrair extract_search_queries_fallback com max_queries injetável
 - `54ae14c` — docs: gravar hash 4d84ab1 no PONTO DE RETOMADA undecies
 - `4d84ab1` — Estender analisador_parsers com heurísticas puras adicionais
 - `50e4880` — docs: gravar hash 393af83 no PONTO DE RETOMADA decies
@@ -428,7 +430,7 @@ Coletadas em `2026-04-22` via `wc -l` / `grep -nE "def "`:
 - `1f3374b` — Extrair detecção de origem de request para módulo testável offline
 - `0c6216e` — docs: refinar backlog P0-P1-P2 com evidências concretas
 
-**Suite offline atual: 14 arquivos → 343 passed** (333 anterior + 10 novos cobrindo `extract_search_queries_fallback` com `max_queries` injetável).
+**Suite offline atual: 14 arquivos → 369 passed** (343 anterior + 5 em `test_request_source::TestIsAnalyzerChatRequest` + 21 em `test_server_helpers` cobrindo `combine_openai_messages`, `build_sender_label`, `wrap_paste_if_python_source`, `coalesce_origin_url`).
 
 Comando exato de validação:
 ```
@@ -449,15 +451,15 @@ python3 -m pytest \
   tests/test_chat_rate_limit_cooldown.py \
   tests/test_analisador_parsers.py
 ```
-Esperado: **343 passed**. (NÃO usar `python3 -m pytest tests/` cru — `tests/test_server_api.py` e `tests/test_storage.py` falham por requerer `flask` / `cryptography` indisponíveis neste ambiente.)
+Esperado: **369 passed**. (NÃO usar `python3 -m pytest tests/` cru — `tests/test_server_api.py` e `tests/test_storage.py` falham por requerer `flask` / `cryptography` indisponíveis neste ambiente.)
 
 ### Mapa de módulos puros já criados
 
 | Módulo | LOC | Papel | Testes |
 |---|---|---|---|
-| `Scripts/request_source.py` | 34 | `is_python_chat_request`, `is_codex_chat_request`. | `tests/test_request_source.py` (10) |
+| `Scripts/request_source.py` | ~60 | `is_python_chat_request`, `is_codex_chat_request`, `is_analyzer_chat_request` (detecta `analisador_prontuarios*` e token `analyzer`). | `tests/test_request_source.py` (15) |
 | `Scripts/error_catalog.py` | ~290 | 11 códigos + `classify_from_text` (PT-BR + EN) + `format_reason` (tag `[CODE] …` idempotente, fallback sem ruído para INTERNAL_ERROR). | `tests/test_error_catalog.py` (65) |
-| `Scripts/server_helpers.py` | ~115 | `format_wait_seconds`, `queue_status_payload`, `prune_old_attempts`, `count_active_chatgpt_profiles`. | `tests/test_server_helpers.py` (29) |
+| `Scripts/server_helpers.py` | ~220 | `format_wait_seconds`, `queue_status_payload`, `prune_old_attempts`, `count_active_chatgpt_profiles`, `combine_openai_messages` (concat system+user OpenAI-style), `build_sender_label`, `wrap_paste_if_python_source` (wrappers `[INICIO/FIM_TEXTO_COLADO]`), `coalesce_origin_url`. | `tests/test_server_helpers.py` (50) |
 | `Scripts/browser_predicates.py` | ~180 | `extract_task_sender`, `is_known_orphan_tab_url`, `response_looks_incomplete_json`, `response_requests_followup_actions`, `replace_inline_base64_payloads`, `ensure_paste_wrappers`. | `tests/test_browser_predicates.py` (38) |
 | `Scripts/log_sanitizer.py` | ~170 | `mask_api_key`, `mask_bearer_token`, `mask_session_cookie`, `mask_file_path`, `sanitize`, `sanitize_iter`, `sanitize_mapping`. | `tests/test_log_sanitizer.py` (31) |
 | `Scripts/security_state.py` | ~120 | Classe `SecurityState` (rate-limit per-(ip,key), brute-force de login, expiração automática, `now_func` injetável). | `tests/test_security_state.py` (14) |
@@ -466,6 +468,7 @@ Esperado: **343 passed**. (NÃO usar `python3 -m pytest tests/` cru — `tests/t
 | `Scripts/humanizer.py` | 124 | Módulo original (inalterado); testes ampliados com invariantes anti-robotização. | `tests/test_humanizer.py` (33) |
 
 ### Integrações já feitas (em caminho quente)
+- `server.chat_completions` usa `request_source.is_analyzer_chat_request`, `server_helpers.combine_openai_messages`, `server_helpers.build_sender_label`, `server_helpers.wrap_paste_if_python_source` e `server_helpers.coalesce_origin_url` — concatenação de mensagens OpenAI-style, rotulagem de remetente e wrappers de texto colado agora são puros e testáveis offline.
 - `server._extract_rate_limit_details` usa `error_catalog.classify_from_text`.
 - `analisador_prontuarios._resposta_eh_rate_limit` usa `error_catalog.classify_from_text` (com fallback defensivo).
 - `analisador_prontuarios._verificar_rate_limit_no_markdown` / `_strip_code_fences` / `_extrair_bloco_json` / `_normalizar_json_llm` / `_parse_json_llm` / `_json_parece_incompleto` / `_decode_json_string_fragment` / `_extrair_markdown_visivel_llm` / `_extrair_queries_pesquisa_fallback` são agora wrappers finos sobre `analisador_parsers`. A camada de exceção (`ChatGPTRateLimitError`) e a decisão de rate-limit (`_resposta_eh_rate_limit`) permanecem no analisador — o módulo puro recebe o matcher por injeção e devolve o preview. `SEARCH_MAX_QUERIES` é injetado no wrapper, mantendo o módulo puro sem dependência de `config`. Fallback defensivo mantido se `analisador_parsers` não importar.
@@ -495,7 +498,7 @@ Esperado: **343 passed**. (NÃO usar `python3 -m pytest tests/` cru — `tests/t
 - **Módulo puro**: sem `flask`, `playwright` nem `config` no import.
 - **Log sanitizado**: `_audit_event` e `utils.log` já mascaram `api_key`, `Bearer`, cookies de sessão e caminhos `/home/<user>` ou `C:\Users\<user>`.
 
-### Padrões validados nesta branch (9 extrações + 5 integrações bem-sucedidas)
+### Padrões validados nesta branch (9 extrações + 6 integrações bem-sucedidas)
 
 **A. Helper puro sem state** (`request_source`, `error_catalog`, `server_helpers`, `browser_predicates`, `log_sanitizer`, `analisador_parsers`):
 1. Criar `Scripts/<nome>.py` com funções puras.
@@ -517,15 +520,19 @@ Esperado: **343 passed**. (NÃO usar `python3 -m pytest tests/` cru — `tests/t
 
 ### Próximas opções (ordem recomendada por risco crescente)
 
-**1. Extrair helpers puros adicionais de `server.py` (BAIXO risco)**
-- Candidatos: helpers de merge de histórico, normalização de payloads JSON de storage.
-- Seguir padrão A (helper puro sem state).
+**1. Continuar extração em `chat_completions` (BAIXO risco)**
+- Candidatos restantes no mesmo handler: normalização de `attachments` (parse base64, validação de nome/tamanho), lógica de "usar URL do snapshot se ausente", decodificação do payload `chat_task_payload`.
+- Adicionar ao `server_helpers.py` existente.
 
-**2. Integrar catálogo em `browser._dismiss_rate_limit_modal_if_any` (ALTO risco, BLOQUEADO)**
+**2. Extrair lógica de `/api/sync` dedup (BAIXO risco)**
+- `ACTIVE_SYNCS`/`ACTIVE_SYNCS_LOCK` + janela 120s já estão isolados; a chave de dedup e o cálculo de `elapsed`/`retry_after` são puros.
+- Criar módulo `Scripts/sync_dedup.py` (padrão B — helper com state + lock, `now_func` injetável).
+
+**3. Integrar catálogo em `browser._dismiss_rate_limit_modal_if_any` (ALTO risco, BLOQUEADO)**
 - Último caminho que ainda usa string livre para rate-limit.
 - **BLOQUEADO**: toca `browser.py` async/Playwright → requer aprovação do usuário.
 
-**3. Plano de concorrência por `browser_profile` (ALTO risco, BLOQUEADO)**
+**4. Plano de concorrência por `browser_profile` (ALTO risco, BLOQUEADO)**
 - Entregável inicial: documento em `docs/concurrency_per_profile.md` (sem código).
 - Depois: alteração em `browser.py` com aprovação explícita.
 
@@ -533,17 +540,18 @@ Esperado: **343 passed**. (NÃO usar `python3 -m pytest tests/` cru — `tests/t
 
 ```
 Continue o refactor do /home/user/chatGPT_Simulator na branch claude/fix-rate-limit-interval-QmRpK.
-Leia APENAS a seção "PONTO DE RETOMADA (última atualização em 2026-04-22 duodecies)" em REFACTOR_PROGRESS.md — é autocontida.
+Leia APENAS a seção "PONTO DE RETOMADA (última atualização em 2026-04-22 terdecies)" em REFACTOR_PROGRESS.md — é autocontida.
 
-Execute a Opção 1 da lista "Próximas opções" (extrair helpers puros adicionais de server.py).
+Execute a Opção 1 da lista "Próximas opções" (continuar extração em `chat_completions` e handlers vizinhos).
 
 Regras obrigatórias:
-(a) criar/estender módulo puro em Scripts/ (sem flask, playwright, config, openai, requests). Candidatos já inventariados:
-    - helpers de merge/normalização de histórico de chat (look em server.py funções relacionadas a `mensagens` e `merge`);
-    - parser/normalizador de payloads JSON que chegam por /api/* (entrada de storage);
-(b) manter wrappers finos em server.py com nome/assinatura originais (padrão A);
-(c) tests/test_<modulo>.py com ≥3 casos por função pública;
-(d) manter todos os 343 testes offline passando + novos;
+(a) estender `Scripts/server_helpers.py` (já existente e puro) com:
+    - `decode_chat_attachment(att)` — parse seguro de `{"name", "data"}` em base64 (trata prefixo `data:...,`, retorna `(name_safe, bytes)` ou levanta `ValueError`);
+    - `resolve_chat_url(requested, stored_snapshot)` — resolve a URL efetiva dada a URL pedida e o snapshot do storage (strings `None`/`"None"` tratadas como ausência);
+    - `normalize_browser_profile(requested, stored)` — mesma ideia para `browser_profile` (com fallback final `None`).
+(b) manter wrappers finos (trechos inline) em `server.py` chamando os novos helpers — padrão A (não criar novos nomes exportados no server);
+(c) ampliar `tests/test_server_helpers.py` com ≥3 casos por função nova;
+(d) manter todos os 369 testes offline passando + novos;
 (e) ANTES do commit/push final, ATUALIZAR a seção "PONTO DE RETOMADA" com novo commit hash, contagem de testes, e próxima opção;
 (f) commit com título em PT-BR no imperativo; corpo com lista de testes novos e resultado pytest;
 (g) push para claude/fix-rate-limit-interval-QmRpK.
@@ -574,4 +582,5 @@ Se precisar tocar em browser.py (async/Playwright) ou em analisador_prontuarios.
 - **2026-04-22 nonies** — `d8636dc`: expõe `ChatRateLimitCooldown.snapshot()` e `SecurityState.snapshot()` em `/api/metrics`; adiciona 4 gauges Prometheus (`simulator_chat_rate_limit_remaining_sec`, `simulator_chat_rate_limit_strikes`, `simulator_security_blocked_ips`, `simulator_security_tracked_login_ips`); testes de contrato JSON-serializable nos snapshots. 279 testes offline passando (+6 novos).
 - **2026-04-22 decies** — `393af83`: extração de parsers puros (`Scripts/analisador_parsers.py`): `detect_rate_limit_preview`, `build_rate_limit_error_message`, `strip_code_fences`, `extract_json_block`, `normalize_llm_json`, `parse_json_block`. Wrappers finos preservam nomes e assinaturas em `analisador_prontuarios.py`. Exceção `ChatGPTRateLimitError` permanece no analisador; matcher de rate-limit é injetável. 311 testes offline passando (+32 novos).
 - **2026-04-22 undecies** — `4d84ab1`: extensão de `analisador_parsers.py` com `json_looks_incomplete`, `decode_json_string_fragment` e `extract_visible_llm_markdown`. Wrappers finos em `analisador_prontuarios.py` preservam nomes. README.md atualizado com inventário de módulos puros e comando offline. 333 testes offline passando (+22 novos).
-- **2026-04-22 duodecies** (esta sessão, branch `claude/fix-rate-limit-interval-QmRpK`) — `403427b`: extração de `extract_search_queries_fallback` para `analisador_parsers.py` com `max_queries` injetável (módulo puro sem dependência de `config`). Wrapper em `analisador_prontuarios.py` passa `SEARCH_MAX_QUERIES` ao delegar. 343 testes offline passando (+10 novos).
+- **2026-04-22 duodecies** — `403427b`: extração de `extract_search_queries_fallback` para `analisador_parsers.py` com `max_queries` injetável (módulo puro sem dependência de `config`). Wrapper em `analisador_prontuarios.py` passa `SEARCH_MAX_QUERIES` ao delegar. 343 testes offline passando (+10 novos).
+- **2026-04-22 terdecies** (esta sessão, branch `claude/fix-rate-limit-interval-QmRpK`) — extração de 5 helpers puros de `chat_completions`: `is_analyzer_chat_request` (em `request_source.py`); `combine_openai_messages`, `build_sender_label`, `wrap_paste_if_python_source`, `coalesce_origin_url` (em `server_helpers.py`). Integração de todos em `server.chat_completions` preservando assinaturas. README.md + REFACTOR_PROGRESS.md atualizados. 369 testes offline passando (+26 novos).

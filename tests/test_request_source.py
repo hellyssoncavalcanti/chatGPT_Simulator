@@ -1,4 +1,8 @@
-from request_source import is_codex_chat_request, is_python_chat_request
+from request_source import (
+    is_analyzer_chat_request,
+    is_codex_chat_request,
+    is_python_chat_request,
+)
 
 
 class TestIsPythonChatRequest:
@@ -46,3 +50,29 @@ class TestIsCodexChatRequest:
     def test_case_insensitive(self):
         assert is_codex_chat_request("CODEX", "", "")
         assert is_codex_chat_request("", "HTTPS://CHATGPT.COM/CODEX/CLOUD", "")
+
+
+class TestIsAnalyzerChatRequest:
+    def test_underscore_variant_matches(self):
+        assert is_analyzer_chat_request("analisador_prontuarios")
+        assert is_analyzer_chat_request("analisador_prontuarios.py")
+        assert is_analyzer_chat_request("analisador_prontuarios.py/worker-2")
+
+    def test_hyphen_variant_matches(self):
+        assert is_analyzer_chat_request("analisador-prontuarios")
+        assert is_analyzer_chat_request("analisador-prontuarios-v2")
+
+    def test_exact_analyzer_token_matches(self):
+        assert is_analyzer_chat_request("analyzer")
+        assert is_analyzer_chat_request("ANALYZER")
+
+    def test_other_sources_do_not_match(self):
+        assert not is_analyzer_chat_request("acompanhamento_whatsapp.py")
+        assert not is_analyzer_chat_request("auto_dev_agent.py")
+        assert not is_analyzer_chat_request("usuario_remoto")
+        assert not is_analyzer_chat_request("")
+        assert not is_analyzer_chat_request(None)  # type: ignore[arg-type]
+
+    def test_analyzer_as_substring_without_underscore_does_not_match(self):
+        # `"analyzer"` só casa exato; `"xanalyzerx"` não deve disparar.
+        assert not is_analyzer_chat_request("xanalyzerx")
