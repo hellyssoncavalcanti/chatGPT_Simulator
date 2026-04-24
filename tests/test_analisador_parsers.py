@@ -280,3 +280,82 @@ class TestExtractVisibleLlmMarkdown:
         )
         assert "oculto" not in out
         assert out == "visível"
+
+
+# ─────────────────────────────────────────────────────────
+# extract_search_queries_fallback
+# ─────────────────────────────────────────────────────────
+class TestExtractSearchQueriesFallback:
+    def test_empty_returns_empty_list(self):
+        assert ap.extract_search_queries_fallback("") == []
+        assert ap.extract_search_queries_fallback(None) == []  # type: ignore[arg-type]
+
+    def test_only_fences_returns_empty(self):
+        assert ap.extract_search_queries_fallback("```json\n\n```") == []
+
+    def test_quoted_pair_pattern(self):
+        raw = '"query": "sinais de enxaqueca", "reason": "dor de cabeça persistente"'
+        out = ap.extract_search_queries_fallback(raw)
+        assert out == [
+            {"query": "sinais de enxaqueca", "reason": "dor de cabeça persistente"}
+        ]
+
+    def test_quoted_pair_pattern_inside_fences_and_json_array(self):
+        raw = '```json\n[{"query":"febre alta","reason":"diagnóstico diferencial"}]\n```'
+        out = ap.extract_search_queries_fallback(raw)
+        assert out == [{"query": "febre alta", "reason": "diagnóstico diferencial"}]
+
+    def test_multiple_pairs_deduplicated_by_query_lowercase(self):
+        raw = (
+            '"query": "Cefaleia", "reason": "A"\n'
+            '"query": "cefaleia", "reason": "B"\n'  # duplicado case-insensitive
+            '"query": "Tontura", "reason": "C"\n'
+        )
+        out = ap.extract_search_queries_fallback(raw)
+        assert [q["query"] for q in out] == ["Cefaleia", "Tontura"]
+
+    def test_line_pattern_dash_separator(self):
+        raw = (
+            "- dor torácica — descartar IAM\n"
+            "- palpitações — avaliar arritmia\n"
+        )
+        out = ap.extract_search_queries_fallback(raw)
+        assert out == [
+            {"query": "dor torácica", "reason": "descartar IAM"},
+            {"query": "palpitações", "reason": "avaliar arritmia"},
+        ]
+
+    def test_line_pattern_numbered_with_motivo_pipe(self):
+        raw = (
+            "1) tosse seca | motivo: avaliar COVID\n"
+            "2) febre | motivo: infecção bacteriana\n"
+        )
+        out = ap.extract_search_queries_fallback(raw)
+        assert len(out) == 2
+        assert out[0]["query"] == "tosse seca"
+        assert out[0]["reason"] == "avaliar COVID"
+
+    def test_max_queries_limits_result(self):
+        raw = "\n".join(
+            f'"query": "q{i}", "reason": "r{i}"' for i in range(10)
+        )
+        out = ap.extract_search_queries_fallback(raw, max_queries=3)
+        assert len(out) == 3
+        assert [q["query"] for q in out] == ["q0", "q1", "q2"]
+
+    def test_max_queries_clamped_to_one_minimum(self):
+        raw = '"query": "x", "reason": "y"'
+        # Valores zero/negativos são normalizados para 1.
+        out_zero = ap.extract_search_queries_fallback(raw, max_queries=0)
+        out_neg = ap.extract_search_queries_fallback(raw, max_queries=-5)
+        assert len(out_zero) == 1
+        assert len(out_neg) == 1
+
+    def test_mixed_pair_then_line_pattern(self):
+        raw = (
+            '"query": "A", "reason": "r1"\n'
+            "- B — r2\n"
+            "- A — r3\n"  # duplicado de "A"
+        )
+        out = ap.extract_search_queries_fallback(raw)
+        assert [q["query"] for q in out] == ["A", "B"]

@@ -776,7 +776,14 @@ def _extrair_queries_pesquisa_fallback(markdown: str) -> list:
     """
     Extrai queries manualmente quando a LLM não entrega JSON estrito.
     Aceita objetos quase-JSON e listas em texto contendo campos query/reason.
+
+    Wrapper fino sobre `analisador_parsers.extract_search_queries_fallback`
+    injetando o teto `SEARCH_MAX_QUERIES` vindo de `config`.
     """
+    if _parsers is not None:
+        return _parsers.extract_search_queries_fallback(markdown, max_queries=SEARCH_MAX_QUERIES)
+
+    # Fallback defensivo (módulo puro indisponível).
     texto = _strip_code_fences(markdown)
     if not texto:
         return []
@@ -784,7 +791,6 @@ def _extrair_queries_pesquisa_fallback(markdown: str) -> list:
     queries = []
     vistos = set()
 
-    # Tenta localizar pares query/reason mesmo quando o JSON veio truncado ou sem vírgulas.
     pair_pattern = re.compile(
         r'"query"\s*:\s*"(?P<query>(?:\\.|[^"\\])*)"\s*,?\s*"reason"\s*:\s*"(?P<reason>(?:\\.|[^"\\])*)"',
         re.IGNORECASE | re.DOTALL,
@@ -802,7 +808,6 @@ def _extrair_queries_pesquisa_fallback(markdown: str) -> list:
         if len(queries) >= SEARCH_MAX_QUERIES:
             return queries
 
-    # Fallback mais simples: linhas em lista com query e motivo.
     line_pattern = re.compile(
         r'^\s*(?:[-*]|\d+[.)])\s*(?P<query>.+?)(?:\s+[—-]\s+|\s+\|\s+motivo:\s+)(?P<reason>.+?)\s*$',
         re.IGNORECASE | re.MULTILINE,

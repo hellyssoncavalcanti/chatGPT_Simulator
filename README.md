@@ -264,7 +264,7 @@ python3 -m pytest \
   tests/test_analisador_parsers.py
 ```
 
-Esperado: **333 passed**. (Os arquivos `tests/test_server_api.py` e
+Esperado: **343 passed**. (Os arquivos `tests/test_server_api.py` e
 `tests/test_storage.py` são excluídos porque exigem `flask` e
 `cryptography`, que não estão nesta lista de smoke offline — eles
 rodam no CI completo via o comando da seção anterior.)
@@ -280,7 +280,7 @@ rodam no CI completo via o comando da seção anterior.)
 | `Scripts/log_sanitizer.py` | `mask_api_key`, `mask_bearer_token`, `mask_session_cookie`, `mask_file_path`, `sanitize*`. | `tests/test_log_sanitizer.py` |
 | `Scripts/security_state.py` | Classe `SecurityState` — rate-limit per-(ip,key) + brute-force de login, expiração automática. | `tests/test_security_state.py` |
 | `Scripts/chat_rate_limit_cooldown.py` | Classe `ChatRateLimitCooldown` — cooldown global com backoff exponencial 2^strikes (clamp 1800s). | `tests/test_chat_rate_limit_cooldown.py` |
-| `Scripts/analisador_parsers.py` | Detecção de rate-limit em texto, strip/extract/normalize/parse JSON tolerante, heurística de truncamento, remoção de `<think>…</think>`. | `tests/test_analisador_parsers.py` |
+| `Scripts/analisador_parsers.py` | Detecção de rate-limit em texto, strip/extract/normalize/parse JSON tolerante, heurística de truncamento, remoção de `<think>…</think>`, parser de fallback para queries de pesquisa com `max_queries` injetável. | `tests/test_analisador_parsers.py` |
 
 Os callers (`server.py`, `browser.py`, `analisador_prontuarios.py`,
 `utils.py`) mantêm wrappers finos com as mesmas assinaturas originais —
