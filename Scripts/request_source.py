@@ -32,3 +32,21 @@ def is_codex_chat_request(source_hint_norm: str, url: str, origin_url: str) -> b
         str(origin_url or "").lower(),
     ])
     return ("codex" in hay) or ("/codex/cloud" in hay) or ("/codex/" in hay)
+
+
+def is_analyzer_chat_request(source_hint_norm: str) -> bool:
+    """Whether the request originates from `analisador_prontuarios.py`.
+
+    Matches any of the historical labels used by the analyzer script:
+      - `analisador_prontuarios` (substring)
+      - `analisador-prontuarios` (substring, hyphen variant)
+      - exact token `analyzer` (case-insensitive)
+    """
+    src = (source_hint_norm or "").strip().lower()
+    if not src:
+        return False
+    return (
+        "analisador_prontuarios" in src
+        or "analisador-prontuarios" in src
+        or src == "analyzer"
+    )

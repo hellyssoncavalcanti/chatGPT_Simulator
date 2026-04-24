@@ -149,3 +149,127 @@ class TestCountActiveChatgptProfiles:
     def test_list_is_treated_like_mapping_length(self):
         # O código histórico só chamava len(); aceitamos qualquer sized.
         assert sh.count_active_chatgpt_profiles(["default", "segunda_chance"]) == 2
+
+
+# ─────────────────────────────────────────────────────────
+# combine_openai_messages
+# ─────────────────────────────────────────────────────────
+class TestCombineOpenaiMessages:
+    def test_non_list_returns_empty(self):
+        assert sh.combine_openai_messages(None) == ""
+        assert sh.combine_openai_messages("oi") == ""
+        assert sh.combine_openai_messages({"role": "user", "content": "x"}) == ""
+
+    def test_empty_list_returns_empty(self):
+        assert sh.combine_openai_messages([]) == ""
+
+    def test_single_user_message(self):
+        assert sh.combine_openai_messages([
+            {"role": "user", "content": "olá"}
+        ]) == "olá"
+
+    def test_system_prepended_with_double_newline(self):
+        out = sh.combine_openai_messages([
+            {"role": "user", "content": "pergunta"},
+            {"role": "system", "content": "contexto"},
+        ])
+        assert out.startswith("contexto")
+        assert "pergunta" in out
+        assert "\n\n" in out
+
+    def test_assistant_message_ignored(self):
+        out = sh.combine_openai_messages([
+            {"role": "user", "content": "pergunta"},
+            {"role": "assistant", "content": "resposta anterior"},
+        ])
+        assert "resposta anterior" not in out
+        assert out == "pergunta"
+
+    def test_non_string_content_skipped(self):
+        out = sh.combine_openai_messages([
+            {"role": "user", "content": 42},
+            {"role": "user", "content": "texto"},
+        ])
+        assert out == "texto"
+
+    def test_non_mapping_items_ignored(self):
+        out = sh.combine_openai_messages([
+            "lixo",
+            None,
+            {"role": "user", "content": "válido"},
+        ])
+        assert out == "válido"
+
+
+# ─────────────────────────────────────────────────────────
+# build_sender_label
+# ─────────────────────────────────────────────────────────
+class TestBuildSenderLabel:
+    def test_analyzer_always_returns_canonical_label(self):
+        assert sh.build_sender_label("anything", True) == "analisador_prontuarios.py"
+        assert sh.build_sender_label("", True) == "analisador_prontuarios.py"
+
+    def test_hint_preserved_when_not_analyzer(self):
+        assert sh.build_sender_label("acompanhamento_whatsapp.py", False) == "acompanhamento_whatsapp.py"
+
+    def test_empty_hint_falls_back_to_default(self):
+        assert sh.build_sender_label("", False) == "usuario_remoto"
+        assert sh.build_sender_label(None, False) == "usuario_remoto"  # type: ignore[arg-type]
+        assert sh.build_sender_label("   ", False) == "usuario_remoto"
+
+
+# ─────────────────────────────────────────────────────────
+# wrap_paste_if_python_source
+# ─────────────────────────────────────────────────────────
+class TestWrapPasteIfPythonSource:
+    def test_not_python_source_returns_unchanged(self):
+        assert sh.wrap_paste_if_python_source("texto qualquer", False) == "texto qualquer"
+        assert sh.wrap_paste_if_python_source("", False) == ""
+
+    def test_python_source_wraps_plain_text(self):
+        out = sh.wrap_paste_if_python_source("analise isto", True)
+        assert out == "[INICIO_TEXTO_COLADO]analise isto[FIM_TEXTO_COLADO]"
+
+    def test_already_wrapped_not_double_wrapped(self):
+        already = "[INICIO_TEXTO_COLADO]x[FIM_TEXTO_COLADO]"
+        assert sh.wrap_paste_if_python_source(already, True) == already
+
+    def test_whitespace_only_is_not_wrapped(self):
+        assert sh.wrap_paste_if_python_source("", True) == ""
+        assert sh.wrap_paste_if_python_source("   \n", True) == "   \n"
+
+    def test_non_string_returns_empty(self):
+        assert sh.wrap_paste_if_python_source(None, True) == ""
+        assert sh.wrap_paste_if_python_source(42, True) == ""
+
+
+# ─────────────────────────────────────────────────────────
+# coalesce_origin_url
+# ─────────────────────────────────────────────────────────
+class TestCoalesceOriginUrl:
+    def test_origin_url_takes_priority(self):
+        out = sh.coalesce_origin_url(
+            {"origin_url": "https://a", "url_atual": "https://b"},
+            header_value="https://c",
+        )
+        assert out == "https://a"
+
+    def test_falls_back_to_url_atual(self):
+        out = sh.coalesce_origin_url(
+            {"url_atual": "https://b"},
+            header_value="https://c",
+        )
+        assert out == "https://b"
+
+    def test_falls_back_to_header(self):
+        assert sh.coalesce_origin_url({}, header_value="https://c") == "https://c"
+
+    def test_empty_when_nothing_provided(self):
+        assert sh.coalesce_origin_url({}) == ""
+        assert sh.coalesce_origin_url(None) == ""
+
+    def test_strips_whitespace(self):
+        assert sh.coalesce_origin_url({"origin_url": "  https://a  "}) == "https://a"
+
+    def test_non_mapping_data_treated_as_empty(self):
+        assert sh.coalesce_origin_url("lixo", header_value="https://fb") == "https://fb"

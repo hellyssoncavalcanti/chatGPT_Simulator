@@ -50,12 +50,17 @@ from utils import log as file_log
 from request_source import (
     is_python_chat_request as _is_python_chat_request_impl,
     is_codex_chat_request as _is_codex_chat_request_impl,
+    is_analyzer_chat_request as _is_analyzer_chat_request_impl,
 )
 from server_helpers import (
     format_wait_seconds as _format_wait_seconds_impl,
     queue_status_payload as _queue_status_payload_impl,
     prune_old_attempts as _prune_old_attempts_impl,
     count_active_chatgpt_profiles as _count_active_chatgpt_profiles_impl,
+    combine_openai_messages as _combine_openai_messages_impl,
+    build_sender_label as _build_sender_label_impl,
+    wrap_paste_if_python_source as _wrap_paste_if_python_source_impl,
+    coalesce_origin_url as _coalesce_origin_url_impl,
 )
 import error_catalog as _error_catalog
 from log_sanitizer import sanitize_mapping as _sanitize_audit_payload
@@ -2152,12 +2157,8 @@ def chat_completions():
         or ""
     )
     source_hint_norm = str(source_hint).strip().lower()
-    is_analyzer = (
-        'analisador_prontuarios' in source_hint_norm
-        or 'analisador-prontuarios' in source_hint_norm
-        or source_hint_norm == 'analyzer'
-    )
-    sender_label = "analisador_prontuarios.py" if is_analyzer else (source_hint or "usuario_remoto")
+    is_analyzer = _is_analyzer_chat_request_impl(source_hint_norm)
+    sender_label = _build_sender_label_impl(source_hint, is_analyzer)
     _origem = " [origem: analisador_prontuarios.py]" if is_analyzer else (f" [origem: {source_hint}]" if source_hint else "")
 
     if chat_id:
@@ -2171,29 +2172,19 @@ def chat_completions():
 
     # Se a mensagem vier vazia, mas houver um array 'messages', concatena tudo
     if not message and "messages" in data and isinstance(data["messages"], list):
-        combined_text = ""
-        for msg in data["messages"]:
-            role    = msg.get("role", "user")
-            content = msg.get("content", "")
-            if role == "system":
-                combined_text = content + "\n\n" + combined_text
-            elif role == "user":
-                combined_text += f"{content}\n"
-        message = combined_text.strip()
+        message = _combine_openai_messages_impl(data["messages"])
         print(f"[📡 SERVIDOR] Array de mensagens concatenado. Tamanho do texto: {len(message)} caracteres.")
 
     stream      = data.get("stream", False)
     attachments = data.get("attachments", [])
-    origin_url  = data.get("origin_url") or data.get("url_atual") or request.headers.get("X-Origin-URL") or ""
+    origin_url  = _coalesce_origin_url_impl(data, request.headers.get("X-Origin-URL") or "")
     is_python_source = _is_python_chat_request(source_hint_norm)
     is_codex_request = _is_codex_chat_request(source_hint_norm, data.get("url"), origin_url)
     use_python_queue = bool(is_python_source and not is_codex_request)
 
     # Todos os pedidos oriundos de scripts Python devem usar encapsulamento de
     # texto colado para evitar typing realista (lento) no browser.py.
-    if is_python_source and isinstance(message, str) and message.strip():
-        if "[INICIO_TEXTO_COLADO]" not in message or "[FIM_TEXTO_COLADO]" not in message:
-            message = f"[INICIO_TEXTO_COLADO]{message}[FIM_TEXTO_COLADO]"
+    message = _wrap_paste_if_python_source_impl(message, is_python_source)
 
     # --- 2. PROCESSAMENTO DE ANEXOS ---
     saved_paths = []
