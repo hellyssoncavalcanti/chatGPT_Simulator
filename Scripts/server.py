@@ -68,6 +68,9 @@ from server_helpers import (
     build_queue_key as _build_queue_key_impl,
     build_error_event as _build_error_event_impl,
     build_status_event as _build_status_event_impl,
+    normalize_optional_text as _normalize_optional_text_impl,
+    format_requester_suffix as _format_requester_suffix_impl,
+    compute_python_request_interval as _compute_python_request_interval_impl,
 )
 import error_catalog as _error_catalog
 from log_sanitizer import sanitize_mapping as _sanitize_audit_payload
@@ -488,8 +491,7 @@ def _wait_python_request_interval_if_needed(is_python_source: bool, stream_queue
             return
 
     profile_count = _count_active_chatgpt_profiles()
-    base = random.uniform(max(0, pmin), max(pmin, pmax))
-    target = max(0.0, base / float(profile_count))
+    base, target = _compute_python_request_interval_impl(pmin, pmax, profile_count)
 
     while True:
         now = time.time()
@@ -503,15 +505,14 @@ def _wait_python_request_interval_if_needed(is_python_source: bool, stream_queue
             f"base {int(base)}s): aguardando {int(remaining)}s."
         )
         if stream_queue is not None:
-            stream_queue.put(json.dumps({
-                "type": "status",
-                "content": status_text,
-                "phase": "python_anti_rate_limit_interval",
-                "wait_seconds": round(remaining, 1),
-                "target_seconds": round(target, 1),
-                "base_seconds": round(base, 1),
-                "profile_count": int(profile_count),
-            }, ensure_ascii=False))
+            stream_queue.put(_build_status_event_impl(
+                status_text,
+                phase="python_anti_rate_limit_interval",
+                wait_seconds=round(remaining, 1),
+                target_seconds=round(target, 1),
+                base_seconds=round(base, 1),
+                profile_count=int(profile_count),
+            ))
         time.sleep(min(PYTHON_ANTI_RATE_LIMIT_TICK_SEC, remaining))
 
     with _python_anti_rate_limit_lock:
@@ -544,14 +545,11 @@ def _wait_remote_user_priority_if_needed(is_analyzer: bool, stream_queue=None):
         return
     while _has_active_remote_user_chat():
         if stream_queue is not None:
-            stream_queue.put(json.dumps({
-                "type": "status",
-                "content": (
-                    "⏳ Aguardando finalização de pedido remoto prioritário em andamento "
-                    "antes de iniciar a análise automática."
-                ),
-                "phase": "analyzer_waiting_remote_priority",
-            }, ensure_ascii=False))
+            stream_queue.put(_build_status_event_impl(
+                "⏳ Aguardando finalização de pedido remoto prioritário em andamento "
+                "antes de iniciar a análise automática.",
+                phase="analyzer_waiting_remote_priority",
+            ))
         time.sleep(1.0)
 
 
@@ -702,14 +700,13 @@ def _execute_single_browser_search(query_str, browser_action, source_label, phas
             stream_queue.put(json.dumps(msg, ensure_ascii=False))
 
     if stream_queue is not None:
-        stream_queue.put(json.dumps({
-            "type": "status",
-            "content": f"🔎 Iniciando busca {source_label} por \"{query_str}\".",
-            "query": query_str,
-            "wait_seconds": 0,
-            "phase": f"{phase_prefix}_start",
-            "source": source_label,
-        }, ensure_ascii=False))
+        stream_queue.put(_build_status_event_impl(
+            f"🔎 Iniciando busca {source_label} por \"{query_str}\".",
+            query=query_str,
+            wait_seconds=0,
+            phase=f"{phase_prefix}_start",
+            source=source_label,
+        ))
 
     q = queue.Queue()
     browser_queue.put({
@@ -1409,7 +1406,7 @@ def menu_execute():
                     except: pass
                 if msg.get('type') in ['exec_result', 'error']: break
             except Exception as e:
-                yield json.dumps({"type": "error", "content": str(e)}) + "\n"; break
+                yield _build_error_event_impl(str(e)) + "\n"; break
     return Response(stream_with_context(generate()), mimetype='application/x-ndjson')
 
 @app.route("/api/sync", methods=["POST"])
@@ -1421,18 +1418,22 @@ def api_sync():
     url     = data.get("url")
     chat_id = data.get("chat_id")
     stream  = data.get("stream", False)
-    sync_browser_profile = (data.get("browser_profile") or "").strip() or None
+    sync_browser_profile = _normalize_optional_text_impl(data.get("browser_profile"))
 
     if chat_id and (not url or str(url).lower() == "none"):
         snap = storage.load_chats().get(chat_id, {}) or {}
-        url = snap.get("url") or url
+        # `_resolve_chat_url_impl(case_insensitive=True)` aceita "none"/"NONE"/etc.
+        # como ausência (idiom histórico de api_sync). `or url` preserva o
+        # comportamento original `snap.get("url") or url` — se snapshot vazio,
+        # mantém a URL bruta recebida (mesmo se for "none" string).
+        url = _resolve_chat_url_impl(url, snap.get("url"), case_insensitive=True) or url
         if not sync_browser_profile:
-            sync_browser_profile = (snap.get("chromium_profile") or "").strip() or None
+            sync_browser_profile = _normalize_optional_text_impl(snap.get("chromium_profile"))
 
     # --- Identificação do solicitante (opcional) ---
     nome_membro = data.get("nome_membro_solicitante") or None
     id_membro   = data.get("id_membro_solicitante")   or None
-    _quem = f', por "{nome_membro}" (id_membro: "{id_membro}")' if (nome_membro or id_membro) else ""
+    _quem = _format_requester_suffix_impl(nome_membro, id_membro)
     _url_info  = f' | url: {url}'     if url     else ''
     _cid_info  = f' | chat_id: {chat_id}' if chat_id else ''
     print(f"\n[🔄 SYNC] Pedido de sincronização recebido{_quem}{_cid_info}{_url_info}")
@@ -1464,8 +1465,8 @@ def api_sync():
         
         if stream:
             def sync_generate():
-                yield json.dumps({"type": "status", "content": "Reconectado ao processo ativo..."}) + "\n"
-                if ACTIVE_CHATS[chat_id]['status']: yield json.dumps({"type": "status", "content": ACTIVE_CHATS[chat_id]['status']}) + "\n"
+                yield _build_status_event_impl("Reconectado ao processo ativo...") + "\n"
+                if ACTIVE_CHATS[chat_id]['status']: yield _build_status_event_impl(ACTIVE_CHATS[chat_id]['status']) + "\n"
                 if ACTIVE_CHATS[chat_id]['markdown']: yield json.dumps({"type": "markdown", "content": ACTIVE_CHATS[chat_id]['markdown']}) + "\n"
                 try:
                     while not ACTIVE_CHATS[chat_id].get('finished'):
@@ -2156,7 +2157,7 @@ def chat_completions():
     # --- Identificação do solicitante (opcional) ---
     nome_membro = data.get("nome_membro_solicitante") or None
     id_membro   = data.get("id_membro_solicitante")   or None
-    _quem = f', por "{nome_membro}" (id_membro: "{id_membro}")' if (nome_membro or id_membro) else ""
+    _quem = _format_requester_suffix_impl(nome_membro, id_membro)
     source_hint = (
         data.get("request_source")
         or request.headers.get("X-Request-Source")
@@ -2388,7 +2389,7 @@ def chat_completions():
                         # Browser não respondeu em 600s — avisa o cliente e encerra
                         ACTIVE_CHATS[chat_id]['finished']    = True
                         ACTIVE_CHATS[chat_id]['finished_at'] = time.time()
-                        yield json.dumps({"type": "error", "content": "Timeout: browser não respondeu em 600s."}) + "\n"
+                        yield _build_error_event_impl("Timeout: browser não respondeu em 600s.") + "\n"
                         break
 
                     if raw_msg is None:

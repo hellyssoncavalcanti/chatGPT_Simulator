@@ -216,7 +216,12 @@ def decode_attachment(att) -> Optional[Tuple[str, bytes]]:
     return name, decoded
 
 
-def resolve_chat_url(requested_url, stored_url) -> Optional[str]:
+def resolve_chat_url(
+    requested_url,
+    stored_url,
+    *,
+    case_insensitive: bool = False,
+) -> Optional[str]:
     """Decide qual URL usar para retomar a conversa.
 
     Aceita o sentinela histórico `"None"` (string literal vinda do JSON
@@ -225,14 +230,74 @@ def resolve_chat_url(requested_url, stored_url) -> Optional[str]:
 
     Pura: o chamador é responsável por buscar `stored_url` em
     `storage.load_chats()`.
+
+    `case_insensitive=True` (padrão histórico de `api_sync`): além de
+    `"None"`, também trata `"none"`, `"NONE"`, `"None "`, etc., como
+    ausência. `chat_completions` usa `False` (preserva strict-equality
+    com `"None"`) — mantido por backward-compat.
     """
     for candidate in (requested_url, stored_url):
         if not isinstance(candidate, str):
             continue
         trimmed = candidate.strip()
-        if trimmed and trimmed != "None":
-            return trimmed
+        if not trimmed:
+            continue
+        compare = trimmed.lower() if case_insensitive else trimmed
+        sentinel = "none" if case_insensitive else "None"
+        if compare == sentinel:
+            continue
+        return trimmed
     return None
+
+
+def compute_python_request_interval(
+    pausa_min,
+    pausa_max,
+    profile_count,
+    *,
+    rng=None,
+) -> Tuple[float, float]:
+    """Calcula o intervalo anti-rate-limit para pedidos Python.
+
+    Retorna `(base_sec, target_sec)`:
+      - `base = rng(max(0, pmin), max(pmin, pmax))` — sorteado uniformemente.
+      - `target = max(0.0, base / max(1, profile_count))` — dividido pelo
+        número de perfis Chromium ativos para distribuir a carga.
+
+    Quando `pausa_min <= 0` E `pausa_max <= 0`, retorna `(0.0, 0.0)` —
+    sinal que o caller deve pular o wait e apenas atualizar `last_ts`
+    (preserva o curto-circuito histórico de
+    `_wait_python_request_interval_if_needed` em server.py).
+
+    `rng` é injetável para testes determinísticos; default é
+    `random.uniform`.
+    """
+    pmin = float(pausa_min)
+    pmax = float(pausa_max)
+    if pmin <= 0 and pmax <= 0:
+        return 0.0, 0.0
+    if rng is None:
+        import random
+        rng = random.uniform
+    base = float(rng(max(0.0, pmin), max(pmin, pmax)))
+    target = max(0.0, base / float(max(1, int(profile_count))))
+    return base, target
+
+
+def format_requester_suffix(nome_membro, id_membro) -> str:
+    """Sufixo padronizado para logs de requisição remota.
+
+    Formato histórico (idêntico em `chat_completions` e `api_sync`):
+        `, por "<nome>" (id_membro: "<id>")`  quando há nome OU id;
+        string vazia quando ambos são falsy.
+
+    Aceita `None`/strings vazias indiscriminadamente; non-strings são
+    serializados via f-string (preserva o comportamento original que
+    não validava tipos).
+    """
+    if not (nome_membro or id_membro):
+        return ""
+    return f', por "{nome_membro}" (id_membro: "{id_membro}")'
 
 
 def normalize_optional_text(value) -> Optional[str]:
@@ -396,6 +461,8 @@ __all__ = [
     "build_chat_task_payload",
     "build_error_event",
     "build_status_event",
+    "format_requester_suffix",
+    "compute_python_request_interval",
 ]
 
 
