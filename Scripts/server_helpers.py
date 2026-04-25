@@ -384,6 +384,16 @@ def build_status_event(content: str, **extras) -> str:
     return json.dumps(payload, ensure_ascii=False)
 
 
+def build_markdown_event(content: str) -> str:
+    """JSON do evento de markdown consumido pelo SSE / `stream_queue`.
+
+    Formato: `{"type": "markdown", "content": "<texto>"}`. Espelha
+    `build_error_event` (sem extras). `ensure_ascii=False` preserva
+    acentos/emoji. Sem newline trailing — o chamador decide.
+    """
+    return json.dumps({"type": "markdown", "content": str(content)}, ensure_ascii=False)
+
+
 def build_queue_key(chat_id, *, now_ns: Callable[[], int] = time.time_ns) -> str:
     """Gera a chave única usada para identificar um slot de fila Python.
 
@@ -461,6 +471,7 @@ __all__ = [
     "build_chat_task_payload",
     "build_error_event",
     "build_status_event",
+    "build_markdown_event",
     "format_requester_suffix",
     "compute_python_request_interval",
 ]

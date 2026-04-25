@@ -68,6 +68,7 @@ from server_helpers import (
     build_queue_key as _build_queue_key_impl,
     build_error_event as _build_error_event_impl,
     build_status_event as _build_status_event_impl,
+    build_markdown_event as _build_markdown_event_impl,
     normalize_optional_text as _normalize_optional_text_impl,
     format_requester_suffix as _format_requester_suffix_impl,
     compute_python_request_interval as _compute_python_request_interval_impl,
@@ -1467,7 +1468,7 @@ def api_sync():
             def sync_generate():
                 yield _build_status_event_impl("Reconectado ao processo ativo...") + "\n"
                 if ACTIVE_CHATS[chat_id]['status']: yield _build_status_event_impl(ACTIVE_CHATS[chat_id]['status']) + "\n"
-                if ACTIVE_CHATS[chat_id]['markdown']: yield json.dumps({"type": "markdown", "content": ACTIVE_CHATS[chat_id]['markdown']}) + "\n"
+                if ACTIVE_CHATS[chat_id]['markdown']: yield _build_markdown_event_impl(ACTIVE_CHATS[chat_id]['markdown']) + "\n"
                 try:
                     while not ACTIVE_CHATS[chat_id].get('finished'):
                         try:

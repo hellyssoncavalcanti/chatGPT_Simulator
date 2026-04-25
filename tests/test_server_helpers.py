@@ -594,6 +594,28 @@ class TestBuildStatusEvent:
 
 
 # ─────────────────────────────────────────────────────────
+# build_markdown_event
+# ─────────────────────────────────────────────────────────
+class TestBuildMarkdownEvent:
+    def test_basic_shape(self):
+        out = json.loads(sh.build_markdown_event("# Título\n\ntexto"))
+        assert out == {"type": "markdown", "content": "# Título\n\ntexto"}
+
+    def test_unicode_preserved(self):
+        out = sh.build_markdown_event("✅ análise concluída")
+        assert "✅" in out
+        assert "análise" in out
+
+    def test_coerces_non_string_to_str(self):
+        out = json.loads(sh.build_markdown_event(42))
+        assert out["content"] == "42"
+
+    def test_no_trailing_newline(self):
+        out = sh.build_markdown_event("x")
+        assert not out.endswith("\n")
+
+
+# ─────────────────────────────────────────────────────────
 # format_requester_suffix
 # ─────────────────────────────────────────────────────────
 class TestFormatRequesterSuffix:
