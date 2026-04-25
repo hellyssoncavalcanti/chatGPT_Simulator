@@ -12,10 +12,12 @@ instalar `flask` / `cryptography` e sem montar o app completo.
 
 from __future__ import annotations
 
+import base64
+import binascii
 import json
 import time
 from collections import deque
-from typing import Callable, Mapping, MutableSequence, Optional
+from typing import Callable, Mapping, MutableSequence, Optional, Tuple
 
 
 def format_wait_seconds(seconds) -> str:
@@ -174,6 +176,85 @@ def wrap_paste_if_python_source(message, is_python_source: bool) -> str:
     return f"{_PASTE_WRAPPER_OPEN}{message}{_PASTE_WRAPPER_CLOSE}"
 
 
+_DEFAULT_ATTACHMENT_NAME = "file.txt"
+
+
+def decode_attachment(att) -> Optional[Tuple[str, bytes]]:
+    """Decodifica um anexo `{"name": ..., "data": "<base64 ou data URI>"}`.
+
+    Retorna `(nome, bytes_decodificados)` ou `None` quando o anexo é
+    malformado a ponto do código histórico ter caído no `except Exception`
+    (não-mapping, `data` não-string, ou base64 inválido).
+
+    Semântica preservada byte-a-byte de `server.chat_completions`:
+      - Nome ausente → `"file.txt"` (default do `dict.get`). Nome com
+        valor `None` é repassado para o chamador, que historicamente
+        produzia o caminho `<ts>_None`.
+      - `data` ausente ou vazio → `base64.b64decode("") == b""`. O
+        chamador histórico cria o arquivo vazio e anexa o path; este
+        comportamento é preservado (helper retorna `(name, b"")`).
+      - Se `data` contém vírgula (ex.: `data:image/png;base64,iVBOR...`),
+        usa **apenas** o trecho imediatamente após a primeira vírgula
+        (`s.split(",")[1]`), ignorando vírgulas posteriores no payload —
+        comportamento histórico que evita reconstruir prefixos de
+        `data:` URIs e é seguro para os clientes atuais.
+
+    Sem IO: a gravação em disco continua sendo responsabilidade do
+    chamador (preserva o caminho `config.DIRS["uploads"]` em server.py).
+    """
+    if not isinstance(att, Mapping):
+        return None
+    raw = att.get("data", "")
+    if not isinstance(raw, str):
+        return None
+    name = att.get("name", _DEFAULT_ATTACHMENT_NAME)
+    payload = raw.split(",")[1] if "," in raw else raw
+    try:
+        decoded = base64.b64decode(payload)
+    except (binascii.Error, ValueError):
+        return None
+    return name, decoded
+
+
+def resolve_chat_url(requested_url, stored_url) -> Optional[str]:
+    """Decide qual URL usar para retomar a conversa.
+
+    Aceita o sentinela histórico `"None"` (string literal vinda do JSON
+    de clientes antigos) como ausência de URL. Devolve a primeira URL
+    válida em ordem de prioridade ou `None` quando nenhuma serve.
+
+    Pura: o chamador é responsável por buscar `stored_url` em
+    `storage.load_chats()`.
+    """
+    for candidate in (requested_url, stored_url):
+        if not isinstance(candidate, str):
+            continue
+        trimmed = candidate.strip()
+        if trimmed and trimmed != "None":
+            return trimmed
+    return None
+
+
+def resolve_browser_profile(requested_profile, stored_profile) -> Optional[str]:
+    """Resolve o `browser_profile` efetivo para a tarefa do browser.
+
+    Prioridade: `requested_profile` (vindo do payload da request) →
+    `stored_profile` (vindo do snapshot persistido) → `None`.
+
+    Strings são `.strip()`-adas; vazias após strip são ignoradas. Tipos
+    não-string são tratados como ausência. Mantém o contrato histórico
+    de `chat_completions` em que `None` significa "deixar `browser.py`
+    cair no fallback `default`".
+    """
+    for candidate in (requested_profile, stored_profile):
+        if not isinstance(candidate, str):
+            continue
+        trimmed = candidate.strip()
+        if trimmed:
+            return trimmed
+    return None
+
+
 def coalesce_origin_url(data, header_value: str = "") -> str:
     """Resolve a URL de origem efetiva do pedido `/v1/chat/completions`.
 
@@ -204,6 +285,9 @@ __all__ = [
     "build_sender_label",
     "wrap_paste_if_python_source",
     "coalesce_origin_url",
+    "decode_attachment",
+    "resolve_chat_url",
+    "resolve_browser_profile",
 ]
 
 

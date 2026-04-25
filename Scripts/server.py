@@ -61,6 +61,9 @@ from server_helpers import (
     build_sender_label as _build_sender_label_impl,
     wrap_paste_if_python_source as _wrap_paste_if_python_source_impl,
     coalesce_origin_url as _coalesce_origin_url_impl,
+    decode_attachment as _decode_attachment_impl,
+    resolve_chat_url as _resolve_chat_url_impl,
+    resolve_browser_profile as _resolve_browser_profile_impl,
 )
 import error_catalog as _error_catalog
 from log_sanitizer import sanitize_mapping as _sanitize_audit_payload
@@ -2191,11 +2194,11 @@ def chat_completions():
     if attachments:
         for att in attachments:
             try:
-                name  = att.get("name", "file.txt")
-                b64   = att.get("data", "")
-                if "," in b64: b64 = b64.split(",")[1]
-                bdata = base64.b64decode(b64)
-                path  = os.path.join(config.DIRS["uploads"], f"{int(time.time())}_{name}")
+                decoded = _decode_attachment_impl(att)
+                if decoded is None:
+                    continue
+                name, bdata = decoded
+                path = os.path.join(config.DIRS["uploads"], f"{int(time.time())}_{name}")
                 with open(path, "wb") as f:
                     f.write(bdata)
                 saved_paths.append(path)
@@ -2215,9 +2218,10 @@ def chat_completions():
 
     # Persiste imediatamente o pedido remoto para sobreviver ao fechamento precoce da aba.
     chat_snapshot = storage.load_chats().get(chat_id, {})
-    requested_browser_profile = (data.get('browser_profile') or '').strip() or None
-    stored_browser_profile = (chat_snapshot.get("chromium_profile") or "").strip() or None
-    effective_browser_profile = requested_browser_profile or stored_browser_profile or None
+    effective_browser_profile = _resolve_browser_profile_impl(
+        data.get('browser_profile'),
+        chat_snapshot.get("chromium_profile"),
+    )
     storage.save_chat(
         chat_id,
         chat_snapshot.get('title') or 'Novo Chat',
