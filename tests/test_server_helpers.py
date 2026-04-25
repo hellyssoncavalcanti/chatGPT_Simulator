@@ -276,6 +276,61 @@ class TestCoalesceOriginUrl:
 
 
 # ─────────────────────────────────────────────────────────
+# extract_source_hint
+# ─────────────────────────────────────────────────────────
+class TestExtractSourceHint:
+    def test_payload_takes_priority(self):
+        out = sh.extract_source_hint(
+            {"request_source": "analisador.py"},
+            {"X-Request-Source": "header.py", "X-Client-Source": "client.py"},
+        )
+        assert out == "analisador.py"
+
+    def test_falls_back_to_x_request_source(self):
+        out = sh.extract_source_hint(
+            {},
+            {"X-Request-Source": "header.py", "X-Client-Source": "client.py"},
+        )
+        assert out == "header.py"
+
+    def test_falls_back_to_x_client_source(self):
+        out = sh.extract_source_hint(
+            {},
+            {"X-Client-Source": "client.py"},
+        )
+        assert out == "client.py"
+
+    def test_empty_when_nothing_provided(self):
+        assert sh.extract_source_hint({}, {}) == ""
+        assert sh.extract_source_hint(None, None) == ""
+
+    def test_none_payload_treated_as_empty(self):
+        out = sh.extract_source_hint(None, {"X-Request-Source": "header.py"})
+        assert out == "header.py"
+
+    def test_none_headers_treated_as_empty(self):
+        out = sh.extract_source_hint({"request_source": "analisador.py"}, None)
+        assert out == "analisador.py"
+
+    def test_falsy_payload_value_falls_through(self):
+        # request_source vazio ou None no payload → fallback para headers.
+        out = sh.extract_source_hint(
+            {"request_source": ""},
+            {"X-Request-Source": "header.py"},
+        )
+        assert out == "header.py"
+
+    def test_accepts_duck_typed_get(self):
+        # Flask EnvironHeaders / qualquer objeto com .get() funciona.
+        class FakeHeaders:
+            def get(self, key, default=None):
+                return {"X-Request-Source": "duck.py"}.get(key, default)
+
+        out = sh.extract_source_hint({}, FakeHeaders())
+        assert out == "duck.py"
+
+
+# ─────────────────────────────────────────────────────────
 # decode_attachment
 # ─────────────────────────────────────────────────────────
 import base64 as _b64

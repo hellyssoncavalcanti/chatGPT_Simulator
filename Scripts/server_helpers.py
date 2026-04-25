@@ -355,6 +355,32 @@ def resolve_browser_profile(requested_profile, stored_profile) -> Optional[str]:
     return None
 
 
+def extract_source_hint(data, headers) -> str:
+    """Extrai a `source_hint` do payload + headers da requisição.
+
+    Cadeia de fallback (idêntica em `chat_completions` e
+    `_handle_browser_search_api`):
+      1. `data["request_source"]`
+      2. `headers["X-Request-Source"]`
+      3. `headers["X-Client-Source"]`
+      4. `""` (string vazia)
+
+    Aceita qualquer objeto com `.get(name)` (`dict`, Flask `EnvironHeaders`
+    ou similares); ausência de `.get` é tratada como dicionário vazio
+    (preserva robustez se `data`/`headers` for `None`).
+    """
+    payload_get = getattr(data, 'get', None)
+    headers_get = getattr(headers, 'get', None)
+    candidate = ""
+    if payload_get is not None:
+        candidate = payload_get("request_source") or ""
+    if not candidate and headers_get is not None:
+        candidate = headers_get("X-Request-Source") or ""
+    if not candidate and headers_get is not None:
+        candidate = headers_get("X-Client-Source") or ""
+    return candidate or ""
+
+
 def coalesce_origin_url(data, header_value: str = "") -> str:
     """Resolve a URL de origem efetiva do pedido `/v1/chat/completions`.
 
@@ -483,6 +509,7 @@ __all__ = [
     "build_sender_label",
     "wrap_paste_if_python_source",
     "coalesce_origin_url",
+    "extract_source_hint",
     "decode_attachment",
     "resolve_chat_url",
     "resolve_browser_profile",

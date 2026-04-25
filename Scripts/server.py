@@ -61,6 +61,7 @@ from server_helpers import (
     build_sender_label as _build_sender_label_impl,
     wrap_paste_if_python_source as _wrap_paste_if_python_source_impl,
     coalesce_origin_url as _coalesce_origin_url_impl,
+    extract_source_hint as _extract_source_hint_impl,
     decode_attachment as _decode_attachment_impl,
     resolve_chat_url as _resolve_chat_url_impl,
     resolve_browser_profile as _resolve_browser_profile_impl,
@@ -1664,19 +1665,11 @@ def _handle_browser_search_api(execute_fn, *, route_label, source_label):
     stream  = bool(data.get('stream', False))
     nome_membro = data.get("nome_membro_solicitante") or None
     id_membro   = data.get("id_membro_solicitante") or None
-    _quem = f', por "{nome_membro}" (id_membro: "{id_membro}")' if (nome_membro or id_membro) else ""
-    source_hint = (
-        data.get("request_source")
-        or request.headers.get("X-Request-Source")
-        or request.headers.get("X-Client-Source")
-        or ""
-    )
+    _quem = _format_requester_suffix_impl(nome_membro, id_membro)
+    source_hint = _extract_source_hint_impl(data, request.headers)
     source_hint_norm = str(source_hint).strip().lower()
-    sender_label = "analisador_prontuarios.py" if (
-        'analisador_prontuarios' in source_hint_norm
-        or 'analisador-prontuarios' in source_hint_norm
-        or source_hint_norm == 'analyzer'
-    ) else (source_hint or "usuario_remoto")
+    is_analyzer = _is_analyzer_chat_request_impl(source_hint_norm)
+    sender_label = _build_sender_label_impl(source_hint, is_analyzer)
 
     if not queries or not isinstance(queries, list):
         return jsonify({'success': False, 'error': 'Missing queries array'}), 400
@@ -2160,12 +2153,7 @@ def chat_completions():
     nome_membro = data.get("nome_membro_solicitante") or None
     id_membro   = data.get("id_membro_solicitante")   or None
     _quem = _format_requester_suffix_impl(nome_membro, id_membro)
-    source_hint = (
-        data.get("request_source")
-        or request.headers.get("X-Request-Source")
-        or request.headers.get("X-Client-Source")
-        or ""
-    )
+    source_hint = _extract_source_hint_impl(data, request.headers)
     source_hint_norm = str(source_hint).strip().lower()
     is_analyzer = _is_analyzer_chat_request_impl(source_hint_norm)
     sender_label = _build_sender_label_impl(source_hint, is_analyzer)
