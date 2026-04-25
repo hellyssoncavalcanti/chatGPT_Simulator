@@ -70,6 +70,7 @@ from server_helpers import (
     build_status_event as _build_status_event_impl,
     normalize_optional_text as _normalize_optional_text_impl,
     format_requester_suffix as _format_requester_suffix_impl,
+    compute_python_request_interval as _compute_python_request_interval_impl,
 )
 import error_catalog as _error_catalog
 from log_sanitizer import sanitize_mapping as _sanitize_audit_payload
@@ -490,8 +491,7 @@ def _wait_python_request_interval_if_needed(is_python_source: bool, stream_queue
             return
 
     profile_count = _count_active_chatgpt_profiles()
-    base = random.uniform(max(0, pmin), max(pmin, pmax))
-    target = max(0.0, base / float(profile_count))
+    base, target = _compute_python_request_interval_impl(pmin, pmax, profile_count)
 
     while True:
         now = time.time()

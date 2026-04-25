@@ -250,6 +250,40 @@ def resolve_chat_url(
     return None
 
 
+def compute_python_request_interval(
+    pausa_min,
+    pausa_max,
+    profile_count,
+    *,
+    rng=None,
+) -> Tuple[float, float]:
+    """Calcula o intervalo anti-rate-limit para pedidos Python.
+
+    Retorna `(base_sec, target_sec)`:
+      - `base = rng(max(0, pmin), max(pmin, pmax))` — sorteado uniformemente.
+      - `target = max(0.0, base / max(1, profile_count))` — dividido pelo
+        número de perfis Chromium ativos para distribuir a carga.
+
+    Quando `pausa_min <= 0` E `pausa_max <= 0`, retorna `(0.0, 0.0)` —
+    sinal que o caller deve pular o wait e apenas atualizar `last_ts`
+    (preserva o curto-circuito histórico de
+    `_wait_python_request_interval_if_needed` em server.py).
+
+    `rng` é injetável para testes determinísticos; default é
+    `random.uniform`.
+    """
+    pmin = float(pausa_min)
+    pmax = float(pausa_max)
+    if pmin <= 0 and pmax <= 0:
+        return 0.0, 0.0
+    if rng is None:
+        import random
+        rng = random.uniform
+    base = float(rng(max(0.0, pmin), max(pmin, pmax)))
+    target = max(0.0, base / float(max(1, int(profile_count))))
+    return base, target
+
+
 def format_requester_suffix(nome_membro, id_membro) -> str:
     """Sufixo padronizado para logs de requisição remota.
 
@@ -428,6 +462,7 @@ __all__ = [
     "build_error_event",
     "build_status_event",
     "format_requester_suffix",
+    "compute_python_request_interval",
 ]
 
 

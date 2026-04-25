@@ -619,3 +619,69 @@ class TestFormatRequesterSuffix:
         # Histórico não validava tipos; preservamos.
         out = sh.format_requester_suffix("Carol", 42)
         assert out == ', por "Carol" (id_membro: "42")'
+
+
+# ─────────────────────────────────────────────────────────
+# compute_python_request_interval
+# ─────────────────────────────────────────────────────────
+class TestComputePythonRequestInterval:
+    def test_zero_when_both_pauses_disabled(self):
+        base, target = sh.compute_python_request_interval(0, 0, 2)
+        assert (base, target) == (0.0, 0.0)
+
+    def test_zero_when_both_negative(self):
+        base, target = sh.compute_python_request_interval(-5, -1, 2)
+        assert (base, target) == (0.0, 0.0)
+
+    def test_target_is_base_divided_by_profile_count(self):
+        # rng sempre devolve 60.0 → base=60, target = 60/2 = 30
+        base, target = sh.compute_python_request_interval(
+            10, 60, 2, rng=lambda lo, hi: 60.0,
+        )
+        assert base == 60.0
+        assert target == 30.0
+
+    def test_single_profile_target_equals_base(self):
+        base, target = sh.compute_python_request_interval(
+            5, 30, 1, rng=lambda lo, hi: 30.0,
+        )
+        assert base == 30.0
+        assert target == 30.0
+
+    def test_zero_profiles_clamped_to_one(self):
+        # profile_count=0 não pode dividir por zero — clamp em 1.
+        base, target = sh.compute_python_request_interval(
+            10, 60, 0, rng=lambda lo, hi: 60.0,
+        )
+        assert base == 60.0
+        assert target == 60.0
+
+    def test_rng_receives_correct_bounds(self):
+        seen = {}
+        def rng(lo, hi):
+            seen["lo"] = lo
+            seen["hi"] = hi
+            return lo
+
+        sh.compute_python_request_interval(10, 60, 2, rng=rng)
+        # max(0, 10) = 10; max(10, 60) = 60.
+        assert seen == {"lo": 10.0, "hi": 60.0}
+
+    def test_rng_swap_when_min_gt_max(self):
+        # Histórico: max(pmin, pmax) garante que hi >= lo.
+        seen = {}
+        def rng(lo, hi):
+            seen["lo"] = lo
+            seen["hi"] = hi
+            return lo
+        sh.compute_python_request_interval(60, 10, 2, rng=rng)
+        # lo=max(0,60)=60; hi=max(60,10)=60.
+        assert seen["lo"] == 60.0
+        assert seen["hi"] == 60.0
+
+    def test_default_rng_is_random_uniform(self):
+        # Apenas garante que a chamada sem rng não falha e devolve floats.
+        base, target = sh.compute_python_request_interval(1, 2, 1)
+        assert isinstance(base, float)
+        assert isinstance(target, float)
+        assert 0.0 <= target <= 2.0
