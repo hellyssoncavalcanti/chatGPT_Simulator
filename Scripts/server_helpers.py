@@ -216,7 +216,12 @@ def decode_attachment(att) -> Optional[Tuple[str, bytes]]:
     return name, decoded
 
 
-def resolve_chat_url(requested_url, stored_url) -> Optional[str]:
+def resolve_chat_url(
+    requested_url,
+    stored_url,
+    *,
+    case_insensitive: bool = False,
+) -> Optional[str]:
     """Decide qual URL usar para retomar a conversa.
 
     Aceita o sentinela histórico `"None"` (string literal vinda do JSON
@@ -225,13 +230,23 @@ def resolve_chat_url(requested_url, stored_url) -> Optional[str]:
 
     Pura: o chamador é responsável por buscar `stored_url` em
     `storage.load_chats()`.
+
+    `case_insensitive=True` (padrão histórico de `api_sync`): além de
+    `"None"`, também trata `"none"`, `"NONE"`, `"None "`, etc., como
+    ausência. `chat_completions` usa `False` (preserva strict-equality
+    com `"None"`) — mantido por backward-compat.
     """
     for candidate in (requested_url, stored_url):
         if not isinstance(candidate, str):
             continue
         trimmed = candidate.strip()
-        if trimmed and trimmed != "None":
-            return trimmed
+        if not trimmed:
+            continue
+        compare = trimmed.lower() if case_insensitive else trimmed
+        sentinel = "none" if case_insensitive else "None"
+        if compare == sentinel:
+            continue
+        return trimmed
     return None
 
 

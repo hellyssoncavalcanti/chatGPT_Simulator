@@ -68,6 +68,7 @@ from server_helpers import (
     build_queue_key as _build_queue_key_impl,
     build_error_event as _build_error_event_impl,
     build_status_event as _build_status_event_impl,
+    normalize_optional_text as _normalize_optional_text_impl,
 )
 import error_catalog as _error_catalog
 from log_sanitizer import sanitize_mapping as _sanitize_audit_payload
@@ -1416,13 +1417,17 @@ def api_sync():
     url     = data.get("url")
     chat_id = data.get("chat_id")
     stream  = data.get("stream", False)
-    sync_browser_profile = (data.get("browser_profile") or "").strip() or None
+    sync_browser_profile = _normalize_optional_text_impl(data.get("browser_profile"))
 
     if chat_id and (not url or str(url).lower() == "none"):
         snap = storage.load_chats().get(chat_id, {}) or {}
-        url = snap.get("url") or url
+        # `_resolve_chat_url_impl(case_insensitive=True)` aceita "none"/"NONE"/etc.
+        # como ausência (idiom histórico de api_sync). `or url` preserva o
+        # comportamento original `snap.get("url") or url` — se snapshot vazio,
+        # mantém a URL bruta recebida (mesmo se for "none" string).
+        url = _resolve_chat_url_impl(url, snap.get("url"), case_insensitive=True) or url
         if not sync_browser_profile:
-            sync_browser_profile = (snap.get("chromium_profile") or "").strip() or None
+            sync_browser_profile = _normalize_optional_text_impl(snap.get("chromium_profile"))
 
     # --- Identificação do solicitante (opcional) ---
     nome_membro = data.get("nome_membro_solicitante") or None

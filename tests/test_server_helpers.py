@@ -370,6 +370,20 @@ class TestResolveChatUrl:
         assert sh.resolve_chat_url(42, "https://b") == "https://b"
         assert sh.resolve_chat_url(None, 42) is None
 
+    def test_case_insensitive_treats_lowercase_none_as_absent(self):
+        # Caminho histórico de api_sync: `str(url).lower() == "none"`.
+        assert sh.resolve_chat_url("none", "https://b", case_insensitive=True) == "https://b"
+        assert sh.resolve_chat_url("NONE", "https://b", case_insensitive=True) == "https://b"
+        assert sh.resolve_chat_url("None", "https://b", case_insensitive=True) == "https://b"
+
+    def test_case_insensitive_strict_default(self):
+        # Sem o flag, "none" minúsculo é tratado como URL válida (preserva
+        # comportamento estrito histórico de chat_completions).
+        assert sh.resolve_chat_url("none", "https://b") == "none"
+
+    def test_case_insensitive_returns_none_when_both_match_sentinel(self):
+        assert sh.resolve_chat_url("none", "NONE", case_insensitive=True) is None
+
 
 # ─────────────────────────────────────────────────────────
 # resolve_browser_profile
