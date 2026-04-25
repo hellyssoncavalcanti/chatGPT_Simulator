@@ -2206,12 +2206,16 @@ def chat_completions():
                 print(f"Erro no anexo: {e}")
 
     # --- 3. CAPTURA DA URL ---
-    url = data.get("url")
-    if not url or url == "None":
-        all_chats = storage.load_chats()
-        url = all_chats.get(chat_id, {}).get("url")
+    # `_resolve_chat_url_impl` trata o sentinela `"None"` (string vinda
+    # de clientes antigos) como ausência. Downstream:
+    #   - `storage.save_chat(..., url or chat_snapshot.get('url',''), ...)`
+    #     passa a usar o fallback do snapshot em vez de persistir "None".
+    #   - `browser.py:~4159` já tratava `url == 'None'` defensivamente;
+    #     agora simplesmente recebe `None` e cai no mesmo branch.
+    all_chats = storage.load_chats()
+    url = _resolve_chat_url_impl(data.get("url"), all_chats.get(chat_id, {}).get("url"))
 
-    if url and url != "None":
+    if url:
         print(f"[📡 SERVIDOR] URL detectada. Retomando conversa em: {url}")
     else:
         print("[📡 SERVIDOR] Nenhuma URL detectada. Iniciando um novo chat do zero.")
