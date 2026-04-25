@@ -273,3 +273,127 @@ class TestCoalesceOriginUrl:
 
     def test_non_mapping_data_treated_as_empty(self):
         assert sh.coalesce_origin_url("lixo", header_value="https://fb") == "https://fb"
+
+
+# ─────────────────────────────────────────────────────────
+# decode_attachment
+# ─────────────────────────────────────────────────────────
+import base64 as _b64
+
+
+class TestDecodeAttachment:
+    def test_plain_base64(self):
+        payload = _b64.b64encode(b"hello").decode("ascii")
+        out = sh.decode_attachment({"name": "x.txt", "data": payload})
+        assert out == ("x.txt", b"hello")
+
+    def test_data_uri_prefix_is_stripped(self):
+        payload = _b64.b64encode(b"img-bytes").decode("ascii")
+        out = sh.decode_attachment({
+            "name": "logo.png",
+            "data": f"data:image/png;base64,{payload}",
+        })
+        assert out == ("logo.png", b"img-bytes")
+
+    def test_default_name_when_missing(self):
+        payload = _b64.b64encode(b"abc").decode("ascii")
+        out = sh.decode_attachment({"data": payload})
+        assert out == ("file.txt", b"abc")
+
+    def test_empty_name_passed_through(self):
+        # Histórico: server.py usa `att.get("name", "file.txt")` — só repõe
+        # default quando a CHAVE está ausente. `name=""` é repassado bruto
+        # (resulta em `<ts>_` no path histórico).
+        payload = _b64.b64encode(b"abc").decode("ascii")
+        out = sh.decode_attachment({"name": "", "data": payload})
+        assert out == ("", b"abc")
+
+    def test_missing_data_decodes_to_empty_bytes(self):
+        # Histórico: `base64.b64decode("") == b""` — o servidor escrevia
+        # arquivo vazio e anexava o path. Preservamos o contrato.
+        out = sh.decode_attachment({"name": "x"})
+        assert out == ("x", b"")
+        out2 = sh.decode_attachment({"name": "x", "data": ""})
+        assert out2 == ("x", b"")
+
+    def test_invalid_base64_returns_none(self):
+        # Caracteres fora do alfabeto base64 e padding corrupto.
+        assert sh.decode_attachment({"name": "x", "data": "###não-é-base64###"}) is None
+
+    def test_non_mapping_returns_none(self):
+        assert sh.decode_attachment(None) is None
+        assert sh.decode_attachment("string") is None
+        assert sh.decode_attachment(42) is None
+
+    def test_non_string_data_returns_none(self):
+        assert sh.decode_attachment({"name": "x", "data": 123}) is None
+
+    def test_only_first_comma_split_preserved_byte_for_byte(self):
+        # Histórico: server.py fazia `b64.split(",")[1]`. Com múltiplas vírgulas,
+        # o restante após a primeira é descartado. Preservamos esse contrato.
+        # Tomamos um payload base64 real e antecedemos com um data URI; depois
+        # injetamos uma vírgula extra DEPOIS do payload para confirmar o cutoff.
+        payload = _b64.b64encode(b"clean").decode("ascii")
+        # split(",")[1] → exatamente `payload`; o ",extra" cai fora.
+        out = sh.decode_attachment({
+            "name": "f",
+            "data": f"data:application/octet-stream;base64,{payload}",
+        })
+        assert out == ("f", b"clean")
+
+
+# ─────────────────────────────────────────────────────────
+# resolve_chat_url
+# ─────────────────────────────────────────────────────────
+class TestResolveChatUrl:
+    def test_requested_takes_priority(self):
+        assert sh.resolve_chat_url("https://a", "https://b") == "https://a"
+
+    def test_falls_back_to_stored(self):
+        assert sh.resolve_chat_url(None, "https://b") == "https://b"
+        assert sh.resolve_chat_url("", "https://b") == "https://b"
+
+    def test_none_string_sentinel_treated_as_absent(self):
+        # Cliente antigo manda literal "None" — não deve ganhar prioridade.
+        assert sh.resolve_chat_url("None", "https://b") == "https://b"
+        assert sh.resolve_chat_url("None", "None") is None
+
+    def test_returns_none_when_both_absent(self):
+        assert sh.resolve_chat_url(None, None) is None
+        assert sh.resolve_chat_url("", "") is None
+
+    def test_strips_whitespace(self):
+        assert sh.resolve_chat_url("  https://a  ", "https://b") == "https://a"
+        assert sh.resolve_chat_url("   ", "https://b") == "https://b"
+
+    def test_non_string_inputs_ignored(self):
+        assert sh.resolve_chat_url(42, "https://b") == "https://b"
+        assert sh.resolve_chat_url(None, 42) is None
+
+
+# ─────────────────────────────────────────────────────────
+# resolve_browser_profile
+# ─────────────────────────────────────────────────────────
+class TestResolveBrowserProfile:
+    def test_requested_takes_priority(self):
+        assert sh.resolve_browser_profile("default", "segunda_chance") == "default"
+
+    def test_falls_back_to_stored(self):
+        assert sh.resolve_browser_profile(None, "segunda_chance") == "segunda_chance"
+        assert sh.resolve_browser_profile("", "segunda_chance") == "segunda_chance"
+
+    def test_returns_none_when_both_empty(self):
+        assert sh.resolve_browser_profile(None, None) is None
+        assert sh.resolve_browser_profile("", "") is None
+        assert sh.resolve_browser_profile("   ", "  ") is None
+
+    def test_strips_whitespace(self):
+        assert sh.resolve_browser_profile("  default  ", "segunda_chance") == "default"
+
+    def test_non_string_inputs_ignored(self):
+        assert sh.resolve_browser_profile(42, "default") == "default"
+        assert sh.resolve_browser_profile(None, 42) is None
+        assert sh.resolve_browser_profile({"x": 1}, "default") == "default"
+
+    def test_whitespace_only_requested_falls_back(self):
+        assert sh.resolve_browser_profile("   ", "default") == "default"
