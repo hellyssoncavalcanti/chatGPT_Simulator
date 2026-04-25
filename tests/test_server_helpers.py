@@ -519,3 +519,61 @@ class TestBuildChatTaskPayload:
             "sender", "request_source", "attachment_paths", "stream_queue",
             "codex_repo", "browser_profile",
         }
+
+
+# ─────────────────────────────────────────────────────────
+# build_error_event
+# ─────────────────────────────────────────────────────────
+class TestBuildErrorEvent:
+    def test_basic_shape(self):
+        out = json.loads(sh.build_error_event("Algo falhou"))
+        assert out == {"type": "error", "content": "Algo falhou"}
+
+    def test_unicode_preserved(self):
+        out = sh.build_error_event("Erro: ✗ não autorizado")
+        assert "✗" in out
+        assert "não autorizado" in out
+
+    def test_coerces_non_string_to_str(self):
+        out = json.loads(sh.build_error_event(42))
+        assert out["content"] == "42"
+        out2 = json.loads(sh.build_error_event(ValueError("boom")))
+        assert out2["content"] == "boom"
+
+    def test_no_trailing_newline(self):
+        out = sh.build_error_event("x")
+        assert not out.endswith("\n")
+
+
+# ─────────────────────────────────────────────────────────
+# build_status_event
+# ─────────────────────────────────────────────────────────
+class TestBuildStatusEvent:
+    def test_basic_shape(self):
+        out = json.loads(sh.build_status_event("Aguardando..."))
+        assert out == {"type": "status", "content": "Aguardando..."}
+
+    def test_extras_merged(self):
+        out = json.loads(sh.build_status_event(
+            "Cooldown",
+            phase="chat_rate_limit_cooldown",
+            wait_seconds=12.5,
+        ))
+        assert out["phase"] == "chat_rate_limit_cooldown"
+        assert out["wait_seconds"] == 12.5
+        assert out["type"] == "status"
+        assert out["content"] == "Cooldown"
+
+    def test_extras_can_override_nothing_critical(self):
+        # `type` e `content` aparecem antes do update — extras do mesmo nome
+        # SOBRESCREVEM (Python dict). Documentamos o contrato.
+        out = json.loads(sh.build_status_event("a", type="custom"))
+        assert out["type"] == "custom"
+
+    def test_unicode_preserved(self):
+        out = sh.build_status_event("⏳ aguarde", phase="queue")
+        assert "⏳" in out
+
+    def test_no_extras_works(self):
+        out = json.loads(sh.build_status_event("simples"))
+        assert out == {"type": "status", "content": "simples"}

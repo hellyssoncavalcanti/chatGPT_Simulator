@@ -66,6 +66,8 @@ from server_helpers import (
     resolve_browser_profile as _resolve_browser_profile_impl,
     build_chat_task_payload as _build_chat_task_payload_impl,
     build_queue_key as _build_queue_key_impl,
+    build_error_event as _build_error_event_impl,
+    build_status_event as _build_status_event_impl,
 )
 import error_catalog as _error_catalog
 from log_sanitizer import sanitize_mapping as _sanitize_audit_payload
@@ -430,12 +432,11 @@ def _wait_chat_rate_limit_if_needed(stream_queue=None):
             f"Nova tentativa em {_format_wait_seconds(remaining)}."
         )
         if stream_queue is not None:
-            stream_queue.put(json.dumps({
-                "type": "status",
-                "content": status_text,
-                "phase": "chat_rate_limit_cooldown",
-                "wait_seconds": round(remaining, 1),
-            }, ensure_ascii=False))
+            stream_queue.put(_build_status_event_impl(
+                status_text,
+                phase="chat_rate_limit_cooldown",
+                wait_seconds=round(remaining, 1),
+            ))
         # No CMD do próprio ChatGPT Simulator: atualizar cooldown inline.
         try:
             width = max(80, shutil.get_terminal_size((160, 20)).columns - 1)
@@ -2290,16 +2291,14 @@ def chat_completions():
             )
             browser_queue.put(chat_task_payload)
         except TimeoutError as queue_timeout:
-            stream_q.put(json.dumps({
-                "type": "error",
-                "content": f"Timeout aguardando fila interna do servidor: {queue_timeout}"
-            }, ensure_ascii=False))
+            stream_q.put(_build_error_event_impl(
+                f"Timeout aguardando fila interna do servidor: {queue_timeout}"
+            ))
             stream_q.put(None)
         except Exception as dispatch_err:
-            stream_q.put(json.dumps({
-                "type": "error",
-                "content": f"Falha ao enfileirar tarefa no browser: {dispatch_err}"
-            }, ensure_ascii=False))
+            stream_q.put(_build_error_event_impl(
+                f"Falha ao enfileirar tarefa no browser: {dispatch_err}"
+            ))
             stream_q.put(None)
         finally:
             if slot_acquired:
