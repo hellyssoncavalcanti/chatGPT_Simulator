@@ -235,6 +235,21 @@ def resolve_chat_url(requested_url, stored_url) -> Optional[str]:
     return None
 
 
+def normalize_optional_text(value) -> Optional[str]:
+    """Colapsa o idiom `(value or '').strip() or None`.
+
+    - String não-vazia após strip → string strip-ada.
+    - String vazia, whitespace ou tipos não-string → `None`.
+
+    Usado em campos opcionais de payload (`codex_repo`, `browser_profile`,
+    `request_source`, etc.) onde "" e None são equivalentes.
+    """
+    if not isinstance(value, str):
+        return None
+    trimmed = value.strip()
+    return trimmed or None
+
+
 def resolve_browser_profile(requested_profile, stored_profile) -> Optional[str]:
     """Resolve o `browser_profile` efetivo para a tarefa do browser.
 
@@ -276,6 +291,66 @@ def coalesce_origin_url(data, header_value: str = "") -> str:
     return str(candidate or "").strip()
 
 
+def build_queue_key(chat_id, *, now_ns: Callable[[], int] = time.time_ns) -> str:
+    """Gera a chave única usada para identificar um slot de fila Python.
+
+    Formato histórico preservado: `f"{chat_id}:{time.time_ns()}"`.
+    `now_ns` é injetável para testes determinísticos.
+    """
+    return f"{chat_id}:{now_ns()}"
+
+
+def build_chat_task_payload(
+    *,
+    url,
+    chat_id,
+    message,
+    is_analyzer,
+    sender_label,
+    source_hint,
+    saved_paths,
+    stream_queue,
+    codex_repo,
+    effective_browser_profile,
+) -> dict:
+    """Monta o dicionário enviado ao `browser_queue` em `chat_completions`.
+
+    Campos preservados byte-a-byte (ordem, defaults, normalizações):
+      - `action` fixo em `"CHAT"`.
+      - `is_analyzer` coagido para `bool` (compat com clientes que mandam
+        truthy não-bool).
+      - `request_source` cai para `sender_label` quando `source_hint`
+        está vazio/falsy.
+      - `attachment_paths` é a lista pronta de paths gravados em disco.
+      - `codex_repo` é normalizado (`normalize_optional_text`) — `""`
+        ou whitespace viram `None`, sinalizando ao `browser.py` que deve
+        usar a seleção atual do dropdown.
+      - `browser_profile` repassado como-está (já resolvido por
+        `resolve_browser_profile` no chamador).
+      - `stream_queue` referência viva — o consumidor do payload no
+        `browser.py` envia eventos SSE de volta por ela.
+
+    `sender` aparece duplicado no dict histórico (uma chave após
+    `is_analyzer`, outra após `stream_queue`); como ambos mapeiam para
+    `sender_label`, a duplicação é semântica-no-op (Python preserva o
+    último valor). Reproduzimos o dict numa única atribuição para evitar
+    qualquer divergência observável.
+    """
+    return {
+        'action':           'CHAT',
+        'url':              url,
+        'chat_id':          chat_id,
+        'message':          message,
+        'is_analyzer':      bool(is_analyzer),
+        'sender':           sender_label,
+        'request_source':   source_hint or sender_label,
+        'attachment_paths': saved_paths,
+        'stream_queue':     stream_queue,
+        'codex_repo':       normalize_optional_text(codex_repo),
+        'browser_profile':  effective_browser_profile,
+    }
+
+
 __all__ = [
     "format_wait_seconds",
     "queue_status_payload",
@@ -288,6 +363,9 @@ __all__ = [
     "decode_attachment",
     "resolve_chat_url",
     "resolve_browser_profile",
+    "normalize_optional_text",
+    "build_queue_key",
+    "build_chat_task_payload",
 ]
 
 

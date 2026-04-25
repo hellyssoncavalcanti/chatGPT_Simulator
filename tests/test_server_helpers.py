@@ -397,3 +397,125 @@ class TestResolveBrowserProfile:
 
     def test_whitespace_only_requested_falls_back(self):
         assert sh.resolve_browser_profile("   ", "default") == "default"
+
+
+# ─────────────────────────────────────────────────────────
+# normalize_optional_text
+# ─────────────────────────────────────────────────────────
+class TestNormalizeOptionalText:
+    def test_strips_and_returns_string(self):
+        assert sh.normalize_optional_text("  default  ") == "default"
+
+    def test_empty_returns_none(self):
+        assert sh.normalize_optional_text("") is None
+        assert sh.normalize_optional_text("   ") is None
+        assert sh.normalize_optional_text("\n\t") is None
+
+    def test_none_input_returns_none(self):
+        assert sh.normalize_optional_text(None) is None
+
+    def test_non_string_returns_none(self):
+        assert sh.normalize_optional_text(42) is None
+        assert sh.normalize_optional_text({"a": 1}) is None
+        assert sh.normalize_optional_text(["x"]) is None
+
+    def test_preserves_internal_whitespace(self):
+        assert sh.normalize_optional_text(" hello world ") == "hello world"
+
+
+# ─────────────────────────────────────────────────────────
+# build_queue_key
+# ─────────────────────────────────────────────────────────
+class TestBuildQueueKey:
+    def test_basic_format(self):
+        out = sh.build_queue_key("abc-123", now_ns=lambda: 1700000000000000000)
+        assert out == "abc-123:1700000000000000000"
+
+    def test_uses_real_time_by_default(self):
+        # Sem monkeypatch: garante apenas que o formato `<chat_id>:<int>` aparece.
+        out = sh.build_queue_key("xyz")
+        assert out.startswith("xyz:")
+        assert out.split(":", 1)[1].isdigit()
+
+    def test_unique_with_monotonic_now_ns(self):
+        counter = iter([10, 20, 30])
+        a = sh.build_queue_key("c", now_ns=lambda: next(counter))
+        b = sh.build_queue_key("c", now_ns=lambda: next(counter))
+        c = sh.build_queue_key("c", now_ns=lambda: next(counter))
+        assert (a, b, c) == ("c:10", "c:20", "c:30")
+
+    def test_chat_id_is_passed_through_as_str(self):
+        # Suporta chat_id como string longa com hyphens (UUID típico).
+        out = sh.build_queue_key("11111111-2222-3333-4444-555555555555",
+                                  now_ns=lambda: 1)
+        assert out == "11111111-2222-3333-4444-555555555555:1"
+
+
+# ─────────────────────────────────────────────────────────
+# build_chat_task_payload
+# ─────────────────────────────────────────────────────────
+class TestBuildChatTaskPayload:
+    def _payload(self, **overrides):
+        defaults = dict(
+            url="https://chatgpt.com/c/abc",
+            chat_id="abc",
+            message="oi",
+            is_analyzer=False,
+            sender_label="usuario_remoto",
+            source_hint="",
+            saved_paths=[],
+            stream_queue=object(),
+            codex_repo=None,
+            effective_browser_profile=None,
+        )
+        defaults.update(overrides)
+        return sh.build_chat_task_payload(**defaults)
+
+    def test_action_is_fixed_chat(self):
+        out = self._payload()
+        assert out["action"] == "CHAT"
+
+    def test_is_analyzer_coerced_to_bool(self):
+        out = self._payload(is_analyzer=1)
+        assert out["is_analyzer"] is True
+        out2 = self._payload(is_analyzer=0)
+        assert out2["is_analyzer"] is False
+        out3 = self._payload(is_analyzer=None)
+        assert out3["is_analyzer"] is False
+
+    def test_request_source_falls_back_to_sender_label(self):
+        out = self._payload(source_hint="", sender_label="analisador_prontuarios.py")
+        assert out["request_source"] == "analisador_prontuarios.py"
+
+    def test_request_source_uses_hint_when_present(self):
+        out = self._payload(source_hint="acompanhamento_whatsapp.py",
+                             sender_label="usuario_remoto")
+        assert out["request_source"] == "acompanhamento_whatsapp.py"
+
+    def test_codex_repo_normalized(self):
+        assert self._payload(codex_repo="  myrepo  ")["codex_repo"] == "myrepo"
+        assert self._payload(codex_repo="")["codex_repo"] is None
+        assert self._payload(codex_repo="   ")["codex_repo"] is None
+        assert self._payload(codex_repo=None)["codex_repo"] is None
+
+    def test_browser_profile_passed_through(self):
+        out = self._payload(effective_browser_profile="segunda_chance")
+        assert out["browser_profile"] == "segunda_chance"
+
+    def test_attachment_paths_passed_through(self):
+        out = self._payload(saved_paths=["/tmp/a", "/tmp/b"])
+        assert out["attachment_paths"] == ["/tmp/a", "/tmp/b"]
+
+    def test_stream_queue_is_same_reference(self):
+        sq = object()
+        out = self._payload(stream_queue=sq)
+        assert out["stream_queue"] is sq
+
+    def test_all_historical_keys_present(self):
+        out = self._payload()
+        # Conjunto exato de chaves que o `browser.py` consome historicamente.
+        assert set(out.keys()) == {
+            "action", "url", "chat_id", "message", "is_analyzer",
+            "sender", "request_source", "attachment_paths", "stream_queue",
+            "codex_repo", "browser_profile",
+        }
