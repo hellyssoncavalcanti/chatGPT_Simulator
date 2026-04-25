@@ -250,6 +250,22 @@ def resolve_chat_url(
     return None
 
 
+def format_requester_suffix(nome_membro, id_membro) -> str:
+    """Sufixo padronizado para logs de requisição remota.
+
+    Formato histórico (idêntico em `chat_completions` e `api_sync`):
+        `, por "<nome>" (id_membro: "<id>")`  quando há nome OU id;
+        string vazia quando ambos são falsy.
+
+    Aceita `None`/strings vazias indiscriminadamente; non-strings são
+    serializados via f-string (preserva o comportamento original que
+    não validava tipos).
+    """
+    if not (nome_membro or id_membro):
+        return ""
+    return f', por "{nome_membro}" (id_membro: "{id_membro}")'
+
+
 def normalize_optional_text(value) -> Optional[str]:
     """Colapsa o idiom `(value or '').strip() or None`.
 
@@ -411,6 +427,7 @@ __all__ = [
     "build_chat_task_payload",
     "build_error_event",
     "build_status_event",
+    "format_requester_suffix",
 ]
 
 

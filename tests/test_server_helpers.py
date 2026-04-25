@@ -591,3 +591,31 @@ class TestBuildStatusEvent:
     def test_no_extras_works(self):
         out = json.loads(sh.build_status_event("simples"))
         assert out == {"type": "status", "content": "simples"}
+
+
+# ─────────────────────────────────────────────────────────
+# format_requester_suffix
+# ─────────────────────────────────────────────────────────
+class TestFormatRequesterSuffix:
+    def test_both_none_returns_empty(self):
+        assert sh.format_requester_suffix(None, None) == ""
+
+    def test_both_empty_strings_returns_empty(self):
+        assert sh.format_requester_suffix("", "") == ""
+
+    def test_both_present(self):
+        out = sh.format_requester_suffix("Alice", "ID-1")
+        assert out == ', por "Alice" (id_membro: "ID-1")'
+
+    def test_only_nome(self):
+        out = sh.format_requester_suffix("Bob", None)
+        assert out == ', por "Bob" (id_membro: "None")'
+
+    def test_only_id(self):
+        out = sh.format_requester_suffix(None, "X9")
+        assert out == ', por "None" (id_membro: "X9")'
+
+    def test_id_as_int_serialized_via_fstring(self):
+        # Histórico não validava tipos; preservamos.
+        out = sh.format_requester_suffix("Carol", 42)
+        assert out == ', por "Carol" (id_membro: "42")'

@@ -69,6 +69,7 @@ from server_helpers import (
     build_error_event as _build_error_event_impl,
     build_status_event as _build_status_event_impl,
     normalize_optional_text as _normalize_optional_text_impl,
+    format_requester_suffix as _format_requester_suffix_impl,
 )
 import error_catalog as _error_catalog
 from log_sanitizer import sanitize_mapping as _sanitize_audit_payload
@@ -1432,7 +1433,7 @@ def api_sync():
     # --- Identificação do solicitante (opcional) ---
     nome_membro = data.get("nome_membro_solicitante") or None
     id_membro   = data.get("id_membro_solicitante")   or None
-    _quem = f', por "{nome_membro}" (id_membro: "{id_membro}")' if (nome_membro or id_membro) else ""
+    _quem = _format_requester_suffix_impl(nome_membro, id_membro)
     _url_info  = f' | url: {url}'     if url     else ''
     _cid_info  = f' | chat_id: {chat_id}' if chat_id else ''
     print(f"\n[🔄 SYNC] Pedido de sincronização recebido{_quem}{_cid_info}{_url_info}")
@@ -2156,7 +2157,7 @@ def chat_completions():
     # --- Identificação do solicitante (opcional) ---
     nome_membro = data.get("nome_membro_solicitante") or None
     id_membro   = data.get("id_membro_solicitante")   or None
-    _quem = f', por "{nome_membro}" (id_membro: "{id_membro}")' if (nome_membro or id_membro) else ""
+    _quem = _format_requester_suffix_impl(nome_membro, id_membro)
     source_hint = (
         data.get("request_source")
         or request.headers.get("X-Request-Source")
