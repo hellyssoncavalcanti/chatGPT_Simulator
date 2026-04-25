@@ -61,6 +61,7 @@ from server_helpers import (
     build_sender_label as _build_sender_label_impl,
     wrap_paste_if_python_source as _wrap_paste_if_python_source_impl,
     coalesce_origin_url as _coalesce_origin_url_impl,
+    extract_source_hint as _extract_source_hint_impl,
     decode_attachment as _decode_attachment_impl,
     resolve_chat_url as _resolve_chat_url_impl,
     resolve_browser_profile as _resolve_browser_profile_impl,
@@ -68,8 +69,10 @@ from server_helpers import (
     build_queue_key as _build_queue_key_impl,
     build_error_event as _build_error_event_impl,
     build_status_event as _build_status_event_impl,
+    build_markdown_event as _build_markdown_event_impl,
     normalize_optional_text as _normalize_optional_text_impl,
     format_requester_suffix as _format_requester_suffix_impl,
+    format_origin_suffix as _format_origin_suffix_impl,
     compute_python_request_interval as _compute_python_request_interval_impl,
 )
 import error_catalog as _error_catalog
@@ -1467,7 +1470,7 @@ def api_sync():
             def sync_generate():
                 yield _build_status_event_impl("Reconectado ao processo ativo...") + "\n"
                 if ACTIVE_CHATS[chat_id]['status']: yield _build_status_event_impl(ACTIVE_CHATS[chat_id]['status']) + "\n"
-                if ACTIVE_CHATS[chat_id]['markdown']: yield json.dumps({"type": "markdown", "content": ACTIVE_CHATS[chat_id]['markdown']}) + "\n"
+                if ACTIVE_CHATS[chat_id]['markdown']: yield _build_markdown_event_impl(ACTIVE_CHATS[chat_id]['markdown']) + "\n"
                 try:
                     while not ACTIVE_CHATS[chat_id].get('finished'):
                         try:
@@ -1662,19 +1665,11 @@ def _handle_browser_search_api(execute_fn, *, route_label, source_label):
     stream  = bool(data.get('stream', False))
     nome_membro = data.get("nome_membro_solicitante") or None
     id_membro   = data.get("id_membro_solicitante") or None
-    _quem = f', por "{nome_membro}" (id_membro: "{id_membro}")' if (nome_membro or id_membro) else ""
-    source_hint = (
-        data.get("request_source")
-        or request.headers.get("X-Request-Source")
-        or request.headers.get("X-Client-Source")
-        or ""
-    )
+    _quem = _format_requester_suffix_impl(nome_membro, id_membro)
+    source_hint = _extract_source_hint_impl(data, request.headers)
     source_hint_norm = str(source_hint).strip().lower()
-    sender_label = "analisador_prontuarios.py" if (
-        'analisador_prontuarios' in source_hint_norm
-        or 'analisador-prontuarios' in source_hint_norm
-        or source_hint_norm == 'analyzer'
-    ) else (source_hint or "usuario_remoto")
+    is_analyzer = _is_analyzer_chat_request_impl(source_hint_norm)
+    sender_label = _build_sender_label_impl(source_hint, is_analyzer)
 
     if not queries or not isinstance(queries, list):
         return jsonify({'success': False, 'error': 'Missing queries array'}), 400
@@ -2158,16 +2153,11 @@ def chat_completions():
     nome_membro = data.get("nome_membro_solicitante") or None
     id_membro   = data.get("id_membro_solicitante")   or None
     _quem = _format_requester_suffix_impl(nome_membro, id_membro)
-    source_hint = (
-        data.get("request_source")
-        or request.headers.get("X-Request-Source")
-        or request.headers.get("X-Client-Source")
-        or ""
-    )
+    source_hint = _extract_source_hint_impl(data, request.headers)
     source_hint_norm = str(source_hint).strip().lower()
     is_analyzer = _is_analyzer_chat_request_impl(source_hint_norm)
     sender_label = _build_sender_label_impl(source_hint, is_analyzer)
-    _origem = " [origem: analisador_prontuarios.py]" if is_analyzer else (f" [origem: {source_hint}]" if source_hint else "")
+    _origem = _format_origin_suffix_impl(is_analyzer, source_hint)
 
     if chat_id:
         print(f"\n[📡 SERVIDOR] Requisição remota recebida{_quem}{_origem}! Continuando Chat ID: {chat_id}")

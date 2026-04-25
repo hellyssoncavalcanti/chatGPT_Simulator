@@ -276,6 +276,61 @@ class TestCoalesceOriginUrl:
 
 
 # ─────────────────────────────────────────────────────────
+# extract_source_hint
+# ─────────────────────────────────────────────────────────
+class TestExtractSourceHint:
+    def test_payload_takes_priority(self):
+        out = sh.extract_source_hint(
+            {"request_source": "analisador.py"},
+            {"X-Request-Source": "header.py", "X-Client-Source": "client.py"},
+        )
+        assert out == "analisador.py"
+
+    def test_falls_back_to_x_request_source(self):
+        out = sh.extract_source_hint(
+            {},
+            {"X-Request-Source": "header.py", "X-Client-Source": "client.py"},
+        )
+        assert out == "header.py"
+
+    def test_falls_back_to_x_client_source(self):
+        out = sh.extract_source_hint(
+            {},
+            {"X-Client-Source": "client.py"},
+        )
+        assert out == "client.py"
+
+    def test_empty_when_nothing_provided(self):
+        assert sh.extract_source_hint({}, {}) == ""
+        assert sh.extract_source_hint(None, None) == ""
+
+    def test_none_payload_treated_as_empty(self):
+        out = sh.extract_source_hint(None, {"X-Request-Source": "header.py"})
+        assert out == "header.py"
+
+    def test_none_headers_treated_as_empty(self):
+        out = sh.extract_source_hint({"request_source": "analisador.py"}, None)
+        assert out == "analisador.py"
+
+    def test_falsy_payload_value_falls_through(self):
+        # request_source vazio ou None no payload → fallback para headers.
+        out = sh.extract_source_hint(
+            {"request_source": ""},
+            {"X-Request-Source": "header.py"},
+        )
+        assert out == "header.py"
+
+    def test_accepts_duck_typed_get(self):
+        # Flask EnvironHeaders / qualquer objeto com .get() funciona.
+        class FakeHeaders:
+            def get(self, key, default=None):
+                return {"X-Request-Source": "duck.py"}.get(key, default)
+
+        out = sh.extract_source_hint({}, FakeHeaders())
+        assert out == "duck.py"
+
+
+# ─────────────────────────────────────────────────────────
 # decode_attachment
 # ─────────────────────────────────────────────────────────
 import base64 as _b64
@@ -594,6 +649,28 @@ class TestBuildStatusEvent:
 
 
 # ─────────────────────────────────────────────────────────
+# build_markdown_event
+# ─────────────────────────────────────────────────────────
+class TestBuildMarkdownEvent:
+    def test_basic_shape(self):
+        out = json.loads(sh.build_markdown_event("# Título\n\ntexto"))
+        assert out == {"type": "markdown", "content": "# Título\n\ntexto"}
+
+    def test_unicode_preserved(self):
+        out = sh.build_markdown_event("✅ análise concluída")
+        assert "✅" in out
+        assert "análise" in out
+
+    def test_coerces_non_string_to_str(self):
+        out = json.loads(sh.build_markdown_event(42))
+        assert out["content"] == "42"
+
+    def test_no_trailing_newline(self):
+        out = sh.build_markdown_event("x")
+        assert not out.endswith("\n")
+
+
+# ─────────────────────────────────────────────────────────
 # format_requester_suffix
 # ─────────────────────────────────────────────────────────
 class TestFormatRequesterSuffix:
@@ -619,6 +696,32 @@ class TestFormatRequesterSuffix:
         # Histórico não validava tipos; preservamos.
         out = sh.format_requester_suffix("Carol", 42)
         assert out == ', por "Carol" (id_membro: "42")'
+
+
+# ─────────────────────────────────────────────────────────
+# format_origin_suffix
+# ─────────────────────────────────────────────────────────
+class TestFormatOriginSuffix:
+    def test_analyzer_overrides_hint(self):
+        out = sh.format_origin_suffix(True, "qualquer_outro.py")
+        assert out == " [origem: analisador_prontuarios.py]"
+
+    def test_analyzer_with_empty_hint(self):
+        assert sh.format_origin_suffix(True, "") == " [origem: analisador_prontuarios.py]"
+        assert sh.format_origin_suffix(True, None) == " [origem: analisador_prontuarios.py]"
+
+    def test_hint_used_when_not_analyzer(self):
+        out = sh.format_origin_suffix(False, "acompanhamento_whatsapp.py")
+        assert out == " [origem: acompanhamento_whatsapp.py]"
+
+    def test_empty_when_not_analyzer_and_no_hint(self):
+        assert sh.format_origin_suffix(False, "") == ""
+        assert sh.format_origin_suffix(False, None) == ""
+
+    def test_leading_space_present_in_truthy_cases(self):
+        # Garantia explícita do contrato: sufixos truthy começam com espaço.
+        assert sh.format_origin_suffix(True, "x").startswith(" ")
+        assert sh.format_origin_suffix(False, "x").startswith(" ")
 
 
 # ─────────────────────────────────────────────────────────

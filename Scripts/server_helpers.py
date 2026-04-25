@@ -284,6 +284,26 @@ def compute_python_request_interval(
     return base, target
 
 
+def format_origin_suffix(is_analyzer: bool, source_hint) -> str:
+    """Sufixo `[origem: ...]` padronizado para logs de `chat_completions`.
+
+    Regras (preservadas byte-a-byte):
+      - `is_analyzer=True` → `" [origem: analisador_prontuarios.py]"`
+        (sempre, independentemente de `source_hint`).
+      - `is_analyzer=False` e `source_hint` truthy → `f" [origem: {source_hint}]"`.
+      - Caso contrário → string vazia.
+
+    Note o espaço inicial de cada caso truthy — facilita concatenar
+    diretamente após o sufixo `_quem` na linha de log sem precisar
+    ajustar separadores.
+    """
+    if is_analyzer:
+        return " [origem: analisador_prontuarios.py]"
+    if source_hint:
+        return f" [origem: {source_hint}]"
+    return ""
+
+
 def format_requester_suffix(nome_membro, id_membro) -> str:
     """Sufixo padronizado para logs de requisição remota.
 
@@ -335,6 +355,32 @@ def resolve_browser_profile(requested_profile, stored_profile) -> Optional[str]:
     return None
 
 
+def extract_source_hint(data, headers) -> str:
+    """Extrai a `source_hint` do payload + headers da requisição.
+
+    Cadeia de fallback (idêntica em `chat_completions` e
+    `_handle_browser_search_api`):
+      1. `data["request_source"]`
+      2. `headers["X-Request-Source"]`
+      3. `headers["X-Client-Source"]`
+      4. `""` (string vazia)
+
+    Aceita qualquer objeto com `.get(name)` (`dict`, Flask `EnvironHeaders`
+    ou similares); ausência de `.get` é tratada como dicionário vazio
+    (preserva robustez se `data`/`headers` for `None`).
+    """
+    payload_get = getattr(data, 'get', None)
+    headers_get = getattr(headers, 'get', None)
+    candidate = ""
+    if payload_get is not None:
+        candidate = payload_get("request_source") or ""
+    if not candidate and headers_get is not None:
+        candidate = headers_get("X-Request-Source") or ""
+    if not candidate and headers_get is not None:
+        candidate = headers_get("X-Client-Source") or ""
+    return candidate or ""
+
+
 def coalesce_origin_url(data, header_value: str = "") -> str:
     """Resolve a URL de origem efetiva do pedido `/v1/chat/completions`.
 
@@ -382,6 +428,16 @@ def build_status_event(content: str, **extras) -> str:
     payload = {"type": "status", "content": str(content)}
     payload.update(extras)
     return json.dumps(payload, ensure_ascii=False)
+
+
+def build_markdown_event(content: str) -> str:
+    """JSON do evento de markdown consumido pelo SSE / `stream_queue`.
+
+    Formato: `{"type": "markdown", "content": "<texto>"}`. Espelha
+    `build_error_event` (sem extras). `ensure_ascii=False` preserva
+    acentos/emoji. Sem newline trailing — o chamador decide.
+    """
+    return json.dumps({"type": "markdown", "content": str(content)}, ensure_ascii=False)
 
 
 def build_queue_key(chat_id, *, now_ns: Callable[[], int] = time.time_ns) -> str:
@@ -453,6 +509,7 @@ __all__ = [
     "build_sender_label",
     "wrap_paste_if_python_source",
     "coalesce_origin_url",
+    "extract_source_hint",
     "decode_attachment",
     "resolve_chat_url",
     "resolve_browser_profile",
@@ -461,7 +518,9 @@ __all__ = [
     "build_chat_task_payload",
     "build_error_event",
     "build_status_event",
+    "build_markdown_event",
     "format_requester_suffix",
+    "format_origin_suffix",
     "compute_python_request_interval",
 ]
 
