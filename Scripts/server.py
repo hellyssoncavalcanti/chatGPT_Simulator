@@ -92,8 +92,14 @@ except AttributeError:
     logging.warning("⚠️ DEBUG_LOG não encontrado no config.py. Usando False como padrão.")
 
 ACTIVE_CHATS = {}
-ACTIVE_SYNCS = {}
-ACTIVE_SYNCS_LOCK = threading.Lock()
+
+# Dedup de /api/sync (janela 120s) — singleton encapsulado em padrão B
+# (ver sync_dedup.py). Aliases ACTIVE_SYNCS / ACTIVE_SYNCS_LOCK preservados
+# para compat com código legado e testes que tocam o estado direto.
+from sync_dedup import SyncDedup, DEFAULT_DEDUP_WINDOW_SEC
+_SYNC_DEDUP = SyncDedup(window_sec=DEFAULT_DEDUP_WINDOW_SEC)
+ACTIVE_SYNCS = _SYNC_DEDUP._active
+ACTIVE_SYNCS_LOCK = _SYNC_DEDUP._lock
 WEB_SEARCH_MIN_INTERVAL_SEC = 8
 WEB_SEARCH_MAX_INTERVAL_SEC = 22
 WEB_SEARCH_PROGRESS_TICK_SEC = 1.0
@@ -1434,27 +1440,23 @@ def api_sync():
         return jsonify({"success": False, "error": "Missing chat_id and url"}), 400
 
     sync_key = chat_id or url
-    with ACTIVE_SYNCS_LOCK:
-        started_at = ACTIVE_SYNCS.get(sync_key)
-        if started_at and (time.time() - started_at) < 120:
-            elapsed = int(time.time() - started_at)
-            retry_after = max(1, 120 - elapsed)
-            explanation = (
-                f"[🔄 SYNC] ⚠️ sync_in_progress (benigno): já existe sincronização "
-                f"ativa para sync_key={sync_key!r} há {elapsed}s. "
-                f"Dedup automático (janela 120s) → respondendo 409 e preservando a "
-                f"sync anterior. Retry seguro em ~{retry_after}s."
-            )
-            print(explanation)
-            log(f"[SYNC_DEDUP] sync_key={sync_key} elapsed={elapsed}s → 409 sync_in_progress")
-            return jsonify({
-                "success": False,
-                "error": "sync_in_progress",
-                "message": "Já existe sincronização ativa para este chat.",
-                "retry_after_seconds": retry_after,
-                "elapsed_seconds": elapsed,
-            }), 409
-        ACTIVE_SYNCS[sync_key] = time.time()
+    acquired, elapsed, retry_after = _SYNC_DEDUP.try_acquire(sync_key)
+    if not acquired:
+        explanation = (
+            f"[🔄 SYNC] ⚠️ sync_in_progress (benigno): já existe sincronização "
+            f"ativa para sync_key={sync_key!r} há {elapsed}s. "
+            f"Dedup automático (janela {_SYNC_DEDUP.window_sec}s) → respondendo 409 e preservando a "
+            f"sync anterior. Retry seguro em ~{retry_after}s."
+        )
+        print(explanation)
+        log(f"[SYNC_DEDUP] sync_key={sync_key} elapsed={elapsed}s → 409 sync_in_progress")
+        return jsonify({
+            "success": False,
+            "error": "sync_in_progress",
+            "message": "Já existe sincronização ativa para este chat.",
+            "retry_after_seconds": retry_after,
+            "elapsed_seconds": elapsed,
+        }), 409
 
     if chat_id in ACTIVE_CHATS and not ACTIVE_CHATS[chat_id].get('finished'):
         target_q = ACTIVE_CHATS[chat_id]['queue']
@@ -1591,8 +1593,7 @@ def api_sync():
     except Exception as e: 
         return jsonify({"success": False, "error": str(e)})
     finally:
-        with ACTIVE_SYNCS_LOCK:
-            ACTIVE_SYNCS.pop(sync_key, None)
+        _SYNC_DEDUP.release(sync_key)
 
 
 @app.route("/api/delete", methods=["POST"])
