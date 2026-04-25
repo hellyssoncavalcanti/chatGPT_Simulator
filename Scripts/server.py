@@ -503,15 +503,14 @@ def _wait_python_request_interval_if_needed(is_python_source: bool, stream_queue
             f"base {int(base)}s): aguardando {int(remaining)}s."
         )
         if stream_queue is not None:
-            stream_queue.put(json.dumps({
-                "type": "status",
-                "content": status_text,
-                "phase": "python_anti_rate_limit_interval",
-                "wait_seconds": round(remaining, 1),
-                "target_seconds": round(target, 1),
-                "base_seconds": round(base, 1),
-                "profile_count": int(profile_count),
-            }, ensure_ascii=False))
+            stream_queue.put(_build_status_event_impl(
+                status_text,
+                phase="python_anti_rate_limit_interval",
+                wait_seconds=round(remaining, 1),
+                target_seconds=round(target, 1),
+                base_seconds=round(base, 1),
+                profile_count=int(profile_count),
+            ))
         time.sleep(min(PYTHON_ANTI_RATE_LIMIT_TICK_SEC, remaining))
 
     with _python_anti_rate_limit_lock:
@@ -544,14 +543,11 @@ def _wait_remote_user_priority_if_needed(is_analyzer: bool, stream_queue=None):
         return
     while _has_active_remote_user_chat():
         if stream_queue is not None:
-            stream_queue.put(json.dumps({
-                "type": "status",
-                "content": (
-                    "⏳ Aguardando finalização de pedido remoto prioritário em andamento "
-                    "antes de iniciar a análise automática."
-                ),
-                "phase": "analyzer_waiting_remote_priority",
-            }, ensure_ascii=False))
+            stream_queue.put(_build_status_event_impl(
+                "⏳ Aguardando finalização de pedido remoto prioritário em andamento "
+                "antes de iniciar a análise automática.",
+                phase="analyzer_waiting_remote_priority",
+            ))
         time.sleep(1.0)
 
 
@@ -702,14 +698,13 @@ def _execute_single_browser_search(query_str, browser_action, source_label, phas
             stream_queue.put(json.dumps(msg, ensure_ascii=False))
 
     if stream_queue is not None:
-        stream_queue.put(json.dumps({
-            "type": "status",
-            "content": f"🔎 Iniciando busca {source_label} por \"{query_str}\".",
-            "query": query_str,
-            "wait_seconds": 0,
-            "phase": f"{phase_prefix}_start",
-            "source": source_label,
-        }, ensure_ascii=False))
+        stream_queue.put(_build_status_event_impl(
+            f"🔎 Iniciando busca {source_label} por \"{query_str}\".",
+            query=query_str,
+            wait_seconds=0,
+            phase=f"{phase_prefix}_start",
+            source=source_label,
+        ))
 
     q = queue.Queue()
     browser_queue.put({
@@ -1409,7 +1404,7 @@ def menu_execute():
                     except: pass
                 if msg.get('type') in ['exec_result', 'error']: break
             except Exception as e:
-                yield json.dumps({"type": "error", "content": str(e)}) + "\n"; break
+                yield _build_error_event_impl(str(e)) + "\n"; break
     return Response(stream_with_context(generate()), mimetype='application/x-ndjson')
 
 @app.route("/api/sync", methods=["POST"])
@@ -1464,8 +1459,8 @@ def api_sync():
         
         if stream:
             def sync_generate():
-                yield json.dumps({"type": "status", "content": "Reconectado ao processo ativo..."}) + "\n"
-                if ACTIVE_CHATS[chat_id]['status']: yield json.dumps({"type": "status", "content": ACTIVE_CHATS[chat_id]['status']}) + "\n"
+                yield _build_status_event_impl("Reconectado ao processo ativo...") + "\n"
+                if ACTIVE_CHATS[chat_id]['status']: yield _build_status_event_impl(ACTIVE_CHATS[chat_id]['status']) + "\n"
                 if ACTIVE_CHATS[chat_id]['markdown']: yield json.dumps({"type": "markdown", "content": ACTIVE_CHATS[chat_id]['markdown']}) + "\n"
                 try:
                     while not ACTIVE_CHATS[chat_id].get('finished'):
@@ -2388,7 +2383,7 @@ def chat_completions():
                         # Browser não respondeu em 600s — avisa o cliente e encerra
                         ACTIVE_CHATS[chat_id]['finished']    = True
                         ACTIVE_CHATS[chat_id]['finished_at'] = time.time()
-                        yield json.dumps({"type": "error", "content": "Timeout: browser não respondeu em 600s."}) + "\n"
+                        yield _build_error_event_impl("Timeout: browser não respondeu em 600s.") + "\n"
                         break
 
                     if raw_msg is None:
