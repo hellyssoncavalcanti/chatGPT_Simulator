@@ -64,6 +64,8 @@ from server_helpers import (
     decode_attachment as _decode_attachment_impl,
     resolve_chat_url as _resolve_chat_url_impl,
     resolve_browser_profile as _resolve_browser_profile_impl,
+    build_chat_task_payload as _build_chat_task_payload_impl,
+    build_queue_key as _build_queue_key_impl,
 )
 import error_catalog as _error_catalog
 from log_sanitizer import sanitize_mapping as _sanitize_audit_payload
@@ -2206,12 +2208,16 @@ def chat_completions():
                 print(f"Erro no anexo: {e}")
 
     # --- 3. CAPTURA DA URL ---
-    url = data.get("url")
-    if not url or url == "None":
-        all_chats = storage.load_chats()
-        url = all_chats.get(chat_id, {}).get("url")
+    # `_resolve_chat_url_impl` trata o sentinela `"None"` (string vinda
+    # de clientes antigos) como ausência. Downstream:
+    #   - `storage.save_chat(..., url or chat_snapshot.get('url',''), ...)`
+    #     passa a usar o fallback do snapshot em vez de persistir "None".
+    #   - `browser.py:~4159` já tratava `url == 'None'` defensivamente;
+    #     agora simplesmente recebe `None` e cai no mesmo branch.
+    all_chats = storage.load_chats()
+    url = _resolve_chat_url_impl(data.get("url"), all_chats.get(chat_id, {}).get("url"))
 
-    if url and url != "None":
+    if url:
         print(f"[📡 SERVIDOR] URL detectada. Retomando conversa em: {url}")
     else:
         print("[📡 SERVIDOR] Nenhuma URL detectada. Iniciando um novo chat do zero.")
@@ -2246,29 +2252,27 @@ def chat_completions():
         'is_analyzer': bool(is_analyzer)
     }
 
-    chat_task_payload = {
-        'action':           'CHAT',
-        'url':              url,
-        'chat_id':          chat_id,
-        'message':          message,
-        'is_analyzer':      bool(is_analyzer),
-        'sender':           sender_label,
-        'request_source':   source_hint or sender_label,
-        'attachment_paths': saved_paths,
-        'stream_queue':     stream_q,
-        'sender':           sender_label,
+    chat_task_payload = _build_chat_task_payload_impl(
+        url=url,
+        chat_id=chat_id,
+        message=message,
+        is_analyzer=is_analyzer,
+        sender_label=sender_label,
+        source_hint=source_hint,
+        saved_paths=saved_paths,
+        stream_queue=stream_q,
         # Codex: repositório/ambiente a ser selecionado no dropdown de
         # https://chatgpt.com/codex/cloud antes do paste da mensagem.
         # Opcional — quando ausente, browser.py usa a seleção atual do UI.
-        'codex_repo':       (data.get('codex_repo') or '').strip() or None,
+        codex_repo=data.get('codex_repo'),
         # Perfil Chromium alvo (ex.: "default", "segunda_chance"). Opcional.
         # browser.py resolve contra config.CHROMIUM_PROFILES; valor ausente
         # ou chave inválida → fallback para "default" (perfil compartilhado).
-        'browser_profile':  effective_browser_profile,
-    }
+        effective_browser_profile=effective_browser_profile,
+    )
 
     def _dispatch_chat_task():
-        queue_key = f"{chat_id}:{time.time_ns()}"
+        queue_key = _build_queue_key_impl(chat_id)
         slot_acquired = False
         try:
             if use_python_queue:
