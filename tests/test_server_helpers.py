@@ -644,6 +644,32 @@ class TestFormatRequesterSuffix:
 
 
 # ─────────────────────────────────────────────────────────
+# format_origin_suffix
+# ─────────────────────────────────────────────────────────
+class TestFormatOriginSuffix:
+    def test_analyzer_overrides_hint(self):
+        out = sh.format_origin_suffix(True, "qualquer_outro.py")
+        assert out == " [origem: analisador_prontuarios.py]"
+
+    def test_analyzer_with_empty_hint(self):
+        assert sh.format_origin_suffix(True, "") == " [origem: analisador_prontuarios.py]"
+        assert sh.format_origin_suffix(True, None) == " [origem: analisador_prontuarios.py]"
+
+    def test_hint_used_when_not_analyzer(self):
+        out = sh.format_origin_suffix(False, "acompanhamento_whatsapp.py")
+        assert out == " [origem: acompanhamento_whatsapp.py]"
+
+    def test_empty_when_not_analyzer_and_no_hint(self):
+        assert sh.format_origin_suffix(False, "") == ""
+        assert sh.format_origin_suffix(False, None) == ""
+
+    def test_leading_space_present_in_truthy_cases(self):
+        # Garantia explícita do contrato: sufixos truthy começam com espaço.
+        assert sh.format_origin_suffix(True, "x").startswith(" ")
+        assert sh.format_origin_suffix(False, "x").startswith(" ")
+
+
+# ─────────────────────────────────────────────────────────
 # compute_python_request_interval
 # ─────────────────────────────────────────────────────────
 class TestComputePythonRequestInterval:

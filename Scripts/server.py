@@ -71,6 +71,7 @@ from server_helpers import (
     build_markdown_event as _build_markdown_event_impl,
     normalize_optional_text as _normalize_optional_text_impl,
     format_requester_suffix as _format_requester_suffix_impl,
+    format_origin_suffix as _format_origin_suffix_impl,
     compute_python_request_interval as _compute_python_request_interval_impl,
 )
 import error_catalog as _error_catalog
@@ -2168,7 +2169,7 @@ def chat_completions():
     source_hint_norm = str(source_hint).strip().lower()
     is_analyzer = _is_analyzer_chat_request_impl(source_hint_norm)
     sender_label = _build_sender_label_impl(source_hint, is_analyzer)
-    _origem = " [origem: analisador_prontuarios.py]" if is_analyzer else (f" [origem: {source_hint}]" if source_hint else "")
+    _origem = _format_origin_suffix_impl(is_analyzer, source_hint)
 
     if chat_id:
         print(f"\n[📡 SERVIDOR] Requisição remota recebida{_quem}{_origem}! Continuando Chat ID: {chat_id}")

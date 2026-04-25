@@ -284,6 +284,26 @@ def compute_python_request_interval(
     return base, target
 
 
+def format_origin_suffix(is_analyzer: bool, source_hint) -> str:
+    """Sufixo `[origem: ...]` padronizado para logs de `chat_completions`.
+
+    Regras (preservadas byte-a-byte):
+      - `is_analyzer=True` → `" [origem: analisador_prontuarios.py]"`
+        (sempre, independentemente de `source_hint`).
+      - `is_analyzer=False` e `source_hint` truthy → `f" [origem: {source_hint}]"`.
+      - Caso contrário → string vazia.
+
+    Note o espaço inicial de cada caso truthy — facilita concatenar
+    diretamente após o sufixo `_quem` na linha de log sem precisar
+    ajustar separadores.
+    """
+    if is_analyzer:
+        return " [origem: analisador_prontuarios.py]"
+    if source_hint:
+        return f" [origem: {source_hint}]"
+    return ""
+
+
 def format_requester_suffix(nome_membro, id_membro) -> str:
     """Sufixo padronizado para logs de requisição remota.
 
@@ -473,6 +493,7 @@ __all__ = [
     "build_status_event",
     "build_markdown_event",
     "format_requester_suffix",
+    "format_origin_suffix",
     "compute_python_request_interval",
 ]
 
