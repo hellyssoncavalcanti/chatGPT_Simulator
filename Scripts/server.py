@@ -66,6 +66,8 @@ from server_helpers import (
     resolve_browser_profile as _resolve_browser_profile_impl,
     build_chat_task_payload as _build_chat_task_payload_impl,
     build_queue_key as _build_queue_key_impl,
+    build_error_event as _build_error_event_impl,
+    build_status_event as _build_status_event_impl,
 )
 import error_catalog as _error_catalog
 from log_sanitizer import sanitize_mapping as _sanitize_audit_payload
@@ -92,8 +94,14 @@ except AttributeError:
     logging.warning("⚠️ DEBUG_LOG não encontrado no config.py. Usando False como padrão.")
 
 ACTIVE_CHATS = {}
-ACTIVE_SYNCS = {}
-ACTIVE_SYNCS_LOCK = threading.Lock()
+
+# Dedup de /api/sync (janela 120s) — singleton encapsulado em padrão B
+# (ver sync_dedup.py). Aliases ACTIVE_SYNCS / ACTIVE_SYNCS_LOCK preservados
+# para compat com código legado e testes que tocam o estado direto.
+from sync_dedup import SyncDedup, DEFAULT_DEDUP_WINDOW_SEC
+_SYNC_DEDUP = SyncDedup(window_sec=DEFAULT_DEDUP_WINDOW_SEC)
+ACTIVE_SYNCS = _SYNC_DEDUP._active
+ACTIVE_SYNCS_LOCK = _SYNC_DEDUP._lock
 WEB_SEARCH_MIN_INTERVAL_SEC = 8
 WEB_SEARCH_MAX_INTERVAL_SEC = 22
 WEB_SEARCH_PROGRESS_TICK_SEC = 1.0
@@ -424,12 +432,11 @@ def _wait_chat_rate_limit_if_needed(stream_queue=None):
             f"Nova tentativa em {_format_wait_seconds(remaining)}."
         )
         if stream_queue is not None:
-            stream_queue.put(json.dumps({
-                "type": "status",
-                "content": status_text,
-                "phase": "chat_rate_limit_cooldown",
-                "wait_seconds": round(remaining, 1),
-            }, ensure_ascii=False))
+            stream_queue.put(_build_status_event_impl(
+                status_text,
+                phase="chat_rate_limit_cooldown",
+                wait_seconds=round(remaining, 1),
+            ))
         # No CMD do próprio ChatGPT Simulator: atualizar cooldown inline.
         try:
             width = max(80, shutil.get_terminal_size((160, 20)).columns - 1)
@@ -1434,27 +1441,23 @@ def api_sync():
         return jsonify({"success": False, "error": "Missing chat_id and url"}), 400
 
     sync_key = chat_id or url
-    with ACTIVE_SYNCS_LOCK:
-        started_at = ACTIVE_SYNCS.get(sync_key)
-        if started_at and (time.time() - started_at) < 120:
-            elapsed = int(time.time() - started_at)
-            retry_after = max(1, 120 - elapsed)
-            explanation = (
-                f"[🔄 SYNC] ⚠️ sync_in_progress (benigno): já existe sincronização "
-                f"ativa para sync_key={sync_key!r} há {elapsed}s. "
-                f"Dedup automático (janela 120s) → respondendo 409 e preservando a "
-                f"sync anterior. Retry seguro em ~{retry_after}s."
-            )
-            print(explanation)
-            log(f"[SYNC_DEDUP] sync_key={sync_key} elapsed={elapsed}s → 409 sync_in_progress")
-            return jsonify({
-                "success": False,
-                "error": "sync_in_progress",
-                "message": "Já existe sincronização ativa para este chat.",
-                "retry_after_seconds": retry_after,
-                "elapsed_seconds": elapsed,
-            }), 409
-        ACTIVE_SYNCS[sync_key] = time.time()
+    acquired, elapsed, retry_after = _SYNC_DEDUP.try_acquire(sync_key)
+    if not acquired:
+        explanation = (
+            f"[🔄 SYNC] ⚠️ sync_in_progress (benigno): já existe sincronização "
+            f"ativa para sync_key={sync_key!r} há {elapsed}s. "
+            f"Dedup automático (janela {_SYNC_DEDUP.window_sec}s) → respondendo 409 e preservando a "
+            f"sync anterior. Retry seguro em ~{retry_after}s."
+        )
+        print(explanation)
+        log(f"[SYNC_DEDUP] sync_key={sync_key} elapsed={elapsed}s → 409 sync_in_progress")
+        return jsonify({
+            "success": False,
+            "error": "sync_in_progress",
+            "message": "Já existe sincronização ativa para este chat.",
+            "retry_after_seconds": retry_after,
+            "elapsed_seconds": elapsed,
+        }), 409
 
     if chat_id in ACTIVE_CHATS and not ACTIVE_CHATS[chat_id].get('finished'):
         target_q = ACTIVE_CHATS[chat_id]['queue']
@@ -1591,8 +1594,7 @@ def api_sync():
     except Exception as e: 
         return jsonify({"success": False, "error": str(e)})
     finally:
-        with ACTIVE_SYNCS_LOCK:
-            ACTIVE_SYNCS.pop(sync_key, None)
+        _SYNC_DEDUP.release(sync_key)
 
 
 @app.route("/api/delete", methods=["POST"])
@@ -2289,16 +2291,14 @@ def chat_completions():
             )
             browser_queue.put(chat_task_payload)
         except TimeoutError as queue_timeout:
-            stream_q.put(json.dumps({
-                "type": "error",
-                "content": f"Timeout aguardando fila interna do servidor: {queue_timeout}"
-            }, ensure_ascii=False))
+            stream_q.put(_build_error_event_impl(
+                f"Timeout aguardando fila interna do servidor: {queue_timeout}"
+            ))
             stream_q.put(None)
         except Exception as dispatch_err:
-            stream_q.put(json.dumps({
-                "type": "error",
-                "content": f"Falha ao enfileirar tarefa no browser: {dispatch_err}"
-            }, ensure_ascii=False))
+            stream_q.put(_build_error_event_impl(
+                f"Falha ao enfileirar tarefa no browser: {dispatch_err}"
+            ))
             stream_q.put(None)
         finally:
             if slot_acquired:

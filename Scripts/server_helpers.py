@@ -291,6 +291,34 @@ def coalesce_origin_url(data, header_value: str = "") -> str:
     return str(candidate or "").strip()
 
 
+def build_error_event(content: str) -> str:
+    """JSON do evento de erro consumido pelo SSE / `stream_queue`.
+
+    Formato estável: `{"type": "error", "content": "<texto>"}`. Usa
+    `ensure_ascii=False` para preservar UTF-8 (mesmo idiom de
+    `queue_status_payload`).
+
+    Não anexa newline — o chamador decide entre `stream_q.put(...)` e
+    `yield ... + "\\n"` para SSE direto.
+    """
+    return json.dumps({"type": "error", "content": str(content)}, ensure_ascii=False)
+
+
+def build_status_event(content: str, **extras) -> str:
+    """JSON de evento de status genérico, com campos extras opcionais.
+
+    Formato: `{"type": "status", "content": "...", **extras}`. Os campos
+    extras são mesclados ao topo do payload (ordem de inserção do dict
+    Python preservada). Para o caso específico da fila Python, prefira
+    `queue_status_payload` (formato canônico há mais tempo).
+
+    `ensure_ascii=False` preserva acentos/emoji.
+    """
+    payload = {"type": "status", "content": str(content)}
+    payload.update(extras)
+    return json.dumps(payload, ensure_ascii=False)
+
+
 def build_queue_key(chat_id, *, now_ns: Callable[[], int] = time.time_ns) -> str:
     """Gera a chave única usada para identificar um slot de fila Python.
 
@@ -366,6 +394,8 @@ __all__ = [
     "normalize_optional_text",
     "build_queue_key",
     "build_chat_task_payload",
+    "build_error_event",
+    "build_status_event",
 ]
 
 
