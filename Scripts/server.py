@@ -72,6 +72,8 @@ from server_helpers import (
     normalize_optional_text as _normalize_optional_text_impl,
     format_requester_suffix as _format_requester_suffix_impl,
     format_origin_suffix as _format_origin_suffix_impl,
+    safe_int as _safe_int_impl,
+    safe_snapshot_stats as _safe_snapshot_stats_impl,
 )
 import error_catalog as _error_catalog
 from log_sanitizer import sanitize_mapping as _sanitize_audit_payload
@@ -202,6 +204,10 @@ PROM_SECURITY_TRACKED_LOGIN_IPS = Gauge(
 PROM_PYTHON_REQUEST_THROTTLE_AGE_SEC = Gauge(
     "simulator_python_request_throttle_age_sec",
     "Segundos desde o último pedido Python que passou pelo throttle anti-rate-limit (0 antes do primeiro pedido)",
+) if Gauge else None
+PROM_WEB_SEARCH_THROTTLE_AGE_SEC = Gauge(
+    "simulator_web_search_throttle_age_sec",
+    "Segundos desde a última reserva de busca web (Google/UpToDate); 0 antes da primeira busca",
 ) if Gauge else None
 
 
@@ -1097,12 +1103,7 @@ def queue_status():
     Observabilidade da fila interna server → browser.
     Requer autenticação padrão (before_request/check_auth).
     """
-    stats = {}
-    try:
-        if hasattr(browser_queue, "snapshot_stats"):
-            stats = browser_queue.snapshot_stats() or {}
-    except Exception as e:
-        stats = {"error": str(e)}
+    stats = _safe_snapshot_stats_impl(browser_queue)
 
     return jsonify({
         "success": True,
@@ -1116,10 +1117,7 @@ def queue_status():
 @app.route("/api/queue/failed", methods=["GET"])
 def queue_failed():
     """DLQ: lista tarefas que falharam no browser loop."""
-    try:
-        limit = int(request.args.get("limit", 100))
-    except Exception:
-        limit = 100
+    limit = _safe_int_impl(request.args.get("limit", 100), 100)
     items = browser_queue.list_failed(limit=limit) if hasattr(browser_queue, "list_failed") else []
     return jsonify({"success": True, "failed": items, "count": len(items)}), 200
 
@@ -1128,10 +1126,7 @@ def queue_failed():
 def queue_failed_retry():
     """Reinsere item da DLQ na fila principal por índice."""
     data = request.get_json(silent=True) or {}
-    try:
-        idx = int(data.get("index", -1))
-    except Exception:
-        idx = -1
+    idx = _safe_int_impl(data.get("index", -1), -1)
     if not hasattr(browser_queue, "retry_failed"):
         return jsonify({"success": False, "error": "dlq_not_supported"}), 400
     retried = browser_queue.retry_failed(idx)
@@ -1146,10 +1141,7 @@ def logs_tail():
     Retorna as últimas linhas do log atual do simulator.
     Ideal para polling leve no frontend (toast de observabilidade).
     """
-    try:
-        requested = int(request.args.get("lines", 120))
-    except Exception:
-        requested = 120
+    requested = _safe_int_impl(request.args.get("lines", 120), 120)
     lines_limit = max(10, min(800, requested))
 
     path = getattr(config, "LOG_PATH", "")
@@ -1239,12 +1231,7 @@ def api_metrics():
         if last_event_at and (now - last_event_at) > ACTIVE_CHAT_STALE_SEC:
             stale_candidates += 1
 
-    queue_stats = {}
-    try:
-        if hasattr(browser_queue, "snapshot_stats"):
-            queue_stats = browser_queue.snapshot_stats() or {}
-    except Exception as e:
-        queue_stats = {"error": str(e)}
+    queue_stats = _safe_snapshot_stats_impl(browser_queue)
 
     metrics = {
         "timestamp": int(now),
@@ -1260,6 +1247,7 @@ def api_metrics():
         "chat_rate_limit": _CHAT_RATE_LIMIT_COOLDOWN.snapshot(),
         "security": _SECURITY_STATE.snapshot(),
         "python_request_throttle": _PYTHON_REQUEST_THROTTLE.snapshot(),
+        "web_search_throttle": _WEB_SEARCH_THROTTLE.snapshot(),
         "request_timeout_sec": int(PYTHON_CHAT_QUEUE_TIMEOUT_SEC),
     }
     return jsonify({"success": True, "metrics": metrics}), 200
@@ -1286,6 +1274,7 @@ def _update_rate_limit_prom_gauges():
     chat_snap = _CHAT_RATE_LIMIT_COOLDOWN.snapshot()
     sec_snap = _SECURITY_STATE.snapshot()
     throttle_snap = _PYTHON_REQUEST_THROTTLE.snapshot()
+    web_search_snap = _WEB_SEARCH_THROTTLE.snapshot()
     if PROM_CHAT_RATE_LIMIT_REMAINING_SEC is not None:
         PROM_CHAT_RATE_LIMIT_REMAINING_SEC.set(float(chat_snap.get("remaining_seconds", 0.0)))
     if PROM_CHAT_RATE_LIMIT_STRIKES is not None:
@@ -1296,6 +1285,8 @@ def _update_rate_limit_prom_gauges():
         PROM_SECURITY_TRACKED_LOGIN_IPS.set(float(sec_snap.get("tracked_login_ips", 0)))
     if PROM_PYTHON_REQUEST_THROTTLE_AGE_SEC is not None:
         PROM_PYTHON_REQUEST_THROTTLE_AGE_SEC.set(float(throttle_snap.get("age_seconds", 0.0)))
+    if PROM_WEB_SEARCH_THROTTLE_AGE_SEC is not None:
+        PROM_WEB_SEARCH_THROTTLE_AGE_SEC.set(float(web_search_snap.get("age_seconds", 0.0)))
 
 @app.route("/", methods=["GET", "POST"])
 def index(): 
