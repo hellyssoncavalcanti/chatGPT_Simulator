@@ -891,6 +891,43 @@ class TestCountActiveChats:
         assert out["stale_candidates"] == 0
 
 
+class TestCountUnfinishedChats:
+    def test_empty_dict_returns_zero(self):
+        assert sh.count_unfinished_chats({}) == 0
+
+    def test_counts_only_unfinished(self):
+        chats = {
+            "a": {"finished": False},
+            "b": {"finished": True},
+            "c": {"finished": False},
+            "d": {},  # finished ausente -> conta como nao finalizado
+        }
+        assert sh.count_unfinished_chats(chats) == 3
+
+    def test_finished_truthy_values_excluded(self):
+        chats = {
+            "a": {"finished": 1},
+            "b": {"finished": "yes"},
+            "c": {"finished": True},
+            "d": {"finished": False},
+        }
+        assert sh.count_unfinished_chats(chats) == 1
+
+    def test_invalid_meta_entries_skipped(self):
+        chats = {
+            "ok": {"finished": False},
+            "bad_str": "junk",
+            "bad_none": None,
+            "bad_int": 7,
+        }
+        assert sh.count_unfinished_chats(chats) == 1
+
+    def test_concurrent_mutation_safe(self):
+        # itera sobre uma copia dos items — mutacao durante iteracao nao quebra
+        chats = {f"k{i}": {"finished": i % 2 == 0} for i in range(20)}
+        assert sh.count_unfinished_chats(chats) == 10
+
+
 class TestBuildActiveChatMeta:
     def test_meta_shape_and_defaults(self):
         sentinel_q = object()

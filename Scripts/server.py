@@ -90,6 +90,7 @@ from server_helpers import (
     resolve_download_content_type as _resolve_download_content_type_impl,
     resolve_avatar_filename as _resolve_avatar_filename_impl,
     count_active_chats as _count_active_chats_impl,
+    count_unfinished_chats as _count_unfinished_chats_impl,
     build_active_chat_meta as _build_active_chat_meta_impl,
     normalize_source_hint as _normalize_source_hint_impl,
     format_requester_suffix as _format_requester_suffix_impl,
@@ -891,7 +892,7 @@ def after_request_audit(response):
         if PROM_QUEUE_SIZE is not None:
             PROM_QUEUE_SIZE.set(float(browser_queue.qsize()))
         if PROM_ACTIVE_CHATS is not None:
-            active = sum(1 for _k, meta in list(ACTIVE_CHATS.items()) if not meta.get("finished"))
+            active = _count_unfinished_chats_impl(ACTIVE_CHATS)
             PROM_ACTIVE_CHATS.set(float(active))
         if PROM_HTTP_ERRORS is not None and int(getattr(response, "status_code", 0)) >= 400:
             PROM_HTTP_ERRORS.labels(status=str(int(response.status_code))).inc()
@@ -1262,7 +1263,7 @@ def prometheus_metrics():
     if PROM_QUEUE_SIZE is not None:
         PROM_QUEUE_SIZE.set(float(browser_queue.qsize()))
     if PROM_ACTIVE_CHATS is not None:
-        active = sum(1 for _k, meta in list(ACTIVE_CHATS.items()) if not meta.get("finished"))
+        active = _count_unfinished_chats_impl(ACTIVE_CHATS)
         PROM_ACTIVE_CHATS.set(float(active))
     _update_rate_limit_prom_gauges()
     return Response(generate_latest(), mimetype=CONTENT_TYPE_LATEST)

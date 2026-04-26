@@ -512,6 +512,23 @@ def build_active_chat_meta(stream_queue, is_analyzer: bool, *, now: float) -> di
     }
 
 
+def count_unfinished_chats(active_chats) -> int:
+    """Conta entradas em `active_chats` cuja `meta.finished` é falsa.
+
+    Versão mínima do `count_active_chats` para call sites que precisam
+    apenas do total (gauge Prometheus, audit hook). Itera sobre uma cópia
+    da lista de items para tolerar mutação concorrente. Entradas não-dict
+    (defensivamente) são ignoradas.
+    """
+    total = 0
+    for _chat_id, meta in list(active_chats.items()):
+        if not isinstance(meta, dict):
+            continue
+        if not meta.get("finished"):
+            total += 1
+    return total
+
+
 def count_active_chats(active_chats, *, now: float, stale_threshold_sec: float) -> dict:
     """Conta chats ativos por categoria a partir do snapshot `active_chats`.
 
@@ -940,6 +957,7 @@ __all__ = [
     "resolve_download_content_type",
     "resolve_avatar_filename",
     "count_active_chats",
+    "count_unfinished_chats",
     "build_active_chat_meta",
     "normalize_source_hint",
     "build_queue_key",
