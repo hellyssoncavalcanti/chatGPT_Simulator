@@ -393,7 +393,7 @@ Coletadas em `2026-04-22` via `wc -l` / `grep -nE "def "`:
 
 ---
 
-## 🆕 PONTO DE RETOMADA (última atualização em 2026-04-26 quinvicies)
+## 🆕 PONTO DE RETOMADA (última atualização em 2026-04-26 sexvicies)
 
 > **Leia APENAS esta seção ao retomar em outro chat.** Ela é autocontida:
 > não é necessário reler seções anteriores a menos que haja dúvida sobre
@@ -402,7 +402,9 @@ Coletadas em `2026-04-22` via `wc -l` / `grep -nE "def "`:
 ### Estado atual (consolidado) — branch `claude/focused-einstein-GcWqc`
 
 **Commits relevantes (mais recente → mais antigo):**
-- `a36eaef` — Migrar 2 dict-yielders SSE de _handle_browser_search_api para build_status_event *(esta sessão, ciclo 19 / opção 10)*
+- *(commit pendente)* — README: atualizar contagem de testes e inventário com novos helpers *(esta sessão, ciclo 20 / docs)*
+- `79b876d` — docs: gravar hash a36eaef no PONTO DE RETOMADA quinvicies
+- `a36eaef` — Migrar 2 dict-yielders SSE de _handle_browser_search_api para build_status_event *(ciclo 19 / opção 10)*
 - `6c06f0d` — docs: gravar hash bda99f0 no PONTO DE RETOMADA quatervicies
 - `bda99f0` — Extrair safe_int/safe_snapshot_stats e migrar 5 endpoints menores *(ciclo 18 / opção 8)*
 - `ccb8256` — docs: gravar hash 33a6a54 no PONTO DE RETOMADA tervicies
@@ -680,6 +682,8 @@ Se precisar tocar em browser.py (async/Playwright) ou em analisador_prontuarios.
   15. `939d904`: extração de `Scripts/web_search_throttle.py` com classe `WebSearchThrottle` (`reserve_slot` + `snapshot`, com `now_func` e `rng_func` injetáveis). `server._reserve_web_search_slot` migra para wrapper fino sobre singleton `_WEB_SEARCH_THROTTLE`, preservando contrato histórico de `wait_ctx` (`interval_sec`, `scheduled_start_at`, `wait_seconds`, `requested_at`) e mantendo aliases de compat (`_web_search_timing_lock`, `_web_search_last_started_at`, `_web_search_last_interval_sec`). +9 testes em `tests/test_web_search_throttle.py` cobrindo first-call sem espera, agendamento com cooldown, clamps/normalização e concorrência. Suite offline: **517 passed** em 17 arquivos. Próxima opção recomendada: integrar snapshot do WebSearchThrottle em `/api/metrics`/Prometheus (baixo risco) antes de qualquer mudança em `browser.py`.
 - **2026-04-26 duovicies** (esta sessão, branch `work`) — 1 ciclo de Opção C (documentação de concorrência por profile, sem código runtime):
   16. `511d667`: criado `docs/concurrency_per_profile.md` com proposta incremental em 3 fases (módulo puro padrão B → wrapper fino em `server.py` → observabilidade), failure modes, política inicial de limites por `browser_profile`, plano de testes offline e DoD. README atualizado para incluir o novo documento em `docs/` e refletir suite offline atual (`517 passed`, 17 arquivos) + inventário de módulos puros incluindo `sync_dedup`, `python_request_throttle` e `web_search_throttle`. Nenhuma alteração em `browser.py`/`analisador_prontuarios.py` nesta sessão.
+- **2026-04-26 sexvicies** (esta sessão, branch `claude/focused-einstein-GcWqc`) — 1 ciclo de docs (README sync):
+  20. *(commit pendente)*: `README.md` atualizado para refletir suite offline corrente (`543 passed` ao invés de `517`) e inventário enriquecido em `Scripts/server_helpers.py` (`safe_int`, `safe_snapshot_stats`, `build_status_event`/`build_error_event`/`build_markdown_event`, `compute_python_request_interval`) e `Scripts/web_search_throttle.py` (snapshot com `age_seconds` + gauge Prometheus). Auditoria de `request.get_json()` (15 sites) realizada — não justifica extração de helper: variantes loud (`get_json() or {}`) vs silent (`get_json(silent=True) or {}`) têm semântica diferente; unificar mudaria comportamento de erro observável (status 415 → fallback `{}`). Mantido como está. Suite offline: **543 passed** (sem mudança nesta etapa).
 - **2026-04-26 quinvicies** (esta sessão, branch `claude/focused-einstein-GcWqc`) — 1 ciclo de Opção 10 (dict-yielders SSE em search handler):
   19. `a36eaef`: 2 dict-yielders SSE em `_handle_browser_search_api` migraram para `_build_status_event_impl(content, **extras)`. Sites: status `*_prepare` (`📚 Preparando busca ...`) e status `*_keepalive` (`⏳ Busca ... ainda em andamento...`). Ordem das chaves preservada (`type → content → query → index → total → phase → source`); `ensure_ascii=False` mantido pelo helper (acentos e aspas literais preservados). +6 testes em `TestSearchHandlerStatusEventEquivalence` (2 prepare parametrizados, 2 keepalive parametrizados, 1 unicode-em-query, 1 ordem-de-chaves). `searchresult` e `finish` (linhas ~1702/~1717) permanecem como dict-yielders — tipos únicos com 1 site cada não justificam helper dedicado. Suite offline: **543 passed** em 17 arquivos.
 - **2026-04-26 quatervicies** (esta sessão, branch `claude/focused-einstein-GcWqc`) — 1 ciclo de Opção 8 (auditoria de endpoints menores):
