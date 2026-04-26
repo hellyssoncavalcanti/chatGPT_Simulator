@@ -72,6 +72,8 @@ from server_helpers import (
     normalize_optional_text as _normalize_optional_text_impl,
     format_requester_suffix as _format_requester_suffix_impl,
     format_origin_suffix as _format_origin_suffix_impl,
+    safe_int as _safe_int_impl,
+    safe_snapshot_stats as _safe_snapshot_stats_impl,
 )
 import error_catalog as _error_catalog
 from log_sanitizer import sanitize_mapping as _sanitize_audit_payload
@@ -1101,12 +1103,7 @@ def queue_status():
     Observabilidade da fila interna server → browser.
     Requer autenticação padrão (before_request/check_auth).
     """
-    stats = {}
-    try:
-        if hasattr(browser_queue, "snapshot_stats"):
-            stats = browser_queue.snapshot_stats() or {}
-    except Exception as e:
-        stats = {"error": str(e)}
+    stats = _safe_snapshot_stats_impl(browser_queue)
 
     return jsonify({
         "success": True,
@@ -1120,10 +1117,7 @@ def queue_status():
 @app.route("/api/queue/failed", methods=["GET"])
 def queue_failed():
     """DLQ: lista tarefas que falharam no browser loop."""
-    try:
-        limit = int(request.args.get("limit", 100))
-    except Exception:
-        limit = 100
+    limit = _safe_int_impl(request.args.get("limit", 100), 100)
     items = browser_queue.list_failed(limit=limit) if hasattr(browser_queue, "list_failed") else []
     return jsonify({"success": True, "failed": items, "count": len(items)}), 200
 
@@ -1132,10 +1126,7 @@ def queue_failed():
 def queue_failed_retry():
     """Reinsere item da DLQ na fila principal por índice."""
     data = request.get_json(silent=True) or {}
-    try:
-        idx = int(data.get("index", -1))
-    except Exception:
-        idx = -1
+    idx = _safe_int_impl(data.get("index", -1), -1)
     if not hasattr(browser_queue, "retry_failed"):
         return jsonify({"success": False, "error": "dlq_not_supported"}), 400
     retried = browser_queue.retry_failed(idx)
@@ -1150,10 +1141,7 @@ def logs_tail():
     Retorna as últimas linhas do log atual do simulator.
     Ideal para polling leve no frontend (toast de observabilidade).
     """
-    try:
-        requested = int(request.args.get("lines", 120))
-    except Exception:
-        requested = 120
+    requested = _safe_int_impl(request.args.get("lines", 120), 120)
     lines_limit = max(10, min(800, requested))
 
     path = getattr(config, "LOG_PATH", "")
@@ -1243,12 +1231,7 @@ def api_metrics():
         if last_event_at and (now - last_event_at) > ACTIVE_CHAT_STALE_SEC:
             stale_candidates += 1
 
-    queue_stats = {}
-    try:
-        if hasattr(browser_queue, "snapshot_stats"):
-            queue_stats = browser_queue.snapshot_stats() or {}
-    except Exception as e:
-        queue_stats = {"error": str(e)}
+    queue_stats = _safe_snapshot_stats_impl(browser_queue)
 
     metrics = {
         "timestamp": int(now),

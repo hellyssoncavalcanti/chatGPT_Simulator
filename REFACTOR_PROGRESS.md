@@ -393,7 +393,7 @@ Coletadas em `2026-04-22` via `wc -l` / `grep -nE "def "`:
 
 ---
 
-## 🆕 PONTO DE RETOMADA (última atualização em 2026-04-26 tervicies)
+## 🆕 PONTO DE RETOMADA (última atualização em 2026-04-26 quatervicies)
 
 > **Leia APENAS esta seção ao retomar em outro chat.** Ela é autocontida:
 > não é necessário reler seções anteriores a menos que haja dúvida sobre
@@ -402,7 +402,9 @@ Coletadas em `2026-04-22` via `wc -l` / `grep -nE "def "`:
 ### Estado atual (consolidado) — branch `claude/focused-einstein-GcWqc`
 
 **Commits relevantes (mais recente → mais antigo):**
-- `33a6a54` — Expor snapshot de WebSearchThrottle em /api/metrics + gauge Prometheus *(esta sessão, ciclo 17 / opção E)*
+- *(commit pendente)* — Extrair safe_int/safe_snapshot_stats e migrar 5 endpoints menores *(esta sessão, ciclo 18 / opção 8)*
+- `ccb8256` — docs: gravar hash 33a6a54 no PONTO DE RETOMADA tervicies
+- `33a6a54` — Expor snapshot de WebSearchThrottle em /api/metrics + gauge Prometheus *(ciclo 17 / opção E)*
 - `0428be6` — Auto-resolucao de conflitos do PR #581
 - `17511c5` — Atualizar REFACTOR_PROGRESS com ciclo duovicies
 - `511d667` — Documentar plano de concorrência por browser_profile *(ciclo 16 / opção C)*
@@ -456,7 +458,7 @@ Coletadas em `2026-04-22` via `wc -l` / `grep -nE "def "`:
 - `1f3374b` — Extrair detecção de origem de request para módulo testável offline
 - `0c6216e` — docs: refinar backlog P0-P1-P2 com evidências concretas
 
-**Suite offline atual: 17 arquivos → 520 passed** (517 anterior + 3 em `test_web_search_throttle.py::TestSnapshot::test_snapshot_age_*`).
+**Suite offline atual: 17 arquivos → 537 passed** (520 anterior + 17 em `test_server_helpers.py::TestSafeInt`/`TestSafeSnapshotStats`).
 
 Comando exato de validação:
 ```
@@ -480,7 +482,7 @@ python3 -m pytest \
   tests/test_python_request_throttle.py \
   tests/test_web_search_throttle.py
 ```
-Esperado: **520 passed**. (NÃO usar `python3 -m pytest tests/` cru — `tests/test_server_api.py` e `tests/test_storage.py` falham por requerer `flask` / `cryptography` indisponíveis neste ambiente.)
+Esperado: **537 passed**. (NÃO usar `python3 -m pytest tests/` cru — `tests/test_server_api.py` e `tests/test_storage.py` falham por requerer `flask` / `cryptography` indisponíveis neste ambiente.)
 
 ### Mapa de módulos puros já criados
 
@@ -488,7 +490,7 @@ Esperado: **520 passed**. (NÃO usar `python3 -m pytest tests/` cru — `tests/t
 |---|---|---|---|
 | `Scripts/request_source.py` | ~60 | `is_python_chat_request`, `is_codex_chat_request`, `is_analyzer_chat_request` (detecta `analisador_prontuarios*` e token `analyzer`). | `tests/test_request_source.py` (15) |
 | `Scripts/error_catalog.py` | ~290 | 11 códigos + `classify_from_text` (PT-BR + EN) + `format_reason` (tag `[CODE] …` idempotente, fallback sem ruído para INTERNAL_ERROR). | `tests/test_error_catalog.py` (65) |
-| `Scripts/server_helpers.py` | ~530 | `format_wait_seconds`, `queue_status_payload`, `prune_old_attempts`, `count_active_chatgpt_profiles`, `combine_openai_messages`, `build_sender_label`, `wrap_paste_if_python_source`, `coalesce_origin_url`, `extract_source_hint` (cadeia `data.request_source` → `X-Request-Source` → `X-Client-Source` → `""`, duck-typed `.get()`), `decode_attachment`, `resolve_chat_url` (com `case_insensitive=False` opcional para `api_sync`), `resolve_browser_profile`, `normalize_optional_text`, `build_queue_key`, `build_chat_task_payload`, `build_error_event` / `build_status_event` / `build_markdown_event` (JSON SSE/stream queue), `format_requester_suffix` (idiom `_quem`), `format_origin_suffix` (idiom `_origem` com analyzer override), `compute_python_request_interval` (decisão pura `(base, target)` com `rng` injetável). | `tests/test_server_helpers.py` (141) |
+| `Scripts/server_helpers.py` | ~580 | `format_wait_seconds`, `queue_status_payload`, `prune_old_attempts`, `count_active_chatgpt_profiles`, `combine_openai_messages`, `build_sender_label`, `wrap_paste_if_python_source`, `coalesce_origin_url`, `extract_source_hint` (cadeia `data.request_source` → `X-Request-Source` → `X-Client-Source` → `""`, duck-typed `.get()`), `decode_attachment`, `resolve_chat_url` (com `case_insensitive=False` opcional para `api_sync`), `resolve_browser_profile`, `normalize_optional_text`, `build_queue_key`, `build_chat_task_payload`, `build_error_event` / `build_status_event` / `build_markdown_event` (JSON SSE/stream queue), `format_requester_suffix` (idiom `_quem`), `format_origin_suffix` (idiom `_origem` com analyzer override), `compute_python_request_interval` (decisão pura `(base, target)` com `rng` injetável), `safe_int` (idiom `try int(x) except: default`), `safe_snapshot_stats` (wrapper defensivo de `queue.snapshot_stats()`). | `tests/test_server_helpers.py` (156) |
 | `Scripts/sync_dedup.py` | ~95 | Classe `SyncDedup` (dedup de `/api/sync` na janela 120s, `try_acquire`/`release`/`active_count`/`snapshot`, `now_func` injetável). Constante `DEFAULT_DEDUP_WINDOW_SEC = 120`. | `tests/test_sync_dedup.py` (20) |
 | `Scripts/browser_predicates.py` | ~180 | `extract_task_sender`, `is_known_orphan_tab_url`, `response_looks_incomplete_json`, `response_requests_followup_actions`, `replace_inline_base64_payloads`, `ensure_paste_wrappers`. | `tests/test_browser_predicates.py` (38) |
 | `Scripts/log_sanitizer.py` | ~170 | `mask_api_key`, `mask_bearer_token`, `mask_session_cookie`, `mask_file_path`, `sanitize`, `sanitize_iter`, `sanitize_mapping`. | `tests/test_log_sanitizer.py` (31) |
@@ -520,6 +522,8 @@ Esperado: **520 passed**. (NÃO usar `python3 -m pytest tests/` cru — `tests/t
 - `server._register_chat_rate_limit` normaliza `reason` via `error_catalog.format_reason(reason)` antes de logar. Reasons classificáveis ganham prefixo `[CODE]` (ex.: `[RATE_LIMIT] excesso de solicitações...`); reasons não classificáveis são logados sem prefixo (evita ruído `[INTERNAL_ERROR]`). Format do log preservado: `[CHAT_RATE_LIMIT] cooldown de Xs registrado. Motivo: …`. Contrato testado em `tests/test_rate_limit_integration.py::TestRegisterWrapperNormalizesReason`.
 - `/api/metrics` expõe `chat_rate_limit: {remaining_seconds, strikes, until_ts}`, `security: {rate_limit_keys, blocked_ips, tracked_login_ips}`, `python_request_throttle: {last_ts, age_seconds}` e `web_search_throttle: {last_started_at, last_interval_sec, age_seconds}` (snapshots dos quatro singletons). `rate_limit_remaining_sec` legado preservado para compat com dashboards existentes.
 - `/metrics` (Prometheus) ganha 6 gauges: `simulator_chat_rate_limit_remaining_sec`, `simulator_chat_rate_limit_strikes`, `simulator_security_blocked_ips`, `simulator_security_tracked_login_ips`, `simulator_python_request_throttle_age_sec`, `simulator_web_search_throttle_age_sec`. Atualização centralizada em `_update_rate_limit_prom_gauges()`. Silencioso se `prometheus_client` ausente.
+- `server.queue_status` e `server.api_metrics` usam `_safe_snapshot_stats_impl(browser_queue)` (substitui idiom try/except duplicado de 5 linhas com semântica byte-equivalente: dict de erro `{"error": "<repr>"}` se a chamada lança; `{}` se método ausente ou retorna falsy).
+- `server.queue_failed`, `server.queue_failed_retry` e `server.logs_tail` usam `_safe_int_impl(value, default)` (substitui 3 idioms try/except do `int()`). Defaults preservados byte-a-byte (`limit=100`, `idx=-1`, `requested=120`).
 - Filtro de log werkzeug (`No401AuthLog`) acrescenta sufixo explicativo ao 409 de `/api/sync` (dedup benigno 120s).
 - `api_sync()` emite `[🔄 SYNC] ⚠️ sync_in_progress` com `elapsed` e `retry_after` antes de retornar 409, e inclui `retry_after_seconds` / `elapsed_seconds` no JSON.
 
@@ -584,8 +588,8 @@ Esperado: **520 passed**. (NÃO usar `python3 -m pytest tests/` cru — `tests/t
 - Entregável inicial: documento em `docs/concurrency_per_profile.md` (sem código) — **FEITO** em 2026-04-26 duovicies (`511d667`).
 - Próximo passo: alteração em `browser.py` com aprovação explícita.
 
-**8. Auditar/cobrir endpoints menores ainda sem testes offline (BAIXO risco)**
-- Candidatos: `api_close_chat`, `api_delete`, `api_completions` legado, `api_queue_status`. Sem novos módulos puros — apenas extrair pequenos helpers se aparecerem idioms duplicados (`_format_wait_seconds`, `_format_requester_suffix`, `_extract_source_hint`).
+**8. ~~Auditar/cobrir endpoints menores ainda sem testes offline~~ (FEITO em 2026-04-26 quatervicies)**
+- Auditoria identificou 2 idioms duplicados; extraídos `safe_int(value, default)` e `safe_snapshot_stats(queue_obj)` em `server_helpers.py`. 5 sites migrados (`queue_status`, `queue_failed`, `queue_failed_retry`, `logs_tail`, `api_metrics`). +17 testes em `tests/test_server_helpers.py::TestSafeInt`/`TestSafeSnapshotStats` cobrindo coerções, fallback de exceção, ausência de método, valores `None`/`""`/`bool`/float, defaults negativos.
 
 **9. Modularização do `server.py` (P2 #21, MÉDIO risco)**
 - Quando os módulos puros pararem de crescer (próximo de saturação dos idioms), agrupar wrappers por domínio (auth, chats, observabilidade, administração, busca) em sub-módulos `Scripts/server_<domínio>.py`. Padrão: blueprints Flask + import explícito. Não fazer sem plano explícito.
@@ -594,26 +598,29 @@ Esperado: **520 passed**. (NÃO usar `python3 -m pytest tests/` cru — `tests/t
 
 ```
 Continue o refactor do /home/user/chatGPT_Simulator na branch claude/focused-einstein-GcWqc.
-Leia APENAS a seção "PONTO DE RETOMADA (última atualização em 2026-04-26 tervicies)" em REFACTOR_PROGRESS.md — é autocontida.
+Leia APENAS a seção "PONTO DE RETOMADA (última atualização em 2026-04-26 quatervicies)" em REFACTOR_PROGRESS.md — é autocontida.
 
 As opções 1 (PythonRequestThrottle), 2 (auditoria de handlers menores), 3 (dict-yielders SSE),
 A (snapshot PythonRequestThrottle em /api/metrics + Prometheus), B (WebSearchThrottle),
-C (doc de concorrência por profile) e E (snapshot WebSearchThrottle em /api/metrics + Prometheus) já estão FEITAS. Próximas opções:
-
-**8. Auditar/cobrir endpoints menores ainda sem testes offline** (BAIXO risco)
-- Candidatos: `api_close_chat`, `api_delete`, `api_completions` legado, `api_queue_status`.
-- Sem novos módulos puros — apenas extrair pequenos helpers se aparecerem idioms duplicados.
+C (doc de concorrência por profile), E (snapshot WebSearchThrottle em /api/metrics + Prometheus)
+e 8 (safe_int / safe_snapshot_stats) já estão FEITAS. Próximas opções:
 
 **9. Modularização do `server.py`** (MÉDIO risco)
 - Agrupar wrappers por domínio (auth, chats, observabilidade, administração, busca) em sub-módulos `Scripts/server_<domínio>.py`. Não fazer sem plano explícito antes.
 
+**10. Refatoração de `_handle_browser_search_api` para módulo puro de validação** (BAIXO risco)
+- Identificar o miolo de validação de payload (`query`, `kind`, etc.) e extrair como função pura em `server_helpers.py`. O dispatcher async permanece em `server.py`.
+
+**11. Cobertura offline de `api_close_chat`, `menu_options`, `menu_execute`** (BAIXO risco)
+- Replicar contrato JSON e timeout em testes "cópia offline" sem subir Flask, igual a `tests/test_rate_limit_integration.py`.
+
 **D. Integrar catálogo em `browser._dismiss_rate_limit_modal_if_any`** (ALTO risco, BLOQUEADO — pede aprovação).
 
 Regras obrigatórias:
-(a) escolher UMA opção (8, 9 ou D) e executar do começo ao fim;
+(a) escolher UMA opção (9, 10, 11 ou D) e executar do começo ao fim;
 (b) padrão B já validado 5 vezes (security_state, chat_rate_limit_cooldown, sync_dedup, python_request_throttle, web_search_throttle): novo módulo puro + classe + `now_func` injetável + wrapper fino + alias preservado;
 (c) NÃO criar novos arquivos em browser.py/analisador_prontuarios.py — fora de escopo;
-(d) manter os 520 testes offline passando + eventuais novos;
+(d) manter os 537 testes offline passando + eventuais novos;
 (e) ANTES do commit/push final, ATUALIZAR a seção "PONTO DE RETOMADA" com novo commit hash, contagem de testes, e próxima opção;
 (f) commit com título em PT-BR no imperativo;
 (g) push para claude/focused-einstein-GcWqc.
@@ -623,7 +630,7 @@ Se precisar tocar em browser.py (async/Playwright) ou em analisador_prontuarios.
 ```
 
 ### Checklist de "antes de terminar a sessão" (rodar sempre)
-- [ ] Suite offline passa: `python3 -m pytest tests/test_humanizer.py tests/test_shared_queue.py tests/test_selectors_smoke.py tests/test_request_source.py tests/test_error_catalog.py tests/test_server_helpers.py tests/test_browser_predicates.py tests/test_rate_limit_integration.py tests/test_log_sanitizer.py tests/test_analisador_rate_limit.py tests/test_audit_sanitization.py tests/test_security_state.py tests/test_chat_rate_limit_cooldown.py tests/test_analisador_parsers.py tests/test_sync_dedup.py tests/test_python_request_throttle.py tests/test_web_search_throttle.py` (esperado: **520 passed**).
+- [ ] Suite offline passa: `python3 -m pytest tests/test_humanizer.py tests/test_shared_queue.py tests/test_selectors_smoke.py tests/test_request_source.py tests/test_error_catalog.py tests/test_server_helpers.py tests/test_browser_predicates.py tests/test_rate_limit_integration.py tests/test_log_sanitizer.py tests/test_analisador_rate_limit.py tests/test_audit_sanitization.py tests/test_security_state.py tests/test_chat_rate_limit_cooldown.py tests/test_analisador_parsers.py tests/test_sync_dedup.py tests/test_python_request_throttle.py tests/test_web_search_throttle.py` (esperado: **537 passed**).
 - [ ] `python3 -c "import ast; ast.parse(open('Scripts/server.py').read())"` OK.
 - [ ] `python3 -c "import ast; ast.parse(open('Scripts/browser.py').read())"` OK.
 - [ ] `python3 -c "import ast; ast.parse(open('Scripts/analisador_prontuarios.py').read())"` OK.
@@ -670,6 +677,8 @@ Se precisar tocar em browser.py (async/Playwright) ou em analisador_prontuarios.
   15. `939d904`: extração de `Scripts/web_search_throttle.py` com classe `WebSearchThrottle` (`reserve_slot` + `snapshot`, com `now_func` e `rng_func` injetáveis). `server._reserve_web_search_slot` migra para wrapper fino sobre singleton `_WEB_SEARCH_THROTTLE`, preservando contrato histórico de `wait_ctx` (`interval_sec`, `scheduled_start_at`, `wait_seconds`, `requested_at`) e mantendo aliases de compat (`_web_search_timing_lock`, `_web_search_last_started_at`, `_web_search_last_interval_sec`). +9 testes em `tests/test_web_search_throttle.py` cobrindo first-call sem espera, agendamento com cooldown, clamps/normalização e concorrência. Suite offline: **517 passed** em 17 arquivos. Próxima opção recomendada: integrar snapshot do WebSearchThrottle em `/api/metrics`/Prometheus (baixo risco) antes de qualquer mudança em `browser.py`.
 - **2026-04-26 duovicies** (esta sessão, branch `work`) — 1 ciclo de Opção C (documentação de concorrência por profile, sem código runtime):
   16. `511d667`: criado `docs/concurrency_per_profile.md` com proposta incremental em 3 fases (módulo puro padrão B → wrapper fino em `server.py` → observabilidade), failure modes, política inicial de limites por `browser_profile`, plano de testes offline e DoD. README atualizado para incluir o novo documento em `docs/` e refletir suite offline atual (`517 passed`, 17 arquivos) + inventário de módulos puros incluindo `sync_dedup`, `python_request_throttle` e `web_search_throttle`. Nenhuma alteração em `browser.py`/`analisador_prontuarios.py` nesta sessão.
+- **2026-04-26 quatervicies** (esta sessão, branch `claude/focused-einstein-GcWqc`) — 1 ciclo de Opção 8 (auditoria de endpoints menores):
+  18. *(commit pendente)*: extração de 2 helpers puros adicionais em `server_helpers.py`. (a) `safe_int(value, default)` cobre o idiom `try int(x) except: default` em `queue_failed` (limit), `queue_failed_retry` (idx), `logs_tail` (lines) — 11 testes incluindo coerção de bool, float-string inválido, defaults negativos, ausência de valor. (b) `safe_snapshot_stats(queue_obj)` cobre o idiom defensivo em torno de `browser_queue.snapshot_stats()` em `queue_status` e `api_metrics` — 6 testes incluindo método ausente, `None` retornado, exceção propagada como `{"error": ...}`. Todas as 5 migrações são byte-equivalentes ao código histórico. Suite offline: **537 passed** em 17 arquivos. Nenhuma alteração em `browser.py` / `analisador_prontuarios.py` nesta sessão.
 - **2026-04-26 tervicies** (esta sessão, branch `claude/focused-einstein-GcWqc`) — 1 ciclo de Opção E (observabilidade do WebSearchThrottle):
   17. `33a6a54`: `WebSearchThrottle.snapshot()` estendido com `age_seconds` (clamp 0 quando `last_started_at == 0` ou clock retrógrado). Nova chave `web_search_throttle: {last_started_at, last_interval_sec, age_seconds}` em `/api/metrics`. Novo gauge `simulator_web_search_throttle_age_sec` em `/metrics` (atualizado em `_update_rate_limit_prom_gauges`). +3 testes em `TestSnapshot::test_snapshot_age_*` (avanço de relógio, never-set e clock retrógrado); 2 testes pré-existentes ajustados para o novo shape do snapshot (`test_snapshot_initial_state`, `test_snapshot_reflects_last_state`); `test_force_state_changes_snapshot` ajustado para também validar `age_seconds` derivado de `last_started_at`. Suite offline: **520 passed** em 17 arquivos. Próxima opção recomendada: 8 (auditar endpoints menores) ou 9 (modularização de server.py); D continua bloqueada.
 

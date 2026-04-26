@@ -935,3 +935,81 @@ class TestWebSearchWaitEventEquivalence:
         assert positions == sorted(positions), (
             f"Ordem de chaves inesperada: {expected_order} → posições {positions}"
         )
+
+
+class TestSafeInt:
+    def test_int_passthrough(self):
+        assert sh.safe_int(42, 0) == 42
+
+    def test_string_digits(self):
+        assert sh.safe_int("100", 0) == 100
+
+    def test_negative_string(self):
+        assert sh.safe_int("-7", 0) == -7
+
+    def test_default_returned_for_none(self):
+        assert sh.safe_int(None, 99) == 99
+
+    def test_default_returned_for_empty_string(self):
+        assert sh.safe_int("", 12) == 12
+
+    def test_default_returned_for_invalid_string(self):
+        assert sh.safe_int("abc", 5) == 5
+
+    def test_default_returned_for_float_string(self):
+        # int("1.5") levanta ValueError no Python — fallback para default.
+        assert sh.safe_int("1.5", 7) == 7
+
+    def test_float_value_truncates(self):
+        assert sh.safe_int(3.9, 0) == 3
+
+    def test_negative_default_preserved(self):
+        # Idiom de queue_failed_retry: -1 sinaliza ausência.
+        assert sh.safe_int(None, -1) == -1
+        assert sh.safe_int("xx", -1) == -1
+
+    def test_default_coerced_to_int(self):
+        assert sh.safe_int(None, 5.7) == 5
+
+    def test_bool_returns_int_value(self):
+        # Compatibilidade com idiom histórico (Python: int(True) == 1).
+        assert sh.safe_int(True, 0) == 1
+        assert sh.safe_int(False, 99) == 0
+
+
+class TestSafeSnapshotStats:
+    class _DummyOk:
+        def __init__(self, payload):
+            self._payload = payload
+        def snapshot_stats(self):
+            return self._payload
+
+    class _DummyRaises:
+        def snapshot_stats(self):
+            raise RuntimeError("boom")
+
+    class _DummyNoMethod:
+        pass
+
+    def test_returns_payload_when_method_exists(self):
+        payload = {"a": 1, "b": "x"}
+        assert sh.safe_snapshot_stats(self._DummyOk(payload)) == payload
+
+    def test_returns_empty_dict_when_method_returns_none(self):
+        # Contrato histórico: `snapshot_stats() or {}`.
+        assert sh.safe_snapshot_stats(self._DummyOk(None)) == {}
+
+    def test_returns_empty_dict_when_method_returns_empty(self):
+        assert sh.safe_snapshot_stats(self._DummyOk({})) == {}
+
+    def test_returns_empty_dict_when_method_absent(self):
+        assert sh.safe_snapshot_stats(self._DummyNoMethod()) == {}
+
+    def test_returns_error_dict_when_method_raises(self):
+        result = sh.safe_snapshot_stats(self._DummyRaises())
+        assert "error" in result
+        assert "boom" in result["error"]
+
+    def test_handles_none_queue(self):
+        # `None` não tem `snapshot_stats` → caminho de hasattr=False → {}.
+        assert sh.safe_snapshot_stats(None) == {}

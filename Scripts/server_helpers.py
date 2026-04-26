@@ -500,6 +500,51 @@ def build_chat_task_payload(
     }
 
 
+def safe_int(value, default: int) -> int:
+    """Converte ``value`` para ``int`` ou retorna ``default`` em qualquer
+    falha (None, string vazia, string inválida, tipo incompatível).
+
+    Usado em endpoints que aceitam parâmetros opcionais de query string ou
+    JSON e precisam de fallback silencioso (ex.: `request.args.get("limit")`,
+    `data.get("index")`). O contrato histórico equivale ao idiom:
+
+    ```python
+    try:
+        x = int(value)
+    except Exception:
+        x = default
+    ```
+
+    Aceita `default` negativo (usado por `queue_failed_retry` com `-1` para
+    sinalizar "ausente"). Mantém a semântica byte-equivalente (incluindo
+    coerção de bool → int implícita do Python — `int(True) == 1`).
+    """
+    try:
+        return int(value)
+    except Exception:
+        return int(default)
+
+
+def safe_snapshot_stats(queue_obj) -> dict:
+    """Wrapper defensivo para ``queue_obj.snapshot_stats()`` que jamais
+    levanta exceção.
+
+    Retorna:
+    - ``{}`` quando ``queue_obj`` não expõe ``snapshot_stats``;
+    - resultado de ``snapshot_stats() or {}`` no caminho feliz;
+    - ``{"error": "<repr>"}`` quando a chamada lança.
+
+    Idiom historicamente duplicado em `queue_status` e `api_metrics` —
+    contrato byte-equivalente preservado para ambos os endpoints.
+    """
+    try:
+        if hasattr(queue_obj, "snapshot_stats"):
+            return queue_obj.snapshot_stats() or {}
+    except Exception as e:
+        return {"error": str(e)}
+    return {}
+
+
 __all__ = [
     "format_wait_seconds",
     "queue_status_payload",
@@ -522,6 +567,8 @@ __all__ = [
     "format_requester_suffix",
     "format_origin_suffix",
     "compute_python_request_interval",
+    "safe_int",
+    "safe_snapshot_stats",
 ]
 
 
