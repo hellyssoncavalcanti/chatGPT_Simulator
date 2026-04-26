@@ -72,6 +72,11 @@ from server_helpers import (
     build_markdown_event as _build_markdown_event_impl,
     normalize_optional_text as _normalize_optional_text_impl,
     extract_requester_identity as _extract_requester_identity_impl,
+    resolve_lookup_origin_url as _resolve_lookup_origin_url_impl,
+    extract_chat_delete_local_targets as _extract_chat_delete_local_targets_impl,
+    extract_delete_request_targets as _extract_delete_request_targets_impl,
+    extract_menu_url as _extract_menu_url_impl,
+    extract_menu_execute_payload as _extract_menu_execute_payload_impl,
     format_requester_suffix as _format_requester_suffix_impl,
     format_origin_suffix as _format_origin_suffix_impl,
     safe_int as _safe_int_impl,
@@ -1313,11 +1318,7 @@ def api_chat_lookup():
         return jsonify({"error": "Unauthorized"}), 401
 
     data = request.get_json() or {}
-    origin_url = (
-        _normalize_optional_text_impl(data.get('origin_url'))
-        or _normalize_optional_text_impl(data.get('url_atual'))
-        or ''
-    )
+    origin_url = _resolve_lookup_origin_url_impl(data)
     if not origin_url:
         return jsonify({"success": False, "error": "Missing origin_url"}), 400
 
@@ -1336,8 +1337,7 @@ def api_chat_delete_local():
         return jsonify({"error": "Unauthorized"}), 401
 
     data = request.get_json() or {}
-    chat_id = _normalize_optional_text_impl(data.get('chat_id')) or ''
-    origin_url = _normalize_optional_text_impl(data.get('origin_url')) or ''
+    chat_id, origin_url = _extract_chat_delete_local_targets_impl(data)
 
     deleted_count = 0
     if chat_id:
@@ -1352,7 +1352,7 @@ def api_chat_delete_local():
 @app.route("/api/menu/options", methods=["POST"])
 def menu_options():
     data = request.get_json() or {}
-    url = data.get("url")
+    url = _extract_menu_url_impl(data)
     if not url: return jsonify([])
     q = queue.Queue()
     browser_queue.put({'action': 'GET_MENU', 'url': url, 'stream_queue': q})
@@ -1367,9 +1367,7 @@ def menu_options():
 @app.route("/api/menu/execute", methods=["POST"])
 def menu_execute():
     data = request.get_json() or {}
-    url = data.get("url")
-    option = data.get("option")
-    new_name = data.get("new_name")
+    url, option, new_name = _extract_menu_execute_payload_impl(data)
     if not url or not option: return jsonify({"success": False})
     q = queue.Queue()
     browser_queue.put({'action': 'EXEC_MENU', 'url': url, 'option': option, 'new_name': new_name, 'stream_queue': q})
@@ -1595,8 +1593,7 @@ def api_delete():
         return jsonify({"error": "Unauthorized"}), 401
 
     data = request.get_json() or {}
-    url = _normalize_optional_text_impl(data.get("url"))
-    chat_id = _normalize_optional_text_impl(data.get("chat_id"))
+    url, chat_id = _extract_delete_request_targets_impl(data)
     
     if not url or not chat_id: 
         return jsonify({"success": False, "error": "Missing url or chat_id"}), 400

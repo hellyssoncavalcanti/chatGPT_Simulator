@@ -530,6 +530,84 @@ class TestExtractRequesterIdentity:
 
 
 # ─────────────────────────────────────────────────────────
+# lookup/delete payload helpers
+# ─────────────────────────────────────────────────────────
+class TestResolveLookupOriginUrl:
+    def test_prefers_origin_url(self):
+        assert sh.resolve_lookup_origin_url({
+            "origin_url": "  https://a  ",
+            "url_atual": "https://b",
+        }) == "https://a"
+
+    def test_falls_back_to_url_atual(self):
+        assert sh.resolve_lookup_origin_url({"url_atual": "  https://b "}) == "https://b"
+
+    def test_returns_empty_for_missing_or_invalid_input(self):
+        assert sh.resolve_lookup_origin_url({}) == ""
+        assert sh.resolve_lookup_origin_url(None) == ""
+
+
+class TestExtractChatDeleteLocalTargets:
+    def test_extracts_and_normalizes(self):
+        out = sh.extract_chat_delete_local_targets({
+            "chat_id": "  c1 ",
+            "origin_url": "  https://x ",
+        })
+        assert out == ("c1", "https://x")
+
+    def test_missing_keys_return_empty_strings(self):
+        assert sh.extract_chat_delete_local_targets({}) == ("", "")
+
+    def test_invalid_input_returns_empty_strings(self):
+        assert sh.extract_chat_delete_local_targets(None) == ("", "")
+
+
+class TestExtractDeleteRequestTargets:
+    def test_extracts_and_normalizes(self):
+        out = sh.extract_delete_request_targets({
+            "url": "  https://chat ",
+            "chat_id": "  id-1 ",
+        })
+        assert out == ("https://chat", "id-1")
+
+    def test_missing_keys_return_none_tuple(self):
+        assert sh.extract_delete_request_targets({}) == (None, None)
+
+    def test_invalid_input_returns_none_tuple(self):
+        assert sh.extract_delete_request_targets(None) == (None, None)
+
+
+class TestExtractMenuUrl:
+    def test_extracts_and_normalizes(self):
+        assert sh.extract_menu_url({"url": "  https://chat  "}) == "https://chat"
+
+    def test_missing_or_invalid_returns_none(self):
+        assert sh.extract_menu_url({}) is None
+        assert sh.extract_menu_url(None) is None
+
+
+class TestExtractMenuExecutePayload:
+    def test_extracts_and_normalizes(self):
+        out = sh.extract_menu_execute_payload({
+            "url": "  https://chat  ",
+            "option": "  Excluir  ",
+            "new_name": "  Novo Nome ",
+        })
+        assert out == ("https://chat", "Excluir", "Novo Nome")
+
+    def test_optional_new_name_can_be_none(self):
+        out = sh.extract_menu_execute_payload({
+            "url": "https://chat",
+            "option": "Rename",
+        })
+        assert out == ("https://chat", "Rename", None)
+
+    def test_missing_or_invalid_returns_none_tuple(self):
+        assert sh.extract_menu_execute_payload({}) == (None, None, None)
+        assert sh.extract_menu_execute_payload(None) == (None, None, None)
+
+
+# ─────────────────────────────────────────────────────────
 # build_queue_key
 # ─────────────────────────────────────────────────────────
 class TestBuildQueueKey:
