@@ -393,7 +393,7 @@ Coletadas em `2026-04-22` via `wc -l` / `grep -nE "def "`:
 
 ---
 
-## 🆕 PONTO DE RETOMADA (última atualização em 2026-04-26 octodecies)
+## 🆕 PONTO DE RETOMADA (última atualização em 2026-04-26 novendecies)
 
 > **Leia APENAS esta seção ao retomar em outro chat.** Ela é autocontida:
 > não é necessário reler seções anteriores a menos que haja dúvida sobre
@@ -402,6 +402,8 @@ Coletadas em `2026-04-22` via `wc -l` / `grep -nE "def "`:
 ### Estado atual (consolidado) — branch `claude/focused-einstein-Ol7Hd`
 
 **Commits relevantes (mais recente → mais antigo):**
+- `0904fe9` — Extrair PythonRequestThrottle (state + lock) para módulo puro *(esta sessão, ciclo 13)*
+- `63d1603` — docs: gravar ciclo octodecies (commit 14ffcf0) no PONTO DE RETOMADA
 - `14ffcf0` — Migrar dict-yielders de _iter_web_search_wait_messages para build_status_event *(esta sessão, ciclo 12)*
 - `8911ec4` — Merge PR #577 (sessão septendecies integrada em main)
 - `0b08d85` — Extrair extract_source_hint e migrar _handle_browser_search_api
@@ -447,7 +449,7 @@ Coletadas em `2026-04-22` via `wc -l` / `grep -nE "def "`:
 - `1f3374b` — Extrair detecção de origem de request para módulo testável offline
 - `0c6216e` — docs: refinar backlog P0-P1-P2 com evidências concretas
 
-**Suite offline atual: 15 arquivos → 478 passed** (471 anterior + 7 em `TestWebSearchWaitEventEquivalence`).
+**Suite offline atual: 16 arquivos → 505 passed** (478 anterior + 27 em `tests/test_python_request_throttle.py`).
 
 Comando exato de validação:
 ```
@@ -467,9 +469,10 @@ python3 -m pytest \
   tests/test_security_state.py \
   tests/test_chat_rate_limit_cooldown.py \
   tests/test_analisador_parsers.py \
-  tests/test_sync_dedup.py
+  tests/test_sync_dedup.py \
+  tests/test_python_request_throttle.py
 ```
-Esperado: **471 passed**. (NÃO usar `python3 -m pytest tests/` cru — `tests/test_server_api.py` e `tests/test_storage.py` falham por requerer `flask` / `cryptography` indisponíveis neste ambiente.)
+Esperado: **505 passed**. (NÃO usar `python3 -m pytest tests/` cru — `tests/test_server_api.py` e `tests/test_storage.py` falham por requerer `flask` / `cryptography` indisponíveis neste ambiente.)
 
 ### Mapa de módulos puros já criados
 
@@ -483,6 +486,7 @@ Esperado: **471 passed**. (NÃO usar `python3 -m pytest tests/` cru — `tests/t
 | `Scripts/log_sanitizer.py` | ~170 | `mask_api_key`, `mask_bearer_token`, `mask_session_cookie`, `mask_file_path`, `sanitize`, `sanitize_iter`, `sanitize_mapping`. | `tests/test_log_sanitizer.py` (31) |
 | `Scripts/security_state.py` | ~120 | Classe `SecurityState` (rate-limit per-(ip,key), brute-force de login, expiração automática, `now_func` injetável). | `tests/test_security_state.py` (14) |
 | `Scripts/chat_rate_limit_cooldown.py` | ~100 | Classe `ChatRateLimitCooldown` (cooldown global com backoff exponencial 2^strikes, clamp em `max_cooldown_sec`, `now_func` injetável). | `tests/test_chat_rate_limit_cooldown.py` (20) |
+| `Scripts/python_request_throttle.py` | ~120 | Classe `PythonRequestThrottle` (throttle global anti-rate-limit Python: `begin`/`remaining_seconds`/`commit`/`snapshot`, `now_func` injetável). Caller mantém o tight-loop SSE. | `tests/test_python_request_throttle.py` (27) |
 | `Scripts/analisador_parsers.py` | ~330 | `detect_rate_limit_preview` (matcher injetável), `build_rate_limit_error_message`, `strip_code_fences`, `extract_json_block`, `normalize_llm_json`, `parse_json_block`, `json_looks_incomplete` (heurística de truncamento), `decode_json_string_fragment`, `extract_visible_llm_markdown` (remove `<think>…</think>`), `extract_search_queries_fallback` (parser tolerante de queries com `max_queries` injetável). | `tests/test_analisador_parsers.py` (64) |
 | `Scripts/humanizer.py` | 124 | Módulo original (inalterado); testes ampliados com invariantes anti-robotização. | `tests/test_humanizer.py` (33) |
 
@@ -492,7 +496,7 @@ Esperado: **471 passed**. (NÃO usar `python3 -m pytest tests/` cru — `tests/t
 - `server.api_sync` usa `sync_dedup.SyncDedup.try_acquire` / `release`. Aliases `ACTIVE_SYNCS` e `ACTIVE_SYNCS_LOCK` permanecem como referências para `_SYNC_DEDUP._active` / `_SYNC_DEDUP._lock` — `len(ACTIVE_SYNCS)` em `/api/metrics::syncs_in_progress` (linha 1270) continua funcionando byte-a-byte; mensagem de log e shape do JSON 409 (`retry_after_seconds`, `elapsed_seconds`) preservados.
 - `server.api_sync` usa `_normalize_optional_text_impl` para `sync_browser_profile` (2 sites — payload e snapshot), `_resolve_chat_url_impl(case_insensitive=True)` para o fallback de URL (preserva `or url` final como último-recurso) e `_format_requester_suffix_impl(nome_membro, id_membro)` para o sufixo `_quem` do log.
 - `server.chat_completions` usa `_format_requester_suffix_impl` para o mesmo sufixo `_quem` (idiom unificado entre os dois handlers).
-- `server._wait_python_request_interval_if_needed` usa `_compute_python_request_interval_impl(pmin, pmax, profile_count)` para calcular `(base, target)` — substitui `random.uniform(...)` + divisão pelo profile_count. Curto-circuito histórico (ambos pmin/pmax `<=0` → retorno antecipado sem wait) preservado **antes** da chamada ao helper. State global (`_python_anti_rate_limit_last_ts`/lock) e o tight-loop com `time.sleep`/status SSE permanecem em server.py — extração completa em padrão B foi adiada (aumenta complexidade sem ganho proporcional).
+- `server._wait_python_request_interval_if_needed` é agora wrapper fino sobre o singleton `_PYTHON_REQUEST_THROTTLE: PythonRequestThrottle` (padrão B). State global (`_python_anti_rate_limit_last_ts` + lock) **encapsulado no módulo puro**; o wrapper mantém o tight-loop com `time.sleep` e o status SSE (`phase=python_anti_rate_limit_interval`) no call site. `compute_python_request_interval` agora é consumido apenas dentro de `python_request_throttle.py`. Alias `_python_anti_rate_limit_lock = _PYTHON_REQUEST_THROTTLE._lock` preservado para compat.
 - 7 sites SSE em `server.py` migraram para `_build_status_event_impl`/`_build_error_event_impl`/`_build_markdown_event_impl`: `_wait_python_request_interval_if_needed`, `_wait_remote_user_priority_if_needed`, `_execute_single_browser_search`, `api_completions` SSE generator, `api_sync::sync_generate` (3x — 2 status + 1 markdown), `chat_completions` timeout.
 - **`_iter_web_search_wait_messages` (sessão octodecies)**: agora recebe `phase_prefix` e `source_label` por argumento e yielda strings JSON via `_build_status_event_impl`. O consumer em `_execute_single_browser_search` deixa de mutar `phase`/`source`/`content` e simplifica para `stream_queue.put(raw_msg)`. Byte-equivalência com o pipeline antigo (legacy dict + mutate + `json.dumps`) coberta por 7 testes em `TestWebSearchWaitEventEquivalence`. **Não há mais dict-yielders SSE** em `server.py`.
 - **`chat_completions::chat_meta` (sessão octodecies)**: `early_profile = (fin.get('chromium_profile') or "").strip()` migrado para `_normalize_optional_text_impl(fin.get('chromium_profile'))`. O `or` chain downstream (`early_profile or snapshot.get("chromium_profile", "")`) absorve `None`/`""` identicamente.
@@ -548,8 +552,8 @@ Esperado: **471 passed**. (NÃO usar `python3 -m pytest tests/` cru — `tests/t
 
 ### Próximas opções (ordem recomendada por risco crescente)
 
-**1. Extrair `_wait_python_request_interval_if_needed` completo em padrão B (MÉDIO risco)**
-- Decisão pura já isolada em `compute_python_request_interval`. Resta encapsular state global (`_python_anti_rate_limit_last_ts` + lock) e tight-loop em uma classe (ex.: `PythonRequestThrottle`). Cuidado: o loop emite status SSE via `stream_queue` — receber `status_emit_func` por injeção, ou fatiar em `should_wait()` / `wait_remaining_sec()` para que o caller mantenha o loop.
+**1. ~~Extrair `_wait_python_request_interval_if_needed` completo em padrão B~~ (FEITO em 2026-04-26 novendecies, commit `0904fe9`)**
+- Classe `PythonRequestThrottle` em `Scripts/python_request_throttle.py` encapsula state + lock; wrapper em `server.py` mantém o tight-loop SSE. Padrão B aplicado (4 métodos: `begin`/`remaining_seconds`/`commit`/`snapshot`, `now_func` injetável). 27 testes offline cobrem curto-circuitos, tupla, view pura, commit, snapshot thread-safe e state-machine ponta-a-ponta.
 
 **2. Auditar e migrar handlers menores que ainda têm idioms duplicados (BAIXO risco)**
 - Verificar handlers fora dos 3 já cobertos (`chat_completions`, `api_sync`, `_handle_browser_search_api`) — ex.: `api_delete`, `api_close_chat`, `api_completions` legado, etc. Procurar pelos idioms `_format_requester_suffix`, `_extract_source_hint`, `(v or '').strip() or None`. Comando útil: `grep -n "data.get(\"nome_membro" Scripts/server.py`.
@@ -572,27 +576,41 @@ Esperado: **471 passed**. (NÃO usar `python3 -m pytest tests/` cru — `tests/t
 
 ```
 Continue o refactor do /home/user/chatGPT_Simulator na branch claude/focused-einstein-Ol7Hd.
-Leia APENAS a seção "PONTO DE RETOMADA (última atualização em 2026-04-26 octodecies)" em REFACTOR_PROGRESS.md — é autocontida.
+Leia APENAS a seção "PONTO DE RETOMADA (última atualização em 2026-04-26 novendecies)" em REFACTOR_PROGRESS.md — é autocontida.
 
-Execute a Opção 1 da lista "Próximas opções" (PythonRequestThrottle padrão B). Risco MÉDIO — toca o tight-loop SSE de `_wait_python_request_interval_if_needed`, mas a decisão pura `compute_python_request_interval` já existe; resta encapsular state global (`_python_anti_rate_limit_last_ts` + lock) em uma classe e aplicar padrão B (instância singleton + wrapper fino).
+As opções 1 (PythonRequestThrottle), 2 (auditoria de handlers menores) e 3 (dict-yielders SSE)
+já estão FEITAS. As próximas opções de baixo risco são limitadas; recomendado:
+
+**A. Expor `_PYTHON_REQUEST_THROTTLE.snapshot()` em `/api/metrics`** (BAIXO risco)
+- Adicionar `python_request_throttle: {last_ts, age_sec}` ao payload de `/api/metrics` (server.py:~1234) seguindo o padrão de `chat_rate_limit` e `security`.
+- Opcional: gauge Prometheus `simulator_python_request_throttle_age_sec` (incremental, mesmo padrão de `_update_rate_limit_prom_gauges`).
+- Testes: ampliar `tests/test_rate_limit_integration.py` ou novo `test_metrics_snapshot.py` com snapshot serializável.
+
+**B. Replicar padrão B para `_web_search_timing_lock` + `_web_search_last_started_at`/`_web_search_last_interval_sec`** (BAIXO/MÉDIO risco)
+- State global parecido com o que acabou de sair (`_python_anti_rate_limit_last_ts`).
+- Função `_reserve_web_search_slot` usa esse state. Encapsular em `WebSearchThrottle` espelha o padrão.
+- Cuidado: retorna `wait_ctx` dict consumido por `_iter_web_search_wait_messages` (já refatorado em octodecies para receber `phase_prefix`/`source_label`).
+
+**C. Documento de design de concorrência por `browser_profile`** (BAIXO risco — só docs)
+- Entregável: `docs/concurrency_per_profile.md` com proposta (sem código). Exigência prévia para Opção D.
+
+**D. Integrar catálogo em `browser._dismiss_rate_limit_modal_if_any`** (ALTO risco, BLOQUEADO — pede aprovação).
 
 Regras obrigatórias:
-(a) criar `Scripts/python_request_throttle.py` com classe `PythonRequestThrottle` (state + lock + `now_func` injetável); `should_wait()` / `wait_remaining_sec()` para que o caller mantenha o loop e o emit SSE;
-(b) preservar exatamente o status SSE atual (`build_status_event` com `phase="python_request_interval_cooldown"`) e o tight-loop com `time.sleep` no `server.py`;
-(c) NÃO emitir SSE direto do módulo puro — fatiar para que o caller decida;
-(d) NÃO alterar contratos visíveis (logs, JSON, fila); curto-circuito histórico (ambos pmin/pmax `<=0` → retorno antecipado) preservado antes da chamada;
-(e) ≥3 testes offline por método público em `tests/test_python_request_throttle.py`;
-(f) manter os 478 testes offline passando + eventuais novos;
-(g) ANTES do commit/push final, ATUALIZAR a seção "PONTO DE RETOMADA" com novo commit hash, contagem de testes, e próxima opção;
-(h) commit com título em PT-BR no imperativo;
-(i) push para claude/focused-einstein-Ol7Hd.
+(a) escolher UMA opção (A, B ou C) e executar do começo ao fim;
+(b) padrão B já validado 4 vezes (security_state, chat_rate_limit_cooldown, sync_dedup, python_request_throttle): novo módulo puro + classe + `now_func` injetável + wrapper fino + alias preservado;
+(c) NÃO criar novos arquivos em browser.py/analisador_prontuarios.py — fora de escopo;
+(d) manter os 505 testes offline passando + eventuais novos;
+(e) ANTES do commit/push final, ATUALIZAR a seção "PONTO DE RETOMADA" com novo commit hash, contagem de testes, e próxima opção;
+(f) commit com título em PT-BR no imperativo;
+(g) push para claude/focused-einstein-Ol7Hd.
 
 Se encontrar algo inesperado em server.py, PARAR e pedir confirmação antes de editar.
-Se precisar tocar em browser.py (async/Playwright) ou em analisador_prontuarios.py, PARAR — não está no escopo desta opção.
+Se precisar tocar em browser.py (async/Playwright) ou em analisador_prontuarios.py, PARAR — não está no escopo destas opções.
 ```
 
 ### Checklist de "antes de terminar a sessão" (rodar sempre)
-- [ ] Suite offline passa: `python3 -m pytest tests/test_humanizer.py tests/test_shared_queue.py tests/test_selectors_smoke.py tests/test_request_source.py tests/test_error_catalog.py tests/test_server_helpers.py tests/test_browser_predicates.py tests/test_rate_limit_integration.py tests/test_log_sanitizer.py tests/test_analisador_rate_limit.py tests/test_audit_sanitization.py tests/test_security_state.py tests/test_chat_rate_limit_cooldown.py tests/test_analisador_parsers.py tests/test_sync_dedup.py` (esperado: **478 passed**).
+- [ ] Suite offline passa: `python3 -m pytest tests/test_humanizer.py tests/test_shared_queue.py tests/test_selectors_smoke.py tests/test_request_source.py tests/test_error_catalog.py tests/test_server_helpers.py tests/test_browser_predicates.py tests/test_rate_limit_integration.py tests/test_log_sanitizer.py tests/test_analisador_rate_limit.py tests/test_audit_sanitization.py tests/test_security_state.py tests/test_chat_rate_limit_cooldown.py tests/test_analisador_parsers.py tests/test_sync_dedup.py tests/test_python_request_throttle.py` (esperado: **505 passed**).
 - [ ] `python3 -c "import ast; ast.parse(open('Scripts/server.py').read())"` OK.
 - [ ] `python3 -c "import ast; ast.parse(open('Scripts/browser.py').read())"` OK.
 - [ ] `python3 -c "import ast; ast.parse(open('Scripts/analisador_prontuarios.py').read())"` OK.
@@ -628,8 +646,10 @@ Se precisar tocar em browser.py (async/Playwright) ou em analisador_prontuarios.
   7. `bcaa716`: extração de `format_requester_suffix` (idiom `, por "<nome>" (id_membro: "<id>")` duplicado em chat_completions e api_sync). Migração nos 2 sites. +6 testes.
   8. `6ca399a`: extração de `compute_python_request_interval(pmin, pmax, profile_count, *, rng=None)` — decisão pura `(base, target)` com `random.uniform` e divisão pelo profile_count, `rng` injetável, curto-circuito histórico preservado. Integração em `_wait_python_request_interval_if_needed`. State global e tight-loop NÃO extraídos (Opção 4 da próxima sessão). +8 testes.
   Total: **454 testes offline passando** (+17 novos). 4 commits + docs commit.
-- **2026-04-26 octodecies** (esta sessão, branch `claude/focused-einstein-Ol7Hd`) — 1 ciclo de Opção 3 (migração de dict-yielders SSE):
-  12. `14ffcf0`: `_iter_web_search_wait_messages` deixa de yieldar dicts puros e passa a receber `phase_prefix` + `source_label` por argumento, yieldando strings JSON via `_build_status_event_impl`. Consumer em `_execute_single_browser_search` simplifica para `stream_queue.put(raw_msg)` (remove 4 linhas de mutação in-place + `json.dumps`). Migração paralela: `chat_completions::chat_meta` migra `(fin.get('chromium_profile') or "").strip()` para `_normalize_optional_text_impl(...)`. +7 testes em `TestWebSearchWaitEventEquivalence` cobrindo byte-equivalência com o pipeline antigo (legacy dict + mutate + `json.dumps`) para `web` e `uptodate`. Total: **478 testes offline passando**. Auditoria de Opção 2 confirmou que `chat_completions`, `api_sync`, `_handle_browser_search_api` já estão totalmente migrados; `send_manual_whatsapp_reply` mantém formato `_quem` distinto (`(id={id})` vs `(id_membro: "{id}")`) — migração rejeitada por preservar contrato implícito de log. Próxima opção: PythonRequestThrottle (padrão B, MÉDIO risco).
+- **2026-04-26 octodecies** (branch `claude/focused-einstein-Ol7Hd`) — 1 ciclo de Opção 3 (migração de dict-yielders SSE):
+  12. `14ffcf0`: `_iter_web_search_wait_messages` deixa de yieldar dicts puros e passa a receber `phase_prefix` + `source_label` por argumento, yieldando strings JSON via `_build_status_event_impl`. Consumer em `_execute_single_browser_search` simplifica para `stream_queue.put(raw_msg)` (remove 4 linhas de mutação in-place + `json.dumps`). Migração paralela: `chat_completions::chat_meta` migra `(fin.get('chromium_profile') or "").strip()` para `_normalize_optional_text_impl(...)`. +7 testes em `TestWebSearchWaitEventEquivalence` cobrindo byte-equivalência com o pipeline antigo (legacy dict + mutate + `json.dumps`) para `web` e `uptodate`. Total: **478 testes offline passando**. Auditoria de Opção 2 confirmou que `chat_completions`, `api_sync`, `_handle_browser_search_api` já estão totalmente migrados; `send_manual_whatsapp_reply` mantém formato `_quem` distinto (`(id={id})` vs `(id_membro: "{id}")`) — migração rejeitada por preservar contrato implícito de log.
+- **2026-04-26 novendecies** (esta sessão, branch `claude/focused-einstein-Ol7Hd`) — 1 ciclo de Opção 1 (extração padrão B):
+  13. `0904fe9`: extração de `Scripts/python_request_throttle.py` com classe `PythonRequestThrottle` (4 métodos: `begin`/`remaining_seconds`/`commit`/`snapshot`, `now_func` injetável). State global (`_python_anti_rate_limit_last_ts` + lock) sai de `server.py` e é encapsulado no módulo puro; wrapper em `_wait_python_request_interval_if_needed` mantém o tight-loop SSE com `time.sleep` e `_build_status_event_impl(phase="python_anti_rate_limit_interval", ...)` no call site (módulo puro NÃO emite SSE direto). Curto-circuito histórico (`pmin/pmax <= 0` ou primeira chamada) preservado byte-equivalente via `begin()` retornar `None`. Alias `_python_anti_rate_limit_lock` mantido para compat. Import morto `compute_python_request_interval` removido de `server.py` (consumido apenas dentro do módulo puro). +27 testes em `tests/test_python_request_throttle.py` cobrindo todos os 4 métodos públicos, snapshot thread-safe sob 4 threads concorrentes, state-machine ponta-a-ponta e equivalência com a implementação histórica. Total: **505 testes offline passando** em 16 arquivos. Próxima opção: A (snapshot em /api/metrics) ou B (WebSearchThrottle padrão B).
 - **2026-04-25 septendecies** (branch `claude/create-log-sanitization-script-QQ56a`) — 3 ciclos contínuos sobre o pano de fundo da sedecies:
   9. `b0202b1`: extração de `build_markdown_event(content)` espelhando `build_error_event`. Migração do único `{"type":"markdown",...}` literal restante em `api_sync::sync_generate`. +4 testes.
   10. `1aa7dd6`: extração de `format_origin_suffix(is_analyzer, source_hint)` — sufixo `[origem: ...]` com analyzer override (sempre `analisador_prontuarios.py`) ou hint do payload. Migração em `chat_completions::_origem`. +5 testes.
