@@ -422,6 +422,33 @@ def extract_web_search_test_params(data) -> Tuple[str, str]:
     )
 
 
+def build_web_search_test_task(query: str, stream_queue) -> dict:
+    """Monta o payload de fila usado por `/api/web_search/test?q=...`."""
+    return {
+        "action": "SEARCH",
+        "query": query,
+        "stream_queue": stream_queue,
+    }
+
+
+def build_web_search_test_stream_response(raw_msg, query: str):
+    """Interpreta uma mensagem de stream para `/api/web_search/test`.
+
+    Retorna `(payload, status_code)` quando a mensagem exige resposta HTTP:
+      - `searchresult` -> `(content_dict, 200)`
+      - `error`        -> `({"success": False, "query": query, "error": ...}, 500)`
+
+    Para tipos não-terminais/desconhecidos retorna `(None, None)`.
+    """
+    msg = json.loads(raw_msg)
+    msg_type = msg.get("type")
+    if msg_type == "searchresult":
+        return msg.get("content", {}), 200
+    if msg_type == "error":
+        return {"success": False, "query": query, "error": msg.get("content")}, 500
+    return None, None
+
+
 def resolve_browser_profile(requested_profile, stored_profile) -> Optional[str]:
     """Resolve o `browser_profile` efetivo para a tarefa do browser.
 
@@ -653,6 +680,8 @@ __all__ = [
     "extract_menu_url",
     "extract_menu_execute_payload",
     "extract_web_search_test_params",
+    "build_web_search_test_task",
+    "build_web_search_test_stream_response",
     "build_queue_key",
     "build_chat_task_payload",
     "build_error_event",

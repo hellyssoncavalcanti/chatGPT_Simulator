@@ -620,6 +620,41 @@ class TestExtractWebSearchTestParams:
         assert sh.extract_web_search_test_params(None) == ("", "")
 
 
+class TestBuildWebSearchTestTask:
+    def test_builds_expected_shape(self):
+        sq = object()
+        out = sh.build_web_search_test_task("query x", sq)
+        assert out == {
+            "action": "SEARCH",
+            "query": "query x",
+            "stream_queue": sq,
+        }
+
+
+class TestBuildWebSearchTestStreamResponse:
+    def test_maps_searchresult_to_success_payload(self):
+        raw = json.dumps({"type": "searchresult", "content": {"success": True, "count": 1}})
+        payload, status = sh.build_web_search_test_stream_response(raw, "q1")
+        assert status == 200
+        assert payload == {"success": True, "count": 1}
+
+    def test_maps_error_to_http_500_payload(self):
+        raw = json.dumps({"type": "error", "content": "falhou"})
+        payload, status = sh.build_web_search_test_stream_response(raw, "q1")
+        assert status == 500
+        assert payload == {"success": False, "query": "q1", "error": "falhou"}
+
+    def test_unknown_type_is_non_terminal(self):
+        raw = json.dumps({"type": "status", "content": "aguarde"})
+        payload, status = sh.build_web_search_test_stream_response(raw, "q1")
+        assert payload is None
+        assert status is None
+
+    def test_invalid_json_raises_to_preserve_legacy_behavior(self):
+        with pytest.raises(json.JSONDecodeError):
+            sh.build_web_search_test_stream_response("not-json", "q1")
+
+
 # ─────────────────────────────────────────────────────────
 # build_queue_key
 # ─────────────────────────────────────────────────────────
