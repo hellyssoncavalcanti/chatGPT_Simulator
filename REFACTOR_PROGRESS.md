@@ -393,7 +393,7 @@ Coletadas em `2026-04-22` via `wc -l` / `grep -nE "def "`:
 
 ---
 
-## 🆕 PONTO DE RETOMADA (última atualização em 2026-04-26 unvicies)
+## 🆕 PONTO DE RETOMADA (última atualização em 2026-04-26 duovicies)
 
 > **Leia APENAS esta seção ao retomar em outro chat.** Ela é autocontida:
 > não é necessário reler seções anteriores a menos que haja dúvida sobre
@@ -402,6 +402,7 @@ Coletadas em `2026-04-22` via `wc -l` / `grep -nE "def "`:
 ### Estado atual (consolidado) — branch `claude/focused-einstein-Ol7Hd`
 
 **Commits relevantes (mais recente → mais antigo):**
+- `511d667` — Documentar plano de concorrência por browser_profile *(esta sessão, ciclo 16 / opção C)*
 - `939d904` — Extrair WebSearchThrottle (state + lock) para módulo puro *(esta sessão, ciclo 15)*
 - `a8eca94` — Expor snapshot de PythonRequestThrottle em /api/metrics + Prometheus *(esta sessão, ciclo 14)*
 - `f0ceeec` — docs: gravar ciclo novendecies (commit 0904fe9) no PONTO DE RETOMADA
@@ -580,26 +581,23 @@ Esperado: **517 passed**. (NÃO usar `python3 -m pytest tests/` cru — `tests/t
 
 ```
 Continue o refactor do /home/user/chatGPT_Simulator na branch claude/focused-einstein-Ol7Hd.
-Leia APENAS a seção "PONTO DE RETOMADA (última atualização em 2026-04-26 vicies)" em REFACTOR_PROGRESS.md — é autocontida.
+Leia APENAS a seção "PONTO DE RETOMADA (última atualização em 2026-04-26 duovicies)" em REFACTOR_PROGRESS.md — é autocontida.
 
-As opções 1 (PythonRequestThrottle), 2 (auditoria de handlers menores), 3 (dict-yielders SSE)
-e A (snapshot em /api/metrics + Prometheus) já estão FEITAS. Próximas opções:
+As opções 1 (PythonRequestThrottle), 2 (auditoria de handlers menores), 3 (dict-yielders SSE),
+A (snapshot em /api/metrics + Prometheus), B (WebSearchThrottle) e C (doc de concorrência por profile) já estão FEITAS. Próximas opções:
 
-**B. Replicar padrão B para `_web_search_timing_lock` + `_web_search_last_started_at`/`_web_search_last_interval_sec`** (BAIXO/MÉDIO risco)
-- State global parecido com o que acabou de sair (`_python_anti_rate_limit_last_ts`).
-- Função `_reserve_web_search_slot` usa esse state. Encapsular em `WebSearchThrottle` espelha o padrão.
-- Cuidado: retorna `wait_ctx` dict consumido por `_iter_web_search_wait_messages` (já refatorado em octodecies para receber `phase_prefix`/`source_label`).
-
-**C. Documento de design de concorrência por `browser_profile`** (BAIXO risco — só docs)
-- Entregável: `docs/concurrency_per_profile.md` com proposta (sem código). Exigência prévia para Opção D.
+**E. Expor snapshot de `WebSearchThrottle` em `/api/metrics` + gauge Prometheus** (BAIXO risco)
+- Sem tocar `browser.py`; apenas `server.py` + módulo puro já criado.
+- Shape sugerido: `web_search_throttle: {last_started_at, last_interval_sec, age_seconds}`.
+- Gauge sugerido: `simulator_web_search_throttle_age_sec`.
 
 **D. Integrar catálogo em `browser._dismiss_rate_limit_modal_if_any`** (ALTO risco, BLOQUEADO — pede aprovação).
 
 Regras obrigatórias:
-(a) escolher UMA opção (B ou C) e executar do começo ao fim;
+(a) escolher UMA opção (E ou D) e executar do começo ao fim;
 (b) padrão B já validado 4 vezes (security_state, chat_rate_limit_cooldown, sync_dedup, python_request_throttle): novo módulo puro + classe + `now_func` injetável + wrapper fino + alias preservado;
 (c) NÃO criar novos arquivos em browser.py/analisador_prontuarios.py — fora de escopo;
-(d) manter os 508 testes offline passando + eventuais novos;
+(d) manter os 517 testes offline passando + eventuais novos;
 (e) ANTES do commit/push final, ATUALIZAR a seção "PONTO DE RETOMADA" com novo commit hash, contagem de testes, e próxima opção;
 (f) commit com título em PT-BR no imperativo;
 (g) push para claude/focused-einstein-Ol7Hd.
@@ -609,7 +607,7 @@ Se precisar tocar em browser.py (async/Playwright) ou em analisador_prontuarios.
 ```
 
 ### Checklist de "antes de terminar a sessão" (rodar sempre)
-- [ ] Suite offline passa: `python3 -m pytest tests/test_humanizer.py tests/test_shared_queue.py tests/test_selectors_smoke.py tests/test_request_source.py tests/test_error_catalog.py tests/test_server_helpers.py tests/test_browser_predicates.py tests/test_rate_limit_integration.py tests/test_log_sanitizer.py tests/test_analisador_rate_limit.py tests/test_audit_sanitization.py tests/test_security_state.py tests/test_chat_rate_limit_cooldown.py tests/test_analisador_parsers.py tests/test_sync_dedup.py tests/test_python_request_throttle.py` (esperado: **508 passed**).
+- [ ] Suite offline passa: `python3 -m pytest tests/test_humanizer.py tests/test_shared_queue.py tests/test_selectors_smoke.py tests/test_request_source.py tests/test_error_catalog.py tests/test_server_helpers.py tests/test_browser_predicates.py tests/test_rate_limit_integration.py tests/test_log_sanitizer.py tests/test_analisador_rate_limit.py tests/test_audit_sanitization.py tests/test_security_state.py tests/test_chat_rate_limit_cooldown.py tests/test_analisador_parsers.py tests/test_sync_dedup.py tests/test_python_request_throttle.py tests/test_web_search_throttle.py` (esperado: **517 passed**).
 - [ ] `python3 -c "import ast; ast.parse(open('Scripts/server.py').read())"` OK.
 - [ ] `python3 -c "import ast; ast.parse(open('Scripts/browser.py').read())"` OK.
 - [ ] `python3 -c "import ast; ast.parse(open('Scripts/analisador_prontuarios.py').read())"` OK.
@@ -652,7 +650,10 @@ Se precisar tocar em browser.py (async/Playwright) ou em analisador_prontuarios.
 - **2026-04-26 vicies** (esta sessão, branch `claude/focused-einstein-Ol7Hd`) — 1 ciclo de Opção A (observabilidade):
   14. `a8eca94`: `PythonRequestThrottle.snapshot()` agora retorna `{last_ts, age_seconds}` (extensão); `/api/metrics` expõe `python_request_throttle` snapshot; `/metrics` (Prometheus) ganha gauge `simulator_python_request_throttle_age_sec` (atualizado em `_update_rate_limit_prom_gauges`). Clamp 0 em `age_seconds` quando `last_ts == 0` (boot) ou quando o relógio retrocede (ajuste NTP). +3 testes em `TestSnapshot::test_snapshot_age_*` cobrindo avanço de relógio, never-set e clock retrógrado (2 casos pré-existentes ajustados para o novo shape). Suite offline: **508 passed** em 16 arquivos.
 - **2026-04-26 unvicies** (esta sessão, branch `work`) — 1 ciclo de Opção B (extração padrão B para web search throttle):
-  15. `939d904`: extração de `Scripts/web_search_throttle.py` com classe `WebSearchThrottle` (`reserve_slot` + `snapshot`, com `now_func` e `rng_func` injetáveis). `server._reserve_web_search_slot` migra para wrapper fino sobre singleton `_WEB_SEARCH_THROTTLE`, preservando contrato histórico de `wait_ctx` (`interval_sec`, `scheduled_start_at`, `wait_seconds`, `requested_at`) e mantendo aliases de compat (`_web_search_timing_lock`, `_web_search_last_started_at`, `_web_search_last_interval_sec`). +9 testes em `tests/test_web_search_throttle.py` cobrindo first-call sem espera, agendamento com cooldown, clamps/normalização e concorrência. Suite offline: **517 passed** em 17 arquivos. Próxima opção recomendada: C (documento de design de concorrência por `browser_profile`) ou integração de snapshot do WebSearchThrottle em `/api/metrics`/Prometheus.
+  15. `939d904`: extração de `Scripts/web_search_throttle.py` com classe `WebSearchThrottle` (`reserve_slot` + `snapshot`, com `now_func` e `rng_func` injetáveis). `server._reserve_web_search_slot` migra para wrapper fino sobre singleton `_WEB_SEARCH_THROTTLE`, preservando contrato histórico de `wait_ctx` (`interval_sec`, `scheduled_start_at`, `wait_seconds`, `requested_at`) e mantendo aliases de compat (`_web_search_timing_lock`, `_web_search_last_started_at`, `_web_search_last_interval_sec`). +9 testes em `tests/test_web_search_throttle.py` cobrindo first-call sem espera, agendamento com cooldown, clamps/normalização e concorrência. Suite offline: **517 passed** em 17 arquivos. Próxima opção recomendada: integrar snapshot do WebSearchThrottle em `/api/metrics`/Prometheus (baixo risco) antes de qualquer mudança em `browser.py`.
+- **2026-04-26 duovicies** (esta sessão, branch `work`) — 1 ciclo de Opção C (documentação de concorrência por profile, sem código runtime):
+  16. `511d667`: criado `docs/concurrency_per_profile.md` com proposta incremental em 3 fases (módulo puro padrão B → wrapper fino em `server.py` → observabilidade), failure modes, política inicial de limites por `browser_profile`, plano de testes offline e DoD. README atualizado para incluir o novo documento em `docs/` e refletir suite offline atual (`517 passed`, 17 arquivos) + inventário de módulos puros incluindo `sync_dedup`, `python_request_throttle` e `web_search_throttle`. Nenhuma alteração em `browser.py`/`analisador_prontuarios.py` nesta sessão.
+
 - **2026-04-25 septendecies** (branch `claude/create-log-sanitization-script-QQ56a`) — 3 ciclos contínuos sobre o pano de fundo da sedecies:
   9. `b0202b1`: extração de `build_markdown_event(content)` espelhando `build_error_event`. Migração do único `{"type":"markdown",...}` literal restante em `api_sync::sync_generate`. +4 testes.
   10. `1aa7dd6`: extração de `format_origin_suffix(is_analyzer, source_hint)` — sufixo `[origem: ...]` com analyzer override (sempre `analisador_prontuarios.py`) ou hint do payload. Migração em `chat_completions::_origem`. +5 testes.
