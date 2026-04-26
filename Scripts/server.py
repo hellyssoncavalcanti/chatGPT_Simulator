@@ -46,6 +46,7 @@ from shared import browser_queue, get_file_info
 import storage
 import auth
 from utils import log as file_log
+from web_search_throttle import WebSearchThrottle
 from request_source import (
     is_python_chat_request as _is_python_chat_request_impl,
     is_codex_chat_request as _is_codex_chat_request_impl,
@@ -177,7 +178,6 @@ PYTHON_ANTI_RATE_LIMIT_TICK_SEC = 1.0
 # preservados para compat com qualquer código legado/teste que toque o
 # lock direto.
 from python_request_throttle import PythonRequestThrottle
-from web_search_throttle import WebSearchThrottle
 _PYTHON_REQUEST_THROTTLE = PythonRequestThrottle()
 _python_anti_rate_limit_lock = _PYTHON_REQUEST_THROTTLE._lock
 
