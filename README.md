@@ -267,7 +267,7 @@ python3 -m pytest \
   tests/test_web_search_throttle.py
 ```
 
-Esperado: **533 passed**. (Os arquivos `tests/test_server_api.py` e
+Esperado: **538 passed**. (Os arquivos `tests/test_server_api.py` e
 `tests/test_storage.py` são excluídos porque exigem `flask` e
 `cryptography`, que não estão nesta lista de smoke offline — eles
 rodam no CI completo via o comando da seção anterior.)
@@ -284,7 +284,7 @@ rodam no CI completo via o comando da seção anterior.)
 |---|---|---|
 | `Scripts/request_source.py` | Detecção de origem Python/Codex/analyzer no request HTTP. | `tests/test_request_source.py` |
 | `Scripts/error_catalog.py` | 11 códigos estáveis + classificador PT/EN + `format_reason` (tag `[CODE]`). | `tests/test_error_catalog.py` |
-| `Scripts/server_helpers.py` | Wait-time formatting, payloads de fila, prune de deque, contagem de perfis Chromium, concatenação de mensagens OpenAI-style, rotulagem de remetente, extração de identidade do solicitante, helpers de payload para lookup/delete, wrappers de texto colado, coalescência de `origin_url`. | `tests/test_server_helpers.py` |
+| `Scripts/server_helpers.py` | Wait-time formatting, payloads de fila, prune de deque, contagem de perfis Chromium, concatenação de mensagens OpenAI-style, rotulagem de remetente, extração de identidade do solicitante, helpers de payload para lookup/delete/menu, wrappers de texto colado, coalescência de `origin_url`. | `tests/test_server_helpers.py` |
 | `Scripts/browser_predicates.py` | Predicados do DOM do ChatGPT (extract sender, orphan tabs, incomplete JSON, inline base64, paste wrappers). | `tests/test_browser_predicates.py` |
 | `Scripts/log_sanitizer.py` | `mask_api_key`, `mask_bearer_token`, `mask_session_cookie`, `mask_file_path`, `sanitize*`. | `tests/test_log_sanitizer.py` |
 | `Scripts/security_state.py` | Classe `SecurityState` — rate-limit per-(ip,key) + brute-force de login, expiração automática. | `tests/test_security_state.py` |

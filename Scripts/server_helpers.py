@@ -391,6 +391,26 @@ def extract_delete_request_targets(data) -> Tuple[Optional[str], Optional[str]]:
     )
 
 
+def extract_menu_url(data) -> Optional[str]:
+    """Extrai URL para `/api/menu/options`."""
+    payload_get = getattr(data, "get", None)
+    if payload_get is None:
+        return None
+    return normalize_optional_text(payload_get("url"))
+
+
+def extract_menu_execute_payload(data) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+    """Extrai (`url`, `option`, `new_name`) para `/api/menu/execute`."""
+    payload_get = getattr(data, "get", None)
+    if payload_get is None:
+        return (None, None, None)
+    return (
+        normalize_optional_text(payload_get("url")),
+        normalize_optional_text(payload_get("option")),
+        normalize_optional_text(payload_get("new_name")),
+    )
+
+
 def resolve_browser_profile(requested_profile, stored_profile) -> Optional[str]:
     """Resolve o `browser_profile` efetivo para a tarefa do browser.
 
@@ -574,6 +594,8 @@ __all__ = [
     "resolve_lookup_origin_url",
     "extract_chat_delete_local_targets",
     "extract_delete_request_targets",
+    "extract_menu_url",
+    "extract_menu_execute_payload",
     "build_queue_key",
     "build_chat_task_payload",
     "build_error_event",

@@ -577,6 +577,36 @@ class TestExtractDeleteRequestTargets:
         assert sh.extract_delete_request_targets(None) == (None, None)
 
 
+class TestExtractMenuUrl:
+    def test_extracts_and_normalizes(self):
+        assert sh.extract_menu_url({"url": "  https://chat  "}) == "https://chat"
+
+    def test_missing_or_invalid_returns_none(self):
+        assert sh.extract_menu_url({}) is None
+        assert sh.extract_menu_url(None) is None
+
+
+class TestExtractMenuExecutePayload:
+    def test_extracts_and_normalizes(self):
+        out = sh.extract_menu_execute_payload({
+            "url": "  https://chat  ",
+            "option": "  Excluir  ",
+            "new_name": "  Novo Nome ",
+        })
+        assert out == ("https://chat", "Excluir", "Novo Nome")
+
+    def test_optional_new_name_can_be_none(self):
+        out = sh.extract_menu_execute_payload({
+            "url": "https://chat",
+            "option": "Rename",
+        })
+        assert out == ("https://chat", "Rename", None)
+
+    def test_missing_or_invalid_returns_none_tuple(self):
+        assert sh.extract_menu_execute_payload({}) == (None, None, None)
+        assert sh.extract_menu_execute_payload(None) == (None, None, None)
+
+
 # ─────────────────────────────────────────────────────────
 # build_queue_key
 # ─────────────────────────────────────────────────────────

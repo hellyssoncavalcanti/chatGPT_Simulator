@@ -393,7 +393,7 @@ Coletadas em `2026-04-22` via `wc -l` / `grep -nE "def "`:
 
 ---
 
-## 🆕 PONTO DE RETOMADA (última atualização em 2026-04-26 tricies)
+## 🆕 PONTO DE RETOMADA (última atualização em 2026-04-26 untricies)
 
 > **Leia APENAS esta seção ao retomar em outro chat.** Ela é autocontida:
 > não é necessário reler seções anteriores a menos que haja dúvida sobre
@@ -402,6 +402,7 @@ Coletadas em `2026-04-22` via `wc -l` / `grep -nE "def "`:
 ### Estado atual (consolidado) — branch `claude/focused-einstein-Ol7Hd`
 
 **Commits relevantes (mais recente → mais antigo):**
+- `bd9bd7e` — Extrair helpers de payload para menu options/execute *(esta sessão, ciclo 25 / opção 2)*
 - `ec4a4a7` — Extrair helpers de payload para lookup/delete *(esta sessão, ciclo 24 / opção 2)*
 - `f91b077` — Desativar auto-pip por padrão para import offline *(esta sessão, ciclo 23 / hotfix codex)*
 - `fd5749e` — Permitir import server sem cryptography em ambiente offline *(esta sessão, ciclo 22 / hotfix codex)*
@@ -485,7 +486,7 @@ python3 -m pytest \
   tests/test_python_request_throttle.py \
   tests/test_web_search_throttle.py
 ```
-Esperado: **533 passed**. (NÃO usar `python3 -m pytest tests/` cru — `tests/test_server_api.py` e `tests/test_storage.py` falham por requerer `flask` / `cryptography` indisponíveis neste ambiente.)
+Esperado: **538 passed**. (NÃO usar `python3 -m pytest tests/` cru — `tests/test_server_api.py` e `tests/test_storage.py` falham por requerer `flask` / `cryptography` indisponíveis neste ambiente.)
 
 ### Mapa de módulos puros já criados
 
@@ -589,7 +590,7 @@ Esperado: **533 passed**. (NÃO usar `python3 -m pytest tests/` cru — `tests/t
 
 ```
 Continue o refactor do /home/user/chatGPT_Simulator na branch claude/focused-einstein-Ol7Hd.
-Leia APENAS a seção "PONTO DE RETOMADA (última atualização em 2026-04-26 tricies)" em REFACTOR_PROGRESS.md — é autocontida.
+Leia APENAS a seção "PONTO DE RETOMADA (última atualização em 2026-04-26 untricies)" em REFACTOR_PROGRESS.md — é autocontida.
 
 As opções 1 (PythonRequestThrottle), 3 (dict-yielders SSE),
 A (snapshot em /api/metrics + Prometheus), B (WebSearchThrottle), C (doc de concorrência por profile) e E (snapshot do WebSearchThrottle) já estão FEITAS. Próximas opções:
@@ -597,7 +598,7 @@ A (snapshot em /api/metrics + Prometheus), B (WebSearchThrottle), C (doc de conc
 **2. Auditar e migrar handlers menores que ainda têm idioms duplicados** (BAIXO risco, em progresso)
 - ✅ Concluído nesta trilha: extraído `extract_requester_identity(data)` para `server_helpers.py` e migrados `api_sync`, `_handle_browser_search_api`, `chat_completions` e `send_manual_whatsapp_reply` (preservando formato de log legado `(id={id})` nessa rota).
 - ✅ Subpasso adicional concluído: normalização de campos opcionais via `_normalize_optional_text_impl` em `api_chat_lookup`, `api_chat_delete_local` e `api_delete` (remoção de idioms `or ""`).
-- Próximo subpasso: revisar bloco de documentação/teste (`/api/web_search/test`) e menu handlers para extrações puras de payload/validação sem tocar browser.py.
+- Próximo subpasso: revisar bloco de documentação/teste (`/api/web_search/test`) para extrações puras adicionais sem tocar browser.py.
 - Entregável: PR pequeno com extrações puras + wrappers finos + testes offline.
 
 **D. Integrar catálogo em `browser._dismiss_rate_limit_modal_if_any`** (ALTO risco, BLOQUEADO — pede aprovação).
@@ -606,7 +607,7 @@ Regras obrigatórias:
 (a) escolher UMA opção (2 ou D) e executar do começo ao fim;
 (b) padrão B já validado 4 vezes (security_state, chat_rate_limit_cooldown, sync_dedup, python_request_throttle): novo módulo puro + classe + `now_func` injetável + wrapper fino + alias preservado;
 (c) NÃO criar novos arquivos em browser.py/analisador_prontuarios.py — fora de escopo;
-(d) manter os 533 testes offline passando + eventuais novos;
+(d) manter os 538 testes offline passando + eventuais novos;
 (e) ANTES do commit/push final, ATUALIZAR a seção "PONTO DE RETOMADA" com novo commit hash, contagem de testes, e próxima opção;
 (f) commit com título em PT-BR no imperativo;
 (g) push para claude/focused-einstein-Ol7Hd.
@@ -616,7 +617,7 @@ Se precisar tocar em browser.py (async/Playwright) ou em analisador_prontuarios.
 ```
 
 ### Checklist de "antes de terminar a sessão" (rodar sempre)
-- [ ] Suite offline passa: `python3 -m pytest tests/test_humanizer.py tests/test_shared_queue.py tests/test_selectors_smoke.py tests/test_request_source.py tests/test_error_catalog.py tests/test_server_helpers.py tests/test_browser_predicates.py tests/test_rate_limit_integration.py tests/test_log_sanitizer.py tests/test_analisador_rate_limit.py tests/test_audit_sanitization.py tests/test_security_state.py tests/test_chat_rate_limit_cooldown.py tests/test_analisador_parsers.py tests/test_sync_dedup.py tests/test_python_request_throttle.py tests/test_web_search_throttle.py` (esperado: **533 passed**).
+- [ ] Suite offline passa: `python3 -m pytest tests/test_humanizer.py tests/test_shared_queue.py tests/test_selectors_smoke.py tests/test_request_source.py tests/test_error_catalog.py tests/test_server_helpers.py tests/test_browser_predicates.py tests/test_rate_limit_integration.py tests/test_log_sanitizer.py tests/test_analisador_rate_limit.py tests/test_audit_sanitization.py tests/test_security_state.py tests/test_chat_rate_limit_cooldown.py tests/test_analisador_parsers.py tests/test_sync_dedup.py tests/test_python_request_throttle.py tests/test_web_search_throttle.py` (esperado: **538 passed**).
 - [ ] `python3 -c "import ast; ast.parse(open('Scripts/server.py').read())"` OK.
 - [ ] `python3 -c "import ast; ast.parse(open('Scripts/browser.py').read())"` OK.
 - [ ] `python3 -c "import ast; ast.parse(open('Scripts/analisador_prontuarios.py').read())"` OK.
@@ -678,6 +679,9 @@ Se precisar tocar em browser.py (async/Playwright) ou em analisador_prontuarios.
   23. `f91b077`: `utils.check_and_install()` agora respeita `SIMULATOR_AUTO_INSTALL_DEPS` (default **0**). Sem essa flag, dependências ausentes apenas registram mensagem informativa e não tentam `pip install`, eliminando warnings de proxy 403 durante `import server`. Com `SIMULATOR_AUTO_INSTALL_DEPS=1`, comportamento antigo de auto-instalação é preservado. Validações: `import_server_ok` sem tracebacks + AST + suite offline **524 passed**.
 - **2026-04-26 tricies** (esta sessão, branch `work`) — Opção 2 (auditoria de handlers menores, etapa 4):
   24. `ec4a4a7`: extraídos helpers puros em `server_helpers.py` para payloads de manutenção: `resolve_lookup_origin_url(data)`, `extract_chat_delete_local_targets(data)` e `extract_delete_request_targets(data)`. `server.py` migrou `api_chat_lookup`, `api_chat_delete_local` e `api_delete` para wrappers finos nesses helpers (reduzindo idioms duplicados e padronizando trim/None-collapse). `tests/test_server_helpers.py` ampliado com 9 novos casos cobrindo prioridade/fallback/entrada inválida dos 3 helpers. Suite offline atualizada: **533 passed** em 17 arquivos.
+- **2026-04-26 untricies** (esta sessão, branch `work`) — Opção 2 (auditoria de handlers menores, etapa 5):
+  25. `bd9bd7e`: extraídos `extract_menu_url(data)` e `extract_menu_execute_payload(data)` para `server_helpers.py`, migrando `menu_options` e `menu_execute` em `server.py` para wrappers finos. Novos testes em `tests/test_server_helpers.py` cobrem normalização, opcionais e entrada inválida dos helpers de menu (+5 casos). Suite offline atualizada: **538 passed** em 17 arquivos. Próximo subpasso recomendado: analisar `/api/web_search/test` (bloco grande de documentação HTML) para possíveis extrações puras sem alterar comportamento.
+
 
 
 

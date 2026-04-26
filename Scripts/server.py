@@ -75,6 +75,8 @@ from server_helpers import (
     resolve_lookup_origin_url as _resolve_lookup_origin_url_impl,
     extract_chat_delete_local_targets as _extract_chat_delete_local_targets_impl,
     extract_delete_request_targets as _extract_delete_request_targets_impl,
+    extract_menu_url as _extract_menu_url_impl,
+    extract_menu_execute_payload as _extract_menu_execute_payload_impl,
     format_requester_suffix as _format_requester_suffix_impl,
     format_origin_suffix as _format_origin_suffix_impl,
 )
@@ -1366,7 +1368,7 @@ def api_chat_delete_local():
 @app.route("/api/menu/options", methods=["POST"])
 def menu_options():
     data = request.get_json() or {}
-    url = data.get("url")
+    url = _extract_menu_url_impl(data)
     if not url: return jsonify([])
     q = queue.Queue()
     browser_queue.put({'action': 'GET_MENU', 'url': url, 'stream_queue': q})
@@ -1381,9 +1383,7 @@ def menu_options():
 @app.route("/api/menu/execute", methods=["POST"])
 def menu_execute():
     data = request.get_json() or {}
-    url = data.get("url")
-    option = data.get("option")
-    new_name = data.get("new_name")
+    url, option, new_name = _extract_menu_execute_payload_impl(data)
     if not url or not option: return jsonify({"success": False})
     q = queue.Queue()
     browser_queue.put({'action': 'EXEC_MENU', 'url': url, 'option': option, 'new_name': new_name, 'stream_queue': q})
