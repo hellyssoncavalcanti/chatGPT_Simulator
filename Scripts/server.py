@@ -92,6 +92,7 @@ from server_helpers import (
     count_active_chats as _count_active_chats_impl,
     count_unfinished_chats as _count_unfinished_chats_impl,
     find_expired_chat_ids as _find_expired_chat_ids_impl,
+    mark_chat_finished as _mark_chat_finished_impl,
     build_active_chat_meta as _build_active_chat_meta_impl,
     normalize_source_hint as _normalize_source_hint_impl,
     format_requester_suffix as _format_requester_suffix_impl,
@@ -2270,9 +2271,7 @@ def chat_completions():
                         break
 
                     if raw_msg is None:
-                        ACTIVE_CHATS[chat_id]['finished'] = True
-                        ACTIVE_CHATS[chat_id]['finished_at'] = time.time()
-                        ACTIVE_CHATS[chat_id]['last_event_at'] = time.time()
+                        _mark_chat_finished_impl(ACTIVE_CHATS, chat_id, now=time.time())
                         break
 
                     try:
@@ -2290,9 +2289,7 @@ def chat_completions():
                         ACTIVE_CHATS[chat_id]['last_event_at'] = time.time()
                     elif t == 'finish':
                         fin = msg_obj.get('content', {}) or {}
-                        ACTIVE_CHATS[chat_id]['finished'] = True
-                        ACTIVE_CHATS[chat_id]['finished_at'] = time.time()
-                        ACTIVE_CHATS[chat_id]['last_event_at'] = time.time()
+                        _mark_chat_finished_impl(ACTIVE_CHATS, chat_id, now=time.time())
                         try:
                             storage.append_message(chat_id, "user", message)
                             storage.append_message(chat_id, "assistant", ACTIVE_CHATS[chat_id]['markdown'])
@@ -2301,9 +2298,7 @@ def chat_completions():
                             log(f"[WARN] Falha ao persistir finish (drain pós-disconnect): {e}")
                         break
                     elif t == 'error':
-                        ACTIVE_CHATS[chat_id]['finished'] = True
-                        ACTIVE_CHATS[chat_id]['finished_at'] = time.time()
-                        ACTIVE_CHATS[chat_id]['last_event_at'] = time.time()
+                        _mark_chat_finished_impl(ACTIVE_CHATS, chat_id, now=time.time())
                         break
                     else:
                         # log/chat_meta/etc.
@@ -2337,9 +2332,7 @@ def chat_completions():
                         break
 
                     if raw_msg is None:
-                        ACTIVE_CHATS[chat_id]['finished']    = True
-                        ACTIVE_CHATS[chat_id]['finished_at'] = time.time()
-                        ACTIVE_CHATS[chat_id]['last_event_at'] = time.time()
+                        _mark_chat_finished_impl(ACTIVE_CHATS, chat_id, now=time.time())
                         break
 
                     try:
@@ -2377,9 +2370,7 @@ def chat_completions():
                                 except Exception as e:
                                     log(f"[WARN] Falha ao persistir chat_meta antecipado: {e}")
                         elif t == 'finish':
-                            ACTIVE_CHATS[chat_id]['finished']    = True
-                            ACTIVE_CHATS[chat_id]['finished_at'] = time.time()
-                            ACTIVE_CHATS[chat_id]['last_event_at'] = time.time()
+                            _mark_chat_finished_impl(ACTIVE_CHATS, chat_id, now=time.time())
                             # [FIX Bug 1] Persiste no storage ao terminar (stream nunca escrevia)
                             try:
                                 fin = msg_obj.get('content', {})
@@ -2443,9 +2434,7 @@ def chat_completions():
                     })
 
                 if raw_msg is None:
-                    ACTIVE_CHATS[chat_id]['finished'] = True
-                    ACTIVE_CHATS[chat_id]['finished_at'] = time.time()
-                    ACTIVE_CHATS[chat_id]['last_event_at'] = time.time()
+                    _mark_chat_finished_impl(ACTIVE_CHATS, chat_id, now=time.time())
                     break
 
                 try:
@@ -2465,16 +2454,12 @@ def chat_completions():
                     final_url   = msg['content'].get('url',   final_url)
                     final_title = msg['content'].get('title', final_title)
                     final_chromium_profile = msg['content'].get('chromium_profile', final_chromium_profile)
-                    ACTIVE_CHATS[chat_id]['finished']    = True
-                    ACTIVE_CHATS[chat_id]['finished_at'] = time.time()
-                    ACTIVE_CHATS[chat_id]['last_event_at'] = time.time()
+                    _mark_chat_finished_impl(ACTIVE_CHATS, chat_id, now=time.time())
                 elif t == 'error':
                     is_rate_limited, err_msg, retry_after = _extract_rate_limit_details(msg.get('content'))
                     if is_rate_limited:
                         _register_chat_rate_limit(retry_after, reason=err_msg)
-                    ACTIVE_CHATS[chat_id]['finished']    = True
-                    ACTIVE_CHATS[chat_id]['finished_at'] = time.time()
-                    ACTIVE_CHATS[chat_id]['last_event_at'] = time.time()
+                    _mark_chat_finished_impl(ACTIVE_CHATS, chat_id, now=time.time())
                     return jsonify({"success": False, "error": msg['content'], "chat_id": chat_id})
 
         except Exception as e:

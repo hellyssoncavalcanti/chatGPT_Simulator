@@ -968,6 +968,56 @@ class TestFindExpiredChatIds:
         assert sh.find_expired_chat_ids(chats, 1000.0) == []
 
 
+class TestMarkChatFinished:
+    def test_mutates_meta_and_returns_true(self):
+        chats = {"abc": {"finished": False, "finished_at": None, "last_event_at": 100.0}}
+        ok = sh.mark_chat_finished(chats, "abc", now=500.0)
+        assert ok is True
+        assert chats["abc"] == {
+            "finished": True,
+            "finished_at": 500.0,
+            "last_event_at": 500.0,
+        }
+
+    def test_missing_chat_id_returns_false(self):
+        chats = {"x": {"finished": False}}
+        ok = sh.mark_chat_finished(chats, "missing", now=1.0)
+        assert ok is False
+        assert chats == {"x": {"finished": False}}  # nao mutou nada
+
+    def test_invalid_meta_value_returns_false(self):
+        chats = {"a": "not-a-dict", "b": None, "c": 7}
+        for k in ("a", "b", "c"):
+            assert sh.mark_chat_finished(chats, k, now=1.0) is False
+
+    def test_preserves_other_meta_fields(self):
+        chats = {
+            "x": {
+                "finished": False,
+                "queue": object(),
+                "is_analyzer": True,
+                "status": "running",
+                "markdown": "abc",
+                "last_event_at": 0.0,
+                "finished_at": None,
+            }
+        }
+        sh.mark_chat_finished(chats, "x", now=42.0)
+        meta = chats["x"]
+        assert meta["finished"] is True
+        assert meta["finished_at"] == 42.0
+        assert meta["last_event_at"] == 42.0
+        # Demais campos preservados
+        assert meta["is_analyzer"] is True
+        assert meta["status"] == "running"
+        assert meta["markdown"] == "abc"
+
+    def test_active_chats_not_dict_returns_false(self):
+        # collection sem .get tambem deve falhar gracefully
+        assert sh.mark_chat_finished(None, "x", now=1.0) is False
+        assert sh.mark_chat_finished("string", "x", now=1.0) is False
+
+
 class TestBuildActiveChatMeta:
     def test_meta_shape_and_defaults(self):
         sentinel_q = object()

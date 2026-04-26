@@ -512,6 +512,30 @@ def build_active_chat_meta(stream_queue, is_analyzer: bool, *, now: float) -> di
     }
 
 
+def mark_chat_finished(active_chats, chat_id, *, now: float) -> bool:
+    """Marca uma entrada de `ACTIVE_CHATS[chat_id]` como finalizada.
+
+    Sets `finished=True`, `finished_at=now` e `last_event_at=now` em uma
+    única passada — idiom canônico repetido em vários sites do dispatcher
+    de chat (`chat_completions::generate`, `chat_completions::_drain_*`,
+    timeouts, etc.).
+
+    Tolera ausência de `chat_id` na coleção e entradas não-dict
+    (retorna `False` sem mutar nada). Retorna `True` quando a meta foi
+    efetivamente atualizada.
+
+    Função pura no comportamento (sem IO/log) — caller fornece o
+    relógio para testes determinísticos.
+    """
+    meta = active_chats.get(chat_id) if hasattr(active_chats, "get") else None
+    if not isinstance(meta, dict):
+        return False
+    meta["finished"] = True
+    meta["finished_at"] = now
+    meta["last_event_at"] = now
+    return True
+
+
 def find_expired_chat_ids(active_chats, cutoff_ts: float) -> list:
     """Lista IDs de chats finalizados antes de `cutoff_ts`.
 
@@ -984,6 +1008,7 @@ __all__ = [
     "count_active_chats",
     "count_unfinished_chats",
     "find_expired_chat_ids",
+    "mark_chat_finished",
     "build_active_chat_meta",
     "normalize_source_hint",
     "build_queue_key",
