@@ -203,6 +203,10 @@ PROM_PYTHON_REQUEST_THROTTLE_AGE_SEC = Gauge(
     "simulator_python_request_throttle_age_sec",
     "Segundos desde o último pedido Python que passou pelo throttle anti-rate-limit (0 antes do primeiro pedido)",
 ) if Gauge else None
+PROM_WEB_SEARCH_THROTTLE_AGE_SEC = Gauge(
+    "simulator_web_search_throttle_age_sec",
+    "Segundos desde a última reserva de busca web (Google/UpToDate); 0 antes da primeira busca",
+) if Gauge else None
 
 
 def _cleanup_active_chats():
@@ -1260,6 +1264,7 @@ def api_metrics():
         "chat_rate_limit": _CHAT_RATE_LIMIT_COOLDOWN.snapshot(),
         "security": _SECURITY_STATE.snapshot(),
         "python_request_throttle": _PYTHON_REQUEST_THROTTLE.snapshot(),
+        "web_search_throttle": _WEB_SEARCH_THROTTLE.snapshot(),
         "request_timeout_sec": int(PYTHON_CHAT_QUEUE_TIMEOUT_SEC),
     }
     return jsonify({"success": True, "metrics": metrics}), 200
@@ -1286,6 +1291,7 @@ def _update_rate_limit_prom_gauges():
     chat_snap = _CHAT_RATE_LIMIT_COOLDOWN.snapshot()
     sec_snap = _SECURITY_STATE.snapshot()
     throttle_snap = _PYTHON_REQUEST_THROTTLE.snapshot()
+    web_search_snap = _WEB_SEARCH_THROTTLE.snapshot()
     if PROM_CHAT_RATE_LIMIT_REMAINING_SEC is not None:
         PROM_CHAT_RATE_LIMIT_REMAINING_SEC.set(float(chat_snap.get("remaining_seconds", 0.0)))
     if PROM_CHAT_RATE_LIMIT_STRIKES is not None:
@@ -1296,6 +1302,8 @@ def _update_rate_limit_prom_gauges():
         PROM_SECURITY_TRACKED_LOGIN_IPS.set(float(sec_snap.get("tracked_login_ips", 0)))
     if PROM_PYTHON_REQUEST_THROTTLE_AGE_SEC is not None:
         PROM_PYTHON_REQUEST_THROTTLE_AGE_SEC.set(float(throttle_snap.get("age_seconds", 0.0)))
+    if PROM_WEB_SEARCH_THROTTLE_AGE_SEC is not None:
+        PROM_WEB_SEARCH_THROTTLE_AGE_SEC.set(float(web_search_snap.get("age_seconds", 0.0)))
 
 @app.route("/", methods=["GET", "POST"])
 def index(): 
