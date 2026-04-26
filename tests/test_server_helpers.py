@@ -1,5 +1,6 @@
 import json
 from collections import deque
+from pathlib import Path
 
 import pytest
 
@@ -1244,6 +1245,23 @@ class TestAdvanceHealthPingState:
         out = sh.advance_health_ping_state(0, 50.0, 60.0, interval_sec=10)
         assert out["should_log"] is True
         assert out["logged_ping_count"] == 1
+
+
+class TestBuildUnauthorizedPayload:
+    def test_shape_matches_legacy_contract(self):
+        assert sh.build_unauthorized_payload() == {"error": "Unauthorized"}
+
+    def test_returns_new_dict_each_call(self):
+        first = sh.build_unauthorized_payload()
+        second = sh.build_unauthorized_payload()
+        assert first == second
+        assert first is not second
+
+
+class TestServerImportAliasSmoke:
+    def test_normalize_source_hint_alias_imported_in_server(self):
+        text = Path("Scripts/server.py").read_text(encoding="utf-8")
+        assert "normalize_source_hint as _normalize_source_hint_impl" in text
 
 
 class TestSafeSnapshotStats:

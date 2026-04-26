@@ -72,6 +72,7 @@ from server_helpers import (
     build_markdown_event as _build_markdown_event_impl,
     build_search_result_event as _build_search_result_event_impl,
     build_search_finish_event as _build_search_finish_event_impl,
+    normalize_source_hint as _normalize_source_hint_impl,
     normalize_optional_text as _normalize_optional_text_impl,
     extract_requester_identity as _extract_requester_identity_impl,
     resolve_lookup_origin_url as _resolve_lookup_origin_url_impl,
@@ -92,6 +93,7 @@ from server_helpers import (
     extract_queue_failed_limit as _extract_queue_failed_limit_impl,
     extract_queue_failed_retry_index as _extract_queue_failed_retry_index_impl,
     advance_health_ping_state as _advance_health_ping_state_impl,
+    build_unauthorized_payload as _build_unauthorized_payload_impl,
     safe_snapshot_stats as _safe_snapshot_stats_impl,
 )
 import error_catalog as _error_catalog
@@ -1298,7 +1300,7 @@ def index():
 def get_history():
     # Valida a autenticação (via Cookie na UI ou via Bearer Token remotamente)
     if not check_auth():
-        return jsonify({"error": "Unauthorized"}), 401
+        return jsonify(_build_unauthorized_payload_impl()), 401
     
     # Carrega e devolve o histórico em formato JSON
     history = storage.load_chats()
@@ -1307,7 +1309,7 @@ def get_history():
 @app.route('/api/chat_lookup', methods=['POST'])
 def api_chat_lookup():
     if not check_auth():
-        return jsonify({"error": "Unauthorized"}), 401
+        return jsonify(_build_unauthorized_payload_impl()), 401
 
     data = request.get_json() or {}
     origin_url = _resolve_lookup_origin_url_impl(data)
@@ -1326,7 +1328,7 @@ def api_chat_delete_local():
     """Remove chat(s) do histórico local (history.json) por chat_id e/ou origin_url.
     Não exclui do ChatGPT — apenas do storage local do servidor Python."""
     if not check_auth():
-        return jsonify({"error": "Unauthorized"}), 401
+        return jsonify(_build_unauthorized_payload_impl()), 401
 
     data = request.get_json() or {}
     chat_id, origin_url = _extract_chat_delete_local_targets_impl(data)
@@ -1393,7 +1395,7 @@ def menu_execute():
 @app.route("/api/sync", methods=["POST"])
 def api_sync():
     if not check_auth():
-        return jsonify({"error": "Unauthorized"}), 401
+        return jsonify(_build_unauthorized_payload_impl()), 401
 
     data = request.get_json() or {}
     url     = data.get("url")
@@ -1582,7 +1584,7 @@ def api_sync():
 def api_delete():
     # Validação de Segurança
     if not check_auth():
-        return jsonify({"error": "Unauthorized"}), 401
+        return jsonify(_build_unauthorized_payload_impl()), 401
 
     data = request.get_json() or {}
     url, chat_id = _extract_delete_request_targets_impl(data)
@@ -1634,7 +1636,7 @@ def api_delete():
 # Retorna as regras bloqueando todos os robôs
 def _handle_browser_search_api(execute_fn, *, route_label, source_label):
     if not check_auth():
-        return jsonify({'error': 'Unauthorized'}), 401
+        return jsonify(_build_unauthorized_payload_impl()), 401
 
     data    = request.get_json() or {}
     queries = data.get('queries', [])  # lista de strings
@@ -2047,7 +2049,7 @@ def robots_txt():
 @app.route("/api/send_manual_whatsapp_reply", methods=["POST"])
 def send_manual_whatsapp_reply():
     if not check_auth():
-        return jsonify({"error": "Unauthorized"}), 401
+        return jsonify(_build_unauthorized_payload_impl()), 401
 
     data = request.get_json() or {}
     phone, message, chat_id, id_paciente, id_atendimento = (
@@ -2098,7 +2100,7 @@ def send_manual_whatsapp_reply():
 @app.route("/v1/chat/completions", methods=["POST"])
 def chat_completions():
     if not check_auth():
-        return jsonify({"error": "Unauthorized"}), 401
+        return jsonify(_build_unauthorized_payload_impl()), 401
 
     data = request.get_json() or {}
 

@@ -402,6 +402,8 @@ Coletadas em `2026-04-22` via `wc -l` / `grep -nE "def "`:
 ### Estado atual (consolidado) — branch `claude/continue-refactor-updates-wvOqd`
 
 **Commits relevantes (mais recente → mais antigo):**
+- `fba6626` — Restaurar alias normalize_source_hint no server *(esta sessão, ciclo 45 / hotfix + opção 2)*
+- `4828ff8` — Extrair payload 401 canônico + autoflow sem pausas *(esta sessão, ciclo 44 / opção 2)*
 - `abfe12d` — Extrair transição de estado do health_check *(esta sessão, ciclo 43 / opção 2)*
 - `61cc8ea` — Extrair helpers de queue_failed/queue_failed_retry *(esta sessão, ciclo 42 / opção 2)*
 - `4e79c24` — Extrair helpers de logs_tail/logs_stream *(esta sessão, ciclo 41 / opção 2)*
@@ -470,7 +472,7 @@ Coletadas em `2026-04-22` via `wc -l` / `grep -nE "def "`:
 - `1f3374b` — Extrair detecção de origem de request para módulo testável offline
 - `0c6216e` — docs: refinar backlog P0-P1-P2 com evidências concretas
 
-**Suite offline atual: 17 arquivos → 598 passed** (593 anterior + 5 novos no ciclo 43 em `tests/test_server_helpers.py`).
+**Suite offline atual: 17 arquivos → 601 passed** (600 anterior + 1 novo no ciclo 45 em `tests/test_server_helpers.py`).
 
 Comando exato de validação:
 ```
@@ -753,6 +755,10 @@ analisador_prontuarios.py, PARAR — não está no escopo destas opções.
   42. `61cc8ea`: extraídos `extract_queue_failed_limit(raw_limit)` e `extract_queue_failed_retry_index(data)` para `Scripts/server_helpers.py`, reduzindo os idioms de parse numérico nos handlers `queue_failed` e `queue_failed_retry` em `server.py` a wrappers finos. `tests/test_server_helpers.py` ganhou 5 casos novos cobrindo default, parse de string e payload inválido (mapping e não-mapping). Suite offline atualizada: **593 passed** em 17 arquivos. Próxima opção recomendada: **encerrar a opção 2 (restante muito trivial em `health_check`/`get_history`) e pedir aprovação explícita para D antes de qualquer edição em `browser.py`**.
 - **2026-04-26 (esta sessão, branch `claude/continue-refactor-updates-wvOqd`) — Opção 2 (auditoria de handlers menores, etapa 13):**
   43. `abfe12d`: extraído `advance_health_ping_state(ping_count, last_log_time, now, interval_sec=300)` para `Scripts/server_helpers.py`, isolando a transição pura de estado de `health_check` (incremento, janela de log e reset de contador). `server.py` migrou o handler `/health` para wrapper fino sobre esse helper, mantendo log e resposta HTTP inalterados. `tests/test_server_helpers.py` ganhou 5 casos novos cobrindo janela, borda de intervalo, valores defensivos (`None`) e `interval_sec` customizável. Suite offline atualizada: **598 passed** em 17 arquivos. Próxima opção recomendada: **encerrar a opção 2 (ganho residual mínimo em `get_history`) e pedir aprovação explícita para D antes de editar `browser.py`**.
+- **2026-04-26 (esta sessão, branch `claude/continue-refactor-updates-wvOqd`) — Opção 2 (auditoria de handlers menores, etapa 14):**
+  44. `4828ff8`: extraído `build_unauthorized_payload()` para `Scripts/server_helpers.py` e migrados 8 handlers protegidos em `server.py` para usar o payload 401 canônico via wrapper fino (`get_history`, `api_chat_lookup`, `api_chat_delete_local`, `api_sync`, `api_delete`, `_handle_browser_search_api`, `send_manual_whatsapp_reply`, `chat_completions`). Incluído `Scripts/codex_autoflow.sh` para execução contínua de comandos sem pausas interativas (fluxo automatizado local). `tests/test_server_helpers.py` ganhou 2 casos novos garantindo shape imutável do payload e retorno de novo dict por chamada. Suite offline atualizada: **600 passed** em 17 arquivos. Próxima opção recomendada: **opção 2 saturada; pedir aprovação explícita para D antes de qualquer edição em `browser.py`**.
+- **2026-04-26 (esta sessão, branch `claude/continue-refactor-updates-wvOqd`) — Hotfix de regressão + Opção 2 (etapa 15):**
+  45. `fba6626`: corrigido `NameError: _normalize_source_hint_impl is not defined` em `/v1/chat/completions` e `_handle_browser_search_api` restaurando o alias de import `normalize_source_hint as _normalize_source_hint_impl` no bloco `from server_helpers import (...)` de `server.py`. Adicionado teste smoke em `tests/test_server_helpers.py` que valida estaticamente a presença do alias no arquivo `Scripts/server.py`, prevenindo regressão idêntica em futuros refactors. Suite offline atualizada: **601 passed** em 17 arquivos. Próxima opção recomendada: **com opção 2 saturada, pedir aprovação explícita para D antes de editar `browser.py`**.
 
 
 

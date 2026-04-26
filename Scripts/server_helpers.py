@@ -750,6 +750,11 @@ def advance_health_ping_state(
     }
 
 
+def build_unauthorized_payload() -> dict:
+    """Payload canônico para respostas HTTP 401 dos handlers protegidos."""
+    return {"error": "Unauthorized"}
+
+
 def safe_snapshot_stats(queue_obj) -> dict:
     """Wrapper defensivo para ``queue_obj.snapshot_stats()`` que jamais
     levanta exceção.
@@ -812,6 +817,7 @@ __all__ = [
     "extract_queue_failed_limit",
     "extract_queue_failed_retry_index",
     "advance_health_ping_state",
+    "build_unauthorized_payload",
     "safe_snapshot_stats",
 ]
 
