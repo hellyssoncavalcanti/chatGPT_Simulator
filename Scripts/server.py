@@ -73,7 +73,6 @@ from server_helpers import (
     normalize_optional_text as _normalize_optional_text_impl,
     format_requester_suffix as _format_requester_suffix_impl,
     format_origin_suffix as _format_origin_suffix_impl,
-    compute_python_request_interval as _compute_python_request_interval_impl,
 )
 import error_catalog as _error_catalog
 from log_sanitizer import sanitize_mapping as _sanitize_audit_payload
@@ -169,8 +168,14 @@ PYTHON_ANTI_RATE_LIMIT_PAUSA_MAX = max(
     int(getattr(config, "ANALISADOR_PAUSA_MAX", 60) or 0),
 )
 PYTHON_ANTI_RATE_LIMIT_TICK_SEC = 1.0
-_python_anti_rate_limit_lock = threading.Lock()
-_python_anti_rate_limit_last_ts = 0.0
+
+# Throttle global de pedidos Python — singleton encapsulado em padrão B
+# (ver python_request_throttle.py). Aliases `_python_anti_rate_limit_lock`
+# preservados para compat com qualquer código legado/teste que toque o
+# lock direto.
+from python_request_throttle import PythonRequestThrottle
+_PYTHON_REQUEST_THROTTLE = PythonRequestThrottle()
+_python_anti_rate_limit_lock = _PYTHON_REQUEST_THROTTLE._lock
 
 PROM_QUEUE_SIZE = Gauge("simulator_queue_size", "Tamanho atual da fila") if Gauge else None
 PROM_ACTIVE_CHATS = Gauge("simulator_active_chats", "Chats ativos em processamento") if Gauge else None
@@ -474,32 +479,27 @@ def _wait_python_request_interval_if_needed(is_python_source: bool, stream_queue
     O intervalo base é sorteado entre `ANALISADOR_PAUSA_MIN` e
     `ANALISADOR_PAUSA_MAX` (config.py) e dividido pela quantidade de perfis
     ChatGPT ativos em `config.CHROMIUM_PROFILES` (atualmente 2 → metade).
+
+    State global encapsulado em `_PYTHON_REQUEST_THROTTLE` (padrão B).
+    Curto-circuito histórico (limites <=0 OU primeira chamada) preservado
+    via `PythonRequestThrottle.begin()` retornar `None`. O caller mantém
+    o tight-loop com SSE + `time.sleep` para que o módulo puro permaneça
+    sem dependência de Flask/queue.
     """
     if not is_python_source:
         return
 
-    global _python_anti_rate_limit_last_ts
-
     pmin = PYTHON_ANTI_RATE_LIMIT_PAUSA_MIN
     pmax = PYTHON_ANTI_RATE_LIMIT_PAUSA_MAX
-    if pmin <= 0 and pmax <= 0:
-        with _python_anti_rate_limit_lock:
-            _python_anti_rate_limit_last_ts = time.time()
-        return
-
-    with _python_anti_rate_limit_lock:
-        last_ts = _python_anti_rate_limit_last_ts
-        if last_ts <= 0:
-            _python_anti_rate_limit_last_ts = time.time()
-            return
-
     profile_count = _count_active_chatgpt_profiles()
-    base, target = _compute_python_request_interval_impl(pmin, pmax, profile_count)
+
+    init_result = _PYTHON_REQUEST_THROTTLE.begin(pmin, pmax, profile_count)
+    if init_result is None:
+        return
+    base, target, last_ts = init_result
 
     while True:
-        now = time.time()
-        elapsed = now - last_ts
-        remaining = target - elapsed
+        remaining = _PYTHON_REQUEST_THROTTLE.remaining_seconds(target, last_ts)
         if remaining <= 0:
             break
         status_text = (
@@ -518,8 +518,7 @@ def _wait_python_request_interval_if_needed(is_python_source: bool, stream_queue
             ))
         time.sleep(min(PYTHON_ANTI_RATE_LIMIT_TICK_SEC, remaining))
 
-    with _python_anti_rate_limit_lock:
-        _python_anti_rate_limit_last_ts = time.time()
+    _PYTHON_REQUEST_THROTTLE.commit()
 
 
 def _has_active_remote_user_chat():
