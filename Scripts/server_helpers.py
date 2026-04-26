@@ -335,6 +335,22 @@ def normalize_optional_text(value) -> Optional[str]:
     return trimmed or None
 
 
+def extract_requester_identity(data) -> Tuple[Optional[str], Optional[str]]:
+    """Extrai/normaliza nome/id do solicitante no payload HTTP.
+
+    Chaves suportadas:
+      - `nome_membro_solicitante`
+      - `id_membro_solicitante`
+    """
+    payload_get = getattr(data, "get", None)
+    if payload_get is None:
+        return (None, None)
+    return (
+        normalize_optional_text(payload_get("nome_membro_solicitante")),
+        normalize_optional_text(payload_get("id_membro_solicitante")),
+    )
+
+
 def resolve_browser_profile(requested_profile, stored_profile) -> Optional[str]:
     """Resolve o `browser_profile` efetivo para a tarefa do browser.
 
@@ -559,6 +575,7 @@ __all__ = [
     "resolve_chat_url",
     "resolve_browser_profile",
     "normalize_optional_text",
+    "extract_requester_identity",
     "build_queue_key",
     "build_chat_task_payload",
     "build_error_event",

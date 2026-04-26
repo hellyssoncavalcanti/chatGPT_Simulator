@@ -393,7 +393,7 @@ Coletadas em `2026-04-22` via `wc -l` / `grep -nE "def "`:
 
 ---
 
-## 🆕 PONTO DE RETOMADA (última atualização em 2026-04-26 trevicies)
+## 🆕 PONTO DE RETOMADA (última atualização em 2026-04-26 quattuorvicies)
 
 > **Leia APENAS esta seção ao retomar em outro chat.** Ela é autocontida:
 > não é necessário reler seções anteriores a menos que haja dúvida sobre
@@ -402,6 +402,7 @@ Coletadas em `2026-04-22` via `wc -l` / `grep -nE "def "`:
 ### Estado atual (consolidado) — branch `claude/focused-einstein-GcWqc`
 
 **Commits relevantes (mais recente → mais antigo):**
+- `fb2f476` — Extrair identidade do solicitante para helper puro *(esta sessão, ciclo 18 / opção 2 parcial)*
 - `b68de2d` — Expor WebSearchThrottle em /api/metrics + Prometheus *(esta sessão, ciclo 17 / opção E)*
 - `511d667` — Documentar plano de concorrência por browser_profile *(esta sessão, ciclo 16 / opção C)*
 - `939d904` — Extrair WebSearchThrottle (state + lock) para módulo puro *(esta sessão, ciclo 15)*
@@ -454,7 +455,7 @@ Coletadas em `2026-04-22` via `wc -l` / `grep -nE "def "`:
 - `1f3374b` — Extrair detecção de origem de request para módulo testável offline
 - `0c6216e` — docs: refinar backlog P0-P1-P2 com evidências concretas
 
-**Suite offline atual: 17 arquivos → 519 passed** (517 anterior + 2 novos em `test_web_search_throttle.py::TestSnapshot`).
+**Suite offline atual: 17 arquivos → 524 passed** (519 anterior + 5 novos em `tests/test_server_helpers.py::TestExtractRequesterIdentity`).
 
 Comando exato de validação:
 ```
@@ -478,7 +479,7 @@ python3 -m pytest \
   tests/test_python_request_throttle.py \
   tests/test_web_search_throttle.py
 ```
-Esperado: **519 passed**. (NÃO usar `python3 -m pytest tests/` cru — `tests/test_server_api.py` e `tests/test_storage.py` falham por requerer `flask` / `cryptography` indisponíveis neste ambiente.)
+Esperado: **524 passed**. (NÃO usar `python3 -m pytest tests/` cru — `tests/test_server_api.py` e `tests/test_storage.py` falham por requerer `flask` / `cryptography` indisponíveis neste ambiente.)
 
 ### Mapa de módulos puros já criados
 
@@ -597,13 +598,14 @@ Esperado: **519 passed**. (NÃO usar `python3 -m pytest tests/` cru — `tests/t
 
 ```
 Continue o refactor do /home/user/chatGPT_Simulator na branch claude/focused-einstein-Ol7Hd.
-Leia APENAS a seção "PONTO DE RETOMADA (última atualização em 2026-04-26 trevicies)" em REFACTOR_PROGRESS.md — é autocontida.
+Leia APENAS a seção "PONTO DE RETOMADA (última atualização em 2026-04-26 quattuorvicies)" em REFACTOR_PROGRESS.md — é autocontida.
 
-As opções 1 (PythonRequestThrottle), 2 (auditoria de handlers menores), 3 (dict-yielders SSE),
+As opções 1 (PythonRequestThrottle), 3 (dict-yielders SSE),
 A (snapshot em /api/metrics + Prometheus), B (WebSearchThrottle), C (doc de concorrência por profile) e E (snapshot do WebSearchThrottle) já estão FEITAS. Próximas opções:
 
-**2. Auditar e migrar handlers menores que ainda têm idioms duplicados** (BAIXO risco)
-- Focar em `api_delete`, `api_close_chat`, `api_completions` legado; buscar `_format_requester_suffix`, `_extract_source_hint`, `(v or "").strip() or None`.
+**2. Auditar e migrar handlers menores que ainda têm idioms duplicados** (BAIXO risco, em progresso)
+- ✅ Parcial concluído: extraído `extract_requester_identity(data)` para `server_helpers.py` e migrados `api_sync`, `_handle_browser_search_api` e `chat_completions`.
+- Próximo subpasso: aplicar o mesmo helper em `send_manual_whatsapp_reply` sem alterar o formato de log legado `(id={id})`.
 - Entregável: PR pequeno com extrações puras + wrappers finos + testes offline.
 
 **D. Integrar catálogo em `browser._dismiss_rate_limit_modal_if_any`** (ALTO risco, BLOQUEADO — pede aprovação).
@@ -612,7 +614,7 @@ Regras obrigatórias:
 (a) escolher UMA opção (2 ou D) e executar do começo ao fim;
 (b) padrão B já validado 4 vezes (security_state, chat_rate_limit_cooldown, sync_dedup, python_request_throttle): novo módulo puro + classe + `now_func` injetável + wrapper fino + alias preservado;
 (c) NÃO criar novos arquivos em browser.py/analisador_prontuarios.py — fora de escopo;
-(d) manter os 519 testes offline passando + eventuais novos;
+(d) manter os 524 testes offline passando + eventuais novos;
 (e) ANTES do commit/push final, ATUALIZAR a seção "PONTO DE RETOMADA" com novo commit hash, contagem de testes, e próxima opção;
 (f) commit com título em PT-BR no imperativo;
 (g) push para claude/focused-einstein-GcWqc.
@@ -622,7 +624,7 @@ Se precisar tocar em browser.py (async/Playwright) ou em analisador_prontuarios.
 ```
 
 ### Checklist de "antes de terminar a sessão" (rodar sempre)
-- [ ] Suite offline passa: `python3 -m pytest tests/test_humanizer.py tests/test_shared_queue.py tests/test_selectors_smoke.py tests/test_request_source.py tests/test_error_catalog.py tests/test_server_helpers.py tests/test_browser_predicates.py tests/test_rate_limit_integration.py tests/test_log_sanitizer.py tests/test_analisador_rate_limit.py tests/test_audit_sanitization.py tests/test_security_state.py tests/test_chat_rate_limit_cooldown.py tests/test_analisador_parsers.py tests/test_sync_dedup.py tests/test_python_request_throttle.py tests/test_web_search_throttle.py` (esperado: **519 passed**).
+- [ ] Suite offline passa: `python3 -m pytest tests/test_humanizer.py tests/test_shared_queue.py tests/test_selectors_smoke.py tests/test_request_source.py tests/test_error_catalog.py tests/test_server_helpers.py tests/test_browser_predicates.py tests/test_rate_limit_integration.py tests/test_log_sanitizer.py tests/test_analisador_rate_limit.py tests/test_audit_sanitization.py tests/test_security_state.py tests/test_chat_rate_limit_cooldown.py tests/test_analisador_parsers.py tests/test_sync_dedup.py tests/test_python_request_throttle.py tests/test_web_search_throttle.py` (esperado: **524 passed**).
 - [ ] `python3 -c "import ast; ast.parse(open('Scripts/server.py').read())"` OK.
 - [ ] `python3 -c "import ast; ast.parse(open('Scripts/browser.py').read())"` OK.
 - [ ] `python3 -c "import ast; ast.parse(open('Scripts/analisador_prontuarios.py').read())"` OK.
@@ -671,6 +673,9 @@ Se precisar tocar em browser.py (async/Playwright) ou em analisador_prontuarios.
   16. `511d667`: criado `docs/concurrency_per_profile.md` com proposta incremental em 3 fases (módulo puro padrão B → wrapper fino em `server.py` → observabilidade), failure modes, política inicial de limites por `browser_profile`, plano de testes offline e DoD. README atualizado para incluir o novo documento em `docs/` e refletir suite offline atual (`517 passed`, 17 arquivos) + inventário de módulos puros incluindo `sync_dedup`, `python_request_throttle` e `web_search_throttle`. Nenhuma alteração em `browser.py`/`analisador_prontuarios.py` nesta sessão.
 - **2026-04-26 trevicies** (esta sessão, branch `work`) — 1 ciclo de Opção E (observabilidade do WebSearchThrottle):
   17. `b68de2d`: `WebSearchThrottle.snapshot()` estendido para retornar `age_seconds` (clamp 0 em bootstrap/clock retrógrado). `server.api_metrics` agora expõe `web_search_throttle` e `/metrics` adiciona gauge `simulator_web_search_throttle_age_sec` em `_update_rate_limit_prom_gauges`. Testes `tests/test_web_search_throttle.py` ampliados com 2 casos de idade (`advances`/`clamp`). Suite offline: **519 passed** em 17 arquivos. Próxima opção recomendada: voltar à Opção 2 (auditoria de handlers menores), mantendo `browser.py` fora de escopo sem aprovação.
+- **2026-04-26 quattuorvicies** (esta sessão, branch `work`) — 1 ciclo de Opção 2 (auditoria de handlers menores, etapa 1):
+  18. `fb2f476`: extraído `extract_requester_identity(data)` para `Scripts/server_helpers.py` (módulo puro), normalizando `nome_membro_solicitante`/`id_membro_solicitante` via `normalize_optional_text`. Migração de 3 handlers em `server.py` (`api_sync`, `_handle_browser_search_api`, `chat_completions`) para usar o helper e reduzir idiom duplicado `data.get(... ) or None`. `tests/test_server_helpers.py` ganhou classe `TestExtractRequesterIdentity` (+5 casos: strip, vazios, ausentes, duck-typed `.get`, entrada inválida). Suite offline: **524 passed** em 17 arquivos. Próximo subpasso recomendado: aplicar helper em `send_manual_whatsapp_reply` preservando formato de log legado `(id={id})`.
+
 
 
 - **2026-04-25 septendecies** (branch `claude/create-log-sanitization-script-QQ56a`) — 3 ciclos contínuos sobre o pano de fundo da sedecies:

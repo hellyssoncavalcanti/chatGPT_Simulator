@@ -70,6 +70,7 @@ from server_helpers import (
     build_status_event as _build_status_event_impl,
     build_markdown_event as _build_markdown_event_impl,
     normalize_optional_text as _normalize_optional_text_impl,
+    extract_requester_identity as _extract_requester_identity_impl,
     format_requester_suffix as _format_requester_suffix_impl,
     format_origin_suffix as _format_origin_suffix_impl,
     safe_int as _safe_int_impl,
@@ -1416,8 +1417,7 @@ def api_sync():
             sync_browser_profile = _normalize_optional_text_impl(snap.get("chromium_profile"))
 
     # --- Identificação do solicitante (opcional) ---
-    nome_membro = data.get("nome_membro_solicitante") or None
-    id_membro   = data.get("id_membro_solicitante")   or None
+    nome_membro, id_membro = _extract_requester_identity_impl(data)
     _quem = _format_requester_suffix_impl(nome_membro, id_membro)
     _url_info  = f' | url: {url}'     if url     else ''
     _cid_info  = f' | chat_id: {chat_id}' if chat_id else ''
@@ -1645,8 +1645,7 @@ def _handle_browser_search_api(execute_fn, *, route_label, source_label):
     data    = request.get_json() or {}
     queries = data.get('queries', [])  # lista de strings
     stream  = bool(data.get('stream', False))
-    nome_membro = data.get("nome_membro_solicitante") or None
-    id_membro   = data.get("id_membro_solicitante") or None
+    nome_membro, id_membro = _extract_requester_identity_impl(data)
     _quem = _format_requester_suffix_impl(nome_membro, id_membro)
     source_hint = _extract_source_hint_impl(data, request.headers)
     source_hint_norm = str(source_hint).strip().lower()
@@ -2130,8 +2129,7 @@ def chat_completions():
         chat_id = request.args.get("chat_id")
 
     # --- Identificação do solicitante (opcional) ---
-    nome_membro = data.get("nome_membro_solicitante") or None
-    id_membro   = data.get("id_membro_solicitante")   or None
+    nome_membro, id_membro = _extract_requester_identity_impl(data)
     _quem = _format_requester_suffix_impl(nome_membro, id_membro)
     source_hint = _extract_source_hint_impl(data, request.headers)
     source_hint_norm = str(source_hint).strip().lower()

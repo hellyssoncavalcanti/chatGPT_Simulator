@@ -267,7 +267,7 @@ python3 -m pytest \
   tests/test_web_search_throttle.py
 ```
 
-Esperado: **519 passed**. (Os arquivos `tests/test_server_api.py` e
+Esperado: **524 passed**. (Os arquivos `tests/test_server_api.py` e
 `tests/test_storage.py` são excluídos porque exigem `flask` e
 `cryptography`, que não estão nesta lista de smoke offline — eles
 rodam no CI completo via o comando da seção anterior.)
