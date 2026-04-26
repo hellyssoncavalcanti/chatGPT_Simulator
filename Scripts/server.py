@@ -91,6 +91,7 @@ from server_helpers import (
     resolve_avatar_filename as _resolve_avatar_filename_impl,
     count_active_chats as _count_active_chats_impl,
     count_unfinished_chats as _count_unfinished_chats_impl,
+    find_expired_chat_ids as _find_expired_chat_ids_impl,
     build_active_chat_meta as _build_active_chat_meta_impl,
     normalize_source_hint as _normalize_source_hint_impl,
     format_requester_suffix as _format_requester_suffix_impl,
@@ -238,10 +239,7 @@ def _cleanup_active_chats():
     while True:
         time.sleep(300)
         cutoff = time.time() - 600
-        to_delete = [
-            k for k, v in list(ACTIVE_CHATS.items())
-            if v.get('finished') and v.get('finished_at', 0) < cutoff
-        ]
+        to_delete = _find_expired_chat_ids_impl(ACTIVE_CHATS, cutoff)
         for k in to_delete:
             del ACTIVE_CHATS[k]
         if to_delete:

@@ -928,6 +928,46 @@ class TestCountUnfinishedChats:
         assert sh.count_unfinished_chats(chats) == 10
 
 
+class TestFindExpiredChatIds:
+    def test_empty_returns_empty_list(self):
+        assert sh.find_expired_chat_ids({}, 100.0) == []
+
+    def test_only_finished_below_cutoff_are_returned(self):
+        chats = {
+            "old_finished": {"finished": True, "finished_at": 50.0},
+            "fresh_finished": {"finished": True, "finished_at": 99.0},
+            "unfinished": {"finished": False, "finished_at": 0},
+        }
+        out = sh.find_expired_chat_ids(chats, 80.0)
+        assert out == ["old_finished"]
+
+    def test_finished_at_default_zero_is_below_any_positive_cutoff(self):
+        chats = {
+            "no_ts": {"finished": True},
+        }
+        assert sh.find_expired_chat_ids(chats, 1.0) == ["no_ts"]
+
+    def test_invalid_finished_at_falls_back_to_zero(self):
+        chats = {
+            "bad": {"finished": True, "finished_at": "junk"},
+        }
+        assert sh.find_expired_chat_ids(chats, 1.0) == ["bad"]
+
+    def test_invalid_meta_entries_skipped(self):
+        chats = {
+            "ok_old": {"finished": True, "finished_at": 0.0},
+            "bad_str": "junk",
+            "bad_none": None,
+        }
+        assert sh.find_expired_chat_ids(chats, 100.0) == ["ok_old"]
+
+    def test_unfinished_never_returned_even_below_cutoff(self):
+        chats = {
+            "u": {"finished": False, "finished_at": 0.0},
+        }
+        assert sh.find_expired_chat_ids(chats, 1000.0) == []
+
+
 class TestBuildActiveChatMeta:
     def test_meta_shape_and_defaults(self):
         sentinel_q = object()
