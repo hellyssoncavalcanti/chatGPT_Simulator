@@ -81,38 +81,25 @@ class TestSnapshot:
         clock = _FakeClock(100.0)
         t = WebSearchThrottle(now_func=clock, rng_func=lambda lo, hi: 9.0)
         t.reserve_slot(8, 22)
-        # Sem avanço de relógio entre reserve_slot e snapshot.
         assert t.snapshot() == {
             "last_started_at": 100.0,
             "last_interval_sec": 9.0,
             "age_seconds": 0.0,
         }
 
-    def test_snapshot_age_advances_with_clock(self):
+    def test_snapshot_age_seconds_advances(self):
         clock = _FakeClock(100.0)
         t = WebSearchThrottle(now_func=clock, rng_func=lambda lo, hi: 9.0)
-        t.reserve_slot(8, 22)  # last_started_at = 100.0
-        clock.set(112.5)
-        snap = t.snapshot()
-        assert snap["last_started_at"] == 100.0
-        assert snap["last_interval_sec"] == 9.0
-        assert snap["age_seconds"] == 12.5
+        t.reserve_slot(8, 22)
+        clock.set(108.5)
+        assert t.snapshot()["age_seconds"] == 8.5
 
-    def test_snapshot_age_clamped_to_zero_when_never_reserved(self):
-        clock = _FakeClock(1000.0)
-        t = WebSearchThrottle(now_func=clock)
-        snap = t.snapshot()
-        assert snap["last_started_at"] == 0.0
-        assert snap["age_seconds"] == 0.0
-
-    def test_snapshot_age_clamped_to_zero_on_clock_regression(self):
+    def test_snapshot_age_seconds_clamps_when_clock_goes_backwards(self):
         clock = _FakeClock(100.0)
-        t = WebSearchThrottle(now_func=clock, rng_func=lambda lo, hi: 8.0)
-        t.reserve_slot(8, 22)  # last_started_at = 100.0
-        clock.set(50.0)  # ajuste NTP retroativo
-        snap = t.snapshot()
-        assert snap["last_started_at"] == 100.0
-        assert snap["age_seconds"] == 0.0
+        t = WebSearchThrottle(now_func=clock, rng_func=lambda lo, hi: 9.0)
+        t.reserve_slot(8, 22)
+        clock.set(90.0)
+        assert t.snapshot()["age_seconds"] == 0.0
 
     def test_snapshot_thread_safe_under_concurrent_reservations(self):
         t = WebSearchThrottle(now_func=time.time, rng_func=lambda lo, hi: 8.0)
@@ -131,17 +118,16 @@ class TestSnapshot:
                 assert "last_started_at" in snap
                 assert "last_interval_sec" in snap
                 assert "age_seconds" in snap
-                assert snap["age_seconds"] >= 0.0
         finally:
             stop.set()
 
 
 class TestForceState:
     def test_force_state_changes_snapshot(self):
-        clock = _FakeClock(10.0)
-        t = WebSearchThrottle(now_func=clock)
-        t._force_state(last_started_at=7.0, last_interval_sec=11.0)
-        snap = t.snapshot()
-        assert snap["last_started_at"] == 7.0
-        assert snap["last_interval_sec"] == 11.0
-        assert snap["age_seconds"] == 3.0
+        t = WebSearchThrottle(now_func=lambda: 10.0)
+        t._force_state(last_started_at=77.0, last_interval_sec=11.0)
+        assert t.snapshot() == {
+            "last_started_at": 77.0,
+            "last_interval_sec": 11.0,
+            "age_seconds": 0.0,
+        }

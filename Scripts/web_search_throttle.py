@@ -64,30 +64,20 @@ class WebSearchThrottle:
         """Snapshot serializável do estado interno (thread-safe).
 
         Campos:
-        - ``last_started_at``: timestamp Unix do último ``reserve_slot()``
-          (mais especificamente, do `scheduled_start_at` reservado).
-          ``0.0`` antes da primeira reserva.
-        - ``last_interval_sec``: intervalo (sorteado por `rng_func`) usado
-          na última reserva. ``0.0`` antes da primeira reserva.
-        - ``age_seconds``: segundos desde ``last_started_at``. ``0.0``
-          quando ``last_started_at == 0`` (boot) ou quando o relógio
-          retrocede (ajuste NTP); clamp em zero garante monotonia
-          observável em métricas.
-
-        Pensado para `/api/metrics` — `age_seconds` é o campo observável
-        útil; `last_started_at`/`last_interval_sec` ajudam em correlação
-        com logs de busca web.
+        - ``last_started_at``: timestamp da última reserva concluída.
+        - ``last_interval_sec``: intervalo sorteado na última reserva.
+        - ``age_seconds``: idade (segundos) desde `last_started_at`,
+          com clamp em 0 para bootstrap/clock retrógrado.
         """
         with self._lock:
             last_started_at = float(self._last_started_at)
-            last_interval_sec = float(self._last_interval_sec)
             if last_started_at <= 0:
                 age = 0.0
             else:
                 age = max(0.0, float(self._now_func()) - last_started_at)
             return {
                 "last_started_at": last_started_at,
-                "last_interval_sec": last_interval_sec,
+                "last_interval_sec": float(self._last_interval_sec),
                 "age_seconds": round(age, 3),
             }
 

@@ -207,7 +207,7 @@ PROM_PYTHON_REQUEST_THROTTLE_AGE_SEC = Gauge(
 ) if Gauge else None
 PROM_WEB_SEARCH_THROTTLE_AGE_SEC = Gauge(
     "simulator_web_search_throttle_age_sec",
-    "Segundos desde a última reserva de busca web (Google/UpToDate); 0 antes da primeira busca",
+    "Segundos desde a última reserva de janela para busca web (0 antes da primeira reserva)",
 ) if Gauge else None
 
 
@@ -1269,12 +1269,12 @@ def prometheus_metrics():
 
 def _update_rate_limit_prom_gauges():
     """Sincroniza gauges Prometheus com os snapshots atuais dos singletons
-    de rate-limit / security / throttle Python. Chamado no endpoint `/metrics`.
+    de rate-limit / security / throttles globais. Chamado no endpoint `/metrics`.
     Silencioso em ambientes sem `prometheus_client` (todos os gauges vêm `None`)."""
     chat_snap = _CHAT_RATE_LIMIT_COOLDOWN.snapshot()
     sec_snap = _SECURITY_STATE.snapshot()
-    throttle_snap = _PYTHON_REQUEST_THROTTLE.snapshot()
-    web_search_snap = _WEB_SEARCH_THROTTLE.snapshot()
+    py_throttle_snap = _PYTHON_REQUEST_THROTTLE.snapshot()
+    web_search_throttle_snap = _WEB_SEARCH_THROTTLE.snapshot()
     if PROM_CHAT_RATE_LIMIT_REMAINING_SEC is not None:
         PROM_CHAT_RATE_LIMIT_REMAINING_SEC.set(float(chat_snap.get("remaining_seconds", 0.0)))
     if PROM_CHAT_RATE_LIMIT_STRIKES is not None:
@@ -1284,9 +1284,9 @@ def _update_rate_limit_prom_gauges():
     if PROM_SECURITY_TRACKED_LOGIN_IPS is not None:
         PROM_SECURITY_TRACKED_LOGIN_IPS.set(float(sec_snap.get("tracked_login_ips", 0)))
     if PROM_PYTHON_REQUEST_THROTTLE_AGE_SEC is not None:
-        PROM_PYTHON_REQUEST_THROTTLE_AGE_SEC.set(float(throttle_snap.get("age_seconds", 0.0)))
+        PROM_PYTHON_REQUEST_THROTTLE_AGE_SEC.set(float(py_throttle_snap.get("age_seconds", 0.0)))
     if PROM_WEB_SEARCH_THROTTLE_AGE_SEC is not None:
-        PROM_WEB_SEARCH_THROTTLE_AGE_SEC.set(float(web_search_snap.get("age_seconds", 0.0)))
+        PROM_WEB_SEARCH_THROTTLE_AGE_SEC.set(float(web_search_throttle_snap.get("age_seconds", 0.0)))
 
 @app.route("/", methods=["GET", "POST"])
 def index(): 

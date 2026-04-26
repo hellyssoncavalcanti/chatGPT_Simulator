@@ -267,7 +267,7 @@ python3 -m pytest \
   tests/test_web_search_throttle.py
 ```
 
-Esperado: **543 passed**. (Os arquivos `tests/test_server_api.py` e
+Esperado: **519 passed**. (Os arquivos `tests/test_server_api.py` e
 `tests/test_storage.py` são excluídos porque exigem `flask` e
 `cryptography`, que não estão nesta lista de smoke offline — eles
 rodam no CI completo via o comando da seção anterior.)
@@ -285,7 +285,7 @@ rodam no CI completo via o comando da seção anterior.)
 | `Scripts/chat_rate_limit_cooldown.py` | Classe `ChatRateLimitCooldown` — cooldown global com backoff exponencial 2^strikes (clamp 1800s). | `tests/test_chat_rate_limit_cooldown.py` |
 | `Scripts/sync_dedup.py` | Classe `SyncDedup` — dedup thread-safe de `/api/sync` (janela 120s), com `try_acquire`/`release`/`snapshot`. | `tests/test_sync_dedup.py` |
 | `Scripts/python_request_throttle.py` | Classe `PythonRequestThrottle` — throttle global anti-rate-limit para requests Python com `begin`/`remaining_seconds`/`commit`/`snapshot`. | `tests/test_python_request_throttle.py` |
-| `Scripts/web_search_throttle.py` | Classe `WebSearchThrottle` — agendamento global de busca web com intervalo humano (`reserve_slot`/`snapshot` com `age_seconds`) e injeção de `now_func`/`rng_func`. Snapshot exposto em `/api/metrics::web_search_throttle` e gauge Prometheus `simulator_web_search_throttle_age_sec`. | `tests/test_web_search_throttle.py` |
+| `Scripts/web_search_throttle.py` | Classe `WebSearchThrottle` — agendamento global de busca web com intervalo humano (`reserve_slot`/`snapshot`) e injeção de `now_func`/`rng_func` (`snapshot` inclui `age_seconds`). | `tests/test_web_search_throttle.py` |
 | `Scripts/analisador_parsers.py` | Detecção de rate-limit em texto, strip/extract/normalize/parse JSON tolerante, heurística de truncamento, remoção de `<think>…</think>`, parser de fallback para queries de pesquisa com `max_queries` injetável. | `tests/test_analisador_parsers.py` |
 
 Os callers (`server.py`, `browser.py`, `analisador_prontuarios.py`,
