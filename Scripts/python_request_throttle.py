@@ -105,9 +105,27 @@ class PythonRequestThrottle:
             self._last_ts = self._now_func()
 
     def snapshot(self) -> Mapping[str, float]:
-        """Snapshot serializável do estado interno (thread-safe)."""
+        """Snapshot serializável do estado interno (thread-safe).
+
+        Campos:
+        - ``last_ts``: timestamp Unix do último ``commit()`` (ou ``0.0``
+          se ``begin()`` nunca foi chamado).
+        - ``age_seconds``: segundos desde o último ``commit()``
+          (``0.0`` quando ``last_ts == 0``).
+
+        Pensado para `/api/metrics` — `age_seconds` é o campo observável
+        útil; `last_ts` cru ajuda em correlação cross-process.
+        """
         with self._lock:
-            return {"last_ts": float(self._last_ts)}
+            last_ts = float(self._last_ts)
+            if last_ts <= 0:
+                age = 0.0
+            else:
+                age = max(0.0, self._now_func() - last_ts)
+            return {
+                "last_ts": last_ts,
+                "age_seconds": round(age, 3),
+            }
 
     # ── Acesso de testes (nunca usar em produção) ──
     def _force_last_ts(self, value: float) -> None:
