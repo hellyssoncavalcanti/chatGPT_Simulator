@@ -709,6 +709,67 @@ class TestBuildWebSearchTestTerminalResponse:
         assert nores_payload["query"] == weird
 
 
+class TestExtractManualWhatsappReplyTargets:
+    def test_extracts_and_strips_phone_message(self):
+        out = sh.extract_manual_whatsapp_reply_targets({
+            "phone": "  5511999  ",
+            "message": "  oi  ",
+            "chat_id": "abc",
+            "id_paciente": 42,
+            "id_atendimento": "atd-1",
+        })
+        assert out == ("5511999", "oi", "abc", 42, "atd-1")
+
+    def test_missing_phone_message_become_empty_strings(self):
+        out = sh.extract_manual_whatsapp_reply_targets({
+            "chat_id": "abc",
+        })
+        assert out == ("", "", "abc", None, None)
+
+    def test_none_payload_returns_defaults(self):
+        out = sh.extract_manual_whatsapp_reply_targets(None)
+        assert out == ("", "", None, None, None)
+
+    def test_empty_phone_message_strings_become_empty(self):
+        out = sh.extract_manual_whatsapp_reply_targets({"phone": "", "message": ""})
+        assert out == ("", "", None, None, None)
+
+    def test_only_whitespace_phone_message_become_empty_after_strip(self):
+        out = sh.extract_manual_whatsapp_reply_targets({"phone": "   ", "message": "  "})
+        assert out == ("", "", None, None, None)
+
+    def test_duck_typed_get_supported(self):
+        class Bag:
+            def __init__(self, d):
+                self._d = d
+            def get(self, k, default=None):
+                return self._d.get(k, default)
+
+        out = sh.extract_manual_whatsapp_reply_targets(Bag({
+            "phone": "55",
+            "message": "ok",
+        }))
+        assert out == ("55", "ok", None, None, None)
+
+
+class TestFormatManualWhatsappRequesterSuffix:
+    def test_full_identity_emits_legacy_format(self):
+        assert sh.format_manual_whatsapp_requester_suffix("Ana", "X-1") == ' por "Ana" (id=X-1)'
+
+    def test_only_name_emits_format(self):
+        assert sh.format_manual_whatsapp_requester_suffix("Ana", None) == ' por "Ana" (id=)'
+
+    def test_only_id_emits_format(self):
+        assert sh.format_manual_whatsapp_requester_suffix(None, "X-1") == ' por "" (id=X-1)'
+
+    def test_empty_identity_returns_empty_string(self):
+        assert sh.format_manual_whatsapp_requester_suffix(None, None) == ""
+        assert sh.format_manual_whatsapp_requester_suffix("", "") == ""
+
+    def test_non_string_id_is_coerced(self):
+        assert sh.format_manual_whatsapp_requester_suffix("Ana", 42) == ' por "Ana" (id=42)'
+
+
 # ─────────────────────────────────────────────────────────
 # build_queue_key
 # ─────────────────────────────────────────────────────────

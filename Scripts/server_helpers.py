@@ -468,6 +468,47 @@ def build_web_search_test_no_response_payload(query: str) -> dict:
     return build_web_search_test_error_payload(query, "Sem resposta do browser")
 
 
+def extract_manual_whatsapp_reply_targets(data):
+    """Extrai (`phone`, `message`, `chat_id`, `id_paciente`, `id_atendimento`)
+    do payload de `/api/send_manual_whatsapp_reply`.
+
+    Normaliza apenas `phone` e `message` via trim (mantém ``""`` como
+    sentinela de ausência — o caller valida `if not phone or not message`
+    para retornar HTTP 400). Demais campos são repassados sem mutação,
+    preservando o contrato histórico do downstream `acompanhamento_whatsapp.py`.
+
+    Aceita qualquer objeto com `.get()`; entradas inválidas (None/sem `.get`)
+    retornam todos os campos como ``""``/``None``.
+    """
+    payload_get = getattr(data, "get", None)
+    if payload_get is None:
+        return ("", "", None, None, None)
+    phone = (payload_get("phone") or "").strip() if payload_get("phone") else ""
+    message = (payload_get("message") or "").strip() if payload_get("message") else ""
+    return (
+        phone,
+        message,
+        payload_get("chat_id"),
+        payload_get("id_paciente"),
+        payload_get("id_atendimento"),
+    )
+
+
+def format_manual_whatsapp_requester_suffix(nome_membro, id_membro) -> str:
+    """Sufixo `_quem` específico de `send_manual_whatsapp_reply`.
+
+    Produz ``' por "<nome>" (id=<id>)'`` quando há nome OU id; vazia caso
+    contrário. **Diferente** de `format_requester_suffix` (que emite
+    ``(id_membro: "<id>")``): este idiom é histórico desta rota e
+    consumido por log/observabilidade que dependem do formato exato.
+    """
+    nome = "" if nome_membro is None else str(nome_membro)
+    ident = "" if id_membro is None else str(id_membro)
+    if not nome and not ident:
+        return ""
+    return f' por "{nome}" (id={ident})'
+
+
 def build_web_search_test_terminal_response(kind: str, query: str) -> Tuple[dict, int]:
     """Resolve `(payload, status_code)` para casos terminais de `/api/web_search/test`.
 
@@ -723,6 +764,8 @@ __all__ = [
     "build_web_search_test_timeout_payload",
     "build_web_search_test_no_response_payload",
     "build_web_search_test_terminal_response",
+    "extract_manual_whatsapp_reply_targets",
+    "format_manual_whatsapp_requester_suffix",
     "build_queue_key",
     "build_chat_task_payload",
     "build_error_event",

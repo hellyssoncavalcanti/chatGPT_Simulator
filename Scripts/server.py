@@ -83,6 +83,8 @@ from server_helpers import (
     build_web_search_test_timeout_payload as _build_web_search_test_timeout_payload_impl,
     build_web_search_test_no_response_payload as _build_web_search_test_no_response_payload_impl,
     build_web_search_test_terminal_response as _build_web_search_test_terminal_response_impl,
+    extract_manual_whatsapp_reply_targets as _extract_manual_whatsapp_reply_targets_impl,
+    format_manual_whatsapp_requester_suffix as _format_manual_whatsapp_requester_suffix_impl,
     format_requester_suffix as _format_requester_suffix_impl,
     format_origin_suffix as _format_origin_suffix_impl,
     safe_int as _safe_int_impl,
@@ -2073,11 +2075,9 @@ def send_manual_whatsapp_reply():
         return jsonify({"error": "Unauthorized"}), 401
 
     data = request.get_json() or {}
-    phone   = (data.get("phone") or "").strip()
-    message = (data.get("message") or "").strip()
-    chat_id = data.get("chat_id")
-    id_paciente      = data.get("id_paciente")
-    id_atendimento   = data.get("id_atendimento")
+    phone, message, chat_id, id_paciente, id_atendimento = (
+        _extract_manual_whatsapp_reply_targets_impl(data)
+    )
     nome_membro, id_membro = _extract_requester_identity_impl(data)
 
     if not phone or not message:
@@ -2085,7 +2085,7 @@ def send_manual_whatsapp_reply():
 
     # Mantém formato histórico específico desta rota:
     # ` por "<nome>" (id=<id>)` (difere do padrão `id_membro: "<id>"`).
-    _quem = f' por "{nome_membro}" (id={id_membro})' if (nome_membro or id_membro) else ""
+    _quem = _format_manual_whatsapp_requester_suffix_impl(nome_membro, id_membro)
     print(f"\n[📨 MANUAL REPLY] Resposta manual{_quem} para phone={phone} | chat_id={chat_id}")
 
     # Repassa ao acompanhamento_whatsapp.py (porta 3011)
