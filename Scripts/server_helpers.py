@@ -468,6 +468,47 @@ def build_web_search_test_no_response_payload(query: str) -> dict:
     return build_web_search_test_error_payload(query, "Sem resposta do browser")
 
 
+def count_active_chats(active_chats, *, now: float, stale_threshold_sec: float) -> dict:
+    """Conta chats ativos por categoria a partir do snapshot `active_chats`.
+
+    Itera sobre o mapa `chat_id → meta` (ignora entradas com
+    ``meta.get("finished") is truthy``), classifica `analyzer` vs `remote`
+    pela flag `meta.get("is_analyzer")` e marca como `stale_candidate`
+    quando `now - meta.last_event_at > stale_threshold_sec`
+    (para `last_event_at > 0`).
+
+    Retorna ``{"total", "analyzer", "remote", "stale_candidates"}``,
+    mesmas chaves consumidas em `/api/metrics`. Função pura — caller
+    fornece o snapshot e o relógio (permite teste determinístico).
+    """
+    total = 0
+    analyzer = 0
+    remote = 0
+    stale = 0
+    for _chat_id, meta in list(active_chats.items()):
+        if not isinstance(meta, dict):
+            continue
+        if meta.get("finished"):
+            continue
+        total += 1
+        if meta.get("is_analyzer"):
+            analyzer += 1
+        else:
+            remote += 1
+        try:
+            last_event_at = float(meta.get("last_event_at") or 0.0)
+        except (TypeError, ValueError):
+            last_event_at = 0.0
+        if last_event_at and (now - last_event_at) > stale_threshold_sec:
+            stale += 1
+    return {
+        "total": total,
+        "analyzer": analyzer,
+        "remote": remote,
+        "stale_candidates": stale,
+    }
+
+
 _VALID_AVATAR_EXTENSIONS = (".jpg", ".jpeg", ".png", ".gif", ".webp")
 
 
@@ -826,6 +867,7 @@ __all__ = [
     "format_manual_whatsapp_requester_suffix",
     "resolve_download_content_type",
     "resolve_avatar_filename",
+    "count_active_chats",
     "build_queue_key",
     "build_chat_task_payload",
     "build_error_event",

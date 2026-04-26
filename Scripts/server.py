@@ -87,6 +87,7 @@ from server_helpers import (
     format_manual_whatsapp_requester_suffix as _format_manual_whatsapp_requester_suffix_impl,
     resolve_download_content_type as _resolve_download_content_type_impl,
     resolve_avatar_filename as _resolve_avatar_filename_impl,
+    count_active_chats as _count_active_chats_impl,
     format_requester_suffix as _format_requester_suffix_impl,
     format_origin_suffix as _format_origin_suffix_impl,
     safe_int as _safe_int_impl,
@@ -1223,21 +1224,9 @@ def api_metrics():
     Métricas operacionais leves para observabilidade em tempo real.
     """
     now = time.time()
-    active_total = 0
-    active_analyzer = 0
-    active_remote = 0
-    stale_candidates = 0
-    for _chat_id, meta in list(ACTIVE_CHATS.items()):
-        if meta.get("finished"):
-            continue
-        active_total += 1
-        if meta.get("is_analyzer"):
-            active_analyzer += 1
-        else:
-            active_remote += 1
-        last_event_at = float(meta.get("last_event_at") or 0.0)
-        if last_event_at and (now - last_event_at) > ACTIVE_CHAT_STALE_SEC:
-            stale_candidates += 1
+    active_counts = _count_active_chats_impl(
+        ACTIVE_CHATS, now=now, stale_threshold_sec=ACTIVE_CHAT_STALE_SEC,
+    )
 
     queue_stats = _safe_snapshot_stats_impl(browser_queue)
 
@@ -1246,10 +1235,10 @@ def api_metrics():
         "uptime_sec": int(max(0, now - SERVER_STARTED_AT)),
         "queue_qsize": int(browser_queue.qsize()),
         "queue": queue_stats,
-        "active_chats_total": active_total,
-        "active_chats_remote": active_remote,
-        "active_chats_analyzer": active_analyzer,
-        "active_chats_stale_candidates": stale_candidates,
+        "active_chats_total": active_counts["total"],
+        "active_chats_remote": active_counts["remote"],
+        "active_chats_analyzer": active_counts["analyzer"],
+        "active_chats_stale_candidates": active_counts["stale_candidates"],
         "syncs_in_progress": len(ACTIVE_SYNCS),
         "rate_limit_remaining_sec": round(_get_chat_rate_limit_remaining_seconds(), 1),
         "chat_rate_limit": _CHAT_RATE_LIMIT_COOLDOWN.snapshot(),

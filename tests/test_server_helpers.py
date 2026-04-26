@@ -837,6 +837,60 @@ class TestResolveAvatarFilename:
         assert sh.resolve_avatar_filename("a.png", None) == (".png", None)
 
 
+class TestCountActiveChats:
+    def test_empty_returns_zero_counts(self):
+        out = sh.count_active_chats({}, now=1000.0, stale_threshold_sec=300.0)
+        assert out == {"total": 0, "analyzer": 0, "remote": 0, "stale_candidates": 0}
+
+    def test_finished_entries_are_ignored(self):
+        chats = {
+            "a": {"finished": True, "is_analyzer": True, "last_event_at": 999.0},
+            "b": {"finished": False, "is_analyzer": True, "last_event_at": 999.0},
+        }
+        out = sh.count_active_chats(chats, now=1000.0, stale_threshold_sec=300.0)
+        assert out["total"] == 1
+        assert out["analyzer"] == 1
+        assert out["remote"] == 0
+
+    def test_analyzer_vs_remote_classification(self):
+        chats = {
+            "a": {"is_analyzer": True, "last_event_at": 0.0},
+            "b": {"is_analyzer": False, "last_event_at": 0.0},
+            "c": {"is_analyzer": False, "last_event_at": 0.0},
+        }
+        out = sh.count_active_chats(chats, now=1000.0, stale_threshold_sec=300.0)
+        assert out == {"total": 3, "analyzer": 1, "remote": 2, "stale_candidates": 0}
+
+    def test_stale_candidates_when_age_exceeds_threshold(self):
+        chats = {
+            "stale": {"is_analyzer": False, "last_event_at": 100.0},
+            "fresh": {"is_analyzer": False, "last_event_at": 990.0},
+            "no_event": {"is_analyzer": False, "last_event_at": 0.0},
+        }
+        out = sh.count_active_chats(chats, now=1000.0, stale_threshold_sec=300.0)
+        assert out["total"] == 3
+        assert out["stale_candidates"] == 1  # apenas "stale"
+
+    def test_invalid_meta_entry_is_skipped(self):
+        chats = {
+            "ok": {"is_analyzer": True, "last_event_at": 999.0},
+            "bad": "not-a-dict",
+            "none": None,
+        }
+        out = sh.count_active_chats(chats, now=1000.0, stale_threshold_sec=300.0)
+        assert out["total"] == 1
+        assert out["analyzer"] == 1
+
+    def test_invalid_last_event_at_falls_back_to_zero(self):
+        chats = {
+            "a": {"is_analyzer": False, "last_event_at": "junk"},
+            "b": {"is_analyzer": False, "last_event_at": None},
+        }
+        out = sh.count_active_chats(chats, now=1000.0, stale_threshold_sec=10.0)
+        assert out["total"] == 2
+        assert out["stale_candidates"] == 0
+
+
 # ─────────────────────────────────────────────────────────
 # build_queue_key
 # ─────────────────────────────────────────────────────────
