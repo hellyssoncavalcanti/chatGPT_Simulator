@@ -393,7 +393,7 @@ Coletadas em `2026-04-22` via `wc -l` / `grep -nE "def "`:
 
 ---
 
-## 🆕 PONTO DE RETOMADA (última atualização em 2026-04-26 quinvicies)
+## 🆕 PONTO DE RETOMADA (última atualização em 2026-04-26 septvicies)
 
 > **Leia APENAS esta seção ao retomar em outro chat.** Ela é autocontida:
 > não é necessário reler seções anteriores a menos que haja dúvida sobre
@@ -402,6 +402,8 @@ Coletadas em `2026-04-22` via `wc -l` / `grep -nE "def "`:
 ### Estado atual (consolidado) — branch `claude/focused-einstein-GcWqc`
 
 **Commits relevantes (mais recente → mais antigo):**
+- `f554638` — Corrigir NameError do WebSearchThrottle no boot *(esta sessão, ciclo 21 / hotfix)*
+- `2dd6add` — Normalizar campos opcionais em handlers de manutenção *(esta sessão, ciclo 20 / opção 2)*
 - `865225b` — Migrar send_manual_whatsapp_reply para helper de solicitante *(esta sessão, ciclo 19 / opção 2)*
 - `fb2f476` — Extrair identidade do solicitante para helper puro *(esta sessão, ciclo 18 / opção 2 parcial)*
 - `b68de2d` — Expor WebSearchThrottle em /api/metrics + Prometheus *(esta sessão, ciclo 17 / opção E)*
@@ -599,14 +601,15 @@ Esperado: **524 passed**. (NÃO usar `python3 -m pytest tests/` cru — `tests/t
 
 ```
 Continue o refactor do /home/user/chatGPT_Simulator na branch claude/focused-einstein-Ol7Hd.
-Leia APENAS a seção "PONTO DE RETOMADA (última atualização em 2026-04-26 quinvicies)" em REFACTOR_PROGRESS.md — é autocontida.
+Leia APENAS a seção "PONTO DE RETOMADA (última atualização em 2026-04-26 septvicies)" em REFACTOR_PROGRESS.md — é autocontida.
 
 As opções 1 (PythonRequestThrottle), 3 (dict-yielders SSE),
 A (snapshot em /api/metrics + Prometheus), B (WebSearchThrottle), C (doc de concorrência por profile) e E (snapshot do WebSearchThrottle) já estão FEITAS. Próximas opções:
 
 **2. Auditar e migrar handlers menores que ainda têm idioms duplicados** (BAIXO risco, em progresso)
 - ✅ Concluído nesta trilha: extraído `extract_requester_identity(data)` para `server_helpers.py` e migrados `api_sync`, `_handle_browser_search_api`, `chat_completions` e `send_manual_whatsapp_reply` (preservando formato de log legado `(id={id})` nessa rota).
-- Próximo subpasso: auditar `api_delete`/`api_close_chat`/`api_completions` para outros idioms duplicados (não relacionados ao solicitante).
+- ✅ Subpasso adicional concluído: normalização de campos opcionais via `_normalize_optional_text_impl` em `api_chat_lookup`, `api_chat_delete_local` e `api_delete` (remoção de idioms `or ""`).
+- Próximo subpasso: revisar `api_completions` legado para possíveis helpers puros de validação/payload.
 - Entregável: PR pequeno com extrações puras + wrappers finos + testes offline.
 
 **D. Integrar catálogo em `browser._dismiss_rate_limit_modal_if_any`** (ALTO risco, BLOQUEADO — pede aprovação).
@@ -678,6 +681,12 @@ Se precisar tocar em browser.py (async/Playwright) ou em analisador_prontuarios.
   18. `fb2f476`: extraído `extract_requester_identity(data)` para `Scripts/server_helpers.py` (módulo puro), normalizando `nome_membro_solicitante`/`id_membro_solicitante` via `normalize_optional_text`. Migração de 3 handlers em `server.py` (`api_sync`, `_handle_browser_search_api`, `chat_completions`) para usar o helper e reduzir idiom duplicado `data.get(... ) or None`. `tests/test_server_helpers.py` ganhou classe `TestExtractRequesterIdentity` (+5 casos: strip, vazios, ausentes, duck-typed `.get`, entrada inválida). Suite offline: **524 passed** em 17 arquivos. Próximo subpasso recomendado: aplicar helper em `send_manual_whatsapp_reply` preservando formato de log legado `(id={id})`.
 - **2026-04-26 quinvicies** (esta sessão, branch `work`) — 1 ciclo de Opção 2 (auditoria de handlers menores, etapa 2):
   19. `865225b`: `send_manual_whatsapp_reply` migrado para `_extract_requester_identity_impl(data)` (remove duplicação de `data.get(...)`) mantendo explicitamente o formato histórico de log `_quem` desta rota (` por "<nome>" (id=<id>)`). README atualizado no inventário de `server_helpers` para citar extração de identidade do solicitante. Sem mudanças em `browser.py`/`analisador_prontuarios.py`. Suite offline permanece **524 passed** em 17 arquivos.
+- **2026-04-26 sexvicies** (esta sessão, branch `work`) — 1 ciclo de Opção 2 (auditoria de handlers menores, etapa 3):
+  20. `2dd6add`: normalização de campos opcionais com `_normalize_optional_text_impl` em `api_chat_lookup` (`origin_url`/`url_atual`), `api_chat_delete_local` (`chat_id`/`origin_url`) e `api_delete` (`url`/`chat_id`). Objetivo: reduzir idioms duplicados `data.get(...) or ""` e padronizar trim/None-collapse nas rotas de manutenção local. Suite offline preservada: **524 passed** em 17 arquivos. Próximo subpasso recomendado: auditar `api_completions` legado para extrações puras adicionais.
+- **2026-04-26 septvicies** (esta sessão, branch `work`) — hotfix de boot/compatibilidade de nomes:
+  21. `f554638`: corrigido `NameError: WebSearchThrottle is not defined` no boot (`main.py -> import server`) movendo `from web_search_throttle import WebSearchThrottle` para antes da instanciação `_WEB_SEARCH_THROTTLE = WebSearchThrottle()` em `server.py`. Incluída verificação explícita de ordem de símbolos (`order_ok=True`) e parse AST pós-mudança. README atualizado com nota de troubleshooting no inventário do módulo. Suite offline permaneceu **524 passed**.
+
+
 
 
 

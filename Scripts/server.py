@@ -46,6 +46,7 @@ from shared import browser_queue, get_file_info
 import storage
 import auth
 from utils import log as file_log
+from web_search_throttle import WebSearchThrottle
 from request_source import (
     is_python_chat_request as _is_python_chat_request_impl,
     is_codex_chat_request as _is_codex_chat_request_impl,
@@ -1312,7 +1313,11 @@ def api_chat_lookup():
         return jsonify({"error": "Unauthorized"}), 401
 
     data = request.get_json() or {}
-    origin_url = data.get('origin_url') or data.get('url_atual') or ''
+    origin_url = (
+        _normalize_optional_text_impl(data.get('origin_url'))
+        or _normalize_optional_text_impl(data.get('url_atual'))
+        or ''
+    )
     if not origin_url:
         return jsonify({"success": False, "error": "Missing origin_url"}), 400
 
@@ -1331,8 +1336,8 @@ def api_chat_delete_local():
         return jsonify({"error": "Unauthorized"}), 401
 
     data = request.get_json() or {}
-    chat_id = data.get('chat_id') or ''
-    origin_url = data.get('origin_url') or ''
+    chat_id = _normalize_optional_text_impl(data.get('chat_id')) or ''
+    origin_url = _normalize_optional_text_impl(data.get('origin_url')) or ''
 
     deleted_count = 0
     if chat_id:
@@ -1590,8 +1595,8 @@ def api_delete():
         return jsonify({"error": "Unauthorized"}), 401
 
     data = request.get_json() or {}
-    url = data.get("url")
-    chat_id = data.get("chat_id")
+    url = _normalize_optional_text_impl(data.get("url"))
+    chat_id = _normalize_optional_text_impl(data.get("chat_id"))
     
     if not url or not chat_id: 
         return jsonify({"success": False, "error": "Missing url or chat_id"}), 400
