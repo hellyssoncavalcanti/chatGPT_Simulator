@@ -33,7 +33,6 @@ import json
 import queue
 import base64
 import os
-import random
 import shutil
 import time
 import copy
@@ -110,7 +109,10 @@ ACTIVE_SYNCS_LOCK = _SYNC_DEDUP._lock
 WEB_SEARCH_MIN_INTERVAL_SEC = 8
 WEB_SEARCH_MAX_INTERVAL_SEC = 22
 WEB_SEARCH_PROGRESS_TICK_SEC = 1.0
-_web_search_timing_lock = threading.Lock()
+_WEB_SEARCH_THROTTLE = WebSearchThrottle()
+# Aliases preservados para compat com código legado/testes que acessam
+# diretamente lock/state do intervalo de busca web.
+_web_search_timing_lock = _WEB_SEARCH_THROTTLE._lock
 _web_search_last_started_at = 0.0
 _web_search_last_interval_sec = 0.0
 CHAT_RATE_LIMIT_DEFAULT_COOLDOWN_SEC = 240
@@ -174,6 +176,7 @@ PYTHON_ANTI_RATE_LIMIT_TICK_SEC = 1.0
 # preservados para compat com qualquer código legado/teste que toque o
 # lock direto.
 from python_request_throttle import PythonRequestThrottle
+from web_search_throttle import WebSearchThrottle
 _PYTHON_REQUEST_THROTTLE = PythonRequestThrottle()
 _python_anti_rate_limit_lock = _PYTHON_REQUEST_THROTTLE._lock
 
@@ -627,30 +630,16 @@ def _release_python_chat_slot(request_key: str) -> None:
 
 
 def _reserve_web_search_slot():
-    """
-    Reserva a próxima janela permitida para busca web com espaçamento humano.
-    O lock garante que buscas concorrentes respeitem o mesmo relógio global.
-    """
+    """Wrapper fino para `WebSearchThrottle.reserve_slot` (padrão B)."""
     global _web_search_last_started_at, _web_search_last_interval_sec
-
-    now = time.time()
-    interval = random.uniform(WEB_SEARCH_MIN_INTERVAL_SEC, WEB_SEARCH_MAX_INTERVAL_SEC)
-
-    with _web_search_timing_lock:
-        earliest_start = now
-        if _web_search_last_started_at > 0:
-            earliest_start = max(earliest_start, _web_search_last_started_at + interval)
-
-        wait_seconds = max(0.0, earliest_start - now)
-        _web_search_last_started_at = earliest_start
-        _web_search_last_interval_sec = interval
-
-    return {
-        "interval_sec": interval,
-        "scheduled_start_at": earliest_start,
-        "wait_seconds": wait_seconds,
-        "requested_at": now,
-    }
+    wait_ctx = _WEB_SEARCH_THROTTLE.reserve_slot(
+        WEB_SEARCH_MIN_INTERVAL_SEC,
+        WEB_SEARCH_MAX_INTERVAL_SEC,
+    )
+    # Compat: espelha os valores históricos em variáveis módulo-level.
+    _web_search_last_started_at = float(wait_ctx.get("scheduled_start_at") or 0.0)
+    _web_search_last_interval_sec = float(wait_ctx.get("interval_sec") or 0.0)
+    return wait_ctx
 
 
 def _iter_web_search_wait_messages(wait_ctx, query_str, phase_prefix, source_label):
