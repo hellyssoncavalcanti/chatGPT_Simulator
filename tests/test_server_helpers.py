@@ -493,6 +493,43 @@ class TestNormalizeOptionalText:
 
 
 # ─────────────────────────────────────────────────────────
+# extract_requester_identity
+# ─────────────────────────────────────────────────────────
+class TestExtractRequesterIdentity:
+    def test_extracts_and_strips_both_fields(self):
+        out = sh.extract_requester_identity({
+            "nome_membro_solicitante": "  Alice  ",
+            "id_membro_solicitante": "  123  ",
+        })
+        assert out == ("Alice", "123")
+
+    def test_empty_or_whitespace_becomes_none(self):
+        out = sh.extract_requester_identity({
+            "nome_membro_solicitante": "   ",
+            "id_membro_solicitante": "",
+        })
+        assert out == (None, None)
+
+    def test_missing_keys_returns_none_tuple(self):
+        assert sh.extract_requester_identity({}) == (None, None)
+
+    def test_non_mapping_like_input_returns_none_tuple(self):
+        assert sh.extract_requester_identity(None) == (None, None)
+        assert sh.extract_requester_identity("x") == (None, None)
+
+    def test_duck_typed_get_object_is_supported(self):
+        class Payload:
+            def get(self, key, default=None):
+                data = {
+                    "nome_membro_solicitante": " Bob ",
+                    "id_membro_solicitante": " 9 ",
+                }
+                return data.get(key, default)
+
+        assert sh.extract_requester_identity(Payload()) == ("Bob", "9")
+
+
+# ─────────────────────────────────────────────────────────
 # build_queue_key
 # ─────────────────────────────────────────────────────────
 class TestBuildQueueKey:
