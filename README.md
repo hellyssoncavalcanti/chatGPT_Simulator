@@ -267,7 +267,7 @@ python3 -m pytest \
   tests/test_web_search_throttle.py
 ```
 
-Esperado: **517 passed**. (Os arquivos `tests/test_server_api.py` e
+Esperado: **543 passed**. (Os arquivos `tests/test_server_api.py` e
 `tests/test_storage.py` são excluídos porque exigem `flask` e
 `cryptography`, que não estão nesta lista de smoke offline — eles
 rodam no CI completo via o comando da seção anterior.)
@@ -278,14 +278,14 @@ rodam no CI completo via o comando da seção anterior.)
 |---|---|---|
 | `Scripts/request_source.py` | Detecção de origem Python/Codex/analyzer no request HTTP. | `tests/test_request_source.py` |
 | `Scripts/error_catalog.py` | 11 códigos estáveis + classificador PT/EN + `format_reason` (tag `[CODE]`). | `tests/test_error_catalog.py` |
-| `Scripts/server_helpers.py` | Wait-time formatting, payloads de fila, prune de deque, contagem de perfis Chromium, concatenação de mensagens OpenAI-style, rotulagem de remetente, wrappers de texto colado, coalescência de `origin_url`. | `tests/test_server_helpers.py` |
+| `Scripts/server_helpers.py` | Wait-time formatting, payloads de fila, prune de deque, contagem de perfis Chromium, concatenação de mensagens OpenAI-style, rotulagem de remetente, wrappers de texto colado, coalescência de `origin_url`, `safe_int(value, default)` e `safe_snapshot_stats(queue)` para endpoints defensivos, `build_status_event`/`build_error_event`/`build_markdown_event` para SSE, `compute_python_request_interval` puro com `rng` injetável. | `tests/test_server_helpers.py` |
 | `Scripts/browser_predicates.py` | Predicados do DOM do ChatGPT (extract sender, orphan tabs, incomplete JSON, inline base64, paste wrappers). | `tests/test_browser_predicates.py` |
 | `Scripts/log_sanitizer.py` | `mask_api_key`, `mask_bearer_token`, `mask_session_cookie`, `mask_file_path`, `sanitize*`. | `tests/test_log_sanitizer.py` |
 | `Scripts/security_state.py` | Classe `SecurityState` — rate-limit per-(ip,key) + brute-force de login, expiração automática. | `tests/test_security_state.py` |
 | `Scripts/chat_rate_limit_cooldown.py` | Classe `ChatRateLimitCooldown` — cooldown global com backoff exponencial 2^strikes (clamp 1800s). | `tests/test_chat_rate_limit_cooldown.py` |
 | `Scripts/sync_dedup.py` | Classe `SyncDedup` — dedup thread-safe de `/api/sync` (janela 120s), com `try_acquire`/`release`/`snapshot`. | `tests/test_sync_dedup.py` |
 | `Scripts/python_request_throttle.py` | Classe `PythonRequestThrottle` — throttle global anti-rate-limit para requests Python com `begin`/`remaining_seconds`/`commit`/`snapshot`. | `tests/test_python_request_throttle.py` |
-| `Scripts/web_search_throttle.py` | Classe `WebSearchThrottle` — agendamento global de busca web com intervalo humano (`reserve_slot`/`snapshot`) e injeção de `now_func`/`rng_func`. | `tests/test_web_search_throttle.py` |
+| `Scripts/web_search_throttle.py` | Classe `WebSearchThrottle` — agendamento global de busca web com intervalo humano (`reserve_slot`/`snapshot` com `age_seconds`) e injeção de `now_func`/`rng_func`. Snapshot exposto em `/api/metrics::web_search_throttle` e gauge Prometheus `simulator_web_search_throttle_age_sec`. | `tests/test_web_search_throttle.py` |
 | `Scripts/analisador_parsers.py` | Detecção de rate-limit em texto, strip/extract/normalize/parse JSON tolerante, heurística de truncamento, remoção de `<think>…</think>`, parser de fallback para queries de pesquisa com `max_queries` injetável. | `tests/test_analisador_parsers.py` |
 
 Os callers (`server.py`, `browser.py`, `analisador_prontuarios.py`,

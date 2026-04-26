@@ -1663,15 +1663,14 @@ def _handle_browser_search_api(execute_fn, *, route_label, source_label):
             all_results = []
 
             for idx, query_str in enumerate(queries, start=1):
-                yield json.dumps({
-                    'type': 'status',
-                    'content': f'📚 Preparando busca {source_label} {idx}/{len(queries)}.',
-                    'query': query_str,
-                    'index': idx,
-                    'total': len(queries),
-                    'phase': f'{route_label.lower()}_prepare',
-                    'source': source_label,
-                }, ensure_ascii=False) + "\n"
+                yield _build_status_event_impl(
+                    f'📚 Preparando busca {source_label} {idx}/{len(queries)}.',
+                    query=query_str,
+                    index=idx,
+                    total=len(queries),
+                    phase=f'{route_label.lower()}_prepare',
+                    source=source_label,
+                ) + "\n"
 
                 progress_q = queue.Queue()
                 worker = threading.Thread(
@@ -1685,15 +1684,14 @@ def _handle_browser_search_api(execute_fn, *, route_label, source_label):
                     try:
                         item = progress_q.get(timeout=15)
                     except queue.Empty:
-                        yield json.dumps({
-                            'type': 'status',
-                            'content': f'⏳ Busca {source_label} por "{query_str}" ainda em andamento...',
-                            'query': query_str,
-                            'index': idx,
-                            'total': len(queries),
-                            'phase': f'{route_label.lower()}_keepalive',
-                            'source': source_label,
-                        }, ensure_ascii=False) + "\n"
+                        yield _build_status_event_impl(
+                            f'⏳ Busca {source_label} por "{query_str}" ainda em andamento...',
+                            query=query_str,
+                            index=idx,
+                            total=len(queries),
+                            phase=f'{route_label.lower()}_keepalive',
+                            source=source_label,
+                        ) + "\n"
                         continue
 
                     if isinstance(item, dict) and ('success' in item or 'error' in item):
