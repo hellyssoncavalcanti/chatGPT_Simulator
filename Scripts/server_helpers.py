@@ -335,6 +335,62 @@ def normalize_optional_text(value) -> Optional[str]:
     return trimmed or None
 
 
+def extract_requester_identity(data) -> Tuple[Optional[str], Optional[str]]:
+    """Extrai/normaliza nome/id do solicitante no payload HTTP.
+
+    Chaves suportadas:
+      - `nome_membro_solicitante`
+      - `id_membro_solicitante`
+    """
+    payload_get = getattr(data, "get", None)
+    if payload_get is None:
+        return (None, None)
+    return (
+        normalize_optional_text(payload_get("nome_membro_solicitante")),
+        normalize_optional_text(payload_get("id_membro_solicitante")),
+    )
+
+
+def resolve_lookup_origin_url(data) -> str:
+    """Resolve `origin_url` para `/api/chat_lookup`.
+
+    Prioridade histórica:
+      1. `origin_url`
+      2. `url_atual` (compatibilidade com clientes antigos)
+      3. string vazia
+    """
+    payload_get = getattr(data, "get", None)
+    if payload_get is None:
+        return ""
+    return (
+        normalize_optional_text(payload_get("origin_url"))
+        or normalize_optional_text(payload_get("url_atual"))
+        or ""
+    )
+
+
+def extract_chat_delete_local_targets(data) -> Tuple[str, str]:
+    """Extrai (`chat_id`, `origin_url`) para `/api/chat_delete_local`."""
+    payload_get = getattr(data, "get", None)
+    if payload_get is None:
+        return ("", "")
+    return (
+        normalize_optional_text(payload_get("chat_id")) or "",
+        normalize_optional_text(payload_get("origin_url")) or "",
+    )
+
+
+def extract_delete_request_targets(data) -> Tuple[Optional[str], Optional[str]]:
+    """Extrai (`url`, `chat_id`) para `/api/delete`."""
+    payload_get = getattr(data, "get", None)
+    if payload_get is None:
+        return (None, None)
+    return (
+        normalize_optional_text(payload_get("url")),
+        normalize_optional_text(payload_get("chat_id")),
+    )
+
+
 def resolve_browser_profile(requested_profile, stored_profile) -> Optional[str]:
     """Resolve o `browser_profile` efetivo para a tarefa do browser.
 
@@ -514,6 +570,10 @@ __all__ = [
     "resolve_chat_url",
     "resolve_browser_profile",
     "normalize_optional_text",
+    "extract_requester_identity",
+    "resolve_lookup_origin_url",
+    "extract_chat_delete_local_targets",
+    "extract_delete_request_targets",
     "build_queue_key",
     "build_chat_task_payload",
     "build_error_event",

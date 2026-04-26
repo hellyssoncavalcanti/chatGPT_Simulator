@@ -493,6 +493,91 @@ class TestNormalizeOptionalText:
 
 
 # ─────────────────────────────────────────────────────────
+# extract_requester_identity
+# ─────────────────────────────────────────────────────────
+class TestExtractRequesterIdentity:
+    def test_extracts_and_strips_both_fields(self):
+        out = sh.extract_requester_identity({
+            "nome_membro_solicitante": "  Alice  ",
+            "id_membro_solicitante": "  123  ",
+        })
+        assert out == ("Alice", "123")
+
+    def test_empty_or_whitespace_becomes_none(self):
+        out = sh.extract_requester_identity({
+            "nome_membro_solicitante": "   ",
+            "id_membro_solicitante": "",
+        })
+        assert out == (None, None)
+
+    def test_missing_keys_returns_none_tuple(self):
+        assert sh.extract_requester_identity({}) == (None, None)
+
+    def test_non_mapping_like_input_returns_none_tuple(self):
+        assert sh.extract_requester_identity(None) == (None, None)
+        assert sh.extract_requester_identity("x") == (None, None)
+
+    def test_duck_typed_get_object_is_supported(self):
+        class Payload:
+            def get(self, key, default=None):
+                data = {
+                    "nome_membro_solicitante": " Bob ",
+                    "id_membro_solicitante": " 9 ",
+                }
+                return data.get(key, default)
+
+        assert sh.extract_requester_identity(Payload()) == ("Bob", "9")
+
+
+# ─────────────────────────────────────────────────────────
+# lookup/delete payload helpers
+# ─────────────────────────────────────────────────────────
+class TestResolveLookupOriginUrl:
+    def test_prefers_origin_url(self):
+        assert sh.resolve_lookup_origin_url({
+            "origin_url": "  https://a  ",
+            "url_atual": "https://b",
+        }) == "https://a"
+
+    def test_falls_back_to_url_atual(self):
+        assert sh.resolve_lookup_origin_url({"url_atual": "  https://b "}) == "https://b"
+
+    def test_returns_empty_for_missing_or_invalid_input(self):
+        assert sh.resolve_lookup_origin_url({}) == ""
+        assert sh.resolve_lookup_origin_url(None) == ""
+
+
+class TestExtractChatDeleteLocalTargets:
+    def test_extracts_and_normalizes(self):
+        out = sh.extract_chat_delete_local_targets({
+            "chat_id": "  c1 ",
+            "origin_url": "  https://x ",
+        })
+        assert out == ("c1", "https://x")
+
+    def test_missing_keys_return_empty_strings(self):
+        assert sh.extract_chat_delete_local_targets({}) == ("", "")
+
+    def test_invalid_input_returns_empty_strings(self):
+        assert sh.extract_chat_delete_local_targets(None) == ("", "")
+
+
+class TestExtractDeleteRequestTargets:
+    def test_extracts_and_normalizes(self):
+        out = sh.extract_delete_request_targets({
+            "url": "  https://chat ",
+            "chat_id": "  id-1 ",
+        })
+        assert out == ("https://chat", "id-1")
+
+    def test_missing_keys_return_none_tuple(self):
+        assert sh.extract_delete_request_targets({}) == (None, None)
+
+    def test_invalid_input_returns_none_tuple(self):
+        assert sh.extract_delete_request_targets(None) == (None, None)
+
+
+# ─────────────────────────────────────────────────────────
 # build_queue_key
 # ─────────────────────────────────────────────────────────
 class TestBuildQueueKey:
