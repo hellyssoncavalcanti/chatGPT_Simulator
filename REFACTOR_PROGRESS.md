@@ -393,7 +393,7 @@ Coletadas em `2026-04-22` via `wc -l` / `grep -nE "def "`:
 
 ---
 
-## 🆕 PONTO DE RETOMADA (última atualização em 2026-04-26 untricies)
+## 🆕 PONTO DE RETOMADA (última atualização em 2026-04-26 duotricies)
 
 > **Leia APENAS esta seção ao retomar em outro chat.** Ela é autocontida:
 > não é necessário reler seções anteriores a menos que haja dúvida sobre
@@ -402,6 +402,7 @@ Coletadas em `2026-04-22` via `wc -l` / `grep -nE "def "`:
 ### Estado atual (consolidado) — branch `claude/focused-einstein-GcWqc`
 
 **Commits relevantes (mais recente → mais antigo):**
+- `6f4bbeb` — Extrair helper de parâmetros do teste de busca web *(esta sessão, ciclo 26 / opção 2)*
 - `bd9bd7e` — Extrair helpers de payload para menu options/execute *(esta sessão, ciclo 25 / opção 2)*
 - `ec4a4a7` — Extrair helpers de payload para lookup/delete *(esta sessão, ciclo 24 / opção 2)*
 - `f91b077` — Desativar auto-pip por padrão para import offline *(esta sessão, ciclo 23 / hotfix codex)*
@@ -462,7 +463,7 @@ Coletadas em `2026-04-22` via `wc -l` / `grep -nE "def "`:
 - `1f3374b` — Extrair detecção de origem de request para módulo testável offline
 - `0c6216e` — docs: refinar backlog P0-P1-P2 com evidências concretas
 
-**Suite offline atual: 17 arquivos → 524 passed** (519 anterior + 5 novos em `tests/test_server_helpers.py::TestExtractRequesterIdentity`).
+**Suite offline atual: 17 arquivos → 563 passed** (538 anterior + 25 novos no ciclo 26 em `tests/test_server_helpers.py`).
 
 Comando exato de validação:
 ```
@@ -486,7 +487,7 @@ python3 -m pytest \
   tests/test_python_request_throttle.py \
   tests/test_web_search_throttle.py
 ```
-Esperado: **538 passed**. (NÃO usar `python3 -m pytest tests/` cru — `tests/test_server_api.py` e `tests/test_storage.py` falham por requerer `flask` / `cryptography` indisponíveis neste ambiente.)
+Esperado: **563 passed**. (NÃO usar `python3 -m pytest tests/` cru — `tests/test_server_api.py` e `tests/test_storage.py` falham por requerer `flask` / `cryptography` indisponíveis neste ambiente.)
 
 ### Mapa de módulos puros já criados
 
@@ -632,7 +633,7 @@ Se precisar tocar em browser.py (async/Playwright) ou em analisador_prontuarios.
 ```
 
 ### Checklist de "antes de terminar a sessão" (rodar sempre)
-- [ ] Suite offline passa: `python3 -m pytest tests/test_humanizer.py tests/test_shared_queue.py tests/test_selectors_smoke.py tests/test_request_source.py tests/test_error_catalog.py tests/test_server_helpers.py tests/test_browser_predicates.py tests/test_rate_limit_integration.py tests/test_log_sanitizer.py tests/test_analisador_rate_limit.py tests/test_audit_sanitization.py tests/test_security_state.py tests/test_chat_rate_limit_cooldown.py tests/test_analisador_parsers.py tests/test_sync_dedup.py tests/test_python_request_throttle.py tests/test_web_search_throttle.py` (esperado: **538 passed**).
+- [ ] Suite offline passa: `python3 -m pytest tests/test_humanizer.py tests/test_shared_queue.py tests/test_selectors_smoke.py tests/test_request_source.py tests/test_error_catalog.py tests/test_server_helpers.py tests/test_browser_predicates.py tests/test_rate_limit_integration.py tests/test_log_sanitizer.py tests/test_analisador_rate_limit.py tests/test_audit_sanitization.py tests/test_security_state.py tests/test_chat_rate_limit_cooldown.py tests/test_analisador_parsers.py tests/test_sync_dedup.py tests/test_python_request_throttle.py tests/test_web_search_throttle.py` (esperado: **563 passed**).
 - [ ] `python3 -c "import ast; ast.parse(open('Scripts/server.py').read())"` OK.
 - [ ] `python3 -c "import ast; ast.parse(open('Scripts/browser.py').read())"` OK.
 - [ ] `python3 -c "import ast; ast.parse(open('Scripts/analisador_prontuarios.py').read())"` OK.
@@ -697,6 +698,8 @@ Se precisar tocar em browser.py (async/Playwright) ou em analisador_prontuarios.
   24. `ec4a4a7`: extraídos helpers puros em `server_helpers.py` para payloads de manutenção: `resolve_lookup_origin_url(data)`, `extract_chat_delete_local_targets(data)` e `extract_delete_request_targets(data)`. `server.py` migrou `api_chat_lookup`, `api_chat_delete_local` e `api_delete` para wrappers finos nesses helpers (reduzindo idioms duplicados e padronizando trim/None-collapse). `tests/test_server_helpers.py` ampliado com 9 novos casos cobrindo prioridade/fallback/entrada inválida dos 3 helpers. Suite offline atualizada: **533 passed** em 17 arquivos.
 - **2026-04-26 untricies** (esta sessão, branch `work`) — Opção 2 (auditoria de handlers menores, etapa 5):
   25. `bd9bd7e`: extraídos `extract_menu_url(data)` e `extract_menu_execute_payload(data)` para `server_helpers.py`, migrando `menu_options` e `menu_execute` em `server.py` para wrappers finos. Novos testes em `tests/test_server_helpers.py` cobrem normalização, opcionais e entrada inválida dos helpers de menu (+5 casos). Suite offline atualizada: **538 passed** em 17 arquivos. Próximo subpasso recomendado: analisar `/api/web_search/test` (bloco grande de documentação HTML) para possíveis extrações puras sem alterar comportamento.
+- **2026-04-26 duotricies** (esta sessão, branch `claude/focused-einstein-GcWqc`) — Opção 2 (auditoria de handlers menores, etapa 6):
+  26. `6f4bbeb`: extraído `extract_web_search_test_params(data)` em `server_helpers.py` para normalizar `q`/`api_key` de `/api/web_search/test` (query string) com o mesmo idiom canônico de trim + fallback vazio. `server.py` migrou `api_web_search_test` para wrapper fino (`query, api_key = _extract_web_search_test_params_impl(request.args)`), sem alterar HTML/fluxo de execução da rota. `tests/test_server_helpers.py` ganhou 2 casos novos cobrindo normalização e entrada inválida do novo helper. Suite offline atualizada: **563 passed** em 17 arquivos. Próximo subpasso recomendado: auditar `api_completions` legado para extrações puras adicionais (sem tocar `browser.py`).
 
 
 
