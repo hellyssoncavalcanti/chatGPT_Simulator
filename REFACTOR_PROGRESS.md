@@ -393,7 +393,7 @@ Coletadas em `2026-04-22` via `wc -l` / `grep -nE "def "`:
 
 ---
 
-## 🆕 PONTO DE RETOMADA (última atualização em 2026-04-26 vicies)
+## 🆕 PONTO DE RETOMADA (última atualização em 2026-04-26 unvicies)
 
 > **Leia APENAS esta seção ao retomar em outro chat.** Ela é autocontida:
 > não é necessário reler seções anteriores a menos que haja dúvida sobre
@@ -402,6 +402,7 @@ Coletadas em `2026-04-22` via `wc -l` / `grep -nE "def "`:
 ### Estado atual (consolidado) — branch `claude/focused-einstein-Ol7Hd`
 
 **Commits relevantes (mais recente → mais antigo):**
+- `939d904` — Extrair WebSearchThrottle (state + lock) para módulo puro *(esta sessão, ciclo 15)*
 - `a8eca94` — Expor snapshot de PythonRequestThrottle em /api/metrics + Prometheus *(esta sessão, ciclo 14)*
 - `f0ceeec` — docs: gravar ciclo novendecies (commit 0904fe9) no PONTO DE RETOMADA
 - `0904fe9` — Extrair PythonRequestThrottle (state + lock) para módulo puro *(esta sessão, ciclo 13)*
@@ -451,7 +452,7 @@ Coletadas em `2026-04-22` via `wc -l` / `grep -nE "def "`:
 - `1f3374b` — Extrair detecção de origem de request para módulo testável offline
 - `0c6216e` — docs: refinar backlog P0-P1-P2 com evidências concretas
 
-**Suite offline atual: 16 arquivos → 508 passed** (505 anterior + 3 em `TestSnapshot::test_snapshot_age_*`).
+**Suite offline atual: 17 arquivos → 517 passed** (508 anterior + 9 em `test_web_search_throttle.py`).
 
 Comando exato de validação:
 ```
@@ -472,9 +473,10 @@ python3 -m pytest \
   tests/test_chat_rate_limit_cooldown.py \
   tests/test_analisador_parsers.py \
   tests/test_sync_dedup.py \
-  tests/test_python_request_throttle.py
+  tests/test_python_request_throttle.py \
+  tests/test_web_search_throttle.py
 ```
-Esperado: **505 passed**. (NÃO usar `python3 -m pytest tests/` cru — `tests/test_server_api.py` e `tests/test_storage.py` falham por requerer `flask` / `cryptography` indisponíveis neste ambiente.)
+Esperado: **517 passed**. (NÃO usar `python3 -m pytest tests/` cru — `tests/test_server_api.py` e `tests/test_storage.py` falham por requerer `flask` / `cryptography` indisponíveis neste ambiente.)
 
 ### Mapa de módulos puros já criados
 
@@ -648,7 +650,9 @@ Se precisar tocar em browser.py (async/Playwright) ou em analisador_prontuarios.
 - **2026-04-26 novendecies** (branch `claude/focused-einstein-Ol7Hd`) — 1 ciclo de Opção 1 (extração padrão B):
   13. `0904fe9`: extração de `Scripts/python_request_throttle.py` com classe `PythonRequestThrottle` (4 métodos: `begin`/`remaining_seconds`/`commit`/`snapshot`, `now_func` injetável). State global (`_python_anti_rate_limit_last_ts` + lock) sai de `server.py` e é encapsulado no módulo puro; wrapper em `_wait_python_request_interval_if_needed` mantém o tight-loop SSE com `time.sleep` e `_build_status_event_impl(phase="python_anti_rate_limit_interval", ...)` no call site (módulo puro NÃO emite SSE direto). Curto-circuito histórico (`pmin/pmax <= 0` ou primeira chamada) preservado byte-equivalente via `begin()` retornar `None`. Alias `_python_anti_rate_limit_lock` mantido para compat. Import morto `compute_python_request_interval` removido de `server.py` (consumido apenas dentro do módulo puro). +27 testes em `tests/test_python_request_throttle.py` cobrindo todos os 4 métodos públicos, snapshot thread-safe sob 4 threads concorrentes, state-machine ponta-a-ponta e equivalência com a implementação histórica. Total: **505 testes offline passando** em 16 arquivos.
 - **2026-04-26 vicies** (esta sessão, branch `claude/focused-einstein-Ol7Hd`) — 1 ciclo de Opção A (observabilidade):
-  14. `a8eca94`: `PythonRequestThrottle.snapshot()` agora retorna `{last_ts, age_seconds}` (extensão); `/api/metrics` expõe `python_request_throttle` snapshot; `/metrics` (Prometheus) ganha gauge `simulator_python_request_throttle_age_sec` (atualizado em `_update_rate_limit_prom_gauges`). Clamp 0 em `age_seconds` quando `last_ts == 0` (boot) ou quando o relógio retrocede (ajuste NTP). +3 testes em `TestSnapshot::test_snapshot_age_*` cobrindo avanço de relógio, never-set e clock retrógrado (2 casos pré-existentes ajustados para o novo shape). Suite offline: **508 passed** em 16 arquivos. Próxima opção: B (WebSearchThrottle padrão B) ou C (docs de concorrência por `browser_profile`).
+  14. `a8eca94`: `PythonRequestThrottle.snapshot()` agora retorna `{last_ts, age_seconds}` (extensão); `/api/metrics` expõe `python_request_throttle` snapshot; `/metrics` (Prometheus) ganha gauge `simulator_python_request_throttle_age_sec` (atualizado em `_update_rate_limit_prom_gauges`). Clamp 0 em `age_seconds` quando `last_ts == 0` (boot) ou quando o relógio retrocede (ajuste NTP). +3 testes em `TestSnapshot::test_snapshot_age_*` cobrindo avanço de relógio, never-set e clock retrógrado (2 casos pré-existentes ajustados para o novo shape). Suite offline: **508 passed** em 16 arquivos.
+- **2026-04-26 unvicies** (esta sessão, branch `work`) — 1 ciclo de Opção B (extração padrão B para web search throttle):
+  15. `939d904`: extração de `Scripts/web_search_throttle.py` com classe `WebSearchThrottle` (`reserve_slot` + `snapshot`, com `now_func` e `rng_func` injetáveis). `server._reserve_web_search_slot` migra para wrapper fino sobre singleton `_WEB_SEARCH_THROTTLE`, preservando contrato histórico de `wait_ctx` (`interval_sec`, `scheduled_start_at`, `wait_seconds`, `requested_at`) e mantendo aliases de compat (`_web_search_timing_lock`, `_web_search_last_started_at`, `_web_search_last_interval_sec`). +9 testes em `tests/test_web_search_throttle.py` cobrindo first-call sem espera, agendamento com cooldown, clamps/normalização e concorrência. Suite offline: **517 passed** em 17 arquivos. Próxima opção recomendada: C (documento de design de concorrência por `browser_profile`) ou integração de snapshot do WebSearchThrottle em `/api/metrics`/Prometheus.
 - **2026-04-25 septendecies** (branch `claude/create-log-sanitization-script-QQ56a`) — 3 ciclos contínuos sobre o pano de fundo da sedecies:
   9. `b0202b1`: extração de `build_markdown_event(content)` espelhando `build_error_event`. Migração do único `{"type":"markdown",...}` literal restante em `api_sync::sync_generate`. +4 testes.
   10. `1aa7dd6`: extração de `format_origin_suffix(is_analyzer, source_hint)` — sufixo `[origem: ...]` com analyzer override (sempre `analisador_prontuarios.py`) ou hint do payload. Migração em `chat_completions::_origem`. +5 testes.
