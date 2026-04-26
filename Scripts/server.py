@@ -87,6 +87,8 @@ from server_helpers import (
     format_requester_suffix as _format_requester_suffix_impl,
     format_origin_suffix as _format_origin_suffix_impl,
     safe_int as _safe_int_impl,
+    resolve_logs_tail_lines_limit as _resolve_logs_tail_lines_limit_impl,
+    parse_from_end_flag as _parse_from_end_flag_impl,
     safe_snapshot_stats as _safe_snapshot_stats_impl,
 )
 import error_catalog as _error_catalog
@@ -1143,8 +1145,7 @@ def logs_tail():
     Retorna as últimas linhas do log atual do simulator.
     Ideal para polling leve no frontend (toast de observabilidade).
     """
-    requested = _safe_int_impl(request.args.get("lines", 120), 120)
-    lines_limit = max(10, min(800, requested))
+    lines_limit = _resolve_logs_tail_lines_limit_impl(request.args.get("lines", 120))
 
     path = getattr(config, "LOG_PATH", "")
     if not path or not os.path.exists(path):
@@ -1186,7 +1187,7 @@ def logs_stream():
     if not path or not os.path.exists(path):
         return jsonify({"success": False, "error": "log_not_found", "path": path}), 404
 
-    from_end = str(request.args.get("from_end", "1")).strip().lower() not in {"0", "false", "no"}
+    from_end = _parse_from_end_flag_impl(request.args.get("from_end", "1"))
 
     @stream_with_context
     def generate():

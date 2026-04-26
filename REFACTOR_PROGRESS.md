@@ -393,7 +393,7 @@ Coletadas em `2026-04-22` via `wc -l` / `grep -nE "def "`:
 
 ---
 
-## 🆕 PONTO DE RETOMADA (última atualização em 2026-04-26 sextricies)
+## 🆕 PONTO DE RETOMADA (última atualização em 2026-04-26)
 
 > **Leia APENAS esta seção ao retomar em outro chat.** Ela é autocontida:
 > não é necessário reler seções anteriores a menos que haja dúvida sobre
@@ -402,6 +402,7 @@ Coletadas em `2026-04-22` via `wc -l` / `grep -nE "def "`:
 ### Estado atual (consolidado) — branch `claude/continue-refactor-updates-wvOqd`
 
 **Commits relevantes (mais recente → mais antigo):**
+- `4e79c24` — Extrair helpers de logs_tail/logs_stream *(esta sessão, ciclo 41 / opção 2)*
 - `35502c5` — Extrair payloads terminais do teste de busca web *(esta sessão, ciclo 30 / opção 2)*
 - `547d2b5` — Padronizar payload de erro no teste de busca web *(esta sessão, ciclo 29 / opção 2)*
 - `efa8282` — Extrair parser de stream do teste de busca web *(esta sessão, ciclo 28 / opção 2)*
@@ -467,7 +468,7 @@ Coletadas em `2026-04-22` via `wc -l` / `grep -nE "def "`:
 - `1f3374b` — Extrair detecção de origem de request para módulo testável offline
 - `0c6216e` — docs: refinar backlog P0-P1-P2 com evidências concretas
 
-**Suite offline atual: 17 arquivos → 572 passed** (570 anterior + 2 novos no ciclo 30 em `tests/test_server_helpers.py`).
+**Suite offline atual: 17 arquivos → 588 passed** (572 anterior + 16 novos no ciclo 41 em `tests/test_server_helpers.py`).
 
 Comando exato de validação:
 ```
@@ -744,6 +745,8 @@ analisador_prontuarios.py, PARAR — não está no escopo destas opções.
   29. `547d2b5`: extraído `build_web_search_test_error_payload(query, error)` em `server_helpers.py` para padronizar o formato de erros JSON de `/api/web_search/test` e reduzir duplicação entre o parser de stream e os retornos de timeout/sem resposta. `server.py` migrou os dois retornos de erro finais para wrappers finos com o novo helper. `tests/test_server_helpers.py` ganhou 2 casos novos para o payload de erro padronizado e o teste de stream-error passou a afirmar via helper. Suite offline atualizada: **570 passed** em 17 arquivos. Próximo subpasso recomendado: extrair helper puro para o envelope de timeout/fallback da rota ou encerrar opção 2 e pedir aprovação para opção D.
 - **2026-04-26 sextricies** (esta sessão, branch `claude/focused-einstein-GcWqc`) — Opção 2 (auditoria de handlers menores, etapa 10):
   30. `35502c5`: extraídos `build_web_search_test_timeout_payload(query)` e `build_web_search_test_no_response_payload(query)` em `server_helpers.py`, ambos delegando ao payload canônico de erro da rota. `server.py` migrou os retornos terminais (timeout 504 e sem resposta) para wrappers finos com esses helpers, removendo strings inline duplicadas do call site. `tests/test_server_helpers.py` ganhou 2 casos novos cobrindo os dois payloads terminais. Suite offline atualizada: **572 passed** em 17 arquivos. Próximo subpasso recomendado: concluir opção 2 com extração de helper puro para seleção de HTTP status terminal (sem tocar `browser.py`) ou validar se já podemos encerrar opção 2.
+- **2026-04-26 (esta sessão, branch `claude/continue-refactor-updates-wvOqd`) — Opção 2 (auditoria de handlers menores, etapa 11):**
+  41. `4e79c24`: extraídos `resolve_logs_tail_lines_limit(raw_lines)` (clamp canônico 10..800 com fallback 120) e `parse_from_end_flag(raw_value)` (idiom canônico `str(v).strip().lower() not in {"0","false","no"}`) para `Scripts/server_helpers.py`. `server.py` migrou `logs_tail` e `logs_stream` para wrappers finos desses helpers sem alterar IO/SSE. `tests/test_server_helpers.py` ganhou 16 casos novos cobrindo limites, fallback e variantes truthy/falsy. Suite offline atualizada: **588 passed** em 17 arquivos. Próxima opção recomendada: **encerrar a opção 2 por saturação dos idioms restantes (`queue_*`, `health_check`, `get_history`) e pedir aprovação explícita para a opção D antes de tocar `browser.py`**.
 
 
 

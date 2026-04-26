@@ -1170,6 +1170,33 @@ class TestSafeInt:
         assert sh.safe_int(False, 99) == 0
 
 
+class TestResolveLogsTailLinesLimit:
+    def test_default_when_missing(self):
+        assert sh.resolve_logs_tail_lines_limit(None) == 120
+
+    def test_clamp_min(self):
+        assert sh.resolve_logs_tail_lines_limit("1") == 10
+
+    def test_clamp_max(self):
+        assert sh.resolve_logs_tail_lines_limit("9999") == 800
+
+    def test_keeps_requested_inside_range(self):
+        assert sh.resolve_logs_tail_lines_limit("250") == 250
+
+    def test_invalid_value_uses_default_before_clamp(self):
+        assert sh.resolve_logs_tail_lines_limit("abc") == 120
+
+
+class TestParseFromEndFlag:
+    @pytest.mark.parametrize("raw_value", ["1", "true", "yes", "", None, "   "])
+    def test_truthy_variants(self, raw_value):
+        assert sh.parse_from_end_flag(raw_value) is True
+
+    @pytest.mark.parametrize("raw_value", ["0", "false", "no", " FALSE ", " No "])
+    def test_falsy_variants(self, raw_value):
+        assert sh.parse_from_end_flag(raw_value) is False
+
+
 class TestSafeSnapshotStats:
     class _DummyOk:
         def __init__(self, payload):
