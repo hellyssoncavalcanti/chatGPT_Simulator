@@ -77,6 +77,11 @@ from server_helpers import (
     extract_delete_request_targets as _extract_delete_request_targets_impl,
     extract_menu_url as _extract_menu_url_impl,
     extract_menu_execute_payload as _extract_menu_execute_payload_impl,
+    extract_web_search_test_params as _extract_web_search_test_params_impl,
+    build_web_search_test_task as _build_web_search_test_task_impl,
+    build_web_search_test_stream_response as _build_web_search_test_stream_response_impl,
+    build_web_search_test_timeout_payload as _build_web_search_test_timeout_payload_impl,
+    build_web_search_test_no_response_payload as _build_web_search_test_no_response_payload_impl,
     format_requester_suffix as _format_requester_suffix_impl,
     format_origin_suffix as _format_origin_suffix_impl,
     safe_int as _safe_int_impl,
@@ -1767,8 +1772,7 @@ def api_web_search_test():
         <p><b>Opção 2:</b> Adicione a API key na URL:<br><code>/api/web_search/test?api_key=SUA_CHAVE</code></p>
         </div></body></html>""", mimetype='text/html', status=401)
 
-    query   = request.args.get('q', '').strip()
-    api_key = request.args.get('api_key', '')
+    query, api_key = _extract_web_search_test_params_impl(request.args)
 
     # Se não tem query, retorna a página de documentação + teste
     if not query:
@@ -2036,26 +2040,20 @@ document.getElementById('q')?.addEventListener('keydown', e => {{ if (e.key === 
 
     # Se recebeu ?q=..., executa a busca diretamente (retorna JSON)
     q = queue.Queue()
-    browser_queue.put({
-        'action':       'SEARCH',
-        'query':        query,
-        'stream_queue': q
-    })
+    browser_queue.put(_build_web_search_test_task_impl(query, q))
 
     try:
         while True:
             raw_msg = q.get(timeout=90)
             if raw_msg is None:
                 break
-            msg = json.loads(raw_msg)
-            if msg.get('type') == 'searchresult':
-                return jsonify(msg.get('content', {}))
-            elif msg.get('type') == 'error':
-                return jsonify({'success': False, 'query': query, 'error': msg.get('content')}), 500
+            payload, status_code = _build_web_search_test_stream_response_impl(raw_msg, query)
+            if payload is not None:
+                return jsonify(payload), status_code
     except queue.Empty:
-        return jsonify({'success': False, 'query': query, 'error': 'Timeout (90s)'}), 504
+        return jsonify(_build_web_search_test_timeout_payload_impl(query)), 504
 
-    return jsonify({'success': False, 'query': query, 'error': 'Sem resposta do browser'})
+    return jsonify(_build_web_search_test_no_response_payload_impl(query))
 
 
 @app.route('/robots.txt')
