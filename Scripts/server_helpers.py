@@ -468,6 +468,30 @@ def build_web_search_test_no_response_payload(query: str) -> dict:
     return build_web_search_test_error_payload(query, "Sem resposta do browser")
 
 
+_VALID_AVATAR_EXTENSIONS = (".jpg", ".jpeg", ".png", ".gif", ".webp")
+
+
+def resolve_avatar_filename(uploaded_filename, user) -> Tuple[Optional[str], Optional[str]]:
+    """Resolve `(filename_to_save, error)` para `/api/user/upload_avatar`.
+
+    Aceita apenas extensões em ``{.jpg, .jpeg, .png, .gif, .webp}`` (mesma
+    whitelist histórica de `server.upload_avatar`). Caso a extensão seja
+    inválida ou ausente, retorna ``(None, "Formato inválido")`` — string
+    preservada byte-a-byte para não quebrar o JSON consumido pelo
+    frontend.
+
+    Quando válida, retorna ``(f"{user}{ext}", None)`` com `ext` em
+    minúsculas (igual ao call site original).
+    """
+    name = uploaded_filename or ""
+    import os as _os
+    ext = _os.path.splitext(name)[1].lower()
+    if ext not in _VALID_AVATAR_EXTENSIONS:
+        return (None, "Formato inválido")
+    user_str = "" if user is None else str(user)
+    return (f"{user_str}{ext}", None)
+
+
 _DOWNLOAD_MIME_BY_EXT = {
     "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     "xls": "application/vnd.ms-excel",
@@ -801,6 +825,7 @@ __all__ = [
     "extract_manual_whatsapp_reply_targets",
     "format_manual_whatsapp_requester_suffix",
     "resolve_download_content_type",
+    "resolve_avatar_filename",
     "build_queue_key",
     "build_chat_task_payload",
     "build_error_event",

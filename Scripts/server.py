@@ -86,6 +86,7 @@ from server_helpers import (
     extract_manual_whatsapp_reply_targets as _extract_manual_whatsapp_reply_targets_impl,
     format_manual_whatsapp_requester_suffix as _format_manual_whatsapp_requester_suffix_impl,
     resolve_download_content_type as _resolve_download_content_type_impl,
+    resolve_avatar_filename as _resolve_avatar_filename_impl,
     format_requester_suffix as _format_requester_suffix_impl,
     format_origin_suffix as _format_origin_suffix_impl,
     safe_int as _safe_int_impl,
@@ -968,9 +969,9 @@ def upload_avatar():
     file = request.files['file']
     if file.filename == '': return jsonify({"success": False})
     if file:
-        ext = os.path.splitext(file.filename)[1].lower()
-        if ext not in ['.jpg', '.jpeg', '.png', '.gif', '.webp']: return jsonify({"success": False, "error": "Formato inválido"})
-        filename = f"{user}{ext}"
+        filename, err = _resolve_avatar_filename_impl(file.filename, user)
+        if err:
+            return jsonify({"success": False, "error": err})
         save_path = os.path.join(config.DIRS["users"], filename)
         try:
             if HAS_PIL:

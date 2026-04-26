@@ -804,6 +804,39 @@ class TestResolveDownloadContentType:
         assert sh.resolve_download_content_type("application/octet-stream", "x.zip") == "application/zip"
 
 
+class TestResolveAvatarFilename:
+    def test_valid_extension_uses_user_prefix(self):
+        assert sh.resolve_avatar_filename("foto.PNG", "alice") == ("alice.png", None)
+
+    def test_jpeg_jpg_gif_webp_valid(self):
+        for raw, expected_ext in [
+            ("a.jpg", ".jpg"),
+            ("b.jpeg", ".jpeg"),
+            ("c.gif", ".gif"),
+            ("d.webp", ".webp"),
+        ]:
+            filename, err = sh.resolve_avatar_filename(raw, "u")
+            assert err is None
+            assert filename == f"u{expected_ext}"
+
+    def test_invalid_extension_returns_error_string(self):
+        filename, err = sh.resolve_avatar_filename("malware.exe", "alice")
+        assert filename is None
+        assert err == "Formato inválido"
+
+    def test_no_extension_is_invalid(self):
+        filename, err = sh.resolve_avatar_filename("avatarless", "alice")
+        assert filename is None
+        assert err == "Formato inválido"
+
+    def test_empty_or_none_filename_is_invalid(self):
+        assert sh.resolve_avatar_filename("", "alice") == (None, "Formato inválido")
+        assert sh.resolve_avatar_filename(None, "alice") == (None, "Formato inválido")
+
+    def test_user_none_coerced_to_empty_string(self):
+        assert sh.resolve_avatar_filename("a.png", None) == (".png", None)
+
+
 # ─────────────────────────────────────────────────────────
 # build_queue_key
 # ─────────────────────────────────────────────────────────
