@@ -468,6 +468,33 @@ def build_web_search_test_no_response_payload(query: str) -> dict:
     return build_web_search_test_error_payload(query, "Sem resposta do browser")
 
 
+def build_active_chat_meta(stream_queue, is_analyzer: bool, *, now: float) -> dict:
+    """Monta o `meta` inicial inserido em `ACTIVE_CHATS[chat_id]`.
+
+    Mantém as chaves históricas consumidas em `/api/metrics`,
+    `/api/chat_lookup` e por `_cleanup_active_chats`:
+      - ``queue``         → fila SSE associada ao chat;
+      - ``status``        → texto curto exibido no UI (``"Iniciando..."``);
+      - ``markdown``      → buffer parcial de markdown (vazio até o
+        primeiro chunk);
+      - ``finished``      → ``False`` enquanto o chat estiver vivo;
+      - ``finished_at``   → ``None`` até o término;
+      - ``last_event_at`` → relógio do último evento (controle de stale);
+      - ``is_analyzer``   → flag boolean usada pelo classificador.
+
+    Função pura — `now` injetável para testes determinísticos.
+    """
+    return {
+        "queue": stream_queue,
+        "status": "Iniciando...",
+        "markdown": "",
+        "finished": False,
+        "finished_at": None,
+        "last_event_at": float(now),
+        "is_analyzer": bool(is_analyzer),
+    }
+
+
 def count_active_chats(active_chats, *, now: float, stale_threshold_sec: float) -> dict:
     """Conta chats ativos por categoria a partir do snapshot `active_chats`.
 
@@ -868,6 +895,7 @@ __all__ = [
     "resolve_download_content_type",
     "resolve_avatar_filename",
     "count_active_chats",
+    "build_active_chat_meta",
     "build_queue_key",
     "build_chat_task_payload",
     "build_error_event",

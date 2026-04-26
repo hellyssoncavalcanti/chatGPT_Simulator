@@ -88,6 +88,7 @@ from server_helpers import (
     resolve_download_content_type as _resolve_download_content_type_impl,
     resolve_avatar_filename as _resolve_avatar_filename_impl,
     count_active_chats as _count_active_chats_impl,
+    build_active_chat_meta as _build_active_chat_meta_impl,
     format_requester_suffix as _format_requester_suffix_impl,
     format_origin_suffix as _format_origin_suffix_impl,
     safe_int as _safe_int_impl,
@@ -2199,15 +2200,9 @@ def chat_completions():
     # --- 4. PREPARAÇÃO DA FILA ---
     stream_q = queue.Queue()
 
-    ACTIVE_CHATS[chat_id] = {
-        'queue':       stream_q,
-        'status':      'Iniciando...',
-        'markdown':    '',
-        'finished':    False,
-        'finished_at': None,
-        'last_event_at': time.time(),
-        'is_analyzer': bool(is_analyzer)
-    }
+    ACTIVE_CHATS[chat_id] = _build_active_chat_meta_impl(
+        stream_q, is_analyzer, now=time.time(),
+    )
 
     chat_task_payload = _build_chat_task_payload_impl(
         url=url,

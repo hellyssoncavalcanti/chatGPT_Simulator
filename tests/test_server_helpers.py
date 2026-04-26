@@ -891,6 +891,42 @@ class TestCountActiveChats:
         assert out["stale_candidates"] == 0
 
 
+class TestBuildActiveChatMeta:
+    def test_meta_shape_and_defaults(self):
+        sentinel_q = object()
+        out = sh.build_active_chat_meta(sentinel_q, True, now=12345.5)
+        assert out == {
+            "queue": sentinel_q,
+            "status": "Iniciando...",
+            "markdown": "",
+            "finished": False,
+            "finished_at": None,
+            "last_event_at": 12345.5,
+            "is_analyzer": True,
+        }
+
+    def test_is_analyzer_coerced_to_bool(self):
+        out = sh.build_active_chat_meta(None, "yes", now=0.0)
+        assert out["is_analyzer"] is True
+        out2 = sh.build_active_chat_meta(None, 0, now=0.0)
+        assert out2["is_analyzer"] is False
+
+    def test_now_coerced_to_float(self):
+        out = sh.build_active_chat_meta(None, False, now=10)
+        assert isinstance(out["last_event_at"], float)
+        assert out["last_event_at"] == 10.0
+
+    def test_meta_is_compatible_with_count_active_chats(self):
+        # confirma o contrato cruzado entre os dois helpers
+        meta = sh.build_active_chat_meta(None, True, now=500.0)
+        out = sh.count_active_chats(
+            {"x": meta}, now=600.0, stale_threshold_sec=50.0,
+        )
+        assert out["total"] == 1
+        assert out["analyzer"] == 1
+        assert out["stale_candidates"] == 1  # 600 - 500 > 50
+
+
 # ─────────────────────────────────────────────────────────
 # build_queue_key
 # ─────────────────────────────────────────────────────────
