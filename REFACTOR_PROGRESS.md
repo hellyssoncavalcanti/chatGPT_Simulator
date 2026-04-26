@@ -393,16 +393,18 @@ Coletadas em `2026-04-22` via `wc -l` / `grep -nE "def "`:
 
 ---
 
-## 🆕 PONTO DE RETOMADA (última atualização em 2026-04-25 septendecies)
+## 🆕 PONTO DE RETOMADA (última atualização em 2026-04-26 octodecies)
 
 > **Leia APENAS esta seção ao retomar em outro chat.** Ela é autocontida:
 > não é necessário reler seções anteriores a menos que haja dúvida sobre
 > detalhe específico. Seções históricas acima existem apenas para auditoria.
 
-### Estado atual (consolidado) — branch `claude/create-log-sanitization-script-QQ56a`
+### Estado atual (consolidado) — branch `claude/focused-einstein-Ol7Hd`
 
 **Commits relevantes (mais recente → mais antigo):**
-- `0b08d85` — Extrair extract_source_hint e migrar _handle_browser_search_api *(esta sessão, ciclo 11)*
+- `14ffcf0` — Migrar dict-yielders de _iter_web_search_wait_messages para build_status_event *(esta sessão, ciclo 12)*
+- `8911ec4` — Merge PR #577 (sessão septendecies integrada em main)
+- `0b08d85` — Extrair extract_source_hint e migrar _handle_browser_search_api
 - `1aa7dd6` — Extrair format_origin_suffix (idiom de log _origem) *(esta sessão, ciclo 10)*
 - `b0202b1` — Extrair build_markdown_event e migrar último site SSE em api_sync *(esta sessão, ciclo 9)*
 - `ab45781` — docs: gravar 4 ciclos da sessão sedecies (76d2f40..6ca399a)
@@ -445,7 +447,7 @@ Coletadas em `2026-04-22` via `wc -l` / `grep -nE "def "`:
 - `1f3374b` — Extrair detecção de origem de request para módulo testável offline
 - `0c6216e` — docs: refinar backlog P0-P1-P2 com evidências concretas
 
-**Suite offline atual: 15 arquivos → 471 passed** (454 anterior + 4 em `TestBuildMarkdownEvent` + 5 em `TestFormatOriginSuffix` + 8 em `TestExtractSourceHint`).
+**Suite offline atual: 15 arquivos → 478 passed** (471 anterior + 7 em `TestWebSearchWaitEventEquivalence`).
 
 Comando exato de validação:
 ```
@@ -491,7 +493,9 @@ Esperado: **471 passed**. (NÃO usar `python3 -m pytest tests/` cru — `tests/t
 - `server.api_sync` usa `_normalize_optional_text_impl` para `sync_browser_profile` (2 sites — payload e snapshot), `_resolve_chat_url_impl(case_insensitive=True)` para o fallback de URL (preserva `or url` final como último-recurso) e `_format_requester_suffix_impl(nome_membro, id_membro)` para o sufixo `_quem` do log.
 - `server.chat_completions` usa `_format_requester_suffix_impl` para o mesmo sufixo `_quem` (idiom unificado entre os dois handlers).
 - `server._wait_python_request_interval_if_needed` usa `_compute_python_request_interval_impl(pmin, pmax, profile_count)` para calcular `(base, target)` — substitui `random.uniform(...)` + divisão pelo profile_count. Curto-circuito histórico (ambos pmin/pmax `<=0` → retorno antecipado sem wait) preservado **antes** da chamada ao helper. State global (`_python_anti_rate_limit_last_ts`/lock) e o tight-loop com `time.sleep`/status SSE permanecem em server.py — extração completa em padrão B foi adiada (aumenta complexidade sem ganho proporcional).
-- 7 sites SSE em `server.py` migraram para `_build_status_event_impl`/`_build_error_event_impl`/`_build_markdown_event_impl`: `_wait_python_request_interval_if_needed`, `_wait_remote_user_priority_if_needed`, `_execute_single_browser_search`, `api_completions` SSE generator, `api_sync::sync_generate` (3x — 2 status + 1 markdown), `chat_completions` timeout. 2 sites de `_iter_web_search_wait_messages` permanecem com dict-yielding (consumidor faz `json.dumps(msg)` sobre dict arbitrário enriquecido).
+- 7 sites SSE em `server.py` migraram para `_build_status_event_impl`/`_build_error_event_impl`/`_build_markdown_event_impl`: `_wait_python_request_interval_if_needed`, `_wait_remote_user_priority_if_needed`, `_execute_single_browser_search`, `api_completions` SSE generator, `api_sync::sync_generate` (3x — 2 status + 1 markdown), `chat_completions` timeout.
+- **`_iter_web_search_wait_messages` (sessão octodecies)**: agora recebe `phase_prefix` e `source_label` por argumento e yielda strings JSON via `_build_status_event_impl`. O consumer em `_execute_single_browser_search` deixa de mutar `phase`/`source`/`content` e simplifica para `stream_queue.put(raw_msg)`. Byte-equivalência com o pipeline antigo (legacy dict + mutate + `json.dumps`) coberta por 7 testes em `TestWebSearchWaitEventEquivalence`. **Não há mais dict-yielders SSE** em `server.py`.
+- **`chat_completions::chat_meta` (sessão octodecies)**: `early_profile = (fin.get('chromium_profile') or "").strip()` migrado para `_normalize_optional_text_impl(fin.get('chromium_profile'))`. O `or` chain downstream (`early_profile or snapshot.get("chromium_profile", "")`) absorve `None`/`""` identicamente.
 - `server.chat_completions` e `server._handle_browser_search_api` ambos usam `_extract_source_hint_impl(data, request.headers)` (cadeia de fallback unificada) e `_format_origin_suffix_impl(is_analyzer, source_hint)` (apenas em chat_completions). `_handle_browser_search_api` também migrou para o trio canônico `_format_requester_suffix_impl` + `_is_analyzer_chat_request_impl` + `_build_sender_label_impl` (mesma classificação de chat_completions, eliminando 5 linhas de string-match ad-hoc).
 - `server._extract_rate_limit_details` usa `error_catalog.classify_from_text`.
 - `analisador_prontuarios._resposta_eh_rate_limit` usa `error_catalog.classify_from_text` (com fallback defensivo).
@@ -550,9 +554,8 @@ Esperado: **471 passed**. (NÃO usar `python3 -m pytest tests/` cru — `tests/t
 **2. Auditar e migrar handlers menores que ainda têm idioms duplicados (BAIXO risco)**
 - Verificar handlers fora dos 3 já cobertos (`chat_completions`, `api_sync`, `_handle_browser_search_api`) — ex.: `api_delete`, `api_close_chat`, `api_completions` legado, etc. Procurar pelos idioms `_format_requester_suffix`, `_extract_source_hint`, `(v or '').strip() or None`. Comando útil: `grep -n "data.get(\"nome_membro" Scripts/server.py`.
 
-**3. Migrar 2 dict-yielders em `_iter_web_search_wait_messages` (BAIXO risco, valor questionável)**
-- `_iter_web_search_wait_messages` (~lines 659/675) yield dicts puros; o consumer em `_execute_single_browser_search` (~line 702) faz `json.dumps(msg, ensure_ascii=False)` sobre o dict mutado.
-- Migrar exigiria refactor da interface produtor↔consumidor (substituir mutation in-place por construção explícita) ou criar um `build_event_from_dict(msg)` quase no-op. Decidir o trade-off antes de implementar.
+**3. ~~Migrar 2 dict-yielders em `_iter_web_search_wait_messages`~~ (FEITO em 2026-04-26 octodecies, commit `14ffcf0`)**
+- Refactor producer↔consumer concluído: `_iter_web_search_wait_messages` recebe `phase_prefix`/`source_label` e yielda strings via `build_status_event(content, **extras)`. Consumer só faz `stream_queue.put(raw_msg)`. Byte-equivalência coberta por 7 testes em `TestWebSearchWaitEventEquivalence`.
 
 **4. `api_sync` `_url_info` / `_cid_info` (BAIXO valor)**
 - Sites únicos, one-liners óbvios. Não recomendado extrair — daria pouco ganho e adicionaria indireção desnecessária.
@@ -568,34 +571,35 @@ Esperado: **471 passed**. (NÃO usar `python3 -m pytest tests/` cru — `tests/t
 ### Prompt de retomada (COPIAR EXATAMENTE EM NOVO CHAT)
 
 ```
-Continue o refactor do /home/user/chatGPT_Simulator na branch claude/create-log-sanitization-script-QQ56a.
-Leia APENAS a seção "PONTO DE RETOMADA (última atualização em 2026-04-25 septendecies)" em REFACTOR_PROGRESS.md — é autocontida.
+Continue o refactor do /home/user/chatGPT_Simulator na branch claude/focused-einstein-Ol7Hd.
+Leia APENAS a seção "PONTO DE RETOMADA (última atualização em 2026-04-26 octodecies)" em REFACTOR_PROGRESS.md — é autocontida.
 
-Execute a Opção 2 da lista "Próximas opções" (auditoria de handlers menores). É BAIXO risco e tem alta probabilidade de revelar mais sites a unificar. Depois, se sobrar tempo, atacar a Opção 1 (PythonRequestThrottle padrão B) ou parar com docs commit.
+Execute a Opção 1 da lista "Próximas opções" (PythonRequestThrottle padrão B). Risco MÉDIO — toca o tight-loop SSE de `_wait_python_request_interval_if_needed`, mas a decisão pura `compute_python_request_interval` já existe; resta encapsular state global (`_python_anti_rate_limit_last_ts` + lock) em uma classe e aplicar padrão B (instância singleton + wrapper fino).
 
 Regras obrigatórias:
-(a) usar `grep -n "data.get(\"nome_membro_solicitante\")" Scripts/server.py` (e variantes) para encontrar os ~5 handlers do projeto que ainda recebem identificação do solicitante;
-(b) para cada handler encontrado, verificar se ainda usa o idiom inline em vez dos helpers — `_format_requester_suffix_impl`, `_extract_source_hint_impl`, `_normalize_optional_text_impl`. Migrar quando encontrar;
-(c) NÃO criar novos helpers nesta opção — apenas usar os já existentes (server_helpers.py exporta 19+ funções; sync_dedup.py tem SyncDedup);
-(d) NÃO alterar a string de log de cada handler (mensagens visíveis a operadores são contrato implícito);
-(e) manter os 471 testes offline passando + eventuais novos;
-(f) ANTES do commit/push final, ATUALIZAR a seção "PONTO DE RETOMADA" com novo commit hash, contagem de testes, e próxima opção;
-(g) commit com título em PT-BR no imperativo, listando os handlers migrados;
-(h) push para claude/create-log-sanitization-script-QQ56a.
+(a) criar `Scripts/python_request_throttle.py` com classe `PythonRequestThrottle` (state + lock + `now_func` injetável); `should_wait()` / `wait_remaining_sec()` para que o caller mantenha o loop e o emit SSE;
+(b) preservar exatamente o status SSE atual (`build_status_event` com `phase="python_request_interval_cooldown"`) e o tight-loop com `time.sleep` no `server.py`;
+(c) NÃO emitir SSE direto do módulo puro — fatiar para que o caller decida;
+(d) NÃO alterar contratos visíveis (logs, JSON, fila); curto-circuito histórico (ambos pmin/pmax `<=0` → retorno antecipado) preservado antes da chamada;
+(e) ≥3 testes offline por método público em `tests/test_python_request_throttle.py`;
+(f) manter os 478 testes offline passando + eventuais novos;
+(g) ANTES do commit/push final, ATUALIZAR a seção "PONTO DE RETOMADA" com novo commit hash, contagem de testes, e próxima opção;
+(h) commit com título em PT-BR no imperativo;
+(i) push para claude/focused-einstein-Ol7Hd.
 
 Se encontrar algo inesperado em server.py, PARAR e pedir confirmação antes de editar.
 Se precisar tocar em browser.py (async/Playwright) ou em analisador_prontuarios.py, PARAR — não está no escopo desta opção.
 ```
 
 ### Checklist de "antes de terminar a sessão" (rodar sempre)
-- [ ] Suite offline passa: `python3 -m pytest tests/test_humanizer.py tests/test_shared_queue.py tests/test_selectors_smoke.py tests/test_request_source.py tests/test_error_catalog.py tests/test_server_helpers.py tests/test_browser_predicates.py tests/test_rate_limit_integration.py tests/test_log_sanitizer.py tests/test_analisador_rate_limit.py tests/test_audit_sanitization.py tests/test_security_state.py tests/test_chat_rate_limit_cooldown.py tests/test_analisador_parsers.py`
+- [ ] Suite offline passa: `python3 -m pytest tests/test_humanizer.py tests/test_shared_queue.py tests/test_selectors_smoke.py tests/test_request_source.py tests/test_error_catalog.py tests/test_server_helpers.py tests/test_browser_predicates.py tests/test_rate_limit_integration.py tests/test_log_sanitizer.py tests/test_analisador_rate_limit.py tests/test_audit_sanitization.py tests/test_security_state.py tests/test_chat_rate_limit_cooldown.py tests/test_analisador_parsers.py tests/test_sync_dedup.py` (esperado: **478 passed**).
 - [ ] `python3 -c "import ast; ast.parse(open('Scripts/server.py').read())"` OK.
 - [ ] `python3 -c "import ast; ast.parse(open('Scripts/browser.py').read())"` OK.
 - [ ] `python3 -c "import ast; ast.parse(open('Scripts/analisador_prontuarios.py').read())"` OK.
 - [ ] `python3 -c "import ast; ast.parse(open('Scripts/utils.py').read())"` OK.
 - [ ] `python3 -c "import ast; ast.parse(open('Scripts/error_catalog.py').read())"` OK.
 - [ ] Seção "PONTO DE RETOMADA" atualizada com commits novos, contagem de testes, próxima opção.
-- [ ] `git status` limpo e último commit pushado para `origin/claude/create-log-sanitization-script-QQ56a`.
+- [ ] `git status` limpo e último commit pushado para `origin/claude/focused-einstein-Ol7Hd`.
 
 ### Histórico de sessões (para auditoria — NÃO precisa reler)
 - **2026-04-22** (sessão original) — `1f3374b`: extração de `request_source.py`.
@@ -624,7 +628,9 @@ Se precisar tocar em browser.py (async/Playwright) ou em analisador_prontuarios.
   7. `bcaa716`: extração de `format_requester_suffix` (idiom `, por "<nome>" (id_membro: "<id>")` duplicado em chat_completions e api_sync). Migração nos 2 sites. +6 testes.
   8. `6ca399a`: extração de `compute_python_request_interval(pmin, pmax, profile_count, *, rng=None)` — decisão pura `(base, target)` com `random.uniform` e divisão pelo profile_count, `rng` injetável, curto-circuito histórico preservado. Integração em `_wait_python_request_interval_if_needed`. State global e tight-loop NÃO extraídos (Opção 4 da próxima sessão). +8 testes.
   Total: **454 testes offline passando** (+17 novos). 4 commits + docs commit.
-- **2026-04-25 septendecies** (esta sessão, branch `claude/create-log-sanitization-script-QQ56a`) — 3 ciclos contínuos sobre o pano de fundo da sedecies:
+- **2026-04-26 octodecies** (esta sessão, branch `claude/focused-einstein-Ol7Hd`) — 1 ciclo de Opção 3 (migração de dict-yielders SSE):
+  12. `14ffcf0`: `_iter_web_search_wait_messages` deixa de yieldar dicts puros e passa a receber `phase_prefix` + `source_label` por argumento, yieldando strings JSON via `_build_status_event_impl`. Consumer em `_execute_single_browser_search` simplifica para `stream_queue.put(raw_msg)` (remove 4 linhas de mutação in-place + `json.dumps`). Migração paralela: `chat_completions::chat_meta` migra `(fin.get('chromium_profile') or "").strip()` para `_normalize_optional_text_impl(...)`. +7 testes em `TestWebSearchWaitEventEquivalence` cobrindo byte-equivalência com o pipeline antigo (legacy dict + mutate + `json.dumps`) para `web` e `uptodate`. Total: **478 testes offline passando**. Auditoria de Opção 2 confirmou que `chat_completions`, `api_sync`, `_handle_browser_search_api` já estão totalmente migrados; `send_manual_whatsapp_reply` mantém formato `_quem` distinto (`(id={id})` vs `(id_membro: "{id}")`) — migração rejeitada por preservar contrato implícito de log. Próxima opção: PythonRequestThrottle (padrão B, MÉDIO risco).
+- **2026-04-25 septendecies** (branch `claude/create-log-sanitization-script-QQ56a`) — 3 ciclos contínuos sobre o pano de fundo da sedecies:
   9. `b0202b1`: extração de `build_markdown_event(content)` espelhando `build_error_event`. Migração do único `{"type":"markdown",...}` literal restante em `api_sync::sync_generate`. +4 testes.
   10. `1aa7dd6`: extração de `format_origin_suffix(is_analyzer, source_hint)` — sufixo `[origem: ...]` com analyzer override (sempre `analisador_prontuarios.py`) ou hint do payload. Migração em `chat_completions::_origem`. +5 testes.
   11. `0b08d85`: extração de `extract_source_hint(data, headers)` — colapsa o idiom de 4 linhas duplicado em chat_completions e _handle_browser_search_api. Migração ampla em `_handle_browser_search_api`: além de `extract_source_hint`, também `format_requester_suffix`, `is_analyzer_chat_request` e `build_sender_label` (eliminando 5 linhas de string-match ad-hoc; agora usa a mesma classificação canônica de `chat_completions`). +8 testes.
