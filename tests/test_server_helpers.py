@@ -642,7 +642,7 @@ class TestBuildWebSearchTestStreamResponse:
         raw = json.dumps({"type": "error", "content": "falhou"})
         payload, status = sh.build_web_search_test_stream_response(raw, "q1")
         assert status == 500
-        assert payload == {"success": False, "query": "q1", "error": "falhou"}
+        assert payload == sh.build_web_search_test_error_payload("q1", "falhou")
 
     def test_unknown_type_is_non_terminal(self):
         raw = json.dumps({"type": "status", "content": "aguarde"})
@@ -653,6 +653,36 @@ class TestBuildWebSearchTestStreamResponse:
     def test_invalid_json_raises_to_preserve_legacy_behavior(self):
         with pytest.raises(json.JSONDecodeError):
             sh.build_web_search_test_stream_response("not-json", "q1")
+
+
+class TestBuildWebSearchTestErrorPayload:
+    def test_builds_shape(self):
+        out = sh.build_web_search_test_error_payload("q1", "erro xyz")
+        assert out == {"success": False, "query": "q1", "error": "erro xyz"}
+
+    def test_keeps_non_string_error(self):
+        out = sh.build_web_search_test_error_payload("q1", {"code": "x"})
+        assert out["success"] is False
+        assert out["query"] == "q1"
+        assert out["error"] == {"code": "x"}
+
+
+class TestBuildWebSearchTestTerminalErrorPayloads:
+    def test_timeout_payload(self):
+        out = sh.build_web_search_test_timeout_payload("q1")
+        assert out == {
+            "success": False,
+            "query": "q1",
+            "error": "Timeout (90s)",
+        }
+
+    def test_no_response_payload(self):
+        out = sh.build_web_search_test_no_response_payload("q1")
+        assert out == {
+            "success": False,
+            "query": "q1",
+            "error": "Sem resposta do browser",
+        }
 
 
 # ─────────────────────────────────────────────────────────
