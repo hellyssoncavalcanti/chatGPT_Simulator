@@ -1013,3 +1013,97 @@ class TestSafeSnapshotStats:
     def test_handles_none_queue(self):
         # `None` não tem `snapshot_stats` → caminho de hasattr=False → {}.
         assert sh.safe_snapshot_stats(None) == {}
+
+
+class TestSearchHandlerStatusEventEquivalence:
+    """Byte-equivalência entre os dict-yielders SSE históricos de
+    `_handle_browser_search_api` (status `*_prepare` e `*_keepalive`) e o
+    novo `build_status_event(content, **extras)` adotado em 2026-04-26
+    quinvicies (ciclo 19).
+    """
+
+    @staticmethod
+    def _legacy_prepare(query_str, idx, total, route_label, source_label):
+        return json.dumps({
+            'type': 'status',
+            'content': f'📚 Preparando busca {source_label} {idx}/{total}.',
+            'query': query_str,
+            'index': idx,
+            'total': total,
+            'phase': f'{route_label.lower()}_prepare',
+            'source': source_label,
+        }, ensure_ascii=False)
+
+    @staticmethod
+    def _new_prepare(query_str, idx, total, route_label, source_label):
+        return sh.build_status_event(
+            f'📚 Preparando busca {source_label} {idx}/{total}.',
+            query=query_str,
+            index=idx,
+            total=total,
+            phase=f'{route_label.lower()}_prepare',
+            source=source_label,
+        )
+
+    @staticmethod
+    def _legacy_keepalive(query_str, idx, total, route_label, source_label):
+        return json.dumps({
+            'type': 'status',
+            'content': f'⏳ Busca {source_label} por "{query_str}" ainda em andamento...',
+            'query': query_str,
+            'index': idx,
+            'total': total,
+            'phase': f'{route_label.lower()}_keepalive',
+            'source': source_label,
+        }, ensure_ascii=False)
+
+    @staticmethod
+    def _new_keepalive(query_str, idx, total, route_label, source_label):
+        return sh.build_status_event(
+            f'⏳ Busca {source_label} por "{query_str}" ainda em andamento...',
+            query=query_str,
+            index=idx,
+            total=total,
+            phase=f'{route_label.lower()}_keepalive',
+            source=source_label,
+        )
+
+    @pytest.mark.parametrize("route_label,source_label", [
+        ("WEB_SEARCH", "web"),
+        ("UPTODATE_SEARCH", "uptodate"),
+    ])
+    def test_prepare_event_byte_equivalent(self, route_label, source_label):
+        legacy = self._legacy_prepare("tratamento", 1, 3, route_label, source_label)
+        new = self._new_prepare("tratamento", 1, 3, route_label, source_label)
+        assert legacy == new
+        assert json.loads(legacy) == json.loads(new)
+
+    @pytest.mark.parametrize("route_label,source_label", [
+        ("WEB_SEARCH", "web"),
+        ("UPTODATE_SEARCH", "uptodate"),
+    ])
+    def test_keepalive_event_byte_equivalent(self, route_label, source_label):
+        legacy = self._legacy_keepalive("dose", 2, 5, route_label, source_label)
+        new = self._new_keepalive("dose", 2, 5, route_label, source_label)
+        assert legacy == new
+        assert json.loads(legacy) == json.loads(new)
+
+    def test_unicode_in_query_preserved(self):
+        # Acento + aspas duplas no query — JSON precisa escapar `"` e
+        # preservar UTF-8 cru (ensure_ascii=False).
+        query = 'cefepime "diluição"'
+        legacy = self._legacy_keepalive(query, 1, 1, "WEB_SEARCH", "web")
+        new = self._new_keepalive(query, 1, 1, "WEB_SEARCH", "web")
+        assert legacy == new
+        # As aspas internas viram \" e o ç permanece literal.
+        assert '\\"diluição\\"' in new
+
+    def test_extras_order_matches_legacy(self):
+        legacy = self._legacy_prepare("q", 1, 1, "WEB_SEARCH", "web")
+        new = self._new_prepare("q", 1, 1, "WEB_SEARCH", "web")
+        # Ordem das chaves deve ser idêntica (dict mantém ordem de inserção).
+        expected_order = ['"type"', '"content"', '"query"', '"index"', '"total"', '"phase"', '"source"']
+        legacy_positions = [legacy.find(k) for k in expected_order]
+        new_positions = [new.find(k) for k in expected_order]
+        assert legacy_positions == new_positions
+        assert all(p >= 0 for p in legacy_positions)
