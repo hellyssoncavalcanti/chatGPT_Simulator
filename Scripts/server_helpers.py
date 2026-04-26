@@ -468,6 +468,23 @@ def build_web_search_test_no_response_payload(query: str) -> dict:
     return build_web_search_test_error_payload(query, "Sem resposta do browser")
 
 
+def normalize_source_hint(value) -> str:
+    """Normaliza um source-hint para a forma `lower-case` sem espaços nas pontas.
+
+    Idiom canônico ``str(value).strip().lower()`` consumido por
+    `is_analyzer_chat_request` / `is_python_chat_request` /
+    `is_codex_chat_request` em `server.py`. Tratamento defensivo:
+    `None` resulta em ``""`` (em vez do literal ``"none"`` produzido por
+    `str(None)`).
+    """
+    if value is None:
+        return ""
+    try:
+        return str(value).strip().lower()
+    except Exception:
+        return ""
+
+
 def build_active_chat_meta(stream_queue, is_analyzer: bool, *, now: float) -> dict:
     """Monta o `meta` inicial inserido em `ACTIVE_CHATS[chat_id]`.
 
@@ -896,6 +913,7 @@ __all__ = [
     "resolve_avatar_filename",
     "count_active_chats",
     "build_active_chat_meta",
+    "normalize_source_hint",
     "build_queue_key",
     "build_chat_task_payload",
     "build_error_event",

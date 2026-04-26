@@ -927,6 +927,33 @@ class TestBuildActiveChatMeta:
         assert out["stale_candidates"] == 1  # 600 - 500 > 50
 
 
+class TestNormalizeSourceHint:
+    def test_strip_lower(self):
+        assert sh.normalize_source_hint("  ANALISADOR_PRONTUARIOS.PY  ") == "analisador_prontuarios.py"
+
+    def test_already_normalized_passthrough(self):
+        assert sh.normalize_source_hint("python:queue") == "python:queue"
+
+    def test_none_becomes_empty_string(self):
+        # Tratamento defensivo: NUNCA produzir o literal "none"
+        assert sh.normalize_source_hint(None) == ""
+
+    def test_empty_passthrough(self):
+        assert sh.normalize_source_hint("") == ""
+        assert sh.normalize_source_hint("   ") == ""
+
+    def test_int_or_other_coerced(self):
+        assert sh.normalize_source_hint(42) == "42"
+        assert sh.normalize_source_hint(True) == "true"
+
+    def test_object_without_str_falls_back_to_empty(self):
+        class Boom:
+            def __str__(self):
+                raise RuntimeError("no str for you")
+
+        assert sh.normalize_source_hint(Boom()) == ""
+
+
 # ─────────────────────────────────────────────────────────
 # build_queue_key
 # ─────────────────────────────────────────────────────────

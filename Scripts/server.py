@@ -89,6 +89,7 @@ from server_helpers import (
     resolve_avatar_filename as _resolve_avatar_filename_impl,
     count_active_chats as _count_active_chats_impl,
     build_active_chat_meta as _build_active_chat_meta_impl,
+    normalize_source_hint as _normalize_source_hint_impl,
     format_requester_suffix as _format_requester_suffix_impl,
     format_origin_suffix as _format_origin_suffix_impl,
     safe_int as _safe_int_impl,
@@ -1641,7 +1642,7 @@ def _handle_browser_search_api(execute_fn, *, route_label, source_label):
     nome_membro, id_membro = _extract_requester_identity_impl(data)
     _quem = _format_requester_suffix_impl(nome_membro, id_membro)
     source_hint = _extract_source_hint_impl(data, request.headers)
-    source_hint_norm = str(source_hint).strip().lower()
+    source_hint_norm = _normalize_source_hint_impl(source_hint)
     is_analyzer = _is_analyzer_chat_request_impl(source_hint_norm)
     sender_label = _build_sender_label_impl(source_hint, is_analyzer)
 
@@ -2119,7 +2120,7 @@ def chat_completions():
     nome_membro, id_membro = _extract_requester_identity_impl(data)
     _quem = _format_requester_suffix_impl(nome_membro, id_membro)
     source_hint = _extract_source_hint_impl(data, request.headers)
-    source_hint_norm = str(source_hint).strip().lower()
+    source_hint_norm = _normalize_source_hint_impl(source_hint)
     is_analyzer = _is_analyzer_chat_request_impl(source_hint_norm)
     sender_label = _build_sender_label_impl(source_hint, is_analyzer)
     _origem = _format_origin_suffix_impl(is_analyzer, source_hint)
