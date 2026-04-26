@@ -27,16 +27,29 @@ import socket
 import ipaddress
 from datetime import datetime, timedelta
 
+AUTO_INSTALL_MISSING_DEPS = str(
+    os.getenv("SIMULATOR_AUTO_INSTALL_DEPS", "0")
+).strip().lower() in {"1", "true", "yes", "on"}
+
 # --- AUTO-INSTALLER (CORE) ---
 def check_and_install(package, import_name=None):
     if import_name is None: import_name = package
     if importlib.util.find_spec(import_name) is None:
+        if not AUTO_INSTALL_MISSING_DEPS:
+            print(
+                f"ℹ️ Dependência opcional ausente: {package}. "
+                "Auto-instalação desativada (SIMULATOR_AUTO_INSTALL_DEPS=0)."
+            )
+            return False
         print(f"🔧 Instalando dependência: {package}...")
         try:
             subprocess.check_call([sys.executable, "-m", "pip", "install", package])
             print(f"✅ {package} instalado com sucesso!")
+            return True
         except Exception as e:
             print(f"❌ Erro ao instalar {package}: {e}")
+            return False
+    return True
 
 # Verifica dependências básicas do Backend
 check_and_install("cryptography")

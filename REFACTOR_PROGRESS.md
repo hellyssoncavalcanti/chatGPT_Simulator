@@ -393,7 +393,7 @@ Coletadas em `2026-04-22` via `wc -l` / `grep -nE "def "`:
 
 ---
 
-## 🆕 PONTO DE RETOMADA (última atualização em 2026-04-26 octovicies)
+## 🆕 PONTO DE RETOMADA (última atualização em 2026-04-26 novovicies)
 
 > **Leia APENAS esta seção ao retomar em outro chat.** Ela é autocontida:
 > não é necessário reler seções anteriores a menos que haja dúvida sobre
@@ -402,6 +402,7 @@ Coletadas em `2026-04-22` via `wc -l` / `grep -nE "def "`:
 ### Estado atual (consolidado) — branch `claude/focused-einstein-GcWqc`
 
 **Commits relevantes (mais recente → mais antigo):**
+- `f91b077` — Desativar auto-pip por padrão para import offline *(esta sessão, ciclo 23 / hotfix codex)*
 - `fd5749e` — Permitir import server sem cryptography em ambiente offline *(esta sessão, ciclo 22 / hotfix codex)*
 - `f554638` — Corrigir NameError do WebSearchThrottle no boot *(esta sessão, ciclo 21 / hotfix)*
 - `2dd6add` — Normalizar campos opcionais em handlers de manutenção *(esta sessão, ciclo 20 / opção 2)*
@@ -602,7 +603,7 @@ Esperado: **524 passed**. (NÃO usar `python3 -m pytest tests/` cru — `tests/t
 
 ```
 Continue o refactor do /home/user/chatGPT_Simulator na branch claude/focused-einstein-Ol7Hd.
-Leia APENAS a seção "PONTO DE RETOMADA (última atualização em 2026-04-26 octovicies)" em REFACTOR_PROGRESS.md — é autocontida.
+Leia APENAS a seção "PONTO DE RETOMADA (última atualização em 2026-04-26 novovicies)" em REFACTOR_PROGRESS.md — é autocontida.
 
 As opções 1 (PythonRequestThrottle), 3 (dict-yielders SSE),
 A (snapshot em /api/metrics + Prometheus), B (WebSearchThrottle), C (doc de concorrência por profile) e E (snapshot do WebSearchThrottle) já estão FEITAS. Próximas opções:
@@ -688,6 +689,9 @@ Se precisar tocar em browser.py (async/Playwright) ou em analisador_prontuarios.
   21. `f554638`: corrigido `NameError: WebSearchThrottle is not defined` no boot (`main.py -> import server`) movendo `from web_search_throttle import WebSearchThrottle` para antes da instanciação `_WEB_SEARCH_THROTTLE = WebSearchThrottle()` em `server.py`. Incluída verificação explícita de ordem de símbolos (`order_ok=True`) e parse AST pós-mudança. README atualizado com nota de troubleshooting no inventário do módulo. Suite offline permaneceu **524 passed**.
 - **2026-04-26 octovicies** (esta sessão, branch `work`) — hotfix de teste do Codex (`import server` em ambiente sem rede):
   22. `fd5749e`: `utils.py` agora trata `cryptography` como dependência opcional no import do módulo (fallback seguro com `HAS_CRYPTOGRAPHY=False`), evitando `ModuleNotFoundError` durante `import server` quando `pip install` falha por proxy 403. `ensure_certificates()` passou a validar explicitamente a dependência e levantar erro claro apenas no uso da geração de certificado. Validação executada: `import server` passou neste ambiente (com warnings de pip), além de AST e suite offline (**524 passed**).
+- **2026-04-26 novovicies** (esta sessão, branch `work`) — hotfix do ruído de teste Codex (warnings de pip/proxy):
+  23. `f91b077`: `utils.check_and_install()` agora respeita `SIMULATOR_AUTO_INSTALL_DEPS` (default **0**). Sem essa flag, dependências ausentes apenas registram mensagem informativa e não tentam `pip install`, eliminando warnings de proxy 403 durante `import server`. Com `SIMULATOR_AUTO_INSTALL_DEPS=1`, comportamento antigo de auto-instalação é preservado. Validações: `import_server_ok` sem tracebacks + AST + suite offline **524 passed**.
+
 
 
 

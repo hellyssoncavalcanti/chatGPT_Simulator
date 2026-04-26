@@ -275,6 +275,8 @@ rodam no CI completo via o comando da seção anterior.)
 > Compatibilidade offline: `import server` agora funciona mesmo quando
 > `cryptography`/`markdownify` não puderem ser instalados (ex.: proxy 403).
 > A geração de certificado continua exigindo `cryptography` em runtime.
+> Se quiser reativar auto-instalação via `pip`, defina
+> `SIMULATOR_AUTO_INSTALL_DEPS=1`.
 
 #### Inventário de módulos puros (extraídos do caminho quente)
 
