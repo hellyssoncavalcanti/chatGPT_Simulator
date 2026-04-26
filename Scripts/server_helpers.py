@@ -686,6 +686,23 @@ def safe_int(value, default: int) -> int:
         return int(default)
 
 
+def resolve_logs_tail_lines_limit(
+    raw_lines,
+    *,
+    default: int = 120,
+    min_lines: int = 10,
+    max_lines: int = 800,
+) -> int:
+    """Normaliza `?lines=` de `/api/logs/tail` com clamp estável."""
+    requested = safe_int(raw_lines, default)
+    return max(int(min_lines), min(int(max_lines), int(requested)))
+
+
+def parse_from_end_flag(raw_value) -> bool:
+    """Interpreta `?from_end=` de `/api/logs/stream` com o idiom legado."""
+    return str(raw_value).strip().lower() not in {"0", "false", "no"}
+
+
 def safe_snapshot_stats(queue_obj) -> dict:
     """Wrapper defensivo para ``queue_obj.snapshot_stats()`` que jamais
     levanta exceção.
@@ -743,6 +760,8 @@ __all__ = [
     "format_origin_suffix",
     "compute_python_request_interval",
     "safe_int",
+    "resolve_logs_tail_lines_limit",
+    "parse_from_end_flag",
     "safe_snapshot_stats",
 ]
 
