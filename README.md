@@ -272,6 +272,10 @@ Esperado: **524 passed**. (Os arquivos `tests/test_server_api.py` e
 `cryptography`, que não estão nesta lista de smoke offline — eles
 rodam no CI completo via o comando da seção anterior.)
 
+> Compatibilidade offline: `import server` agora funciona mesmo quando
+> `cryptography`/`markdownify` não puderem ser instalados (ex.: proxy 403).
+> A geração de certificado continua exigindo `cryptography` em runtime.
+
 #### Inventário de módulos puros (extraídos do caminho quente)
 
 | Módulo | Responsabilidade | Testes |

@@ -393,7 +393,7 @@ Coletadas em `2026-04-22` via `wc -l` / `grep -nE "def "`:
 
 ---
 
-## 🆕 PONTO DE RETOMADA (última atualização em 2026-04-26 septvicies)
+## 🆕 PONTO DE RETOMADA (última atualização em 2026-04-26 octovicies)
 
 > **Leia APENAS esta seção ao retomar em outro chat.** Ela é autocontida:
 > não é necessário reler seções anteriores a menos que haja dúvida sobre
@@ -402,6 +402,7 @@ Coletadas em `2026-04-22` via `wc -l` / `grep -nE "def "`:
 ### Estado atual (consolidado) — branch `claude/focused-einstein-GcWqc`
 
 **Commits relevantes (mais recente → mais antigo):**
+- `fd5749e` — Permitir import server sem cryptography em ambiente offline *(esta sessão, ciclo 22 / hotfix codex)*
 - `f554638` — Corrigir NameError do WebSearchThrottle no boot *(esta sessão, ciclo 21 / hotfix)*
 - `2dd6add` — Normalizar campos opcionais em handlers de manutenção *(esta sessão, ciclo 20 / opção 2)*
 - `865225b` — Migrar send_manual_whatsapp_reply para helper de solicitante *(esta sessão, ciclo 19 / opção 2)*
@@ -601,7 +602,7 @@ Esperado: **524 passed**. (NÃO usar `python3 -m pytest tests/` cru — `tests/t
 
 ```
 Continue o refactor do /home/user/chatGPT_Simulator na branch claude/focused-einstein-Ol7Hd.
-Leia APENAS a seção "PONTO DE RETOMADA (última atualização em 2026-04-26 septvicies)" em REFACTOR_PROGRESS.md — é autocontida.
+Leia APENAS a seção "PONTO DE RETOMADA (última atualização em 2026-04-26 octovicies)" em REFACTOR_PROGRESS.md — é autocontida.
 
 As opções 1 (PythonRequestThrottle), 3 (dict-yielders SSE),
 A (snapshot em /api/metrics + Prometheus), B (WebSearchThrottle), C (doc de concorrência por profile) e E (snapshot do WebSearchThrottle) já estão FEITAS. Próximas opções:
@@ -685,6 +686,9 @@ Se precisar tocar em browser.py (async/Playwright) ou em analisador_prontuarios.
   20. `2dd6add`: normalização de campos opcionais com `_normalize_optional_text_impl` em `api_chat_lookup` (`origin_url`/`url_atual`), `api_chat_delete_local` (`chat_id`/`origin_url`) e `api_delete` (`url`/`chat_id`). Objetivo: reduzir idioms duplicados `data.get(...) or ""` e padronizar trim/None-collapse nas rotas de manutenção local. Suite offline preservada: **524 passed** em 17 arquivos. Próximo subpasso recomendado: auditar `api_completions` legado para extrações puras adicionais.
 - **2026-04-26 septvicies** (esta sessão, branch `work`) — hotfix de boot/compatibilidade de nomes:
   21. `f554638`: corrigido `NameError: WebSearchThrottle is not defined` no boot (`main.py -> import server`) movendo `from web_search_throttle import WebSearchThrottle` para antes da instanciação `_WEB_SEARCH_THROTTLE = WebSearchThrottle()` em `server.py`. Incluída verificação explícita de ordem de símbolos (`order_ok=True`) e parse AST pós-mudança. README atualizado com nota de troubleshooting no inventário do módulo. Suite offline permaneceu **524 passed**.
+- **2026-04-26 octovicies** (esta sessão, branch `work`) — hotfix de teste do Codex (`import server` em ambiente sem rede):
+  22. `fd5749e`: `utils.py` agora trata `cryptography` como dependência opcional no import do módulo (fallback seguro com `HAS_CRYPTOGRAPHY=False`), evitando `ModuleNotFoundError` durante `import server` quando `pip install` falha por proxy 403. `ensure_certificates()` passou a validar explicitamente a dependência e levantar erro claro apenas no uso da geração de certificado. Validação executada: `import server` passou neste ambiente (com warnings de pip), além de AST e suite offline (**524 passed**).
+
 
 
 
