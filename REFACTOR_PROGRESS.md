@@ -524,6 +524,11 @@ Esperado: **519 passed**. (NÃO usar `python3 -m pytest tests/` cru — `tests/t
 ### Integrações pendentes (NÃO feitas)
 1. Catálogo em `browser._dismiss_rate_limit_modal_if_any` — último caminho que ainda usa string livre para rate-limit. **BLOQUEADO: requer aprovação do usuário** (toca `browser.py` async).
 2. Concorrência por `browser_profile` — **BLOQUEADO: requer aprovação do usuário** (toca `browser.py` async).
+3. **Integração inicial ChatGPT ↔ Gemini com pré-check de login no startup** — adicionar após as pendências acima, sem alterar a estrutura do refactor:
+   - Gemini pode abrir no **`browser_profile=default`** (mesma diretriz de fallback já consolidada).
+   - No **start do sistema**, validar sinais de sessão/logado no Gemini (heurística equivalente ao fluxo atual de validação de login do ChatGPT).
+   - Se não houver login ativo no Gemini, **pausar a inicialização operacional** e exibir instruções claras no HTML aberto no Chromium para o usuário concluir login manual; retomar somente após confirmação/sinal de sessão válida.
+   - Manter implementação incremental: primeiro contrato/telemetria/wrappers finos; mudanças em `browser.py` async somente com aprovação explícita.
 
 ### Requisitos consolidados (não-regredir)
 - API key é autorização primária; IP/origem são defesa adicional.
