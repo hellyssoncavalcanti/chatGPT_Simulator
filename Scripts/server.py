@@ -650,40 +650,36 @@ def _reserve_web_search_slot():
     }
 
 
-def _iter_web_search_wait_messages(wait_ctx, query_str):
+def _iter_web_search_wait_messages(wait_ctx, query_str, phase_prefix, source_label):
     remaining = wait_ctx["wait_seconds"]
     interval = wait_ctx["interval_sec"]
 
     if remaining <= 0:
         return
 
-    yield {
-        "type": "status",
-        "content": (
-            f"⏳ Aguardando intervalo humano antes da busca web por "
-            f"\"{query_str}\". Pausa planejada: {_format_wait_seconds(interval)}."
-        ),
-        "query": query_str,
-        "wait_seconds": round(remaining, 1),
-        "planned_interval_seconds": round(interval, 1),
-        "phase": "web_search_cooldown",
-    }
+    yield _build_status_event_impl(
+        f"⏳ Aguardando intervalo humano antes da busca {source_label} por "
+        f"\"{query_str}\". Pausa planejada: {_format_wait_seconds(interval)}.",
+        query=query_str,
+        wait_seconds=round(remaining, 1),
+        planned_interval_seconds=round(interval, 1),
+        phase=f"{phase_prefix}_cooldown",
+        source=source_label,
+    )
 
     while remaining > 0:
         chunk = min(WEB_SEARCH_PROGRESS_TICK_SEC, remaining)
         time.sleep(chunk)
         remaining = max(0.0, wait_ctx["scheduled_start_at"] - time.time())
-        yield {
-            "type": "status",
-            "content": (
-                f"⏳ Pausa anti-bot em andamento antes da busca web por "
-                f"\"{query_str}\". Início previsto em {_format_wait_seconds(remaining)}."
-            ),
-            "query": query_str,
-            "wait_seconds": round(remaining, 1),
-            "planned_interval_seconds": round(interval, 1),
-            "phase": "web_search_cooldown",
-        }
+        yield _build_status_event_impl(
+            f"⏳ Pausa anti-bot em andamento antes da busca {source_label} por "
+            f"\"{query_str}\". Início previsto em {_format_wait_seconds(remaining)}.",
+            query=query_str,
+            wait_seconds=round(remaining, 1),
+            planned_interval_seconds=round(interval, 1),
+            phase=f"{phase_prefix}_cooldown",
+            source=source_label,
+        )
 
 
 def _execute_single_browser_search(query_str, browser_action, source_label, phase_prefix, stream_queue=None, sender_label=None):
@@ -695,12 +691,11 @@ def _execute_single_browser_search(query_str, browser_action, source_label, phas
             f"(intervalo alvo {wait_ctx['interval_sec']:.1f}s) antes da query: {query_str}"
         )
 
-    for msg in _iter_web_search_wait_messages(wait_ctx, query_str):
-        msg["phase"] = f"{phase_prefix}_cooldown"
-        msg["source"] = source_label
-        msg["content"] = msg["content"].replace("busca web", f"busca {source_label}")
+    for raw_msg in _iter_web_search_wait_messages(
+        wait_ctx, query_str, phase_prefix, source_label
+    ):
         if stream_queue is not None:
-            stream_queue.put(json.dumps(msg, ensure_ascii=False))
+            stream_queue.put(raw_msg)
 
     if stream_queue is not None:
         stream_queue.put(_build_status_event_impl(
@@ -2407,7 +2402,7 @@ def chat_completions():
                         elif t == 'chat_meta':
                             fin = msg_obj.get('content', {}) or {}
                             early_url = fin.get('url') or ''
-                            early_profile = (fin.get('chromium_profile') or "").strip()
+                            early_profile = _normalize_optional_text_impl(fin.get('chromium_profile'))
                             early_chat_id = fin.get('chat_id') or chat_id
                             if early_url:
                                 try:

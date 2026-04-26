@@ -788,3 +788,150 @@ class TestComputePythonRequestInterval:
         assert isinstance(base, float)
         assert isinstance(target, float)
         assert 0.0 <= target <= 2.0
+
+
+# ─────────────────────────────────────────────────────────
+# Web-search wait events (regressão: byte-equivalência com o dict-yielder antigo)
+#
+# Antes: `_iter_web_search_wait_messages` yieldava dict; o consumer mutava
+# `phase`, `source` e fazia `content.replace("busca web", f"busca {label}")`,
+# então `json.dumps(msg, ensure_ascii=False)`. A migração troca o yield por
+# `build_status_event(content, **extras)` direto. Este teste documenta que
+# o JSON resultante (mesmas chaves, mesma ordem, mesmos valores) é idêntico
+# ao da via antiga para os 2 source_labels usados em produção: "web" e
+# "uptodate".
+# ─────────────────────────────────────────────────────────
+class TestWebSearchWaitEventEquivalence:
+    @staticmethod
+    def _legacy_event(content_template, query_str, remaining, interval, phase_prefix, source_label):
+        """Reproduz o pipeline antigo: dict + mutate + json.dumps."""
+        msg = {
+            "type": "status",
+            "content": content_template.format(query_str=query_str, interval_or_remaining=interval),
+            "query": query_str,
+            "wait_seconds": round(remaining, 1),
+            "planned_interval_seconds": round(interval, 1),
+            "phase": "web_search_cooldown",
+        }
+        msg["phase"] = f"{phase_prefix}_cooldown"
+        msg["source"] = source_label
+        msg["content"] = msg["content"].replace("busca web", f"busca {source_label}")
+        return json.dumps(msg, ensure_ascii=False)
+
+    @staticmethod
+    def _new_event(content, query_str, remaining, interval, phase_prefix, source_label):
+        """Reproduz o pipeline novo: build_status_event direto."""
+        return sh.build_status_event(
+            content,
+            query=query_str,
+            wait_seconds=round(remaining, 1),
+            planned_interval_seconds=round(interval, 1),
+            phase=f"{phase_prefix}_cooldown",
+            source=source_label,
+        )
+
+    @pytest.mark.parametrize("phase_prefix,source_label", [
+        ("web_search", "web"),
+        ("uptodate_search", "uptodate"),
+    ])
+    def test_first_event_byte_equivalent(self, phase_prefix, source_label):
+        query = "tratamento de hipertensão"
+        remaining = 12.5
+        interval = 30.0
+        legacy_template = (
+            "⏳ Aguardando intervalo humano antes da busca web por "
+            "\"{query_str}\". Pausa planejada: 00:30."
+        )
+        new_content = (
+            f"⏳ Aguardando intervalo humano antes da busca {source_label} por "
+            f"\"{query}\". Pausa planejada: 00:30."
+        )
+        legacy = self._legacy_event(
+            legacy_template, query, remaining, interval, phase_prefix, source_label
+        )
+        new = self._new_event(
+            new_content, query, remaining, interval, phase_prefix, source_label
+        )
+        assert legacy == new, f"Divergência byte-a-byte para {source_label}"
+        assert json.loads(legacy) == json.loads(new)
+
+    @pytest.mark.parametrize("phase_prefix,source_label", [
+        ("web_search", "web"),
+        ("uptodate_search", "uptodate"),
+    ])
+    def test_progress_event_byte_equivalent(self, phase_prefix, source_label):
+        query = "doses pediátricas"
+        remaining = 4.7
+        interval = 30.0
+        legacy_template = (
+            "⏳ Pausa anti-bot em andamento antes da busca web por "
+            "\"{query_str}\". Início previsto em 00:05."
+        )
+        new_content = (
+            f"⏳ Pausa anti-bot em andamento antes da busca {source_label} por "
+            f"\"{query}\". Início previsto em 00:05."
+        )
+        legacy = self._legacy_event(
+            legacy_template, query, remaining, interval, phase_prefix, source_label
+        )
+        new = self._new_event(
+            new_content, query, remaining, interval, phase_prefix, source_label
+        )
+        assert legacy == new
+        assert json.loads(legacy) == json.loads(new)
+
+    def test_phase_and_source_present_after_migration(self):
+        out = json.loads(sh.build_status_event(
+            "⏳ aguarde",
+            query="q",
+            wait_seconds=1.0,
+            planned_interval_seconds=2.0,
+            phase="web_search_cooldown",
+            source="web",
+        ))
+        assert out["type"] == "status"
+        assert out["phase"] == "web_search_cooldown"
+        assert out["source"] == "web"
+        assert out["query"] == "q"
+        assert out["wait_seconds"] == 1.0
+        assert out["planned_interval_seconds"] == 2.0
+
+    def test_unicode_round_trip(self):
+        out = sh.build_status_event(
+            "⏳ Pausa anti-bot em andamento antes da busca uptodate por \"sépsis\".",
+            query="sépsis",
+            wait_seconds=0.0,
+            planned_interval_seconds=30.0,
+            phase="uptodate_search_cooldown",
+            source="uptodate",
+        )
+        # ensure_ascii=False preserva chars não-ASCII na string serializada.
+        assert "sépsis" in out
+        assert "⏳" in out
+
+    def test_key_order_matches_legacy_pipeline(self):
+        """A ordem das chaves no JSON tem que ser idêntica à do pipeline antigo:
+        type, content, query, wait_seconds, planned_interval_seconds, phase, source."""
+        new = sh.build_status_event(
+            "x",
+            query="q",
+            wait_seconds=1.0,
+            planned_interval_seconds=2.0,
+            phase="web_search_cooldown",
+            source="web",
+        )
+        # Chaves devem aparecer na ordem documentada (Python 3.7+ preserva ordem).
+        expected_order = [
+            '"type"',
+            '"content"',
+            '"query"',
+            '"wait_seconds"',
+            '"planned_interval_seconds"',
+            '"phase"',
+            '"source"',
+        ]
+        positions = [new.find(k) for k in expected_order]
+        assert all(p >= 0 for p in positions), f"Chave faltando: {positions}"
+        assert positions == sorted(positions), (
+            f"Ordem de chaves inesperada: {expected_order} → posições {positions}"
+        )
