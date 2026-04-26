@@ -770,6 +770,40 @@ class TestFormatManualWhatsappRequesterSuffix:
         assert sh.format_manual_whatsapp_requester_suffix("Ana", 42) == ' por "Ana" (id=42)'
 
 
+class TestResolveDownloadContentType:
+    def test_specific_content_type_is_preserved(self):
+        # MIME específico do browser deve passar inalterado mesmo com .pdf
+        assert sh.resolve_download_content_type("text/markdown", "doc.pdf") == "text/markdown"
+
+    def test_octet_stream_with_known_extension_is_mapped(self):
+        assert sh.resolve_download_content_type(
+            "application/octet-stream", "relatorio.xlsx"
+        ) == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        assert sh.resolve_download_content_type(
+            "application/octet-stream", "foto.JPG"
+        ) == "image/jpeg"
+        assert sh.resolve_download_content_type(
+            "application/octet-stream", "data.json"
+        ) == "application/json"
+
+    def test_octet_stream_with_unknown_extension_remains_octet(self):
+        assert sh.resolve_download_content_type(
+            "application/octet-stream", "binario.bin"
+        ) == "application/octet-stream"
+
+    def test_none_content_type_uses_octet_default(self):
+        assert sh.resolve_download_content_type(None, "doc.pdf") == "application/pdf"
+
+    def test_empty_or_extensionless_name_keeps_default(self):
+        assert sh.resolve_download_content_type(None, "") == "application/octet-stream"
+        assert sh.resolve_download_content_type(None, "noextension") == "application/octet-stream"
+
+    def test_csv_pdf_zip_mapped(self):
+        assert sh.resolve_download_content_type("application/octet-stream", "x.csv") == "text/csv"
+        assert sh.resolve_download_content_type("application/octet-stream", "x.pdf") == "application/pdf"
+        assert sh.resolve_download_content_type("application/octet-stream", "x.zip") == "application/zip"
+
+
 # ─────────────────────────────────────────────────────────
 # build_queue_key
 # ─────────────────────────────────────────────────────────

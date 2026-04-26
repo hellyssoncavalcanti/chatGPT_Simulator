@@ -85,6 +85,7 @@ from server_helpers import (
     build_web_search_test_terminal_response as _build_web_search_test_terminal_response_impl,
     extract_manual_whatsapp_reply_targets as _extract_manual_whatsapp_reply_targets_impl,
     format_manual_whatsapp_requester_suffix as _format_manual_whatsapp_requester_suffix_impl,
+    resolve_download_content_type as _resolve_download_content_type_impl,
     format_requester_suffix as _format_requester_suffix_impl,
     format_origin_suffix as _format_origin_suffix_impl,
     safe_int as _safe_int_impl,
@@ -1003,18 +1004,9 @@ def serve_download(file_id):
     if info.get("payload_b64"):
         raw_bytes = base64.b64decode(info["payload_b64"])
         display_name = info.get("name") or file_id
-        content_type = info.get("content_type") or "application/octet-stream"
-
-        ext = os.path.splitext(display_name)[1].lower().lstrip('.')
-        mime_map = {
-            'xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-            'xls': 'application/vnd.ms-excel', 'csv': 'text/csv',
-            'pdf': 'application/pdf', 'png': 'image/png',
-            'jpg': 'image/jpeg', 'jpeg': 'image/jpeg',
-            'zip': 'application/zip', 'json': 'application/json',
-        }
-        if content_type == 'application/octet-stream' and ext in mime_map:
-            content_type = mime_map[ext]
+        content_type = _resolve_download_content_type_impl(
+            info.get("content_type"), display_name
+        )
 
         resp = make_response(raw_bytes)
         resp.headers['Content-Type'] = content_type

@@ -468,6 +468,40 @@ def build_web_search_test_no_response_payload(query: str) -> dict:
     return build_web_search_test_error_payload(query, "Sem resposta do browser")
 
 
+_DOWNLOAD_MIME_BY_EXT = {
+    "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    "xls": "application/vnd.ms-excel",
+    "csv": "text/csv",
+    "pdf": "application/pdf",
+    "png": "image/png",
+    "jpg": "image/jpeg",
+    "jpeg": "image/jpeg",
+    "zip": "application/zip",
+    "json": "application/json",
+}
+
+
+def resolve_download_content_type(content_type, display_name) -> str:
+    """Resolve o `Content-Type` final para `/api/downloads/<file_id>`.
+
+    Preserva o tipo informado pelo browser/ChatGPT quando ele é específico.
+    Apenas quando o caller passa o fallback genérico
+    ``"application/octet-stream"`` (ou ``None``) tenta inferir um tipo a
+    partir da extensão do `display_name` usando um mapa estável de
+    extensões para MIME (xlsx/xls/csv/pdf/png/jpg/jpeg/zip/json).
+
+    Mapa idêntico ao usado historicamente em `server.serve_download`,
+    extraído sem alteração de comportamento.
+    """
+    ct = content_type or "application/octet-stream"
+    if ct != "application/octet-stream":
+        return ct
+    name = display_name or ""
+    import os as _os
+    ext = _os.path.splitext(name)[1].lower().lstrip(".")
+    return _DOWNLOAD_MIME_BY_EXT.get(ext, ct)
+
+
 def extract_manual_whatsapp_reply_targets(data):
     """Extrai (`phone`, `message`, `chat_id`, `id_paciente`, `id_atendimento`)
     do payload de `/api/send_manual_whatsapp_reply`.
@@ -766,6 +800,7 @@ __all__ = [
     "build_web_search_test_terminal_response",
     "extract_manual_whatsapp_reply_targets",
     "format_manual_whatsapp_requester_suffix",
+    "resolve_download_content_type",
     "build_queue_key",
     "build_chat_task_payload",
     "build_error_event",
