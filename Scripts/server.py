@@ -84,16 +84,6 @@ from server_helpers import (
     build_web_search_test_stream_response as _build_web_search_test_stream_response_impl,
     build_web_search_test_timeout_payload as _build_web_search_test_timeout_payload_impl,
     build_web_search_test_no_response_payload as _build_web_search_test_no_response_payload_impl,
-    build_web_search_test_terminal_response as _build_web_search_test_terminal_response_impl,
-    extract_manual_whatsapp_reply_targets as _extract_manual_whatsapp_reply_targets_impl,
-    format_manual_whatsapp_requester_suffix as _format_manual_whatsapp_requester_suffix_impl,
-    resolve_download_content_type as _resolve_download_content_type_impl,
-    resolve_avatar_filename as _resolve_avatar_filename_impl,
-    count_active_chats as _count_active_chats_impl,
-    count_unfinished_chats as _count_unfinished_chats_impl,
-    find_expired_chat_ids as _find_expired_chat_ids_impl,
-    build_active_chat_meta as _build_active_chat_meta_impl,
-    normalize_source_hint as _normalize_source_hint_impl,
     format_requester_suffix as _format_requester_suffix_impl,
     format_origin_suffix as _format_origin_suffix_impl,
     safe_int as _safe_int_impl,
@@ -2032,11 +2022,9 @@ document.getElementById('q')?.addEventListener('keydown', e => {{ if (e.key === 
             if payload is not None:
                 return jsonify(payload), status_code
     except queue.Empty:
-        payload, status = _build_web_search_test_terminal_response_impl("timeout", query)
-        return jsonify(payload), status
+        return jsonify(_build_web_search_test_timeout_payload_impl(query)), 504
 
-    payload, status = _build_web_search_test_terminal_response_impl("no_response", query)
-    return jsonify(payload), status
+    return jsonify(_build_web_search_test_no_response_payload_impl(query))
 
 
 @app.route('/robots.txt')
