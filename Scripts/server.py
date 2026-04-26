@@ -70,6 +70,8 @@ from server_helpers import (
     build_error_event as _build_error_event_impl,
     build_status_event as _build_status_event_impl,
     build_markdown_event as _build_markdown_event_impl,
+    build_search_result_event as _build_search_result_event_impl,
+    build_search_finish_event as _build_search_finish_event_impl,
     normalize_optional_text as _normalize_optional_text_impl,
     extract_requester_identity as _extract_requester_identity_impl,
     resolve_lookup_origin_url as _resolve_lookup_origin_url_impl,
@@ -82,6 +84,14 @@ from server_helpers import (
     build_web_search_test_stream_response as _build_web_search_test_stream_response_impl,
     build_web_search_test_timeout_payload as _build_web_search_test_timeout_payload_impl,
     build_web_search_test_no_response_payload as _build_web_search_test_no_response_payload_impl,
+    build_web_search_test_terminal_response as _build_web_search_test_terminal_response_impl,
+    extract_manual_whatsapp_reply_targets as _extract_manual_whatsapp_reply_targets_impl,
+    format_manual_whatsapp_requester_suffix as _format_manual_whatsapp_requester_suffix_impl,
+    resolve_download_content_type as _resolve_download_content_type_impl,
+    resolve_avatar_filename as _resolve_avatar_filename_impl,
+    count_active_chats as _count_active_chats_impl,
+    build_active_chat_meta as _build_active_chat_meta_impl,
+    normalize_source_hint as _normalize_source_hint_impl,
     format_requester_suffix as _format_requester_suffix_impl,
     format_origin_suffix as _format_origin_suffix_impl,
     safe_int as _safe_int_impl,
@@ -964,9 +974,9 @@ def upload_avatar():
     file = request.files['file']
     if file.filename == '': return jsonify({"success": False})
     if file:
-        ext = os.path.splitext(file.filename)[1].lower()
-        if ext not in ['.jpg', '.jpeg', '.png', '.gif', '.webp']: return jsonify({"success": False, "error": "Formato inválido"})
-        filename = f"{user}{ext}"
+        filename, err = _resolve_avatar_filename_impl(file.filename, user)
+        if err:
+            return jsonify({"success": False, "error": err})
         save_path = os.path.join(config.DIRS["users"], filename)
         try:
             if HAS_PIL:
@@ -1000,18 +1010,9 @@ def serve_download(file_id):
     if info.get("payload_b64"):
         raw_bytes = base64.b64decode(info["payload_b64"])
         display_name = info.get("name") or file_id
-        content_type = info.get("content_type") or "application/octet-stream"
-
-        ext = os.path.splitext(display_name)[1].lower().lstrip('.')
-        mime_map = {
-            'xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-            'xls': 'application/vnd.ms-excel', 'csv': 'text/csv',
-            'pdf': 'application/pdf', 'png': 'image/png',
-            'jpg': 'image/jpeg', 'jpeg': 'image/jpeg',
-            'zip': 'application/zip', 'json': 'application/json',
-        }
-        if content_type == 'application/octet-stream' and ext in mime_map:
-            content_type = mime_map[ext]
+        content_type = _resolve_download_content_type_impl(
+            info.get("content_type"), display_name
+        )
 
         resp = make_response(raw_bytes)
         resp.headers['Content-Type'] = content_type
@@ -1227,21 +1228,9 @@ def api_metrics():
     Métricas operacionais leves para observabilidade em tempo real.
     """
     now = time.time()
-    active_total = 0
-    active_analyzer = 0
-    active_remote = 0
-    stale_candidates = 0
-    for _chat_id, meta in list(ACTIVE_CHATS.items()):
-        if meta.get("finished"):
-            continue
-        active_total += 1
-        if meta.get("is_analyzer"):
-            active_analyzer += 1
-        else:
-            active_remote += 1
-        last_event_at = float(meta.get("last_event_at") or 0.0)
-        if last_event_at and (now - last_event_at) > ACTIVE_CHAT_STALE_SEC:
-            stale_candidates += 1
+    active_counts = _count_active_chats_impl(
+        ACTIVE_CHATS, now=now, stale_threshold_sec=ACTIVE_CHAT_STALE_SEC,
+    )
 
     queue_stats = _safe_snapshot_stats_impl(browser_queue)
 
@@ -1250,10 +1239,10 @@ def api_metrics():
         "uptime_sec": int(max(0, now - SERVER_STARTED_AT)),
         "queue_qsize": int(browser_queue.qsize()),
         "queue": queue_stats,
-        "active_chats_total": active_total,
-        "active_chats_remote": active_remote,
-        "active_chats_analyzer": active_analyzer,
-        "active_chats_stale_candidates": stale_candidates,
+        "active_chats_total": active_counts["total"],
+        "active_chats_remote": active_counts["remote"],
+        "active_chats_analyzer": active_counts["analyzer"],
+        "active_chats_stale_candidates": active_counts["stale_candidates"],
         "syncs_in_progress": len(ACTIVE_SYNCS),
         "rate_limit_remaining_sec": round(_get_chat_rate_limit_remaining_seconds(), 1),
         "chat_rate_limit": _CHAT_RATE_LIMIT_COOLDOWN.snapshot(),
@@ -1655,7 +1644,7 @@ def _handle_browser_search_api(execute_fn, *, route_label, source_label):
     nome_membro, id_membro = _extract_requester_identity_impl(data)
     _quem = _format_requester_suffix_impl(nome_membro, id_membro)
     source_hint = _extract_source_hint_impl(data, request.headers)
-    source_hint_norm = str(source_hint).strip().lower()
+    source_hint_norm = _normalize_source_hint_impl(source_hint)
     is_analyzer = _is_analyzer_chat_request_impl(source_hint_norm)
     sender_label = _build_sender_label_impl(source_hint, is_analyzer)
 
@@ -1703,14 +1692,13 @@ def _handle_browser_search_api(execute_fn, *, route_label, source_label):
                     if isinstance(item, dict) and ('success' in item or 'error' in item):
                         result = item
                         all_results.append(result)
-                        yield json.dumps({
-                            'type': 'searchresult',
-                            'content': result,
-                            'query': query_str,
-                            'index': idx,
-                            'total': len(queries),
-                            'source': source_label,
-                        }, ensure_ascii=False) + "\n"
+                        yield _build_search_result_event_impl(
+                            result,
+                            query=query_str,
+                            index=idx,
+                            total=len(queries),
+                            source=source_label,
+                        ) + "\n"
                         break
 
                     if isinstance(item, str):
@@ -1718,13 +1706,7 @@ def _handle_browser_search_api(execute_fn, *, route_label, source_label):
 
                 worker.join(timeout=0.1)
 
-            yield json.dumps({
-                'type': 'finish',
-                'content': {
-                    'success': True,
-                    'results': all_results,
-                }
-            }, ensure_ascii=False) + "\n"
+            yield _build_search_finish_event_impl(all_results) + "\n"
 
         return Response(stream_with_context(generate()), mimetype='application/x-ndjson')
 
@@ -2051,9 +2033,11 @@ document.getElementById('q')?.addEventListener('keydown', e => {{ if (e.key === 
             if payload is not None:
                 return jsonify(payload), status_code
     except queue.Empty:
-        return jsonify(_build_web_search_test_timeout_payload_impl(query)), 504
+        payload, status = _build_web_search_test_terminal_response_impl("timeout", query)
+        return jsonify(payload), status
 
-    return jsonify(_build_web_search_test_no_response_payload_impl(query))
+    payload, status = _build_web_search_test_terminal_response_impl("no_response", query)
+    return jsonify(payload), status
 
 
 @app.route('/robots.txt')
@@ -2070,11 +2054,9 @@ def send_manual_whatsapp_reply():
         return jsonify({"error": "Unauthorized"}), 401
 
     data = request.get_json() or {}
-    phone   = (data.get("phone") or "").strip()
-    message = (data.get("message") or "").strip()
-    chat_id = data.get("chat_id")
-    id_paciente      = data.get("id_paciente")
-    id_atendimento   = data.get("id_atendimento")
+    phone, message, chat_id, id_paciente, id_atendimento = (
+        _extract_manual_whatsapp_reply_targets_impl(data)
+    )
     nome_membro, id_membro = _extract_requester_identity_impl(data)
 
     if not phone or not message:
@@ -2082,7 +2064,7 @@ def send_manual_whatsapp_reply():
 
     # Mantém formato histórico específico desta rota:
     # ` por "<nome>" (id=<id>)` (difere do padrão `id_membro: "<id>"`).
-    _quem = f' por "{nome_membro}" (id={id_membro})' if (nome_membro or id_membro) else ""
+    _quem = _format_manual_whatsapp_requester_suffix_impl(nome_membro, id_membro)
     print(f"\n[📨 MANUAL REPLY] Resposta manual{_quem} para phone={phone} | chat_id={chat_id}")
 
     # Repassa ao acompanhamento_whatsapp.py (porta 3011)
@@ -2133,7 +2115,7 @@ def chat_completions():
     nome_membro, id_membro = _extract_requester_identity_impl(data)
     _quem = _format_requester_suffix_impl(nome_membro, id_membro)
     source_hint = _extract_source_hint_impl(data, request.headers)
-    source_hint_norm = str(source_hint).strip().lower()
+    source_hint_norm = _normalize_source_hint_impl(source_hint)
     is_analyzer = _is_analyzer_chat_request_impl(source_hint_norm)
     sender_label = _build_sender_label_impl(source_hint, is_analyzer)
     _origem = _format_origin_suffix_impl(is_analyzer, source_hint)
@@ -2214,15 +2196,9 @@ def chat_completions():
     # --- 4. PREPARAÇÃO DA FILA ---
     stream_q = queue.Queue()
 
-    ACTIVE_CHATS[chat_id] = {
-        'queue':       stream_q,
-        'status':      'Iniciando...',
-        'markdown':    '',
-        'finished':    False,
-        'finished_at': None,
-        'last_event_at': time.time(),
-        'is_analyzer': bool(is_analyzer)
-    }
+    ACTIVE_CHATS[chat_id] = _build_active_chat_meta_impl(
+        stream_q, is_analyzer, now=time.time(),
+    )
 
     chat_task_payload = _build_chat_task_payload_impl(
         url=url,

@@ -685,6 +685,326 @@ class TestBuildWebSearchTestTerminalErrorPayloads:
         }
 
 
+class TestBuildWebSearchTestTerminalResponse:
+    def test_timeout_returns_payload_and_504(self):
+        payload, status = sh.build_web_search_test_terminal_response("timeout", "qx")
+        assert status == 504
+        assert payload == sh.build_web_search_test_timeout_payload("qx")
+
+    def test_no_response_returns_payload_and_200(self):
+        payload, status = sh.build_web_search_test_terminal_response("no_response", "qx")
+        assert status == 200
+        assert payload == sh.build_web_search_test_no_response_payload("qx")
+
+    def test_unknown_kind_raises_value_error(self):
+        with pytest.raises(ValueError):
+            sh.build_web_search_test_terminal_response("explode", "qx")
+
+    def test_terminal_response_query_is_preserved_byte_for_byte(self):
+        # garante que o helper não normaliza/strip, deixa para o caller
+        weird = "  qá z  "
+        timeout_payload, _ = sh.build_web_search_test_terminal_response("timeout", weird)
+        nores_payload, _ = sh.build_web_search_test_terminal_response("no_response", weird)
+        assert timeout_payload["query"] == weird
+        assert nores_payload["query"] == weird
+
+
+class TestExtractManualWhatsappReplyTargets:
+    def test_extracts_and_strips_phone_message(self):
+        out = sh.extract_manual_whatsapp_reply_targets({
+            "phone": "  5511999  ",
+            "message": "  oi  ",
+            "chat_id": "abc",
+            "id_paciente": 42,
+            "id_atendimento": "atd-1",
+        })
+        assert out == ("5511999", "oi", "abc", 42, "atd-1")
+
+    def test_missing_phone_message_become_empty_strings(self):
+        out = sh.extract_manual_whatsapp_reply_targets({
+            "chat_id": "abc",
+        })
+        assert out == ("", "", "abc", None, None)
+
+    def test_none_payload_returns_defaults(self):
+        out = sh.extract_manual_whatsapp_reply_targets(None)
+        assert out == ("", "", None, None, None)
+
+    def test_empty_phone_message_strings_become_empty(self):
+        out = sh.extract_manual_whatsapp_reply_targets({"phone": "", "message": ""})
+        assert out == ("", "", None, None, None)
+
+    def test_only_whitespace_phone_message_become_empty_after_strip(self):
+        out = sh.extract_manual_whatsapp_reply_targets({"phone": "   ", "message": "  "})
+        assert out == ("", "", None, None, None)
+
+    def test_duck_typed_get_supported(self):
+        class Bag:
+            def __init__(self, d):
+                self._d = d
+            def get(self, k, default=None):
+                return self._d.get(k, default)
+
+        out = sh.extract_manual_whatsapp_reply_targets(Bag({
+            "phone": "55",
+            "message": "ok",
+        }))
+        assert out == ("55", "ok", None, None, None)
+
+
+class TestFormatManualWhatsappRequesterSuffix:
+    def test_full_identity_emits_legacy_format(self):
+        assert sh.format_manual_whatsapp_requester_suffix("Ana", "X-1") == ' por "Ana" (id=X-1)'
+
+    def test_only_name_emits_format(self):
+        assert sh.format_manual_whatsapp_requester_suffix("Ana", None) == ' por "Ana" (id=)'
+
+    def test_only_id_emits_format(self):
+        assert sh.format_manual_whatsapp_requester_suffix(None, "X-1") == ' por "" (id=X-1)'
+
+    def test_empty_identity_returns_empty_string(self):
+        assert sh.format_manual_whatsapp_requester_suffix(None, None) == ""
+        assert sh.format_manual_whatsapp_requester_suffix("", "") == ""
+
+    def test_non_string_id_is_coerced(self):
+        assert sh.format_manual_whatsapp_requester_suffix("Ana", 42) == ' por "Ana" (id=42)'
+
+
+class TestResolveDownloadContentType:
+    def test_specific_content_type_is_preserved(self):
+        # MIME específico do browser deve passar inalterado mesmo com .pdf
+        assert sh.resolve_download_content_type("text/markdown", "doc.pdf") == "text/markdown"
+
+    def test_octet_stream_with_known_extension_is_mapped(self):
+        assert sh.resolve_download_content_type(
+            "application/octet-stream", "relatorio.xlsx"
+        ) == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        assert sh.resolve_download_content_type(
+            "application/octet-stream", "foto.JPG"
+        ) == "image/jpeg"
+        assert sh.resolve_download_content_type(
+            "application/octet-stream", "data.json"
+        ) == "application/json"
+
+    def test_octet_stream_with_unknown_extension_remains_octet(self):
+        assert sh.resolve_download_content_type(
+            "application/octet-stream", "binario.bin"
+        ) == "application/octet-stream"
+
+    def test_none_content_type_uses_octet_default(self):
+        assert sh.resolve_download_content_type(None, "doc.pdf") == "application/pdf"
+
+    def test_empty_or_extensionless_name_keeps_default(self):
+        assert sh.resolve_download_content_type(None, "") == "application/octet-stream"
+        assert sh.resolve_download_content_type(None, "noextension") == "application/octet-stream"
+
+    def test_csv_pdf_zip_mapped(self):
+        assert sh.resolve_download_content_type("application/octet-stream", "x.csv") == "text/csv"
+        assert sh.resolve_download_content_type("application/octet-stream", "x.pdf") == "application/pdf"
+        assert sh.resolve_download_content_type("application/octet-stream", "x.zip") == "application/zip"
+
+
+class TestResolveAvatarFilename:
+    def test_valid_extension_uses_user_prefix(self):
+        assert sh.resolve_avatar_filename("foto.PNG", "alice") == ("alice.png", None)
+
+    def test_jpeg_jpg_gif_webp_valid(self):
+        for raw, expected_ext in [
+            ("a.jpg", ".jpg"),
+            ("b.jpeg", ".jpeg"),
+            ("c.gif", ".gif"),
+            ("d.webp", ".webp"),
+        ]:
+            filename, err = sh.resolve_avatar_filename(raw, "u")
+            assert err is None
+            assert filename == f"u{expected_ext}"
+
+    def test_invalid_extension_returns_error_string(self):
+        filename, err = sh.resolve_avatar_filename("malware.exe", "alice")
+        assert filename is None
+        assert err == "Formato inválido"
+
+    def test_no_extension_is_invalid(self):
+        filename, err = sh.resolve_avatar_filename("avatarless", "alice")
+        assert filename is None
+        assert err == "Formato inválido"
+
+    def test_empty_or_none_filename_is_invalid(self):
+        assert sh.resolve_avatar_filename("", "alice") == (None, "Formato inválido")
+        assert sh.resolve_avatar_filename(None, "alice") == (None, "Formato inválido")
+
+    def test_user_none_coerced_to_empty_string(self):
+        assert sh.resolve_avatar_filename("a.png", None) == (".png", None)
+
+
+class TestCountActiveChats:
+    def test_empty_returns_zero_counts(self):
+        out = sh.count_active_chats({}, now=1000.0, stale_threshold_sec=300.0)
+        assert out == {"total": 0, "analyzer": 0, "remote": 0, "stale_candidates": 0}
+
+    def test_finished_entries_are_ignored(self):
+        chats = {
+            "a": {"finished": True, "is_analyzer": True, "last_event_at": 999.0},
+            "b": {"finished": False, "is_analyzer": True, "last_event_at": 999.0},
+        }
+        out = sh.count_active_chats(chats, now=1000.0, stale_threshold_sec=300.0)
+        assert out["total"] == 1
+        assert out["analyzer"] == 1
+        assert out["remote"] == 0
+
+    def test_analyzer_vs_remote_classification(self):
+        chats = {
+            "a": {"is_analyzer": True, "last_event_at": 0.0},
+            "b": {"is_analyzer": False, "last_event_at": 0.0},
+            "c": {"is_analyzer": False, "last_event_at": 0.0},
+        }
+        out = sh.count_active_chats(chats, now=1000.0, stale_threshold_sec=300.0)
+        assert out == {"total": 3, "analyzer": 1, "remote": 2, "stale_candidates": 0}
+
+    def test_stale_candidates_when_age_exceeds_threshold(self):
+        chats = {
+            "stale": {"is_analyzer": False, "last_event_at": 100.0},
+            "fresh": {"is_analyzer": False, "last_event_at": 990.0},
+            "no_event": {"is_analyzer": False, "last_event_at": 0.0},
+        }
+        out = sh.count_active_chats(chats, now=1000.0, stale_threshold_sec=300.0)
+        assert out["total"] == 3
+        assert out["stale_candidates"] == 1  # apenas "stale"
+
+    def test_invalid_meta_entry_is_skipped(self):
+        chats = {
+            "ok": {"is_analyzer": True, "last_event_at": 999.0},
+            "bad": "not-a-dict",
+            "none": None,
+        }
+        out = sh.count_active_chats(chats, now=1000.0, stale_threshold_sec=300.0)
+        assert out["total"] == 1
+        assert out["analyzer"] == 1
+
+    def test_invalid_last_event_at_falls_back_to_zero(self):
+        chats = {
+            "a": {"is_analyzer": False, "last_event_at": "junk"},
+            "b": {"is_analyzer": False, "last_event_at": None},
+        }
+        out = sh.count_active_chats(chats, now=1000.0, stale_threshold_sec=10.0)
+        assert out["total"] == 2
+        assert out["stale_candidates"] == 0
+
+
+class TestBuildActiveChatMeta:
+    def test_meta_shape_and_defaults(self):
+        sentinel_q = object()
+        out = sh.build_active_chat_meta(sentinel_q, True, now=12345.5)
+        assert out == {
+            "queue": sentinel_q,
+            "status": "Iniciando...",
+            "markdown": "",
+            "finished": False,
+            "finished_at": None,
+            "last_event_at": 12345.5,
+            "is_analyzer": True,
+        }
+
+    def test_is_analyzer_coerced_to_bool(self):
+        out = sh.build_active_chat_meta(None, "yes", now=0.0)
+        assert out["is_analyzer"] is True
+        out2 = sh.build_active_chat_meta(None, 0, now=0.0)
+        assert out2["is_analyzer"] is False
+
+    def test_now_coerced_to_float(self):
+        out = sh.build_active_chat_meta(None, False, now=10)
+        assert isinstance(out["last_event_at"], float)
+        assert out["last_event_at"] == 10.0
+
+    def test_meta_is_compatible_with_count_active_chats(self):
+        # confirma o contrato cruzado entre os dois helpers
+        meta = sh.build_active_chat_meta(None, True, now=500.0)
+        out = sh.count_active_chats(
+            {"x": meta}, now=600.0, stale_threshold_sec=50.0,
+        )
+        assert out["total"] == 1
+        assert out["analyzer"] == 1
+        assert out["stale_candidates"] == 1  # 600 - 500 > 50
+
+
+class TestNormalizeSourceHint:
+    def test_strip_lower(self):
+        assert sh.normalize_source_hint("  ANALISADOR_PRONTUARIOS.PY  ") == "analisador_prontuarios.py"
+
+    def test_already_normalized_passthrough(self):
+        assert sh.normalize_source_hint("python:queue") == "python:queue"
+
+    def test_none_becomes_empty_string(self):
+        # Tratamento defensivo: NUNCA produzir o literal "none"
+        assert sh.normalize_source_hint(None) == ""
+
+    def test_empty_passthrough(self):
+        assert sh.normalize_source_hint("") == ""
+        assert sh.normalize_source_hint("   ") == ""
+
+    def test_int_or_other_coerced(self):
+        assert sh.normalize_source_hint(42) == "42"
+        assert sh.normalize_source_hint(True) == "true"
+
+    def test_object_without_str_falls_back_to_empty(self):
+        class Boom:
+            def __str__(self):
+                raise RuntimeError("no str for you")
+
+        assert sh.normalize_source_hint(Boom()) == ""
+
+
+class TestBuildSearchResultEvent:
+    def test_shape_with_extras(self):
+        out = sh.build_search_result_event(
+            {"success": True, "items": [1, 2]},
+            query="x",
+            index=1,
+            total=2,
+            source="web",
+        )
+        assert json.loads(out) == {
+            "type": "searchresult",
+            "content": {"success": True, "items": [1, 2]},
+            "query": "x",
+            "index": 1,
+            "total": 2,
+            "source": "web",
+        }
+
+    def test_content_is_not_str_coerced(self):
+        # ao contrario de build_status_event, content fica como dict
+        out = sh.build_search_result_event({"a": 1})
+        assert json.loads(out) == {"type": "searchresult", "content": {"a": 1}}
+
+    def test_no_trailing_newline(self):
+        out = sh.build_search_result_event({"x": 1})
+        assert not out.endswith("\n")
+
+    def test_unicode_preserved(self):
+        out = sh.build_search_result_event({"q": "olá"})
+        assert "olá" in out
+
+
+class TestBuildSearchFinishEvent:
+    def test_shape(self):
+        out = sh.build_search_finish_event([{"a": 1}, {"b": 2}])
+        assert json.loads(out) == {
+            "type": "finish",
+            "content": {"success": True, "results": [{"a": 1}, {"b": 2}]},
+        }
+
+    def test_empty_results(self):
+        out = sh.build_search_finish_event([])
+        assert json.loads(out) == {
+            "type": "finish",
+            "content": {"success": True, "results": []},
+        }
+
+    def test_no_trailing_newline(self):
+        assert not sh.build_search_finish_event([]).endswith("\n")
+
+
 # ─────────────────────────────────────────────────────────
 # build_queue_key
 # ─────────────────────────────────────────────────────────
