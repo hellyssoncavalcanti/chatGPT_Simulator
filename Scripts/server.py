@@ -33,7 +33,6 @@ import json
 import queue
 import base64
 import os
-import random
 import shutil
 import time
 import copy
@@ -47,6 +46,7 @@ from shared import browser_queue, get_file_info
 import storage
 import auth
 from utils import log as file_log
+from web_search_throttle import WebSearchThrottle
 from request_source import (
     is_python_chat_request as _is_python_chat_request_impl,
     is_codex_chat_request as _is_codex_chat_request_impl,
@@ -71,6 +71,7 @@ from server_helpers import (
     build_status_event as _build_status_event_impl,
     build_markdown_event as _build_markdown_event_impl,
     normalize_optional_text as _normalize_optional_text_impl,
+    extract_requester_identity as _extract_requester_identity_impl,
     format_requester_suffix as _format_requester_suffix_impl,
     format_origin_suffix as _format_origin_suffix_impl,
 )
@@ -110,7 +111,10 @@ ACTIVE_SYNCS_LOCK = _SYNC_DEDUP._lock
 WEB_SEARCH_MIN_INTERVAL_SEC = 8
 WEB_SEARCH_MAX_INTERVAL_SEC = 22
 WEB_SEARCH_PROGRESS_TICK_SEC = 1.0
-_web_search_timing_lock = threading.Lock()
+_WEB_SEARCH_THROTTLE = WebSearchThrottle()
+# Aliases preservados para compat com código legado/testes que acessam
+# diretamente lock/state do intervalo de busca web.
+_web_search_timing_lock = _WEB_SEARCH_THROTTLE._lock
 _web_search_last_started_at = 0.0
 _web_search_last_interval_sec = 0.0
 CHAT_RATE_LIMIT_DEFAULT_COOLDOWN_SEC = 240
@@ -199,6 +203,10 @@ PROM_SECURITY_TRACKED_LOGIN_IPS = Gauge(
 PROM_PYTHON_REQUEST_THROTTLE_AGE_SEC = Gauge(
     "simulator_python_request_throttle_age_sec",
     "Segundos desde o último pedido Python que passou pelo throttle anti-rate-limit (0 antes do primeiro pedido)",
+) if Gauge else None
+PROM_WEB_SEARCH_THROTTLE_AGE_SEC = Gauge(
+    "simulator_web_search_throttle_age_sec",
+    "Segundos desde a última reserva de janela para busca web (0 antes da primeira reserva)",
 ) if Gauge else None
 
 
@@ -627,30 +635,16 @@ def _release_python_chat_slot(request_key: str) -> None:
 
 
 def _reserve_web_search_slot():
-    """
-    Reserva a próxima janela permitida para busca web com espaçamento humano.
-    O lock garante que buscas concorrentes respeitem o mesmo relógio global.
-    """
+    """Wrapper fino para `WebSearchThrottle.reserve_slot` (padrão B)."""
     global _web_search_last_started_at, _web_search_last_interval_sec
-
-    now = time.time()
-    interval = random.uniform(WEB_SEARCH_MIN_INTERVAL_SEC, WEB_SEARCH_MAX_INTERVAL_SEC)
-
-    with _web_search_timing_lock:
-        earliest_start = now
-        if _web_search_last_started_at > 0:
-            earliest_start = max(earliest_start, _web_search_last_started_at + interval)
-
-        wait_seconds = max(0.0, earliest_start - now)
-        _web_search_last_started_at = earliest_start
-        _web_search_last_interval_sec = interval
-
-    return {
-        "interval_sec": interval,
-        "scheduled_start_at": earliest_start,
-        "wait_seconds": wait_seconds,
-        "requested_at": now,
-    }
+    wait_ctx = _WEB_SEARCH_THROTTLE.reserve_slot(
+        WEB_SEARCH_MIN_INTERVAL_SEC,
+        WEB_SEARCH_MAX_INTERVAL_SEC,
+    )
+    # Compat: espelha os valores históricos em variáveis módulo-level.
+    _web_search_last_started_at = float(wait_ctx.get("scheduled_start_at") or 0.0)
+    _web_search_last_interval_sec = float(wait_ctx.get("interval_sec") or 0.0)
+    return wait_ctx
 
 
 def _iter_web_search_wait_messages(wait_ctx, query_str, phase_prefix, source_label):
@@ -1271,6 +1265,7 @@ def api_metrics():
         "chat_rate_limit": _CHAT_RATE_LIMIT_COOLDOWN.snapshot(),
         "security": _SECURITY_STATE.snapshot(),
         "python_request_throttle": _PYTHON_REQUEST_THROTTLE.snapshot(),
+        "web_search_throttle": _WEB_SEARCH_THROTTLE.snapshot(),
         "request_timeout_sec": int(PYTHON_CHAT_QUEUE_TIMEOUT_SEC),
     }
     return jsonify({"success": True, "metrics": metrics}), 200
@@ -1292,11 +1287,12 @@ def prometheus_metrics():
 
 def _update_rate_limit_prom_gauges():
     """Sincroniza gauges Prometheus com os snapshots atuais dos singletons
-    de rate-limit / security / throttle Python. Chamado no endpoint `/metrics`.
+    de rate-limit / security / throttles globais. Chamado no endpoint `/metrics`.
     Silencioso em ambientes sem `prometheus_client` (todos os gauges vêm `None`)."""
     chat_snap = _CHAT_RATE_LIMIT_COOLDOWN.snapshot()
     sec_snap = _SECURITY_STATE.snapshot()
-    throttle_snap = _PYTHON_REQUEST_THROTTLE.snapshot()
+    py_throttle_snap = _PYTHON_REQUEST_THROTTLE.snapshot()
+    web_search_throttle_snap = _WEB_SEARCH_THROTTLE.snapshot()
     if PROM_CHAT_RATE_LIMIT_REMAINING_SEC is not None:
         PROM_CHAT_RATE_LIMIT_REMAINING_SEC.set(float(chat_snap.get("remaining_seconds", 0.0)))
     if PROM_CHAT_RATE_LIMIT_STRIKES is not None:
@@ -1306,7 +1302,9 @@ def _update_rate_limit_prom_gauges():
     if PROM_SECURITY_TRACKED_LOGIN_IPS is not None:
         PROM_SECURITY_TRACKED_LOGIN_IPS.set(float(sec_snap.get("tracked_login_ips", 0)))
     if PROM_PYTHON_REQUEST_THROTTLE_AGE_SEC is not None:
-        PROM_PYTHON_REQUEST_THROTTLE_AGE_SEC.set(float(throttle_snap.get("age_seconds", 0.0)))
+        PROM_PYTHON_REQUEST_THROTTLE_AGE_SEC.set(float(py_throttle_snap.get("age_seconds", 0.0)))
+    if PROM_WEB_SEARCH_THROTTLE_AGE_SEC is not None:
+        PROM_WEB_SEARCH_THROTTLE_AGE_SEC.set(float(web_search_throttle_snap.get("age_seconds", 0.0)))
 
 @app.route("/", methods=["GET", "POST"])
 def index(): 
@@ -1331,7 +1329,11 @@ def api_chat_lookup():
         return jsonify({"error": "Unauthorized"}), 401
 
     data = request.get_json() or {}
-    origin_url = data.get('origin_url') or data.get('url_atual') or ''
+    origin_url = (
+        _normalize_optional_text_impl(data.get('origin_url'))
+        or _normalize_optional_text_impl(data.get('url_atual'))
+        or ''
+    )
     if not origin_url:
         return jsonify({"success": False, "error": "Missing origin_url"}), 400
 
@@ -1350,8 +1352,8 @@ def api_chat_delete_local():
         return jsonify({"error": "Unauthorized"}), 401
 
     data = request.get_json() or {}
-    chat_id = data.get('chat_id') or ''
-    origin_url = data.get('origin_url') or ''
+    chat_id = _normalize_optional_text_impl(data.get('chat_id')) or ''
+    origin_url = _normalize_optional_text_impl(data.get('origin_url')) or ''
 
     deleted_count = 0
     if chat_id:
@@ -1436,8 +1438,7 @@ def api_sync():
             sync_browser_profile = _normalize_optional_text_impl(snap.get("chromium_profile"))
 
     # --- Identificação do solicitante (opcional) ---
-    nome_membro = data.get("nome_membro_solicitante") or None
-    id_membro   = data.get("id_membro_solicitante")   or None
+    nome_membro, id_membro = _extract_requester_identity_impl(data)
     _quem = _format_requester_suffix_impl(nome_membro, id_membro)
     _url_info  = f' | url: {url}'     if url     else ''
     _cid_info  = f' | chat_id: {chat_id}' if chat_id else ''
@@ -1610,8 +1611,8 @@ def api_delete():
         return jsonify({"error": "Unauthorized"}), 401
 
     data = request.get_json() or {}
-    url = data.get("url")
-    chat_id = data.get("chat_id")
+    url = _normalize_optional_text_impl(data.get("url"))
+    chat_id = _normalize_optional_text_impl(data.get("chat_id"))
     
     if not url or not chat_id: 
         return jsonify({"success": False, "error": "Missing url or chat_id"}), 400
@@ -1665,8 +1666,7 @@ def _handle_browser_search_api(execute_fn, *, route_label, source_label):
     data    = request.get_json() or {}
     queries = data.get('queries', [])  # lista de strings
     stream  = bool(data.get('stream', False))
-    nome_membro = data.get("nome_membro_solicitante") or None
-    id_membro   = data.get("id_membro_solicitante") or None
+    nome_membro, id_membro = _extract_requester_identity_impl(data)
     _quem = _format_requester_suffix_impl(nome_membro, id_membro)
     source_hint = _extract_source_hint_impl(data, request.headers)
     source_hint_norm = str(source_hint).strip().lower()
@@ -2098,12 +2098,13 @@ def send_manual_whatsapp_reply():
     chat_id = data.get("chat_id")
     id_paciente      = data.get("id_paciente")
     id_atendimento   = data.get("id_atendimento")
-    id_membro        = data.get("id_membro_solicitante")
-    nome_membro      = data.get("nome_membro_solicitante")
+    nome_membro, id_membro = _extract_requester_identity_impl(data)
 
     if not phone or not message:
         return jsonify({"success": False, "error": "phone e message são obrigatórios"}), 400
 
+    # Mantém formato histórico específico desta rota:
+    # ` por "<nome>" (id=<id>)` (difere do padrão `id_membro: "<id>"`).
     _quem = f' por "{nome_membro}" (id={id_membro})' if (nome_membro or id_membro) else ""
     print(f"\n[📨 MANUAL REPLY] Resposta manual{_quem} para phone={phone} | chat_id={chat_id}")
 
@@ -2152,8 +2153,7 @@ def chat_completions():
         chat_id = request.args.get("chat_id")
 
     # --- Identificação do solicitante (opcional) ---
-    nome_membro = data.get("nome_membro_solicitante") or None
-    id_membro   = data.get("id_membro_solicitante")   or None
+    nome_membro, id_membro = _extract_requester_identity_impl(data)
     _quem = _format_requester_suffix_impl(nome_membro, id_membro)
     source_hint = _extract_source_hint_impl(data, request.headers)
     source_hint_norm = str(source_hint).strip().lower()

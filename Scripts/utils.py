@@ -27,16 +27,29 @@ import socket
 import ipaddress
 from datetime import datetime, timedelta
 
+AUTO_INSTALL_MISSING_DEPS = str(
+    os.getenv("SIMULATOR_AUTO_INSTALL_DEPS", "0")
+).strip().lower() in {"1", "true", "yes", "on"}
+
 # --- AUTO-INSTALLER (CORE) ---
 def check_and_install(package, import_name=None):
     if import_name is None: import_name = package
     if importlib.util.find_spec(import_name) is None:
+        if not AUTO_INSTALL_MISSING_DEPS:
+            print(
+                f"ℹ️ Dependência opcional ausente: {package}. "
+                "Auto-instalação desativada (SIMULATOR_AUTO_INSTALL_DEPS=0)."
+            )
+            return False
         print(f"🔧 Instalando dependência: {package}...")
         try:
             subprocess.check_call([sys.executable, "-m", "pip", "install", package])
             print(f"✅ {package} instalado com sucesso!")
+            return True
         except Exception as e:
             print(f"❌ Erro ao instalar {package}: {e}")
+            return False
+    return True
 
 # Verifica dependências básicas do Backend
 check_and_install("cryptography")
@@ -44,12 +57,20 @@ check_and_install("flask")
 check_and_install("requests")
 check_and_install("markdownify")
 
-# Imports Seguros (agora que garantimos a instalação)
-from cryptography import x509
-from cryptography.x509.oid import NameOID
-from cryptography.hazmat.primitives import hashes
-from cryptography.hazmat.primitives.asymmetric import rsa
-from cryptography.hazmat.primitives import serialization
+# Imports (cryptography é opcional em ambiente de teste/offline).
+# Quando indisponível, o módulo continua importável para rotas/serviços que
+# não geram certificado; `ensure_certificates()` valida a dependência em
+# runtime antes de usar APIs de crypto.
+try:
+    from cryptography import x509
+    from cryptography.x509.oid import NameOID
+    from cryptography.hazmat.primitives import hashes
+    from cryptography.hazmat.primitives.asymmetric import rsa
+    from cryptography.hazmat.primitives import serialization
+    HAS_CRYPTOGRAPHY = True
+except Exception:
+    x509 = NameOID = hashes = rsa = serialization = None  # type: ignore[assignment]
+    HAS_CRYPTOGRAPHY = False
 import config
 
 # ─────────────────────────────────────────────────────────────
@@ -82,6 +103,11 @@ def log(source, msg):
     logging.info(f"[{source}] {safe_msg}")
 
 def ensure_certificates():
+    if not HAS_CRYPTOGRAPHY:
+        raise RuntimeError(
+            "Dependência ausente: cryptography. "
+            "Instale com `pip install cryptography` para gerar certificados."
+        )
     if os.path.exists(config.CERT_FILE) and os.path.exists(config.KEY_FILE): return
     log("utils.py", "🔐 Gerando certificados SSL...")
     key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
