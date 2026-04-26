@@ -458,6 +458,16 @@ def build_web_search_test_error_payload(query: str, error) -> dict:
     }
 
 
+def build_web_search_test_timeout_payload(query: str) -> dict:
+    """Payload padronizado para timeout (HTTP 504) em `/api/web_search/test`."""
+    return build_web_search_test_error_payload(query, "Timeout (90s)")
+
+
+def build_web_search_test_no_response_payload(query: str) -> dict:
+    """Payload quando o browser não devolve mensagem terminal no stream."""
+    return build_web_search_test_error_payload(query, "Sem resposta do browser")
+
+
 def resolve_browser_profile(requested_profile, stored_profile) -> Optional[str]:
     """Resolve o `browser_profile` efetivo para a tarefa do browser.
 
@@ -692,6 +702,8 @@ __all__ = [
     "build_web_search_test_task",
     "build_web_search_test_stream_response",
     "build_web_search_test_error_payload",
+    "build_web_search_test_timeout_payload",
+    "build_web_search_test_no_response_payload",
     "build_queue_key",
     "build_chat_task_payload",
     "build_error_event",

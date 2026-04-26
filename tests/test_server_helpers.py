@@ -667,6 +667,24 @@ class TestBuildWebSearchTestErrorPayload:
         assert out["error"] == {"code": "x"}
 
 
+class TestBuildWebSearchTestTerminalErrorPayloads:
+    def test_timeout_payload(self):
+        out = sh.build_web_search_test_timeout_payload("q1")
+        assert out == {
+            "success": False,
+            "query": "q1",
+            "error": "Timeout (90s)",
+        }
+
+    def test_no_response_payload(self):
+        out = sh.build_web_search_test_no_response_payload("q1")
+        assert out == {
+            "success": False,
+            "query": "q1",
+            "error": "Sem resposta do browser",
+        }
+
+
 # ─────────────────────────────────────────────────────────
 # build_queue_key
 # ─────────────────────────────────────────────────────────
