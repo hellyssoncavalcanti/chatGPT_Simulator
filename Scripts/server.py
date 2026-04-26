@@ -73,7 +73,6 @@ from server_helpers import (
     normalize_optional_text as _normalize_optional_text_impl,
     format_requester_suffix as _format_requester_suffix_impl,
     format_origin_suffix as _format_origin_suffix_impl,
-    compute_python_request_interval as _compute_python_request_interval_impl,
 )
 import error_catalog as _error_catalog
 from log_sanitizer import sanitize_mapping as _sanitize_audit_payload
@@ -169,8 +168,14 @@ PYTHON_ANTI_RATE_LIMIT_PAUSA_MAX = max(
     int(getattr(config, "ANALISADOR_PAUSA_MAX", 60) or 0),
 )
 PYTHON_ANTI_RATE_LIMIT_TICK_SEC = 1.0
-_python_anti_rate_limit_lock = threading.Lock()
-_python_anti_rate_limit_last_ts = 0.0
+
+# Throttle global de pedidos Python — singleton encapsulado em padrão B
+# (ver python_request_throttle.py). Aliases `_python_anti_rate_limit_lock`
+# preservados para compat com qualquer código legado/teste que toque o
+# lock direto.
+from python_request_throttle import PythonRequestThrottle
+_PYTHON_REQUEST_THROTTLE = PythonRequestThrottle()
+_python_anti_rate_limit_lock = _PYTHON_REQUEST_THROTTLE._lock
 
 PROM_QUEUE_SIZE = Gauge("simulator_queue_size", "Tamanho atual da fila") if Gauge else None
 PROM_ACTIVE_CHATS = Gauge("simulator_active_chats", "Chats ativos em processamento") if Gauge else None
@@ -474,32 +479,27 @@ def _wait_python_request_interval_if_needed(is_python_source: bool, stream_queue
     O intervalo base é sorteado entre `ANALISADOR_PAUSA_MIN` e
     `ANALISADOR_PAUSA_MAX` (config.py) e dividido pela quantidade de perfis
     ChatGPT ativos em `config.CHROMIUM_PROFILES` (atualmente 2 → metade).
+
+    State global encapsulado em `_PYTHON_REQUEST_THROTTLE` (padrão B).
+    Curto-circuito histórico (limites <=0 OU primeira chamada) preservado
+    via `PythonRequestThrottle.begin()` retornar `None`. O caller mantém
+    o tight-loop com SSE + `time.sleep` para que o módulo puro permaneça
+    sem dependência de Flask/queue.
     """
     if not is_python_source:
         return
 
-    global _python_anti_rate_limit_last_ts
-
     pmin = PYTHON_ANTI_RATE_LIMIT_PAUSA_MIN
     pmax = PYTHON_ANTI_RATE_LIMIT_PAUSA_MAX
-    if pmin <= 0 and pmax <= 0:
-        with _python_anti_rate_limit_lock:
-            _python_anti_rate_limit_last_ts = time.time()
-        return
-
-    with _python_anti_rate_limit_lock:
-        last_ts = _python_anti_rate_limit_last_ts
-        if last_ts <= 0:
-            _python_anti_rate_limit_last_ts = time.time()
-            return
-
     profile_count = _count_active_chatgpt_profiles()
-    base, target = _compute_python_request_interval_impl(pmin, pmax, profile_count)
+
+    init_result = _PYTHON_REQUEST_THROTTLE.begin(pmin, pmax, profile_count)
+    if init_result is None:
+        return
+    base, target, last_ts = init_result
 
     while True:
-        now = time.time()
-        elapsed = now - last_ts
-        remaining = target - elapsed
+        remaining = _PYTHON_REQUEST_THROTTLE.remaining_seconds(target, last_ts)
         if remaining <= 0:
             break
         status_text = (
@@ -518,8 +518,7 @@ def _wait_python_request_interval_if_needed(is_python_source: bool, stream_queue
             ))
         time.sleep(min(PYTHON_ANTI_RATE_LIMIT_TICK_SEC, remaining))
 
-    with _python_anti_rate_limit_lock:
-        _python_anti_rate_limit_last_ts = time.time()
+    _PYTHON_REQUEST_THROTTLE.commit()
 
 
 def _has_active_remote_user_chat():
@@ -650,40 +649,36 @@ def _reserve_web_search_slot():
     }
 
 
-def _iter_web_search_wait_messages(wait_ctx, query_str):
+def _iter_web_search_wait_messages(wait_ctx, query_str, phase_prefix, source_label):
     remaining = wait_ctx["wait_seconds"]
     interval = wait_ctx["interval_sec"]
 
     if remaining <= 0:
         return
 
-    yield {
-        "type": "status",
-        "content": (
-            f"⏳ Aguardando intervalo humano antes da busca web por "
-            f"\"{query_str}\". Pausa planejada: {_format_wait_seconds(interval)}."
-        ),
-        "query": query_str,
-        "wait_seconds": round(remaining, 1),
-        "planned_interval_seconds": round(interval, 1),
-        "phase": "web_search_cooldown",
-    }
+    yield _build_status_event_impl(
+        f"⏳ Aguardando intervalo humano antes da busca {source_label} por "
+        f"\"{query_str}\". Pausa planejada: {_format_wait_seconds(interval)}.",
+        query=query_str,
+        wait_seconds=round(remaining, 1),
+        planned_interval_seconds=round(interval, 1),
+        phase=f"{phase_prefix}_cooldown",
+        source=source_label,
+    )
 
     while remaining > 0:
         chunk = min(WEB_SEARCH_PROGRESS_TICK_SEC, remaining)
         time.sleep(chunk)
         remaining = max(0.0, wait_ctx["scheduled_start_at"] - time.time())
-        yield {
-            "type": "status",
-            "content": (
-                f"⏳ Pausa anti-bot em andamento antes da busca web por "
-                f"\"{query_str}\". Início previsto em {_format_wait_seconds(remaining)}."
-            ),
-            "query": query_str,
-            "wait_seconds": round(remaining, 1),
-            "planned_interval_seconds": round(interval, 1),
-            "phase": "web_search_cooldown",
-        }
+        yield _build_status_event_impl(
+            f"⏳ Pausa anti-bot em andamento antes da busca {source_label} por "
+            f"\"{query_str}\". Início previsto em {_format_wait_seconds(remaining)}.",
+            query=query_str,
+            wait_seconds=round(remaining, 1),
+            planned_interval_seconds=round(interval, 1),
+            phase=f"{phase_prefix}_cooldown",
+            source=source_label,
+        )
 
 
 def _execute_single_browser_search(query_str, browser_action, source_label, phase_prefix, stream_queue=None, sender_label=None):
@@ -695,12 +690,11 @@ def _execute_single_browser_search(query_str, browser_action, source_label, phas
             f"(intervalo alvo {wait_ctx['interval_sec']:.1f}s) antes da query: {query_str}"
         )
 
-    for msg in _iter_web_search_wait_messages(wait_ctx, query_str):
-        msg["phase"] = f"{phase_prefix}_cooldown"
-        msg["source"] = source_label
-        msg["content"] = msg["content"].replace("busca web", f"busca {source_label}")
+    for raw_msg in _iter_web_search_wait_messages(
+        wait_ctx, query_str, phase_prefix, source_label
+    ):
         if stream_queue is not None:
-            stream_queue.put(json.dumps(msg, ensure_ascii=False))
+            stream_queue.put(raw_msg)
 
     if stream_queue is not None:
         stream_queue.put(_build_status_event_impl(
@@ -2407,7 +2401,7 @@ def chat_completions():
                         elif t == 'chat_meta':
                             fin = msg_obj.get('content', {}) or {}
                             early_url = fin.get('url') or ''
-                            early_profile = (fin.get('chromium_profile') or "").strip()
+                            early_profile = _normalize_optional_text_impl(fin.get('chromium_profile'))
                             early_chat_id = fin.get('chat_id') or chat_id
                             if early_url:
                                 try:
