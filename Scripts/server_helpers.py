@@ -468,6 +468,24 @@ def build_web_search_test_no_response_payload(query: str) -> dict:
     return build_web_search_test_error_payload(query, "Sem resposta do browser")
 
 
+def build_web_search_test_terminal_response(kind: str, query: str) -> Tuple[dict, int]:
+    """Resolve `(payload, status_code)` para casos terminais de `/api/web_search/test`.
+
+    `kind` aceita:
+      - ``"timeout"``     → `(timeout_payload, 504)`.
+      - ``"no_response"`` → `(no_response_payload, 200)`.
+
+    O propósito é unificar o contrato `(dict, int)` já usado por
+    `build_web_search_test_stream_response`, removendo o literal `504`
+    duplicado no call site em `server.api_web_search_test`.
+    """
+    if kind == "timeout":
+        return build_web_search_test_timeout_payload(query), 504
+    if kind == "no_response":
+        return build_web_search_test_no_response_payload(query), 200
+    raise ValueError(f"unknown terminal kind: {kind!r}")
+
+
 def resolve_browser_profile(requested_profile, stored_profile) -> Optional[str]:
     """Resolve o `browser_profile` efetivo para a tarefa do browser.
 
@@ -704,6 +722,7 @@ __all__ = [
     "build_web_search_test_error_payload",
     "build_web_search_test_timeout_payload",
     "build_web_search_test_no_response_payload",
+    "build_web_search_test_terminal_response",
     "build_queue_key",
     "build_chat_task_payload",
     "build_error_event",

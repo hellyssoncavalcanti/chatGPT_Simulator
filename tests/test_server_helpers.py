@@ -685,6 +685,30 @@ class TestBuildWebSearchTestTerminalErrorPayloads:
         }
 
 
+class TestBuildWebSearchTestTerminalResponse:
+    def test_timeout_returns_payload_and_504(self):
+        payload, status = sh.build_web_search_test_terminal_response("timeout", "qx")
+        assert status == 504
+        assert payload == sh.build_web_search_test_timeout_payload("qx")
+
+    def test_no_response_returns_payload_and_200(self):
+        payload, status = sh.build_web_search_test_terminal_response("no_response", "qx")
+        assert status == 200
+        assert payload == sh.build_web_search_test_no_response_payload("qx")
+
+    def test_unknown_kind_raises_value_error(self):
+        with pytest.raises(ValueError):
+            sh.build_web_search_test_terminal_response("explode", "qx")
+
+    def test_terminal_response_query_is_preserved_byte_for_byte(self):
+        # garante que o helper não normaliza/strip, deixa para o caller
+        weird = "  qá z  "
+        timeout_payload, _ = sh.build_web_search_test_terminal_response("timeout", weird)
+        nores_payload, _ = sh.build_web_search_test_terminal_response("no_response", weird)
+        assert timeout_payload["query"] == weird
+        assert nores_payload["query"] == weird
+
+
 # ─────────────────────────────────────────────────────────
 # build_queue_key
 # ─────────────────────────────────────────────────────────
