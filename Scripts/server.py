@@ -70,6 +70,8 @@ from server_helpers import (
     build_error_event as _build_error_event_impl,
     build_status_event as _build_status_event_impl,
     build_markdown_event as _build_markdown_event_impl,
+    build_search_result_event as _build_search_result_event_impl,
+    build_search_finish_event as _build_search_finish_event_impl,
     normalize_optional_text as _normalize_optional_text_impl,
     extract_requester_identity as _extract_requester_identity_impl,
     resolve_lookup_origin_url as _resolve_lookup_origin_url_impl,
@@ -1690,14 +1692,13 @@ def _handle_browser_search_api(execute_fn, *, route_label, source_label):
                     if isinstance(item, dict) and ('success' in item or 'error' in item):
                         result = item
                         all_results.append(result)
-                        yield json.dumps({
-                            'type': 'searchresult',
-                            'content': result,
-                            'query': query_str,
-                            'index': idx,
-                            'total': len(queries),
-                            'source': source_label,
-                        }, ensure_ascii=False) + "\n"
+                        yield _build_search_result_event_impl(
+                            result,
+                            query=query_str,
+                            index=idx,
+                            total=len(queries),
+                            source=source_label,
+                        ) + "\n"
                         break
 
                     if isinstance(item, str):
@@ -1705,13 +1706,7 @@ def _handle_browser_search_api(execute_fn, *, route_label, source_label):
 
                 worker.join(timeout=0.1)
 
-            yield json.dumps({
-                'type': 'finish',
-                'content': {
-                    'success': True,
-                    'results': all_results,
-                }
-            }, ensure_ascii=False) + "\n"
+            yield _build_search_finish_event_impl(all_results) + "\n"
 
         return Response(stream_with_context(generate()), mimetype='application/x-ndjson')
 

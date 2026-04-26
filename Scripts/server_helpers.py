@@ -775,6 +775,34 @@ def build_markdown_event(content: str) -> str:
     return json.dumps({"type": "markdown", "content": str(content)}, ensure_ascii=False)
 
 
+def build_search_result_event(content, **extras) -> str:
+    """JSON do evento `searchresult` emitido por `_handle_browser_search_api`.
+
+    Formato: `{"type": "searchresult", "content": <result>, **extras}`.
+    Espelha `build_status_event` mas o `content` pode ser dict (resultado
+    completo da query) — não há coerção via `str()`. Campos extras
+    típicos: `query`, `index`, `total`, `source`. Sem newline trailing.
+    """
+    payload = {"type": "searchresult", "content": content}
+    payload.update(extras)
+    return json.dumps(payload, ensure_ascii=False)
+
+
+def build_search_finish_event(results) -> str:
+    """JSON do evento `finish` que encerra um stream de busca.
+
+    Formato canônico:
+    ``{"type": "finish", "content": {"success": True, "results": [...]}}``.
+    `results` é repassado sem mutação para não acoplar o helper ao
+    schema de cada item de resultado.
+    """
+    payload = {
+        "type": "finish",
+        "content": {"success": True, "results": results},
+    }
+    return json.dumps(payload, ensure_ascii=False)
+
+
 def build_queue_key(chat_id, *, now_ns: Callable[[], int] = time.time_ns) -> str:
     """Gera a chave única usada para identificar um slot de fila Python.
 
@@ -919,6 +947,8 @@ __all__ = [
     "build_error_event",
     "build_status_event",
     "build_markdown_event",
+    "build_search_result_event",
+    "build_search_finish_event",
     "format_requester_suffix",
     "format_origin_suffix",
     "compute_python_request_interval",

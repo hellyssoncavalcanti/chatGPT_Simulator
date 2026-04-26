@@ -954,6 +954,57 @@ class TestNormalizeSourceHint:
         assert sh.normalize_source_hint(Boom()) == ""
 
 
+class TestBuildSearchResultEvent:
+    def test_shape_with_extras(self):
+        out = sh.build_search_result_event(
+            {"success": True, "items": [1, 2]},
+            query="x",
+            index=1,
+            total=2,
+            source="web",
+        )
+        assert json.loads(out) == {
+            "type": "searchresult",
+            "content": {"success": True, "items": [1, 2]},
+            "query": "x",
+            "index": 1,
+            "total": 2,
+            "source": "web",
+        }
+
+    def test_content_is_not_str_coerced(self):
+        # ao contrario de build_status_event, content fica como dict
+        out = sh.build_search_result_event({"a": 1})
+        assert json.loads(out) == {"type": "searchresult", "content": {"a": 1}}
+
+    def test_no_trailing_newline(self):
+        out = sh.build_search_result_event({"x": 1})
+        assert not out.endswith("\n")
+
+    def test_unicode_preserved(self):
+        out = sh.build_search_result_event({"q": "olá"})
+        assert "olá" in out
+
+
+class TestBuildSearchFinishEvent:
+    def test_shape(self):
+        out = sh.build_search_finish_event([{"a": 1}, {"b": 2}])
+        assert json.loads(out) == {
+            "type": "finish",
+            "content": {"success": True, "results": [{"a": 1}, {"b": 2}]},
+        }
+
+    def test_empty_results(self):
+        out = sh.build_search_finish_event([])
+        assert json.loads(out) == {
+            "type": "finish",
+            "content": {"success": True, "results": []},
+        }
+
+    def test_no_trailing_newline(self):
+        assert not sh.build_search_finish_event([]).endswith("\n")
+
+
 # ─────────────────────────────────────────────────────────
 # build_queue_key
 # ─────────────────────────────────────────────────────────
