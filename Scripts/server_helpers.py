@@ -686,6 +686,70 @@ def safe_int(value, default: int) -> int:
         return int(default)
 
 
+def resolve_logs_tail_lines_limit(
+    raw_lines,
+    *,
+    default: int = 120,
+    min_lines: int = 10,
+    max_lines: int = 800,
+) -> int:
+    """Normaliza `?lines=` de `/api/logs/tail` com clamp estável."""
+    requested = safe_int(raw_lines, default)
+    return max(int(min_lines), min(int(max_lines), int(requested)))
+
+
+def parse_from_end_flag(raw_value) -> bool:
+    """Interpreta `?from_end=` de `/api/logs/stream` com o idiom legado."""
+    return str(raw_value).strip().lower() not in {"0", "false", "no"}
+
+
+def extract_queue_failed_limit(raw_limit, default: int = 100) -> int:
+    """Normaliza `?limit=` de `/api/queue/failed`."""
+    return safe_int(raw_limit, default)
+
+
+def extract_queue_failed_retry_index(data, default: int = -1) -> int:
+    """Extrai índice de retry da DLQ (`data["index"]`) com fallback estável."""
+    if not isinstance(data, Mapping):
+        return int(default)
+    return safe_int(data.get("index", default), default)
+
+
+def advance_health_ping_state(
+    ping_count,
+    last_log_time,
+    now,
+    *,
+    interval_sec: int = 300,
+) -> dict:
+    """Avança o estado do `/health` preservando o contrato histórico.
+
+    Regras:
+      - Sempre incrementa `ping_count` em +1.
+      - Se `now - last_log_time >= interval_sec`, sinaliza log, atualiza
+        `last_log_time` para `now` e reseta `ping_count` para 0.
+      - Caso contrário, mantém `last_log_time` e conserva o contador
+        incrementado.
+    """
+    next_count = safe_int(ping_count, 0) + 1
+    prev_last = float(last_log_time or 0.0)
+    current = float(now or 0.0)
+    should_log = (current - prev_last) >= int(interval_sec)
+    if should_log:
+        return {
+            "should_log": True,
+            "next_ping_count": 0,
+            "next_last_log_time": current,
+            "logged_ping_count": next_count,
+        }
+    return {
+        "should_log": False,
+        "next_ping_count": next_count,
+        "next_last_log_time": prev_last,
+        "logged_ping_count": next_count,
+    }
+
+
 def safe_snapshot_stats(queue_obj) -> dict:
     """Wrapper defensivo para ``queue_obj.snapshot_stats()`` que jamais
     levanta exceção.
@@ -743,6 +807,11 @@ __all__ = [
     "format_origin_suffix",
     "compute_python_request_interval",
     "safe_int",
+    "resolve_logs_tail_lines_limit",
+    "parse_from_end_flag",
+    "extract_queue_failed_limit",
+    "extract_queue_failed_retry_index",
+    "advance_health_ping_state",
     "safe_snapshot_stats",
 ]
 
