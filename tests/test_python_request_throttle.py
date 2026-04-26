@@ -199,19 +199,46 @@ class TestCommit:
 class TestSnapshot:
     def test_initial_snapshot_is_zero(self):
         t = PythonRequestThrottle(now_func=lambda: 100.0)
-        assert t.snapshot() == {"last_ts": 0.0}
+        snap = t.snapshot()
+        assert snap == {"last_ts": 0.0, "age_seconds": 0.0}
 
     def test_snapshot_reflects_last_ts(self):
         clock = _FakeClock(t=300.0)
         t = PythonRequestThrottle(now_func=clock)
         t.commit()
-        assert t.snapshot() == {"last_ts": 300.0}
+        snap = t.snapshot()
+        assert snap["last_ts"] == 300.0
+        assert snap["age_seconds"] == 0.0  # acabou de commitar
+
+    def test_snapshot_age_seconds_advances_with_clock(self):
+        clock = _FakeClock(t=100.0)
+        t = PythonRequestThrottle(now_func=clock)
+        t.commit()  # last_ts=100
+        assert t.snapshot()["age_seconds"] == 0.0
+        clock.advance(7.5)
+        assert t.snapshot()["age_seconds"] == 7.5
+
+    def test_snapshot_age_zero_when_last_ts_never_set(self):
+        clock = _FakeClock(t=99999.0)
+        t = PythonRequestThrottle(now_func=clock)
+        # Nunca houve commit/begin → age_seconds=0 mesmo com clock alto.
+        assert t.snapshot()["age_seconds"] == 0.0
+        assert t.snapshot()["last_ts"] == 0.0
+
+    def test_snapshot_age_clamps_negative_to_zero(self):
+        # Clock retrocedeu (ex.: ajuste NTP) — age nunca negativo.
+        clock = _FakeClock(t=200.0)
+        t = PythonRequestThrottle(now_func=clock)
+        t.commit()  # last_ts=200
+        clock._t = 150.0  # retrocede
+        assert t.snapshot()["age_seconds"] == 0.0
 
     def test_snapshot_returns_dict(self):
         t = PythonRequestThrottle(now_func=lambda: 50.0)
         snap = t.snapshot()
         assert isinstance(snap, dict)
         assert "last_ts" in snap
+        assert "age_seconds" in snap
 
     def test_snapshot_thread_safe_under_concurrent_commit(self):
         # Garantia básica: sob 4 threads commitando, snapshot nunca quebra.
