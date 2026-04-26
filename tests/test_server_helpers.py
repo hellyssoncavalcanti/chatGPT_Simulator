@@ -607,6 +607,66 @@ class TestExtractMenuExecutePayload:
         assert sh.extract_menu_execute_payload(None) == (None, None, None)
 
 
+class TestExtractWebSearchTestParams:
+    def test_extracts_and_normalizes(self):
+        out = sh.extract_web_search_test_params({
+            "q": "  tdaH tratamento  ",
+            "api_key": "  segredo  ",
+        })
+        assert out == ("tdaH tratamento", "segredo")
+
+    def test_missing_or_invalid_returns_empty_strings(self):
+        assert sh.extract_web_search_test_params({}) == ("", "")
+        assert sh.extract_web_search_test_params(None) == ("", "")
+
+
+class TestBuildWebSearchTestTask:
+    def test_builds_expected_shape(self):
+        sq = object()
+        out = sh.build_web_search_test_task("query x", sq)
+        assert out == {
+            "action": "SEARCH",
+            "query": "query x",
+            "stream_queue": sq,
+        }
+
+
+class TestBuildWebSearchTestStreamResponse:
+    def test_maps_searchresult_to_success_payload(self):
+        raw = json.dumps({"type": "searchresult", "content": {"success": True, "count": 1}})
+        payload, status = sh.build_web_search_test_stream_response(raw, "q1")
+        assert status == 200
+        assert payload == {"success": True, "count": 1}
+
+    def test_maps_error_to_http_500_payload(self):
+        raw = json.dumps({"type": "error", "content": "falhou"})
+        payload, status = sh.build_web_search_test_stream_response(raw, "q1")
+        assert status == 500
+        assert payload == sh.build_web_search_test_error_payload("q1", "falhou")
+
+    def test_unknown_type_is_non_terminal(self):
+        raw = json.dumps({"type": "status", "content": "aguarde"})
+        payload, status = sh.build_web_search_test_stream_response(raw, "q1")
+        assert payload is None
+        assert status is None
+
+    def test_invalid_json_raises_to_preserve_legacy_behavior(self):
+        with pytest.raises(json.JSONDecodeError):
+            sh.build_web_search_test_stream_response("not-json", "q1")
+
+
+class TestBuildWebSearchTestErrorPayload:
+    def test_builds_shape(self):
+        out = sh.build_web_search_test_error_payload("q1", "erro xyz")
+        assert out == {"success": False, "query": "q1", "error": "erro xyz"}
+
+    def test_keeps_non_string_error(self):
+        out = sh.build_web_search_test_error_payload("q1", {"code": "x"})
+        assert out["success"] is False
+        assert out["query"] == "q1"
+        assert out["error"] == {"code": "x"}
+
+
 # ─────────────────────────────────────────────────────────
 # build_queue_key
 # ─────────────────────────────────────────────────────────
