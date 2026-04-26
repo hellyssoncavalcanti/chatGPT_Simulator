@@ -89,6 +89,9 @@ from server_helpers import (
     safe_int as _safe_int_impl,
     resolve_logs_tail_lines_limit as _resolve_logs_tail_lines_limit_impl,
     parse_from_end_flag as _parse_from_end_flag_impl,
+    extract_queue_failed_limit as _extract_queue_failed_limit_impl,
+    extract_queue_failed_retry_index as _extract_queue_failed_retry_index_impl,
+    advance_health_ping_state as _advance_health_ping_state_impl,
     safe_snapshot_stats as _safe_snapshot_stats_impl,
 )
 import error_catalog as _error_catalog
@@ -1089,14 +1092,19 @@ _health_last_log_time = 0
 def health_check():
     global _health_ping_count, _health_last_log_time
 
-    _health_ping_count += 1
     now = time.time()
+    state = _advance_health_ping_state_impl(
+        _health_ping_count,
+        _health_last_log_time,
+        now,
+        interval_sec=300,
+    )
+    _health_ping_count = state["next_ping_count"]
+    _health_last_log_time = state["next_last_log_time"]
     # Loga apenas 1x a cada 5 minutos para não poluir
-    if now - _health_last_log_time >= 300:
+    if state["should_log"]:
         caller = request.headers.get("User-Agent", "desconhecido")
-        log(f"🏥 Health check #{_health_ping_count} (origem: {caller})")
-        _health_last_log_time = now
-        _health_ping_count = 0  # reseta contador após logar
+        log(f"🏥 Health check #{state['logged_ping_count']} (origem: {caller})")
 
     return jsonify({"status": "ok", "service": "ChatGPT Simulator"}), 200
 
@@ -1121,7 +1129,7 @@ def queue_status():
 @app.route("/api/queue/failed", methods=["GET"])
 def queue_failed():
     """DLQ: lista tarefas que falharam no browser loop."""
-    limit = _safe_int_impl(request.args.get("limit", 100), 100)
+    limit = _extract_queue_failed_limit_impl(request.args.get("limit", 100))
     items = browser_queue.list_failed(limit=limit) if hasattr(browser_queue, "list_failed") else []
     return jsonify({"success": True, "failed": items, "count": len(items)}), 200
 
@@ -1130,7 +1138,7 @@ def queue_failed():
 def queue_failed_retry():
     """Reinsere item da DLQ na fila principal por índice."""
     data = request.get_json(silent=True) or {}
-    idx = _safe_int_impl(data.get("index", -1), -1)
+    idx = _extract_queue_failed_retry_index_impl(data)
     if not hasattr(browser_queue, "retry_failed"):
         return jsonify({"success": False, "error": "dlq_not_supported"}), 400
     retried = browser_queue.retry_failed(idx)

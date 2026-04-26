@@ -1197,6 +1197,55 @@ class TestParseFromEndFlag:
         assert sh.parse_from_end_flag(raw_value) is False
 
 
+class TestQueueFailedHelpers:
+    def test_extract_queue_failed_limit_uses_default(self):
+        assert sh.extract_queue_failed_limit(None) == 100
+
+    def test_extract_queue_failed_limit_parses_string(self):
+        assert sh.extract_queue_failed_limit("25") == 25
+
+    def test_extract_queue_failed_retry_index_happy_path(self):
+        assert sh.extract_queue_failed_retry_index({"index": "7"}) == 7
+
+    def test_extract_queue_failed_retry_index_invalid_mapping(self):
+        assert sh.extract_queue_failed_retry_index({"index": "x"}) == -1
+
+    def test_extract_queue_failed_retry_index_invalid_payload(self):
+        assert sh.extract_queue_failed_retry_index(None) == -1
+
+
+class TestAdvanceHealthPingState:
+    def test_increments_without_logging_inside_window(self):
+        out = sh.advance_health_ping_state(2, 1000.0, 1200.0, interval_sec=300)
+        assert out["should_log"] is False
+        assert out["next_ping_count"] == 3
+        assert out["next_last_log_time"] == 1000.0
+        assert out["logged_ping_count"] == 3
+
+    def test_logs_and_resets_when_interval_elapsed(self):
+        out = sh.advance_health_ping_state(4, 1000.0, 1300.0, interval_sec=300)
+        assert out["should_log"] is True
+        assert out["next_ping_count"] == 0
+        assert out["next_last_log_time"] == 1300.0
+        assert out["logged_ping_count"] == 5
+
+    def test_handles_none_values_defensively(self):
+        out = sh.advance_health_ping_state(None, None, None, interval_sec=300)
+        assert out["should_log"] is False
+        assert out["next_ping_count"] == 1
+        assert out["next_last_log_time"] == 0.0
+        assert out["logged_ping_count"] == 1
+
+    def test_safe_int_compat_on_ping_counter(self):
+        out = sh.advance_health_ping_state("7", 0.0, 1.0, interval_sec=300)
+        assert out["next_ping_count"] == 8
+
+    def test_custom_interval(self):
+        out = sh.advance_health_ping_state(0, 50.0, 60.0, interval_sec=10)
+        assert out["should_log"] is True
+        assert out["logged_ping_count"] == 1
+
+
 class TestSafeSnapshotStats:
     class _DummyOk:
         def __init__(self, payload):
