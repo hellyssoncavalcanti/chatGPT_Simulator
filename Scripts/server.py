@@ -2075,12 +2075,13 @@ def send_manual_whatsapp_reply():
     chat_id = data.get("chat_id")
     id_paciente      = data.get("id_paciente")
     id_atendimento   = data.get("id_atendimento")
-    id_membro        = data.get("id_membro_solicitante")
-    nome_membro      = data.get("nome_membro_solicitante")
+    nome_membro, id_membro = _extract_requester_identity_impl(data)
 
     if not phone or not message:
         return jsonify({"success": False, "error": "phone e message são obrigatórios"}), 400
 
+    # Mantém formato histórico específico desta rota:
+    # ` por "<nome>" (id=<id>)` (difere do padrão `id_membro: "<id>"`).
     _quem = f' por "{nome_membro}" (id={id_membro})' if (nome_membro or id_membro) else ""
     print(f"\n[📨 MANUAL REPLY] Resposta manual{_quem} para phone={phone} | chat_id={chat_id}")
 

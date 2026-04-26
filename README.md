@@ -278,7 +278,7 @@ rodam no CI completo via o comando da seção anterior.)
 |---|---|---|
 | `Scripts/request_source.py` | Detecção de origem Python/Codex/analyzer no request HTTP. | `tests/test_request_source.py` |
 | `Scripts/error_catalog.py` | 11 códigos estáveis + classificador PT/EN + `format_reason` (tag `[CODE]`). | `tests/test_error_catalog.py` |
-| `Scripts/server_helpers.py` | Wait-time formatting, payloads de fila, prune de deque, contagem de perfis Chromium, concatenação de mensagens OpenAI-style, rotulagem de remetente, wrappers de texto colado, coalescência de `origin_url`, `safe_int(value, default)` e `safe_snapshot_stats(queue)` para endpoints defensivos, `build_status_event`/`build_error_event`/`build_markdown_event` para SSE, `compute_python_request_interval` puro com `rng` injetável. | `tests/test_server_helpers.py` |
+| `Scripts/server_helpers.py` | Wait-time formatting, payloads de fila, prune de deque, contagem de perfis Chromium, concatenação de mensagens OpenAI-style, rotulagem de remetente, extração de identidade do solicitante, wrappers de texto colado, coalescência de `origin_url`. | `tests/test_server_helpers.py` |
 | `Scripts/browser_predicates.py` | Predicados do DOM do ChatGPT (extract sender, orphan tabs, incomplete JSON, inline base64, paste wrappers). | `tests/test_browser_predicates.py` |
 | `Scripts/log_sanitizer.py` | `mask_api_key`, `mask_bearer_token`, `mask_session_cookie`, `mask_file_path`, `sanitize*`. | `tests/test_log_sanitizer.py` |
 | `Scripts/security_state.py` | Classe `SecurityState` — rate-limit per-(ip,key) + brute-force de login, expiração automática. | `tests/test_security_state.py` |

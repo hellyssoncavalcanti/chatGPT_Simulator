@@ -393,7 +393,7 @@ Coletadas em `2026-04-22` via `wc -l` / `grep -nE "def "`:
 
 ---
 
-## 🆕 PONTO DE RETOMADA (última atualização em 2026-04-26 quattuorvicies)
+## 🆕 PONTO DE RETOMADA (última atualização em 2026-04-26 quinvicies)
 
 > **Leia APENAS esta seção ao retomar em outro chat.** Ela é autocontida:
 > não é necessário reler seções anteriores a menos que haja dúvida sobre
@@ -402,6 +402,7 @@ Coletadas em `2026-04-22` via `wc -l` / `grep -nE "def "`:
 ### Estado atual (consolidado) — branch `claude/focused-einstein-GcWqc`
 
 **Commits relevantes (mais recente → mais antigo):**
+- `865225b` — Migrar send_manual_whatsapp_reply para helper de solicitante *(esta sessão, ciclo 19 / opção 2)*
 - `fb2f476` — Extrair identidade do solicitante para helper puro *(esta sessão, ciclo 18 / opção 2 parcial)*
 - `b68de2d` — Expor WebSearchThrottle em /api/metrics + Prometheus *(esta sessão, ciclo 17 / opção E)*
 - `511d667` — Documentar plano de concorrência por browser_profile *(esta sessão, ciclo 16 / opção C)*
@@ -598,14 +599,14 @@ Esperado: **524 passed**. (NÃO usar `python3 -m pytest tests/` cru — `tests/t
 
 ```
 Continue o refactor do /home/user/chatGPT_Simulator na branch claude/focused-einstein-Ol7Hd.
-Leia APENAS a seção "PONTO DE RETOMADA (última atualização em 2026-04-26 quattuorvicies)" em REFACTOR_PROGRESS.md — é autocontida.
+Leia APENAS a seção "PONTO DE RETOMADA (última atualização em 2026-04-26 quinvicies)" em REFACTOR_PROGRESS.md — é autocontida.
 
 As opções 1 (PythonRequestThrottle), 3 (dict-yielders SSE),
 A (snapshot em /api/metrics + Prometheus), B (WebSearchThrottle), C (doc de concorrência por profile) e E (snapshot do WebSearchThrottle) já estão FEITAS. Próximas opções:
 
 **2. Auditar e migrar handlers menores que ainda têm idioms duplicados** (BAIXO risco, em progresso)
-- ✅ Parcial concluído: extraído `extract_requester_identity(data)` para `server_helpers.py` e migrados `api_sync`, `_handle_browser_search_api` e `chat_completions`.
-- Próximo subpasso: aplicar o mesmo helper em `send_manual_whatsapp_reply` sem alterar o formato de log legado `(id={id})`.
+- ✅ Concluído nesta trilha: extraído `extract_requester_identity(data)` para `server_helpers.py` e migrados `api_sync`, `_handle_browser_search_api`, `chat_completions` e `send_manual_whatsapp_reply` (preservando formato de log legado `(id={id})` nessa rota).
+- Próximo subpasso: auditar `api_delete`/`api_close_chat`/`api_completions` para outros idioms duplicados (não relacionados ao solicitante).
 - Entregável: PR pequeno com extrações puras + wrappers finos + testes offline.
 
 **D. Integrar catálogo em `browser._dismiss_rate_limit_modal_if_any`** (ALTO risco, BLOQUEADO — pede aprovação).
@@ -675,6 +676,9 @@ Se precisar tocar em browser.py (async/Playwright) ou em analisador_prontuarios.
   17. `b68de2d`: `WebSearchThrottle.snapshot()` estendido para retornar `age_seconds` (clamp 0 em bootstrap/clock retrógrado). `server.api_metrics` agora expõe `web_search_throttle` e `/metrics` adiciona gauge `simulator_web_search_throttle_age_sec` em `_update_rate_limit_prom_gauges`. Testes `tests/test_web_search_throttle.py` ampliados com 2 casos de idade (`advances`/`clamp`). Suite offline: **519 passed** em 17 arquivos. Próxima opção recomendada: voltar à Opção 2 (auditoria de handlers menores), mantendo `browser.py` fora de escopo sem aprovação.
 - **2026-04-26 quattuorvicies** (esta sessão, branch `work`) — 1 ciclo de Opção 2 (auditoria de handlers menores, etapa 1):
   18. `fb2f476`: extraído `extract_requester_identity(data)` para `Scripts/server_helpers.py` (módulo puro), normalizando `nome_membro_solicitante`/`id_membro_solicitante` via `normalize_optional_text`. Migração de 3 handlers em `server.py` (`api_sync`, `_handle_browser_search_api`, `chat_completions`) para usar o helper e reduzir idiom duplicado `data.get(... ) or None`. `tests/test_server_helpers.py` ganhou classe `TestExtractRequesterIdentity` (+5 casos: strip, vazios, ausentes, duck-typed `.get`, entrada inválida). Suite offline: **524 passed** em 17 arquivos. Próximo subpasso recomendado: aplicar helper em `send_manual_whatsapp_reply` preservando formato de log legado `(id={id})`.
+- **2026-04-26 quinvicies** (esta sessão, branch `work`) — 1 ciclo de Opção 2 (auditoria de handlers menores, etapa 2):
+  19. `865225b`: `send_manual_whatsapp_reply` migrado para `_extract_requester_identity_impl(data)` (remove duplicação de `data.get(...)`) mantendo explicitamente o formato histórico de log `_quem` desta rota (` por "<nome>" (id=<id>)`). README atualizado no inventário de `server_helpers` para citar extração de identidade do solicitante. Sem mudanças em `browser.py`/`analisador_prontuarios.py`. Suite offline permanece **524 passed** em 17 arquivos.
+
 
 
 
