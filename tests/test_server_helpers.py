@@ -607,6 +607,19 @@ class TestExtractMenuExecutePayload:
         assert sh.extract_menu_execute_payload(None) == (None, None, None)
 
 
+class TestExtractWebSearchTestParams:
+    def test_extracts_and_normalizes(self):
+        out = sh.extract_web_search_test_params({
+            "q": "  tdaH tratamento  ",
+            "api_key": "  segredo  ",
+        })
+        assert out == ("tdaH tratamento", "segredo")
+
+    def test_missing_or_invalid_returns_empty_strings(self):
+        assert sh.extract_web_search_test_params({}) == ("", "")
+        assert sh.extract_web_search_test_params(None) == ("", "")
+
+
 # ─────────────────────────────────────────────────────────
 # build_queue_key
 # ─────────────────────────────────────────────────────────

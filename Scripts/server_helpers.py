@@ -411,6 +411,17 @@ def extract_menu_execute_payload(data) -> Tuple[Optional[str], Optional[str], Op
     )
 
 
+def extract_web_search_test_params(data) -> Tuple[str, str]:
+    """Extrai (`query`, `api_key`) para `/api/web_search/test` (query string)."""
+    payload_get = getattr(data, "get", None)
+    if payload_get is None:
+        return ("", "")
+    return (
+        normalize_optional_text(payload_get("q")) or "",
+        normalize_optional_text(payload_get("api_key")) or "",
+    )
+
+
 def resolve_browser_profile(requested_profile, stored_profile) -> Optional[str]:
     """Resolve o `browser_profile` efetivo para a tarefa do browser.
 
@@ -641,6 +652,7 @@ __all__ = [
     "extract_delete_request_targets",
     "extract_menu_url",
     "extract_menu_execute_payload",
+    "extract_web_search_test_params",
     "build_queue_key",
     "build_chat_task_payload",
     "build_error_event",

@@ -77,6 +77,7 @@ from server_helpers import (
     extract_delete_request_targets as _extract_delete_request_targets_impl,
     extract_menu_url as _extract_menu_url_impl,
     extract_menu_execute_payload as _extract_menu_execute_payload_impl,
+    extract_web_search_test_params as _extract_web_search_test_params_impl,
     format_requester_suffix as _format_requester_suffix_impl,
     format_origin_suffix as _format_origin_suffix_impl,
     safe_int as _safe_int_impl,
@@ -1767,8 +1768,7 @@ def api_web_search_test():
         <p><b>Opção 2:</b> Adicione a API key na URL:<br><code>/api/web_search/test?api_key=SUA_CHAVE</code></p>
         </div></body></html>""", mimetype='text/html', status=401)
 
-    query   = request.args.get('q', '').strip()
-    api_key = request.args.get('api_key', '')
+    query, api_key = _extract_web_search_test_params_impl(request.args)
 
     # Se não tem query, retorna a página de documentação + teste
     if not query:
