@@ -267,7 +267,7 @@ python3 -m pytest \
   tests/test_web_search_throttle.py
 ```
 
-Esperado: **645 passed**. (Os arquivos `tests/test_server_api.py` e
+Esperado: **653 passed**. (Os arquivos `tests/test_server_api.py` e
 `tests/test_storage.py` são excluídos porque exigem `flask` e
 `cryptography`, que não estão nesta lista de smoke offline — eles
 rodam no CI completo via o comando da seção anterior.)
@@ -284,7 +284,7 @@ rodam no CI completo via o comando da seção anterior.)
 |---|---|---|
 | `Scripts/request_source.py` | Detecção de origem Python/Codex/analyzer no request HTTP. | `tests/test_request_source.py` |
 | `Scripts/error_catalog.py` | 11 códigos estáveis + classificador PT/EN + `format_reason` (tag `[CODE]`). | `tests/test_error_catalog.py` |
-| `Scripts/server_helpers.py` | Wait-time formatting, payloads de fila, prune de deque, contagem de perfis Chromium, concatenação de mensagens OpenAI-style, rotulagem de remetente, extração de identidade do solicitante (e idiom legado de WhatsApp), helpers de payload para lookup/delete/menu, wrappers de texto colado, coalescência de `origin_url`, normalização de source-hint (`str(v).strip().lower()` defensivo), construção de eventos SSE/NDJSON (`status`/`error`/`markdown`/`searchresult`/`finish`/`chat_id`/`chat_meta`), terminais HTTP `(payload, status_code)` para `/api/web_search/test`, contagem agregada e init de meta para `ACTIVE_CHATS`, contagem minimal `count_unfinished_chats` para gauges Prometheus, identificação de IDs expirados em `_cleanup_active_chats` (`find_expired_chat_ids`), `mark_chat_finished` (sets finished/finished_at/last_event_at em uma passada), resolução de `Content-Type` por extensão para `/api/downloads/<file_id>`, validação de filename de avatar (whitelist `.jpg/.jpeg/.png/.gif/.webp`). | `tests/test_server_helpers.py` |
+| `Scripts/server_helpers.py` | Wait-time formatting, payloads de fila, prune de deque, contagem de perfis Chromium, concatenação de mensagens OpenAI-style, rotulagem de remetente, extração de identidade do solicitante (e idiom legado de WhatsApp), helpers de payload para lookup/delete/menu, wrappers de texto colado, coalescência de `origin_url`, normalização de source-hint (`str(v).strip().lower()` defensivo), construção de eventos SSE/NDJSON (`status`/`error`/`markdown`/`searchresult`/`finish`/`chat_id`/`chat_meta`) e frames `text/event-stream` para `/api/logs/stream` (`build_log_stream_{line,ping,error}_sse`), terminais HTTP `(payload, status_code)` para `/api/web_search/test`, contagem agregada e init de meta para `ACTIVE_CHATS`, contagem minimal `count_unfinished_chats` para gauges Prometheus, identificação de IDs expirados em `_cleanup_active_chats` (`find_expired_chat_ids`), `mark_chat_finished` (sets finished/finished_at/last_event_at em uma passada), resolução de `Content-Type` por extensão para `/api/downloads/<file_id>`, validação de filename de avatar (whitelist `.jpg/.jpeg/.png/.gif/.webp`). | `tests/test_server_helpers.py` |
 | `Scripts/browser_predicates.py` | Predicados do DOM do ChatGPT (extract sender, orphan tabs, incomplete JSON, inline base64, paste wrappers). | `tests/test_browser_predicates.py` |
 | `Scripts/log_sanitizer.py` | `mask_api_key`, `mask_bearer_token`, `mask_session_cookie`, `mask_file_path`, `sanitize*`. | `tests/test_log_sanitizer.py` |
 | `Scripts/security_state.py` | Classe `SecurityState` — rate-limit per-(ip,key) + brute-force de login, expiração automática. | `tests/test_security_state.py` |
