@@ -72,6 +72,8 @@ from server_helpers import (
     build_markdown_event as _build_markdown_event_impl,
     build_search_result_event as _build_search_result_event_impl,
     build_search_finish_event as _build_search_finish_event_impl,
+    build_chat_id_event as _build_chat_id_event_impl,
+    build_chat_meta_event as _build_chat_meta_event_impl,
     normalize_optional_text as _normalize_optional_text_impl,
     extract_requester_identity as _extract_requester_identity_impl,
     resolve_lookup_origin_url as _resolve_lookup_origin_url_impl,
@@ -2307,17 +2309,10 @@ def chat_completions():
                 log(f"[WARN] Falha no dreno de stream pós-disconnect para chat {chat_id}: {e}")
 
         def generate():
-            yield json.dumps({"type": "chat_id", "content": chat_id}) + "\n"
+            yield _build_chat_id_event_impl(chat_id) + "\n"
             if url and url != "None":
-                yield json.dumps(
-                    {
-                        "type": "chat_meta",
-                        "content": {
-                            "chat_id": chat_id,
-                            "url": url,
-                            "chromium_profile": effective_browser_profile or "",
-                        },
-                    }
+                yield _build_chat_meta_event_impl(
+                    chat_id, url, effective_browser_profile,
                 ) + "\n"
 
             try:

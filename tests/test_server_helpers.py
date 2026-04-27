@@ -1132,6 +1132,43 @@ class TestBuildSearchFinishEvent:
         assert not sh.build_search_finish_event([]).endswith("\n")
 
 
+class TestBuildChatIdEvent:
+    def test_shape(self):
+        out = sh.build_chat_id_event("abc-123")
+        assert json.loads(out) == {"type": "chat_id", "content": "abc-123"}
+
+    def test_id_is_str_coerced(self):
+        out = sh.build_chat_id_event(42)
+        assert json.loads(out) == {"type": "chat_id", "content": "42"}
+
+    def test_no_trailing_newline(self):
+        assert not sh.build_chat_id_event("x").endswith("\n")
+
+
+class TestBuildChatMetaEvent:
+    def test_shape(self):
+        out = sh.build_chat_meta_event("abc", "https://chat", "default")
+        assert json.loads(out) == {
+            "type": "chat_meta",
+            "content": {
+                "chat_id": "abc",
+                "url": "https://chat",
+                "chromium_profile": "default",
+            },
+        }
+
+    def test_none_chromium_profile_becomes_empty_string(self):
+        out = sh.build_chat_meta_event("abc", "https://chat", None)
+        assert json.loads(out)["content"]["chromium_profile"] == ""
+
+    def test_empty_chromium_profile_remains_empty(self):
+        out = sh.build_chat_meta_event("abc", "https://chat", "")
+        assert json.loads(out)["content"]["chromium_profile"] == ""
+
+    def test_no_trailing_newline(self):
+        assert not sh.build_chat_meta_event("x", "u", "p").endswith("\n")
+
+
 # ─────────────────────────────────────────────────────────
 # build_queue_key
 # ─────────────────────────────────────────────────────────

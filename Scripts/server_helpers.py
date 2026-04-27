@@ -841,6 +841,37 @@ def build_markdown_event(content: str) -> str:
     return json.dumps({"type": "markdown", "content": str(content)}, ensure_ascii=False)
 
 
+def build_chat_id_event(chat_id) -> str:
+    """JSON do evento `chat_id` emitido como primeira mensagem do stream
+    SSE/NDJSON de `/v1/chat/completions`.
+
+    Formato canônico: ``{"type": "chat_id", "content": "<id>"}``. NÃO
+    usa `ensure_ascii=False` (idiom histórico do call site preservado;
+    `chat_id` é UUID, então a representação ASCII é byte-equivalente).
+    """
+    return json.dumps({"type": "chat_id", "content": str(chat_id)})
+
+
+def build_chat_meta_event(chat_id, url, chromium_profile) -> str:
+    """JSON do evento `chat_meta` emitido logo após `chat_id` quando há
+    URL conhecida — comunica o frontend o estado inicial do chat.
+
+    Formato:
+    ``{"type": "chat_meta", "content": {"chat_id": ..., "url": ...,
+    "chromium_profile": ...}}``. `chromium_profile=None`/`""` é coercido
+    para string vazia (padrão histórico). NÃO usa `ensure_ascii=False`.
+    """
+    profile_value = chromium_profile or ""
+    return json.dumps({
+        "type": "chat_meta",
+        "content": {
+            "chat_id": chat_id,
+            "url": url,
+            "chromium_profile": profile_value,
+        },
+    })
+
+
 def build_search_result_event(content, **extras) -> str:
     """JSON do evento `searchresult` emitido por `_handle_browser_search_api`.
 
@@ -1016,6 +1047,8 @@ __all__ = [
     "build_error_event",
     "build_status_event",
     "build_markdown_event",
+    "build_chat_id_event",
+    "build_chat_meta_event",
     "build_search_result_event",
     "build_search_finish_event",
     "format_requester_suffix",
