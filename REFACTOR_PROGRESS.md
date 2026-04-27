@@ -393,7 +393,7 @@ Coletadas em `2026-04-22` via `wc -l` / `grep -nE "def "`:
 
 ---
 
-## 🆕 PONTO DE RETOMADA (última atualização em 2026-04-26)
+## 🆕 PONTO DE RETOMADA (última atualização em 2026-04-27 unquadragies)
 
 > **Leia APENAS esta seção ao retomar em outro chat.** Ela é autocontida:
 > não é necessário reler seções anteriores a menos que haja dúvida sobre
@@ -402,15 +402,23 @@ Coletadas em `2026-04-22` via `wc -l` / `grep -nE "def "`:
 ### Estado atual (consolidado) — branch `claude/continue-refactor-updates-wvOqd`
 
 **Commits relevantes (mais recente → mais antigo):**
-- `db0e94f` — Restaurar helpers críticos e aliases de chat_completions *(esta sessão, ciclo 48 / hotfix de runtime)*
-- `863a333` — Tornar auto_dev_agent autônomo para refactor contínuo *(esta sessão, ciclo 47 / automação)*
-- `ec36b34` — Restaurar normalize_source_hint em server_helpers *(esta sessão, ciclo 46 / hotfix de boot)*
-- `fba6626` — Restaurar alias normalize_source_hint no server *(esta sessão, ciclo 45 / hotfix + opção 2)*
-- `4828ff8` — Extrair payload 401 canônico + autoflow sem pausas *(esta sessão, ciclo 44 / opção 2)*
-- `abfe12d` — Extrair transição de estado do health_check *(esta sessão, ciclo 43 / opção 2)*
-- `61cc8ea` — Extrair helpers de queue_failed/queue_failed_retry *(esta sessão, ciclo 42 / opção 2)*
-- `4e79c24` — Extrair helpers de logs_tail/logs_stream *(esta sessão, ciclo 41 / opção 2)*
-- `35502c5` — Extrair payloads terminais do teste de busca web *(esta sessão, ciclo 30 / opção 2)*
+- `653c811` — Extrair frames SSE do logs_stream para helpers puros *(esta sessão, ciclo 43 / opção 2)*
+- `1a58f14` — docs: gravar ciclos 41-42 (sessão quadragies) *(esta sessão, docs)*
+- `ee80375` — Extrair build_chat_id_event e build_chat_meta_event em chat_completions *(esta sessão, ciclo 42 / opção 2)*
+- `2d7ec3f` — Extrair mark_chat_finished e migrar 8 sites duplicados *(esta sessão, ciclo 41 / opção 2)*
+- `6b52d7a` — docs: gravar ciclos 39-40 (sessão nonotricies) *(esta sessão, docs)*
+- `ae6f113` — Extrair find_expired_chat_ids de _cleanup_active_chats *(esta sessão, ciclo 40 / opção 2)*
+- `8b7cc27` — Extrair count_unfinished_chats e migrar 2 sites duplicados *(esta sessão, ciclo 39 / opção 2)*
+- `c50a209` — docs: gravar ciclos 31-38 (sessão octotricies) *(esta sessão, docs)*
+- `2efa540` — Extrair build_search_result_event / build_search_finish_event *(esta sessão, ciclo 38 / opção 2)*
+- `4aec999` — Extrair normalize_source_hint e migrar 2 sites duplicados *(esta sessão, ciclo 37 / opção 2)*
+- `83c0459` — Extrair build_active_chat_meta de chat_completions *(esta sessão, ciclo 36 / opção 2)*
+- `36b77c3` — Extrair count_active_chats de api_metrics *(esta sessão, ciclo 35 / opção 2)*
+- `972a01d` — Extrair resolve_avatar_filename de upload_avatar *(esta sessão, ciclo 34 / opção 2)*
+- `98cd307` — Extrair resolve_download_content_type de serve_download *(esta sessão, ciclo 33 / opção 2)*
+- `414bf22` — Extrair payload e sufixo legado de send_manual_whatsapp_reply *(esta sessão, ciclo 32 / opção 2)*
+- `8bc985b` — Unificar contrato (payload, status_code) em terminais de /api/web_search/test *(esta sessão, ciclo 31 / opção 2)*
+- `35502c5` — Extrair payloads terminais do teste de busca web *(sessão anterior, ciclo 30 / opção 2)*
 - `547d2b5` — Padronizar payload de erro no teste de busca web *(esta sessão, ciclo 29 / opção 2)*
 - `efa8282` — Extrair parser de stream do teste de busca web *(esta sessão, ciclo 28 / opção 2)*
 - `ff33a2b` — Extrair builder de tarefa do teste de busca web *(esta sessão, ciclo 27 / opção 2)*
@@ -475,7 +483,7 @@ Coletadas em `2026-04-22` via `wc -l` / `grep -nE "def "`:
 - `1f3374b` — Extrair detecção de origem de request para módulo testável offline
 - `0c6216e` — docs: refinar backlog P0-P1-P2 com evidências concretas
 
-**Suite offline atual: 17 arquivos → 611 passed** (605 anterior + 6 novos no ciclo 48 em `tests/test_server_helpers.py`).
+**Suite offline atual: 17 arquivos → 653 passed** (572 anterior + 81 novos nos ciclos 31-43 em `tests/test_server_helpers.py`).
 
 Comando exato de validação:
 ```
@@ -499,7 +507,7 @@ python3 -m pytest \
   tests/test_python_request_throttle.py \
   tests/test_web_search_throttle.py
 ```
-Esperado: **572 passed**. (NÃO usar `python3 -m pytest tests/` cru — `tests/test_server_api.py` e `tests/test_storage.py` falham por requerer `flask` / `cryptography` indisponíveis neste ambiente.)
+Esperado: **653 passed**. (NÃO usar `python3 -m pytest tests/` cru — `tests/test_server_api.py` e `tests/test_storage.py` falham por requerer `flask` / `cryptography` indisponíveis neste ambiente.)
 
 ### Mapa de módulos puros já criados
 
@@ -507,7 +515,7 @@ Esperado: **572 passed**. (NÃO usar `python3 -m pytest tests/` cru — `tests/t
 |---|---|---|---|
 | `Scripts/request_source.py` | ~60 | `is_python_chat_request`, `is_codex_chat_request`, `is_analyzer_chat_request` (detecta `analisador_prontuarios*` e token `analyzer`). | `tests/test_request_source.py` (15) |
 | `Scripts/error_catalog.py` | ~290 | 11 códigos + `classify_from_text` (PT-BR + EN) + `format_reason` (tag `[CODE] …` idempotente, fallback sem ruído para INTERNAL_ERROR). | `tests/test_error_catalog.py` (65) |
-| `Scripts/server_helpers.py` | ~800 | `format_wait_seconds`, `queue_status_payload`, `prune_old_attempts`, `count_active_chatgpt_profiles`, `combine_openai_messages`, `build_sender_label`, `wrap_paste_if_python_source`, `coalesce_origin_url`, `extract_source_hint` (cadeia `data.request_source` → `X-Request-Source` → `X-Client-Source` → `""`, duck-typed `.get()`), `decode_attachment`, `resolve_chat_url` (com `case_insensitive=False` opcional para `api_sync`), `resolve_browser_profile`, `normalize_optional_text`, `build_queue_key`, `build_chat_task_payload`, `build_error_event` / `build_status_event` / `build_markdown_event` / `build_search_result_event` / `build_search_finish_event` (JSON SSE/stream queue), `format_requester_suffix` (idiom `_quem`), `format_origin_suffix` (idiom `_origem` com analyzer override), `compute_python_request_interval` (decisão pura `(base, target)` com `rng` injetável), `safe_int` (idiom `try int(x) except: default`), `safe_snapshot_stats` (wrapper defensivo de `queue.snapshot_stats()`), `extract_requester_identity`, `resolve_lookup_origin_url`, `extract_chat_delete_local_targets`, `extract_delete_request_targets`, `extract_menu_url`, `extract_menu_execute_payload`, `extract_web_search_test_params`, `build_web_search_test_task`, `build_web_search_test_stream_response`, `build_web_search_test_error_payload`, `build_web_search_test_timeout_payload`, `build_web_search_test_no_response_payload`, `build_web_search_test_terminal_response` (kind `"timeout"`/`"no_response"` → `(payload, status_code)`), `extract_manual_whatsapp_reply_targets`, `format_manual_whatsapp_requester_suffix` (idiom legado `por "<nome>" (id=<id>)`), `resolve_download_content_type` (mapa MIME por extensão para `/api/downloads/<file_id>`), `resolve_avatar_filename` (whitelist `.jpg/.jpeg/.png/.gif/.webp`), `count_active_chats` (snapshot agregado por chat-meta), `count_unfinished_chats` (versão minimal usada em gauges Prometheus), `find_expired_chat_ids` (lista IDs com `finished and finished_at < cutoff`), `build_active_chat_meta` (init de entry em `ACTIVE_CHATS`), `normalize_source_hint` (idiom canônico `str(v).strip().lower()` defensivo). | `tests/test_server_helpers.py` (267) |
+| `Scripts/server_helpers.py` | ~860 | `format_wait_seconds`, `queue_status_payload`, `prune_old_attempts`, `count_active_chatgpt_profiles`, `combine_openai_messages`, `build_sender_label`, `wrap_paste_if_python_source`, `coalesce_origin_url`, `extract_source_hint`, `decode_attachment`, `resolve_chat_url` (com `case_insensitive=False` opcional), `resolve_browser_profile`, `normalize_optional_text`, `build_queue_key`, `build_chat_task_payload`, eventos SSE/NDJSON (`build_error_event`, `build_status_event`, `build_markdown_event`, `build_search_result_event`, `build_search_finish_event`, `build_chat_id_event`, `build_chat_meta_event`), `format_requester_suffix` / `format_origin_suffix`, `compute_python_request_interval`, `safe_int` / `safe_snapshot_stats`, `extract_requester_identity`, helpers de payload de manutenção (`resolve_lookup_origin_url`, `extract_chat_delete_local_targets`, `extract_delete_request_targets`, `extract_menu_url`, `extract_menu_execute_payload`), helpers de `/api/web_search/test` (`extract_web_search_test_params`, `build_web_search_test_task`, `build_web_search_test_stream_response`, `build_web_search_test_error_payload`, `build_web_search_test_timeout_payload`, `build_web_search_test_no_response_payload`, `build_web_search_test_terminal_response`), `extract_manual_whatsapp_reply_targets` + `format_manual_whatsapp_requester_suffix` (idiom legado), `resolve_download_content_type` (MIME por extensão), `resolve_avatar_filename` (whitelist), helpers de `ACTIVE_CHATS` (`count_active_chats`, `count_unfinished_chats`, `find_expired_chat_ids`, `build_active_chat_meta`, `mark_chat_finished` — sets finished/finished_at/last_event_at em meta), `normalize_source_hint`. | `tests/test_server_helpers.py` (279) |
 | `Scripts/sync_dedup.py` | ~95 | Classe `SyncDedup` (dedup de `/api/sync` na janela 120s, `try_acquire`/`release`/`active_count`/`snapshot`, `now_func` injetável). Constante `DEFAULT_DEDUP_WINDOW_SEC = 120`. | `tests/test_sync_dedup.py` (20) |
 | `Scripts/browser_predicates.py` | ~180 | `extract_task_sender`, `is_known_orphan_tab_url`, `response_looks_incomplete_json`, `response_requests_followup_actions`, `replace_inline_base64_payloads`, `ensure_paste_wrappers`. | `tests/test_browser_predicates.py` (38) |
 | `Scripts/log_sanitizer.py` | ~170 | `mask_api_key`, `mask_bearer_token`, `mask_session_cookie`, `mask_file_path`, `sanitize`, `sanitize_iter`, `sanitize_mapping`. | `tests/test_log_sanitizer.py` (31) |
@@ -618,9 +626,9 @@ Esperado: **572 passed**. (NÃO usar `python3 -m pytest tests/` cru — `tests/t
 
 ```
 Continue o refactor do /home/user/chatGPT_Simulator na branch claude/continue-refactor-updates-wvOqd.
-Leia APENAS a seção "PONTO DE RETOMADA (última atualização em 2026-04-26 nonotricies)" em REFACTOR_PROGRESS.md — é autocontida.
+Leia APENAS a seção "PONTO DE RETOMADA (última atualização em 2026-04-27 unquadragies)" em REFACTOR_PROGRESS.md — é autocontida.
 
-Ciclos 31-40 desta sessão (commits 8bc985b → ae6f113) entregaram 10 extrações
+Ciclos 31-43 desta sessão (commits 8bc985b → 653c811) entregaram 13 extrações
 puras consecutivas em `Scripts/server_helpers.py`:
   31. build_web_search_test_terminal_response (kind/payload/status)
   32. extract_manual_whatsapp_reply_targets + format_manual_whatsapp_requester_suffix
@@ -632,8 +640,11 @@ puras consecutivas em `Scripts/server_helpers.py`:
   38. build_search_result_event + build_search_finish_event (últimos 2 dict-yielders SSE)
   39. count_unfinished_chats (versão minimal para gauges Prometheus, 2 sites duplicados)
   40. find_expired_chat_ids (parte pura de _cleanup_active_chats, isola side effect)
+  41. mark_chat_finished (sets finished/finished_at/last_event_at em meta — 8 sites migrados)
+  42. build_chat_id_event + build_chat_meta_event (NDJSON inicial de chat_completions)
+  43. build_log_stream_{line,ping,error}_sse (SSE text/event-stream de /api/logs/stream)
 
-Suite offline atual: **633 passed em 17 arquivos** (572 anterior + 61 novos).
+Suite offline atual: **653 passed em 17 arquivos** (572 anterior + 81 novos).
 
 Próximas opções (escolher UMA e executar do começo ao fim):
 
@@ -665,7 +676,7 @@ Regras obrigatórias:
     `now_func` injetável + wrapper fino + alias preservado;
 (c) NÃO criar novos arquivos em browser.py/analisador_prontuarios.py — fora
     de escopo (sem aprovação explícita);
-(d) manter os 633 testes offline passando + eventuais novos;
+(d) manter os 645 testes offline passando + eventuais novos;
 (e) ANTES do commit/push final, ATUALIZAR esta seção com novo commit hash,
     contagem de testes e próxima opção;
 (f) commit com título em PT-BR no imperativo;
@@ -677,7 +688,7 @@ analisador_prontuarios.py, PARAR — não está no escopo destas opções.
 ```
 
 ### Checklist de "antes de terminar a sessão" (rodar sempre)
-- [ ] Suite offline passa: `python3 -m pytest tests/test_humanizer.py tests/test_shared_queue.py tests/test_selectors_smoke.py tests/test_request_source.py tests/test_error_catalog.py tests/test_server_helpers.py tests/test_browser_predicates.py tests/test_rate_limit_integration.py tests/test_log_sanitizer.py tests/test_analisador_rate_limit.py tests/test_audit_sanitization.py tests/test_security_state.py tests/test_chat_rate_limit_cooldown.py tests/test_analisador_parsers.py tests/test_sync_dedup.py tests/test_python_request_throttle.py tests/test_web_search_throttle.py` (esperado: **572 passed**).
+- [ ] Suite offline passa: `python3 -m pytest tests/test_humanizer.py tests/test_shared_queue.py tests/test_selectors_smoke.py tests/test_request_source.py tests/test_error_catalog.py tests/test_server_helpers.py tests/test_browser_predicates.py tests/test_rate_limit_integration.py tests/test_log_sanitizer.py tests/test_analisador_rate_limit.py tests/test_audit_sanitization.py tests/test_security_state.py tests/test_chat_rate_limit_cooldown.py tests/test_analisador_parsers.py tests/test_sync_dedup.py tests/test_python_request_throttle.py tests/test_web_search_throttle.py` (esperado: **653 passed**).
 - [ ] `python3 -c "import ast; ast.parse(open('Scripts/server.py').read())"` OK.
 - [ ] `python3 -c "import ast; ast.parse(open('Scripts/browser.py').read())"` OK.
 - [ ] `python3 -c "import ast; ast.parse(open('Scripts/analisador_prontuarios.py').read())"` OK.
@@ -752,22 +763,30 @@ analisador_prontuarios.py, PARAR — não está no escopo destas opções.
   29. `547d2b5`: extraído `build_web_search_test_error_payload(query, error)` em `server_helpers.py` para padronizar o formato de erros JSON de `/api/web_search/test` e reduzir duplicação entre o parser de stream e os retornos de timeout/sem resposta. `server.py` migrou os dois retornos de erro finais para wrappers finos com o novo helper. `tests/test_server_helpers.py` ganhou 2 casos novos para o payload de erro padronizado e o teste de stream-error passou a afirmar via helper. Suite offline atualizada: **570 passed** em 17 arquivos. Próximo subpasso recomendado: extrair helper puro para o envelope de timeout/fallback da rota ou encerrar opção 2 e pedir aprovação para opção D.
 - **2026-04-26 sextricies** (esta sessão, branch `claude/focused-einstein-GcWqc`) — Opção 2 (auditoria de handlers menores, etapa 10):
   30. `35502c5`: extraídos `build_web_search_test_timeout_payload(query)` e `build_web_search_test_no_response_payload(query)` em `server_helpers.py`, ambos delegando ao payload canônico de erro da rota. `server.py` migrou os retornos terminais (timeout 504 e sem resposta) para wrappers finos com esses helpers, removendo strings inline duplicadas do call site. `tests/test_server_helpers.py` ganhou 2 casos novos cobrindo os dois payloads terminais. Suite offline atualizada: **572 passed** em 17 arquivos. Próximo subpasso recomendado: concluir opção 2 com extração de helper puro para seleção de HTTP status terminal (sem tocar `browser.py`) ou validar se já podemos encerrar opção 2.
-- **2026-04-26 (esta sessão, branch `claude/continue-refactor-updates-wvOqd`) — Opção 2 (auditoria de handlers menores, etapa 11):**
-  41. `4e79c24`: extraídos `resolve_logs_tail_lines_limit(raw_lines)` (clamp canônico 10..800 com fallback 120) e `parse_from_end_flag(raw_value)` (idiom canônico `str(v).strip().lower() not in {"0","false","no"}`) para `Scripts/server_helpers.py`. `server.py` migrou `logs_tail` e `logs_stream` para wrappers finos desses helpers sem alterar IO/SSE. `tests/test_server_helpers.py` ganhou 16 casos novos cobrindo limites, fallback e variantes truthy/falsy. Suite offline atualizada: **588 passed** em 17 arquivos. Próxima opção recomendada: **encerrar a opção 2 por saturação dos idioms restantes (`queue_*`, `health_check`, `get_history`) e pedir aprovação explícita para a opção D antes de tocar `browser.py`**.
-- **2026-04-26 (esta sessão, branch `claude/continue-refactor-updates-wvOqd`) — Opção 2 (auditoria de handlers menores, etapa 12):**
-  42. `61cc8ea`: extraídos `extract_queue_failed_limit(raw_limit)` e `extract_queue_failed_retry_index(data)` para `Scripts/server_helpers.py`, reduzindo os idioms de parse numérico nos handlers `queue_failed` e `queue_failed_retry` em `server.py` a wrappers finos. `tests/test_server_helpers.py` ganhou 5 casos novos cobrindo default, parse de string e payload inválido (mapping e não-mapping). Suite offline atualizada: **593 passed** em 17 arquivos. Próxima opção recomendada: **encerrar a opção 2 (restante muito trivial em `health_check`/`get_history`) e pedir aprovação explícita para D antes de qualquer edição em `browser.py`**.
-- **2026-04-26 (esta sessão, branch `claude/continue-refactor-updates-wvOqd`) — Opção 2 (auditoria de handlers menores, etapa 13):**
-  43. `abfe12d`: extraído `advance_health_ping_state(ping_count, last_log_time, now, interval_sec=300)` para `Scripts/server_helpers.py`, isolando a transição pura de estado de `health_check` (incremento, janela de log e reset de contador). `server.py` migrou o handler `/health` para wrapper fino sobre esse helper, mantendo log e resposta HTTP inalterados. `tests/test_server_helpers.py` ganhou 5 casos novos cobrindo janela, borda de intervalo, valores defensivos (`None`) e `interval_sec` customizável. Suite offline atualizada: **598 passed** em 17 arquivos. Próxima opção recomendada: **encerrar a opção 2 (ganho residual mínimo em `get_history`) e pedir aprovação explícita para D antes de editar `browser.py`**.
-- **2026-04-26 (esta sessão, branch `claude/continue-refactor-updates-wvOqd`) — Opção 2 (auditoria de handlers menores, etapa 14):**
-  44. `4828ff8`: extraído `build_unauthorized_payload()` para `Scripts/server_helpers.py` e migrados 8 handlers protegidos em `server.py` para usar o payload 401 canônico via wrapper fino (`get_history`, `api_chat_lookup`, `api_chat_delete_local`, `api_sync`, `api_delete`, `_handle_browser_search_api`, `send_manual_whatsapp_reply`, `chat_completions`). Incluído `Scripts/codex_autoflow.sh` para execução contínua de comandos sem pausas interativas (fluxo automatizado local). `tests/test_server_helpers.py` ganhou 2 casos novos garantindo shape imutável do payload e retorno de novo dict por chamada. Suite offline atualizada: **600 passed** em 17 arquivos. Próxima opção recomendada: **opção 2 saturada; pedir aprovação explícita para D antes de qualquer edição em `browser.py`**.
-- **2026-04-26 (esta sessão, branch `claude/continue-refactor-updates-wvOqd`) — Hotfix de regressão + Opção 2 (etapa 15):**
-  45. `fba6626`: corrigido `NameError: _normalize_source_hint_impl is not defined` em `/v1/chat/completions` e `_handle_browser_search_api` restaurando o alias de import `normalize_source_hint as _normalize_source_hint_impl` no bloco `from server_helpers import (...)` de `server.py`. Adicionado teste smoke em `tests/test_server_helpers.py` que valida estaticamente a presença do alias no arquivo `Scripts/server.py`, prevenindo regressão idêntica em futuros refactors. Suite offline atualizada: **601 passed** em 17 arquivos. Próxima opção recomendada: **com opção 2 saturada, pedir aprovação explícita para D antes de editar `browser.py`**.
-- **2026-04-27 (esta sessão, branch `claude/continue-refactor-updates-wvOqd`) — Hotfix de boot (etapa 16):**
-  46. `ec36b34`: corrigido `ImportError: cannot import name 'normalize_source_hint' from 'server_helpers'` no boot (`main.py -> import server`) reintroduzindo a função pura `normalize_source_hint(value)` em `Scripts/server_helpers.py` com contrato canônico defensivo (`str(v).strip().lower()` + fallback vazio em exceção). Testes `tests/test_server_helpers.py` ampliados com 4 casos (`whitespace/case`, `None`, numérico e `__str__` com exceção). Suite offline atualizada: **605 passed** em 17 arquivos. Próxima opção recomendada: **opção 2 encerrada; pedir aprovação explícita antes de qualquer edição em `browser.py` (opção D)**.
-- **2026-04-27 (esta sessão, branch `claude/continue-refactor-updates-wvOqd`) — Automação do agente (etapa 17):**
-  47. `863a333`: `Scripts/auto_dev_agent.py` recebeu modo mais autônomo para ciclos contínuos de refactor: (a) orçamento aproximado de tokens por janela com cooldown + countdown automático ao atingir limite (`AUTODEV_AGENT_TOKEN_BUDGET`, `AUTODEV_AGENT_TOKEN_WINDOW_SEC`, `AUTODEV_AGENT_TOKEN_COOLDOWN_SEC`), (b) integração opcional para aplicar `Scripts/codex_autoflow.sh` automaticamente quando mudanças tocam hotspots de refactor (`server.py`, `server_helpers.py`, `REFACTOR_PROGRESS.md`), e (c) objetivo proativo do ciclo priorizando extrações puras + wrappers finos no eixo `server.py/server_helpers.py`. Suite offline preservada: **605 passed** em 17 arquivos.
-- **2026-04-27 (esta sessão, branch `claude/continue-refactor-updates-wvOqd`) — Hotfix de runtime crítico (etapa 18):**
-  48. `db0e94f`: corrigida regressão de produção `NameError: _build_active_chat_meta_impl is not defined` restaurando import alias em `server.py` e reintroduzindo no `server_helpers.py` o conjunto de helpers usados no runtime (perdidos em merge): `build_active_chat_meta`, `count_active_chats`, `count_unfinished_chats`, `find_expired_chat_ids`, `extract_manual_whatsapp_reply_targets`, `format_manual_whatsapp_requester_suffix`, `resolve_download_content_type`, `resolve_avatar_filename`. `tests/test_server_helpers.py` ganhou 6 casos novos cobrindo os helpers restaurados e smoke de alias em `server.py`. Suite offline atualizada: **611 passed** em 17 arquivos.
+- **2026-04-27 unquadragies** (esta sessão, branch `claude/continue-refactor-updates-wvOqd`) — Opção 2 (auditoria de handlers menores, etapa 23, **1 ciclo extra autônomo** após o doc commit quadragies):
+  43. `653c811`: extraídos 3 helpers SSE de `logs_stream` (formato distinto dos NDJSON: `text/event-stream` com `event:`/`data:` multi-linha) — `build_log_stream_line_sse(line, path)`, `build_log_stream_ping_sse()`, `build_log_stream_error_sse(error, path)`. `server.logs_stream::generate` migra os 3 sites SSE inline (line, ping, error). +8 testes. **Sites de `json.dumps` em `server.py` agora restantes: apenas 1 — `_audit_event` em server.py:349, que precisa do log() side effect e não é candidato direto a extração de evento.**
+  Total da sessão (incluindo octotricies + nonotricies + quadragies): **653 testes offline passando** (572 → 653, +81 novos). 13 commits totais.
+
+- **2026-04-27 quadragies** (esta sessão, branch `claude/continue-refactor-updates-wvOqd`) — Opção 2 (auditoria de handlers menores, etapas 21-22, **2 ciclos extras autônomos** após o doc commit nonotricies):
+  41. `2d7ec3f`: `mark_chat_finished(active_chats, chat_id, *, now)` — sets `finished=True`, `finished_at=now`, `last_event_at=now` numa única passada. `server.chat_completions` migra **8 sites canônicos** do trio (`_drain_stream_queue_after_disconnect` 3x, `generate` stream 2x, block no-stream 3x). 4 sites NÃO migrados em `api_sync` (parsing condicional frágil) e 2 sites de timeout `queue.Empty` (preservam contrato histórico de não setar `last_event_at`). +5 testes.
+  42. `ee80375`: `build_chat_id_event(chat_id)` e `build_chat_meta_event(chat_id, url, chromium_profile)` espelham o padrão `build_status_event` etc. `server.chat_completions::generate` migra os 2 dict-literals iniciais do stream NDJSON (`chat_id` event + `chat_meta` event), removendo `json.dumps` inline. +7 testes.
+  Total da sessão (incluindo octotricies + nonotricies): **645 testes offline passando** (572 → 645, +73 novos). 12 commits totais.
+
+- **2026-04-26 nonotricies** (esta sessão, branch `claude/continue-refactor-updates-wvOqd`) — Opção 2 (auditoria de handlers menores, etapas 19-20, **2 ciclos extras autônomos** após o doc commit):
+  39. `8b7cc27`: `count_unfinished_chats(active_chats)` — versão minimal de `count_active_chats` para gauges Prometheus. `server.after_request_audit` (linha 894) e `server.prometheus_metrics` (linha 1265) migram do idiom inline `sum(1 for _k, meta in list(...).items() if not meta.get("finished"))` para chamada ao helper. +5 testes.
+  40. `ae6f113`: `find_expired_chat_ids(active_chats, cutoff_ts)` — lista nova de IDs com `meta.finished` truthy e `finished_at < cutoff_ts`. `server._cleanup_active_chats` migra a list-comprehension inline para chamada ao helper, isolando a parte pura do side effect (delete + log). +6 testes.
+  Total da sessão (incluindo octotricies): **633 testes offline passando** (572 → 633, +61 novos). 10 commits totais.
+
+- **2026-04-26 octotricies** (esta sessão, branch `claude/continue-refactor-updates-wvOqd`) — Opção 2 (auditoria de handlers menores, etapas 11-18, **8 ciclos consecutivos autônomos**):
+  31. `8bc985b`: `build_web_search_test_terminal_response(kind, query)` unifica o contrato `(payload, status_code)` dos casos terminais de `/api/web_search/test` (`"timeout"` → `(..., 504)`, `"no_response"` → `(..., 200)`). `server.api_web_search_test` migra ambos os retornos finais, removendo o literal 504 duplicado. +4 testes.
+  32. `414bf22`: `extract_manual_whatsapp_reply_targets(data)` retorna `(phone, message, chat_id, id_paciente, id_atendimento)` com trim apenas em `phone`/`message` (mantém demais campos brutos para preservar contrato downstream). `format_manual_whatsapp_requester_suffix(nome, id)` extraído como idiom histórico distinto (`por "<nome>" (id=<id>)`) — diferente de `format_requester_suffix`, essencial para não quebrar logs/observabilidade desta rota. `server.send_manual_whatsapp_reply` migra ambos os pontos. +11 testes.
+  33. `98cd307`: `resolve_download_content_type(content_type, display_name)` em `server.serve_download` — preserva MIME específico do browser; só infere a partir da extensão quando o caller passa fallback genérico `application/octet-stream`. Mapa estável (xlsx/xls/csv/pdf/png/jpg/jpeg/zip/json). +6 testes.
+  34. `972a01d`: `resolve_avatar_filename(uploaded_filename, user)` retorna `(filename_to_save, error)`. Whitelist `{.jpg, .jpeg, .png, .gif, .webp}` preservada byte-a-byte; string `"Formato inválido"` mantida para compat com frontend. `server.upload_avatar` migra para wrapper fino. +6 testes.
+  35. `36b77c3`: `count_active_chats(active_chats, *, now, stale_threshold_sec)` retorna `{total, analyzer, remote, stale_candidates}` (chaves consumidas em `/api/metrics`). Função pura — caller fornece snapshot e relógio. `server.api_metrics` migra 13 linhas inline para 3 linhas. +6 testes.
+  36. `83c0459`: `build_active_chat_meta(stream_queue, is_analyzer, *, now)` monta o `meta` inicial inserido em `ACTIVE_CHATS[chat_id]` (chaves: queue, status `"Iniciando..."`, markdown `""`, finished False, finished_at None, last_event_at, is_analyzer). `server.chat_completions` migra dict literal de 8 linhas. +4 testes.
+  37. `4aec999`: `normalize_source_hint(value)` extrai o idiom canônico `str(value).strip().lower()` consumido por `is_analyzer_chat_request`/`is_python_chat_request`/`is_codex_chat_request`, com tratamento defensivo de `None` (retorna `""` em vez do literal `"none"`). `server._handle_browser_search_api` e `server.chat_completions` migram 2 sites duplicados idênticos. +6 testes.
+  38. `2efa540`: `build_search_result_event(content, **extras)` e `build_search_finish_event(results)` espelham o padrão de `build_status_event`/`build_error_event`/`build_markdown_event`. `server._handle_browser_search_api` migra os 2 últimos `dict-yielders` SSE (`searchresult` + `finish`), removendo `json.dumps(... ensure_ascii=False)` inline. +7 testes.
+  Total da sessão: **622 testes offline passando** (572 → 622, +50 novos). 8 commits consecutivos sem intervenção.
 
 
 

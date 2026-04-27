@@ -72,15 +72,11 @@ from server_helpers import (
     build_markdown_event as _build_markdown_event_impl,
     build_search_result_event as _build_search_result_event_impl,
     build_search_finish_event as _build_search_finish_event_impl,
-    build_active_chat_meta as _build_active_chat_meta_impl,
-    count_active_chats as _count_active_chats_impl,
-    count_unfinished_chats as _count_unfinished_chats_impl,
-    find_expired_chat_ids as _find_expired_chat_ids_impl,
-    extract_manual_whatsapp_reply_targets as _extract_manual_whatsapp_reply_targets_impl,
-    format_manual_whatsapp_requester_suffix as _format_manual_whatsapp_requester_suffix_impl,
-    resolve_download_content_type as _resolve_download_content_type_impl,
-    resolve_avatar_filename as _resolve_avatar_filename_impl,
-    normalize_source_hint as _normalize_source_hint_impl,
+    build_chat_id_event as _build_chat_id_event_impl,
+    build_chat_meta_event as _build_chat_meta_event_impl,
+    build_log_stream_line_sse as _build_log_stream_line_sse_impl,
+    build_log_stream_ping_sse as _build_log_stream_ping_sse_impl,
+    build_log_stream_error_sse as _build_log_stream_error_sse_impl,
     normalize_optional_text as _normalize_optional_text_impl,
     extract_requester_identity as _extract_requester_identity_impl,
     resolve_lookup_origin_url as _resolve_lookup_origin_url_impl,
@@ -93,6 +89,17 @@ from server_helpers import (
     build_web_search_test_stream_response as _build_web_search_test_stream_response_impl,
     build_web_search_test_timeout_payload as _build_web_search_test_timeout_payload_impl,
     build_web_search_test_no_response_payload as _build_web_search_test_no_response_payload_impl,
+    build_web_search_test_terminal_response as _build_web_search_test_terminal_response_impl,
+    extract_manual_whatsapp_reply_targets as _extract_manual_whatsapp_reply_targets_impl,
+    format_manual_whatsapp_requester_suffix as _format_manual_whatsapp_requester_suffix_impl,
+    resolve_download_content_type as _resolve_download_content_type_impl,
+    resolve_avatar_filename as _resolve_avatar_filename_impl,
+    count_active_chats as _count_active_chats_impl,
+    count_unfinished_chats as _count_unfinished_chats_impl,
+    find_expired_chat_ids as _find_expired_chat_ids_impl,
+    mark_chat_finished as _mark_chat_finished_impl,
+    build_active_chat_meta as _build_active_chat_meta_impl,
+    normalize_source_hint as _normalize_source_hint_impl,
     format_requester_suffix as _format_requester_suffix_impl,
     format_origin_suffix as _format_origin_suffix_impl,
     safe_int as _safe_int_impl,
@@ -1216,16 +1223,14 @@ def logs_stream():
                 while True:
                     line = f.readline()
                     if line:
-                        payload = json.dumps({"line": line.rstrip("\n"), "path": path}, ensure_ascii=False)
-                        yield f"event: log\ndata: {payload}\n\n"
+                        yield _build_log_stream_line_sse_impl(line, path)
                     else:
-                        yield "event: ping\ndata: {}\n\n"
+                        yield _build_log_stream_ping_sse_impl()
                         time.sleep(1.0)
         except GeneratorExit:
             return
         except Exception as e:
-            payload = json.dumps({"error": str(e), "path": path}, ensure_ascii=False)
-            yield f"event: error\ndata: {payload}\n\n"
+            yield _build_log_stream_error_sse_impl(e, path)
 
     return Response(generate(), mimetype="text/event-stream")
 
@@ -2277,9 +2282,7 @@ def chat_completions():
                         break
 
                     if raw_msg is None:
-                        ACTIVE_CHATS[chat_id]['finished'] = True
-                        ACTIVE_CHATS[chat_id]['finished_at'] = time.time()
-                        ACTIVE_CHATS[chat_id]['last_event_at'] = time.time()
+                        _mark_chat_finished_impl(ACTIVE_CHATS, chat_id, now=time.time())
                         break
 
                     try:
@@ -2297,9 +2300,7 @@ def chat_completions():
                         ACTIVE_CHATS[chat_id]['last_event_at'] = time.time()
                     elif t == 'finish':
                         fin = msg_obj.get('content', {}) or {}
-                        ACTIVE_CHATS[chat_id]['finished'] = True
-                        ACTIVE_CHATS[chat_id]['finished_at'] = time.time()
-                        ACTIVE_CHATS[chat_id]['last_event_at'] = time.time()
+                        _mark_chat_finished_impl(ACTIVE_CHATS, chat_id, now=time.time())
                         try:
                             storage.append_message(chat_id, "user", message)
                             storage.append_message(chat_id, "assistant", ACTIVE_CHATS[chat_id]['markdown'])
@@ -2308,9 +2309,7 @@ def chat_completions():
                             log(f"[WARN] Falha ao persistir finish (drain pós-disconnect): {e}")
                         break
                     elif t == 'error':
-                        ACTIVE_CHATS[chat_id]['finished'] = True
-                        ACTIVE_CHATS[chat_id]['finished_at'] = time.time()
-                        ACTIVE_CHATS[chat_id]['last_event_at'] = time.time()
+                        _mark_chat_finished_impl(ACTIVE_CHATS, chat_id, now=time.time())
                         break
                     else:
                         # log/chat_meta/etc.
@@ -2319,17 +2318,10 @@ def chat_completions():
                 log(f"[WARN] Falha no dreno de stream pós-disconnect para chat {chat_id}: {e}")
 
         def generate():
-            yield json.dumps({"type": "chat_id", "content": chat_id}) + "\n"
+            yield _build_chat_id_event_impl(chat_id) + "\n"
             if url and url != "None":
-                yield json.dumps(
-                    {
-                        "type": "chat_meta",
-                        "content": {
-                            "chat_id": chat_id,
-                            "url": url,
-                            "chromium_profile": effective_browser_profile or "",
-                        },
-                    }
+                yield _build_chat_meta_event_impl(
+                    chat_id, url, effective_browser_profile,
                 ) + "\n"
 
             try:
@@ -2344,9 +2336,7 @@ def chat_completions():
                         break
 
                     if raw_msg is None:
-                        ACTIVE_CHATS[chat_id]['finished']    = True
-                        ACTIVE_CHATS[chat_id]['finished_at'] = time.time()
-                        ACTIVE_CHATS[chat_id]['last_event_at'] = time.time()
+                        _mark_chat_finished_impl(ACTIVE_CHATS, chat_id, now=time.time())
                         break
 
                     try:
@@ -2384,9 +2374,7 @@ def chat_completions():
                                 except Exception as e:
                                     log(f"[WARN] Falha ao persistir chat_meta antecipado: {e}")
                         elif t == 'finish':
-                            ACTIVE_CHATS[chat_id]['finished']    = True
-                            ACTIVE_CHATS[chat_id]['finished_at'] = time.time()
-                            ACTIVE_CHATS[chat_id]['last_event_at'] = time.time()
+                            _mark_chat_finished_impl(ACTIVE_CHATS, chat_id, now=time.time())
                             # [FIX Bug 1] Persiste no storage ao terminar (stream nunca escrevia)
                             try:
                                 fin = msg_obj.get('content', {})
@@ -2450,9 +2438,7 @@ def chat_completions():
                     })
 
                 if raw_msg is None:
-                    ACTIVE_CHATS[chat_id]['finished'] = True
-                    ACTIVE_CHATS[chat_id]['finished_at'] = time.time()
-                    ACTIVE_CHATS[chat_id]['last_event_at'] = time.time()
+                    _mark_chat_finished_impl(ACTIVE_CHATS, chat_id, now=time.time())
                     break
 
                 try:
@@ -2472,16 +2458,12 @@ def chat_completions():
                     final_url   = msg['content'].get('url',   final_url)
                     final_title = msg['content'].get('title', final_title)
                     final_chromium_profile = msg['content'].get('chromium_profile', final_chromium_profile)
-                    ACTIVE_CHATS[chat_id]['finished']    = True
-                    ACTIVE_CHATS[chat_id]['finished_at'] = time.time()
-                    ACTIVE_CHATS[chat_id]['last_event_at'] = time.time()
+                    _mark_chat_finished_impl(ACTIVE_CHATS, chat_id, now=time.time())
                 elif t == 'error':
                     is_rate_limited, err_msg, retry_after = _extract_rate_limit_details(msg.get('content'))
                     if is_rate_limited:
                         _register_chat_rate_limit(retry_after, reason=err_msg)
-                    ACTIVE_CHATS[chat_id]['finished']    = True
-                    ACTIVE_CHATS[chat_id]['finished_at'] = time.time()
-                    ACTIVE_CHATS[chat_id]['last_event_at'] = time.time()
+                    _mark_chat_finished_impl(ACTIVE_CHATS, chat_id, now=time.time())
                     return jsonify({"success": False, "error": msg['content'], "chat_id": chat_id})
 
         except Exception as e:

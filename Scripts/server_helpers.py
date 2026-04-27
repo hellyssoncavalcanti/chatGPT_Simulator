@@ -469,6 +469,274 @@ def build_web_search_test_no_response_payload(query: str) -> dict:
     return build_web_search_test_error_payload(query, "Sem resposta do browser")
 
 
+def normalize_source_hint(value) -> str:
+    """Normaliza um source-hint para a forma `lower-case` sem espaços nas pontas.
+
+    Idiom canônico ``str(value).strip().lower()`` consumido por
+    `is_analyzer_chat_request` / `is_python_chat_request` /
+    `is_codex_chat_request` em `server.py`. Tratamento defensivo:
+    `None` resulta em ``""`` (em vez do literal ``"none"`` produzido por
+    `str(None)`).
+    """
+    if value is None:
+        return ""
+    try:
+        return str(value).strip().lower()
+    except Exception:
+        return ""
+
+
+def build_active_chat_meta(stream_queue, is_analyzer: bool, *, now: float) -> dict:
+    """Monta o `meta` inicial inserido em `ACTIVE_CHATS[chat_id]`.
+
+    Mantém as chaves históricas consumidas em `/api/metrics`,
+    `/api/chat_lookup` e por `_cleanup_active_chats`:
+      - ``queue``         → fila SSE associada ao chat;
+      - ``status``        → texto curto exibido no UI (``"Iniciando..."``);
+      - ``markdown``      → buffer parcial de markdown (vazio até o
+        primeiro chunk);
+      - ``finished``      → ``False`` enquanto o chat estiver vivo;
+      - ``finished_at``   → ``None`` até o término;
+      - ``last_event_at`` → relógio do último evento (controle de stale);
+      - ``is_analyzer``   → flag boolean usada pelo classificador.
+
+    Função pura — `now` injetável para testes determinísticos.
+    """
+    return {
+        "queue": stream_queue,
+        "status": "Iniciando...",
+        "markdown": "",
+        "finished": False,
+        "finished_at": None,
+        "last_event_at": float(now),
+        "is_analyzer": bool(is_analyzer),
+    }
+
+
+def mark_chat_finished(active_chats, chat_id, *, now: float) -> bool:
+    """Marca uma entrada de `ACTIVE_CHATS[chat_id]` como finalizada.
+
+    Sets `finished=True`, `finished_at=now` e `last_event_at=now` em uma
+    única passada — idiom canônico repetido em vários sites do dispatcher
+    de chat (`chat_completions::generate`, `chat_completions::_drain_*`,
+    timeouts, etc.).
+
+    Tolera ausência de `chat_id` na coleção e entradas não-dict
+    (retorna `False` sem mutar nada). Retorna `True` quando a meta foi
+    efetivamente atualizada.
+
+    Função pura no comportamento (sem IO/log) — caller fornece o
+    relógio para testes determinísticos.
+    """
+    meta = active_chats.get(chat_id) if hasattr(active_chats, "get") else None
+    if not isinstance(meta, dict):
+        return False
+    meta["finished"] = True
+    meta["finished_at"] = now
+    meta["last_event_at"] = now
+    return True
+
+
+def find_expired_chat_ids(active_chats, cutoff_ts: float) -> list:
+    """Lista IDs de chats finalizados antes de `cutoff_ts`.
+
+    Critério: ``meta.finished is truthy`` E
+    ``meta.get("finished_at", 0) < cutoff_ts``. Função pura — caller
+    fornece o snapshot e o `cutoff_ts` (suporta `now - TTL`).
+
+    Retorna lista nova (caller pode iterar e deletar com segurança).
+    Entradas não-dict são ignoradas defensivamente.
+    """
+    expired = []
+    for k, meta in list(active_chats.items()):
+        if not isinstance(meta, dict):
+            continue
+        if not meta.get("finished"):
+            continue
+        try:
+            finished_at = float(meta.get("finished_at", 0) or 0)
+        except (TypeError, ValueError):
+            finished_at = 0.0
+        if finished_at < cutoff_ts:
+            expired.append(k)
+    return expired
+
+
+def count_unfinished_chats(active_chats) -> int:
+    """Conta entradas em `active_chats` cuja `meta.finished` é falsa.
+
+    Versão mínima do `count_active_chats` para call sites que precisam
+    apenas do total (gauge Prometheus, audit hook). Itera sobre uma cópia
+    da lista de items para tolerar mutação concorrente. Entradas não-dict
+    (defensivamente) são ignoradas.
+    """
+    total = 0
+    for _chat_id, meta in list(active_chats.items()):
+        if not isinstance(meta, dict):
+            continue
+        if not meta.get("finished"):
+            total += 1
+    return total
+
+
+def count_active_chats(active_chats, *, now: float, stale_threshold_sec: float) -> dict:
+    """Conta chats ativos por categoria a partir do snapshot `active_chats`.
+
+    Itera sobre o mapa `chat_id → meta` (ignora entradas com
+    ``meta.get("finished") is truthy``), classifica `analyzer` vs `remote`
+    pela flag `meta.get("is_analyzer")` e marca como `stale_candidate`
+    quando `now - meta.last_event_at > stale_threshold_sec`
+    (para `last_event_at > 0`).
+
+    Retorna ``{"total", "analyzer", "remote", "stale_candidates"}``,
+    mesmas chaves consumidas em `/api/metrics`. Função pura — caller
+    fornece o snapshot e o relógio (permite teste determinístico).
+    """
+    total = 0
+    analyzer = 0
+    remote = 0
+    stale = 0
+    for _chat_id, meta in list(active_chats.items()):
+        if not isinstance(meta, dict):
+            continue
+        if meta.get("finished"):
+            continue
+        total += 1
+        if meta.get("is_analyzer"):
+            analyzer += 1
+        else:
+            remote += 1
+        try:
+            last_event_at = float(meta.get("last_event_at") or 0.0)
+        except (TypeError, ValueError):
+            last_event_at = 0.0
+        if last_event_at and (now - last_event_at) > stale_threshold_sec:
+            stale += 1
+    return {
+        "total": total,
+        "analyzer": analyzer,
+        "remote": remote,
+        "stale_candidates": stale,
+    }
+
+
+_VALID_AVATAR_EXTENSIONS = (".jpg", ".jpeg", ".png", ".gif", ".webp")
+
+
+def resolve_avatar_filename(uploaded_filename, user) -> Tuple[Optional[str], Optional[str]]:
+    """Resolve `(filename_to_save, error)` para `/api/user/upload_avatar`.
+
+    Aceita apenas extensões em ``{.jpg, .jpeg, .png, .gif, .webp}`` (mesma
+    whitelist histórica de `server.upload_avatar`). Caso a extensão seja
+    inválida ou ausente, retorna ``(None, "Formato inválido")`` — string
+    preservada byte-a-byte para não quebrar o JSON consumido pelo
+    frontend.
+
+    Quando válida, retorna ``(f"{user}{ext}", None)`` com `ext` em
+    minúsculas (igual ao call site original).
+    """
+    name = uploaded_filename or ""
+    import os as _os
+    ext = _os.path.splitext(name)[1].lower()
+    if ext not in _VALID_AVATAR_EXTENSIONS:
+        return (None, "Formato inválido")
+    user_str = "" if user is None else str(user)
+    return (f"{user_str}{ext}", None)
+
+
+_DOWNLOAD_MIME_BY_EXT = {
+    "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    "xls": "application/vnd.ms-excel",
+    "csv": "text/csv",
+    "pdf": "application/pdf",
+    "png": "image/png",
+    "jpg": "image/jpeg",
+    "jpeg": "image/jpeg",
+    "zip": "application/zip",
+    "json": "application/json",
+}
+
+
+def resolve_download_content_type(content_type, display_name) -> str:
+    """Resolve o `Content-Type` final para `/api/downloads/<file_id>`.
+
+    Preserva o tipo informado pelo browser/ChatGPT quando ele é específico.
+    Apenas quando o caller passa o fallback genérico
+    ``"application/octet-stream"`` (ou ``None``) tenta inferir um tipo a
+    partir da extensão do `display_name` usando um mapa estável de
+    extensões para MIME (xlsx/xls/csv/pdf/png/jpg/jpeg/zip/json).
+
+    Mapa idêntico ao usado historicamente em `server.serve_download`,
+    extraído sem alteração de comportamento.
+    """
+    ct = content_type or "application/octet-stream"
+    if ct != "application/octet-stream":
+        return ct
+    name = display_name or ""
+    import os as _os
+    ext = _os.path.splitext(name)[1].lower().lstrip(".")
+    return _DOWNLOAD_MIME_BY_EXT.get(ext, ct)
+
+
+def extract_manual_whatsapp_reply_targets(data):
+    """Extrai (`phone`, `message`, `chat_id`, `id_paciente`, `id_atendimento`)
+    do payload de `/api/send_manual_whatsapp_reply`.
+
+    Normaliza apenas `phone` e `message` via trim (mantém ``""`` como
+    sentinela de ausência — o caller valida `if not phone or not message`
+    para retornar HTTP 400). Demais campos são repassados sem mutação,
+    preservando o contrato histórico do downstream `acompanhamento_whatsapp.py`.
+
+    Aceita qualquer objeto com `.get()`; entradas inválidas (None/sem `.get`)
+    retornam todos os campos como ``""``/``None``.
+    """
+    payload_get = getattr(data, "get", None)
+    if payload_get is None:
+        return ("", "", None, None, None)
+    phone = (payload_get("phone") or "").strip() if payload_get("phone") else ""
+    message = (payload_get("message") or "").strip() if payload_get("message") else ""
+    return (
+        phone,
+        message,
+        payload_get("chat_id"),
+        payload_get("id_paciente"),
+        payload_get("id_atendimento"),
+    )
+
+
+def format_manual_whatsapp_requester_suffix(nome_membro, id_membro) -> str:
+    """Sufixo `_quem` específico de `send_manual_whatsapp_reply`.
+
+    Produz ``' por "<nome>" (id=<id>)'`` quando há nome OU id; vazia caso
+    contrário. **Diferente** de `format_requester_suffix` (que emite
+    ``(id_membro: "<id>")``): este idiom é histórico desta rota e
+    consumido por log/observabilidade que dependem do formato exato.
+    """
+    nome = "" if nome_membro is None else str(nome_membro)
+    ident = "" if id_membro is None else str(id_membro)
+    if not nome and not ident:
+        return ""
+    return f' por "{nome}" (id={ident})'
+
+
+def build_web_search_test_terminal_response(kind: str, query: str) -> Tuple[dict, int]:
+    """Resolve `(payload, status_code)` para casos terminais de `/api/web_search/test`.
+
+    `kind` aceita:
+      - ``"timeout"``     → `(timeout_payload, 504)`.
+      - ``"no_response"`` → `(no_response_payload, 200)`.
+
+    O propósito é unificar o contrato `(dict, int)` já usado por
+    `build_web_search_test_stream_response`, removendo o literal `504`
+    duplicado no call site em `server.api_web_search_test`.
+    """
+    if kind == "timeout":
+        return build_web_search_test_timeout_payload(query), 504
+    if kind == "no_response":
+        return build_web_search_test_no_response_payload(query), 200
+    raise ValueError(f"unknown terminal kind: {kind!r}")
+
+
 def resolve_browser_profile(requested_profile, stored_profile) -> Optional[str]:
     """Resolve o `browser_profile` efetivo para a tarefa do browser.
 
@@ -716,6 +984,71 @@ def build_markdown_event(content: str) -> str:
     return json.dumps({"type": "markdown", "content": str(content)}, ensure_ascii=False)
 
 
+def build_log_stream_line_sse(line, path) -> str:
+    """Frame SSE para uma linha lida do log em `/api/logs/stream`.
+
+    Formato canônico (`text/event-stream`):
+    ``event: log\\ndata: {<json>}\\n\\n``. O payload JSON usa
+    ``ensure_ascii=False`` para preservar acentos. `line` é
+    `rstrip("\\n")`-ada para evitar quebras visuais duplas no consumer.
+    """
+    payload = json.dumps(
+        {"line": (line or "").rstrip("\n"), "path": path},
+        ensure_ascii=False,
+    )
+    return f"event: log\ndata: {payload}\n\n"
+
+
+def build_log_stream_ping_sse() -> str:
+    """Frame SSE de heartbeat para `/api/logs/stream` (mantém conexão viva)."""
+    return "event: ping\ndata: {}\n\n"
+
+
+def build_log_stream_error_sse(error, path) -> str:
+    """Frame SSE de erro emitido quando `/api/logs/stream` falha durante leitura.
+
+    Formato: ``event: error\\ndata: {"error": "<msg>", "path": "<p>"}\\n\\n``
+    com ``ensure_ascii=False``. `error` é `str()`-coerced no caller
+    histórico — preservamos esse contrato aqui também.
+    """
+    payload = json.dumps(
+        {"error": str(error), "path": path},
+        ensure_ascii=False,
+    )
+    return f"event: error\ndata: {payload}\n\n"
+
+
+def build_chat_id_event(chat_id) -> str:
+    """JSON do evento `chat_id` emitido como primeira mensagem do stream
+    SSE/NDJSON de `/v1/chat/completions`.
+
+    Formato canônico: ``{"type": "chat_id", "content": "<id>"}``. NÃO
+    usa `ensure_ascii=False` (idiom histórico do call site preservado;
+    `chat_id` é UUID, então a representação ASCII é byte-equivalente).
+    """
+    return json.dumps({"type": "chat_id", "content": str(chat_id)})
+
+
+def build_chat_meta_event(chat_id, url, chromium_profile) -> str:
+    """JSON do evento `chat_meta` emitido logo após `chat_id` quando há
+    URL conhecida — comunica o frontend o estado inicial do chat.
+
+    Formato:
+    ``{"type": "chat_meta", "content": {"chat_id": ..., "url": ...,
+    "chromium_profile": ...}}``. `chromium_profile=None`/`""` é coercido
+    para string vazia (padrão histórico). NÃO usa `ensure_ascii=False`.
+    """
+    profile_value = chromium_profile or ""
+    return json.dumps({
+        "type": "chat_meta",
+        "content": {
+            "chat_id": chat_id,
+            "url": url,
+            "chromium_profile": profile_value,
+        },
+    })
+
+
 def build_search_result_event(content, **extras) -> str:
     """JSON do evento `searchresult` emitido por `_handle_browser_search_api`.
 
@@ -944,11 +1277,27 @@ __all__ = [
     "build_web_search_test_error_payload",
     "build_web_search_test_timeout_payload",
     "build_web_search_test_no_response_payload",
+    "build_web_search_test_terminal_response",
+    "extract_manual_whatsapp_reply_targets",
+    "format_manual_whatsapp_requester_suffix",
+    "resolve_download_content_type",
+    "resolve_avatar_filename",
+    "count_active_chats",
+    "count_unfinished_chats",
+    "find_expired_chat_ids",
+    "mark_chat_finished",
+    "build_active_chat_meta",
+    "normalize_source_hint",
     "build_queue_key",
     "build_chat_task_payload",
     "build_error_event",
     "build_status_event",
     "build_markdown_event",
+    "build_chat_id_event",
+    "build_chat_meta_event",
+    "build_log_stream_line_sse",
+    "build_log_stream_ping_sse",
+    "build_log_stream_error_sse",
     "build_search_result_event",
     "build_search_finish_event",
     "normalize_source_hint",
