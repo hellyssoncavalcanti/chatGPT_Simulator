@@ -331,6 +331,23 @@ class TestExtractSourceHint:
         assert out == "duck.py"
 
 
+class TestNormalizeSourceHint:
+    def test_normalizes_case_and_whitespace(self):
+        assert sh.normalize_source_hint("  Analyzer.PY  ") == "analyzer.py"
+
+    def test_none_returns_empty(self):
+        assert sh.normalize_source_hint(None) == ""
+
+    def test_non_string_is_stringified_and_lowered(self):
+        assert sh.normalize_source_hint(123) == "123"
+
+    def test_defensive_fallback_on_bad_str(self):
+        class _BadStr:
+            def __str__(self):
+                raise RuntimeError("boom")
+        assert sh.normalize_source_hint(_BadStr()) == ""
+
+
 # ─────────────────────────────────────────────────────────
 # decode_attachment
 # ─────────────────────────────────────────────────────────

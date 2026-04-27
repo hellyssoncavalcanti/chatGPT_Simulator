@@ -402,6 +402,7 @@ Coletadas em `2026-04-22` via `wc -l` / `grep -nE "def "`:
 ### Estado atual (consolidado) — branch `claude/continue-refactor-updates-wvOqd`
 
 **Commits relevantes (mais recente → mais antigo):**
+- `ec36b34` — Restaurar normalize_source_hint em server_helpers *(esta sessão, ciclo 46 / hotfix de boot)*
 - `fba6626` — Restaurar alias normalize_source_hint no server *(esta sessão, ciclo 45 / hotfix + opção 2)*
 - `4828ff8` — Extrair payload 401 canônico + autoflow sem pausas *(esta sessão, ciclo 44 / opção 2)*
 - `abfe12d` — Extrair transição de estado do health_check *(esta sessão, ciclo 43 / opção 2)*
@@ -472,7 +473,7 @@ Coletadas em `2026-04-22` via `wc -l` / `grep -nE "def "`:
 - `1f3374b` — Extrair detecção de origem de request para módulo testável offline
 - `0c6216e` — docs: refinar backlog P0-P1-P2 com evidências concretas
 
-**Suite offline atual: 17 arquivos → 601 passed** (600 anterior + 1 novo no ciclo 45 em `tests/test_server_helpers.py`).
+**Suite offline atual: 17 arquivos → 605 passed** (601 anterior + 4 novos no ciclo 46 em `tests/test_server_helpers.py`).
 
 Comando exato de validação:
 ```
@@ -759,6 +760,8 @@ analisador_prontuarios.py, PARAR — não está no escopo destas opções.
   44. `4828ff8`: extraído `build_unauthorized_payload()` para `Scripts/server_helpers.py` e migrados 8 handlers protegidos em `server.py` para usar o payload 401 canônico via wrapper fino (`get_history`, `api_chat_lookup`, `api_chat_delete_local`, `api_sync`, `api_delete`, `_handle_browser_search_api`, `send_manual_whatsapp_reply`, `chat_completions`). Incluído `Scripts/codex_autoflow.sh` para execução contínua de comandos sem pausas interativas (fluxo automatizado local). `tests/test_server_helpers.py` ganhou 2 casos novos garantindo shape imutável do payload e retorno de novo dict por chamada. Suite offline atualizada: **600 passed** em 17 arquivos. Próxima opção recomendada: **opção 2 saturada; pedir aprovação explícita para D antes de qualquer edição em `browser.py`**.
 - **2026-04-26 (esta sessão, branch `claude/continue-refactor-updates-wvOqd`) — Hotfix de regressão + Opção 2 (etapa 15):**
   45. `fba6626`: corrigido `NameError: _normalize_source_hint_impl is not defined` em `/v1/chat/completions` e `_handle_browser_search_api` restaurando o alias de import `normalize_source_hint as _normalize_source_hint_impl` no bloco `from server_helpers import (...)` de `server.py`. Adicionado teste smoke em `tests/test_server_helpers.py` que valida estaticamente a presença do alias no arquivo `Scripts/server.py`, prevenindo regressão idêntica em futuros refactors. Suite offline atualizada: **601 passed** em 17 arquivos. Próxima opção recomendada: **com opção 2 saturada, pedir aprovação explícita para D antes de editar `browser.py`**.
+- **2026-04-27 (esta sessão, branch `claude/continue-refactor-updates-wvOqd`) — Hotfix de boot (etapa 16):**
+  46. `ec36b34`: corrigido `ImportError: cannot import name 'normalize_source_hint' from 'server_helpers'` no boot (`main.py -> import server`) reintroduzindo a função pura `normalize_source_hint(value)` em `Scripts/server_helpers.py` com contrato canônico defensivo (`str(v).strip().lower()` + fallback vazio em exceção). Testes `tests/test_server_helpers.py` ampliados com 4 casos (`whitespace/case`, `None`, numérico e `__str__` com exceção). Suite offline atualizada: **605 passed** em 17 arquivos. Próxima opção recomendada: **opção 2 encerrada; pedir aprovação explícita antes de qualquer edição em `browser.py` (opção D)**.
 
 
 

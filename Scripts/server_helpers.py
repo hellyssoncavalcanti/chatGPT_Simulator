@@ -514,6 +514,18 @@ def extract_source_hint(data, headers) -> str:
     return candidate or ""
 
 
+def normalize_source_hint(value) -> str:
+    """Normaliza `source_hint` para o formato canônico de classificação.
+
+    Contrato histórico: `str(value).strip().lower()` com fallback vazio
+    em qualquer exceção inesperada.
+    """
+    try:
+        return str(value or "").strip().lower()
+    except Exception:
+        return ""
+
+
 def coalesce_origin_url(data, header_value: str = "") -> str:
     """Resolve a URL de origem efetiva do pedido `/v1/chat/completions`.
 
@@ -808,6 +820,7 @@ __all__ = [
     "build_markdown_event",
     "build_search_result_event",
     "build_search_finish_event",
+    "normalize_source_hint",
     "format_requester_suffix",
     "format_origin_suffix",
     "compute_python_request_interval",
