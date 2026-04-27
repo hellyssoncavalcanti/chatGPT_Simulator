@@ -74,6 +74,9 @@ from server_helpers import (
     build_search_finish_event as _build_search_finish_event_impl,
     build_chat_id_event as _build_chat_id_event_impl,
     build_chat_meta_event as _build_chat_meta_event_impl,
+    build_log_stream_line_sse as _build_log_stream_line_sse_impl,
+    build_log_stream_ping_sse as _build_log_stream_ping_sse_impl,
+    build_log_stream_error_sse as _build_log_stream_error_sse_impl,
     normalize_optional_text as _normalize_optional_text_impl,
     extract_requester_identity as _extract_requester_identity_impl,
     resolve_lookup_origin_url as _resolve_lookup_origin_url_impl,
@@ -1210,16 +1213,14 @@ def logs_stream():
                 while True:
                     line = f.readline()
                     if line:
-                        payload = json.dumps({"line": line.rstrip("\n"), "path": path}, ensure_ascii=False)
-                        yield f"event: log\ndata: {payload}\n\n"
+                        yield _build_log_stream_line_sse_impl(line, path)
                     else:
-                        yield "event: ping\ndata: {}\n\n"
+                        yield _build_log_stream_ping_sse_impl()
                         time.sleep(1.0)
         except GeneratorExit:
             return
         except Exception as e:
-            payload = json.dumps({"error": str(e), "path": path}, ensure_ascii=False)
-            yield f"event: error\ndata: {payload}\n\n"
+            yield _build_log_stream_error_sse_impl(e, path)
 
     return Response(generate(), mimetype="text/event-stream")
 

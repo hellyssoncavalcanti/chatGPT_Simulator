@@ -841,6 +841,40 @@ def build_markdown_event(content: str) -> str:
     return json.dumps({"type": "markdown", "content": str(content)}, ensure_ascii=False)
 
 
+def build_log_stream_line_sse(line, path) -> str:
+    """Frame SSE para uma linha lida do log em `/api/logs/stream`.
+
+    Formato canônico (`text/event-stream`):
+    ``event: log\\ndata: {<json>}\\n\\n``. O payload JSON usa
+    ``ensure_ascii=False`` para preservar acentos. `line` é
+    `rstrip("\\n")`-ada para evitar quebras visuais duplas no consumer.
+    """
+    payload = json.dumps(
+        {"line": (line or "").rstrip("\n"), "path": path},
+        ensure_ascii=False,
+    )
+    return f"event: log\ndata: {payload}\n\n"
+
+
+def build_log_stream_ping_sse() -> str:
+    """Frame SSE de heartbeat para `/api/logs/stream` (mantém conexão viva)."""
+    return "event: ping\ndata: {}\n\n"
+
+
+def build_log_stream_error_sse(error, path) -> str:
+    """Frame SSE de erro emitido quando `/api/logs/stream` falha durante leitura.
+
+    Formato: ``event: error\\ndata: {"error": "<msg>", "path": "<p>"}\\n\\n``
+    com ``ensure_ascii=False``. `error` é `str()`-coerced no caller
+    histórico — preservamos esse contrato aqui também.
+    """
+    payload = json.dumps(
+        {"error": str(error), "path": path},
+        ensure_ascii=False,
+    )
+    return f"event: error\ndata: {payload}\n\n"
+
+
 def build_chat_id_event(chat_id) -> str:
     """JSON do evento `chat_id` emitido como primeira mensagem do stream
     SSE/NDJSON de `/v1/chat/completions`.
@@ -1049,6 +1083,9 @@ __all__ = [
     "build_markdown_event",
     "build_chat_id_event",
     "build_chat_meta_event",
+    "build_log_stream_line_sse",
+    "build_log_stream_ping_sse",
+    "build_log_stream_error_sse",
     "build_search_result_event",
     "build_search_finish_event",
     "format_requester_suffix",

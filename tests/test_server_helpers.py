@@ -1169,6 +1169,56 @@ class TestBuildChatMetaEvent:
         assert not sh.build_chat_meta_event("x", "u", "p").endswith("\n")
 
 
+class TestBuildLogStreamLineSse:
+    def test_shape_and_terminator(self):
+        out = sh.build_log_stream_line_sse("alguma linha\n", "/var/log/sim.log")
+        assert out.startswith("event: log\ndata: ")
+        assert out.endswith("\n\n")
+        # JSON sem o newline final na "line"
+        body = out[len("event: log\ndata: "):-2]
+        assert json.loads(body) == {"line": "alguma linha", "path": "/var/log/sim.log"}
+
+    def test_multiple_trailing_newlines_stripped_only_once(self):
+        # rstrip("\n") remove TODOS os trailing \n — preserva contrato historico
+        out = sh.build_log_stream_line_sse("foo\n\n\n", "/p")
+        body = out[len("event: log\ndata: "):-2]
+        assert json.loads(body)["line"] == "foo"
+
+    def test_unicode_preserved(self):
+        out = sh.build_log_stream_line_sse("açúcar 🌟", "/p")
+        assert "açúcar" in out
+        assert "🌟" in out
+
+    def test_none_line_becomes_empty(self):
+        out = sh.build_log_stream_line_sse(None, "/p")
+        body = out[len("event: log\ndata: "):-2]
+        assert json.loads(body)["line"] == ""
+
+
+class TestBuildLogStreamPingSse:
+    def test_constant_string(self):
+        out = sh.build_log_stream_ping_sse()
+        assert out == "event: ping\ndata: {}\n\n"
+
+
+class TestBuildLogStreamErrorSse:
+    def test_shape_and_terminator(self):
+        out = sh.build_log_stream_error_sse("boom", "/p")
+        assert out.startswith("event: error\ndata: ")
+        assert out.endswith("\n\n")
+        body = out[len("event: error\ndata: "):-2]
+        assert json.loads(body) == {"error": "boom", "path": "/p"}
+
+    def test_exception_object_str_coerced(self):
+        out = sh.build_log_stream_error_sse(RuntimeError("disco cheio"), "/p")
+        body = out[len("event: error\ndata: "):-2]
+        assert json.loads(body)["error"] == "disco cheio"
+
+    def test_unicode_in_error_preserved(self):
+        out = sh.build_log_stream_error_sse("erro com cedilha ç", "/p")
+        assert "ç" in out
+
+
 # ─────────────────────────────────────────────────────────
 # build_queue_key
 # ─────────────────────────────────────────────────────────
