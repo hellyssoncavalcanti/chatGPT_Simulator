@@ -1752,6 +1752,8 @@ def _stream_chat_completion(
 
     # Controle de verbosidade para eventos repetitivos (status/markdown).
     last_status_logged: str = ""
+    in_wait_countdown = False
+    last_wait_mmss = ""
     last_markdown_size_reported = -1
     last_markdown_report_ts = 0.0
     MARKDOWN_REPORT_MIN_STEP = 1024   # chars
@@ -1771,6 +1773,10 @@ def _stream_chat_completion(
         if cooldown_match:
             return f"Aguardando cooldown do ChatGPT | nova tentativa em {cooldown_match.group(1)}"
         return s
+
+    def _extract_wait_mmss(text: str) -> Optional[str]:
+        m = re.search(r"nova tentativa em\s*([0-9]{1,2}:[0-9]{2})", text or "", flags=re.IGNORECASE)
+        return m.group(1) if m else None
 
     def _print_inline_status(text: str) -> None:
         nonlocal inline_status_open
@@ -1813,7 +1819,30 @@ def _stream_chat_completion(
 
         if t == "status":
             text = (str(c) if c is not None else "").strip()
-            if text and text != last_status_logged:
+            if not text:
+                continue
+            wait_mmss = _extract_wait_mmss(text)
+            if wait_mmss:
+                if not in_wait_countdown:
+                    _close_inline_status()
+                    log(
+                        f"⏳ Cooldown/espera detectado em {label}; "
+                        "mantendo countdown inline até voltar ao normal."
+                    )
+                    in_wait_countdown = True
+                    last_wait_mmss = ""
+                if wait_mmss != last_wait_mmss:
+                    _print_inline_status(f"Aguardando cooldown do ChatGPT | nova tentativa em {wait_mmss}")
+                    last_wait_mmss = wait_mmss
+                continue
+
+            if in_wait_countdown:
+                _close_inline_status()
+                log("✅ Espera concluída; retomando fluxo normal de eventos.")
+                in_wait_countdown = False
+                last_wait_mmss = ""
+
+            if text != last_status_logged:
                 _print_inline_status(text)
                 last_status_logged = text
 
