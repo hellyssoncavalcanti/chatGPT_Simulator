@@ -393,7 +393,7 @@ Coletadas em `2026-04-22` via `wc -l` / `grep -nE "def "`:
 
 ---
 
-## 🆕 PONTO DE RETOMADA (última atualização em 2026-04-26 sextricies)
+## 🆕 PONTO DE RETOMADA (última atualização em 2026-04-26)
 
 > **Leia APENAS esta seção ao retomar em outro chat.** Ela é autocontida:
 > não é necessário reler seções anteriores a menos que haja dúvida sobre
@@ -402,6 +402,16 @@ Coletadas em `2026-04-22` via `wc -l` / `grep -nE "def "`:
 ### Estado atual (consolidado) — branch `claude/continue-refactor-updates-wvOqd`
 
 **Commits relevantes (mais recente → mais antigo):**
+- `0b93625` — Restaurar helper de chat_id no stream do chat *(esta sessão, ciclo 50 / hotfix de runtime)*
+- `895bfff` — Reduzir ruído de espera no status inline do AutoDevAgent *(esta sessão, ciclo 49 / UX observabilidade)*
+- `db0e94f` — Restaurar helpers críticos e aliases de chat_completions *(esta sessão, ciclo 48 / hotfix de runtime)*
+- `863a333` — Tornar auto_dev_agent autônomo para refactor contínuo *(esta sessão, ciclo 47 / automação)*
+- `ec36b34` — Restaurar normalize_source_hint em server_helpers *(esta sessão, ciclo 46 / hotfix de boot)*
+- `fba6626` — Restaurar alias normalize_source_hint no server *(esta sessão, ciclo 45 / hotfix + opção 2)*
+- `4828ff8` — Extrair payload 401 canônico + autoflow sem pausas *(esta sessão, ciclo 44 / opção 2)*
+- `abfe12d` — Extrair transição de estado do health_check *(esta sessão, ciclo 43 / opção 2)*
+- `61cc8ea` — Extrair helpers de queue_failed/queue_failed_retry *(esta sessão, ciclo 42 / opção 2)*
+- `4e79c24` — Extrair helpers de logs_tail/logs_stream *(esta sessão, ciclo 41 / opção 2)*
 - `35502c5` — Extrair payloads terminais do teste de busca web *(esta sessão, ciclo 30 / opção 2)*
 - `547d2b5` — Padronizar payload de erro no teste de busca web *(esta sessão, ciclo 29 / opção 2)*
 - `efa8282` — Extrair parser de stream do teste de busca web *(esta sessão, ciclo 28 / opção 2)*
@@ -467,7 +477,7 @@ Coletadas em `2026-04-22` via `wc -l` / `grep -nE "def "`:
 - `1f3374b` — Extrair detecção de origem de request para módulo testável offline
 - `0c6216e` — docs: refinar backlog P0-P1-P2 com evidências concretas
 
-**Suite offline atual: 17 arquivos → 572 passed** (570 anterior + 2 novos no ciclo 30 em `tests/test_server_helpers.py`).
+**Suite offline atual: 17 arquivos → 613 passed** (611 anterior + 2 novos no ciclo 50 em `tests/test_server_helpers.py`).
 
 Comando exato de validação:
 ```
@@ -744,6 +754,26 @@ analisador_prontuarios.py, PARAR — não está no escopo destas opções.
   29. `547d2b5`: extraído `build_web_search_test_error_payload(query, error)` em `server_helpers.py` para padronizar o formato de erros JSON de `/api/web_search/test` e reduzir duplicação entre o parser de stream e os retornos de timeout/sem resposta. `server.py` migrou os dois retornos de erro finais para wrappers finos com o novo helper. `tests/test_server_helpers.py` ganhou 2 casos novos para o payload de erro padronizado e o teste de stream-error passou a afirmar via helper. Suite offline atualizada: **570 passed** em 17 arquivos. Próximo subpasso recomendado: extrair helper puro para o envelope de timeout/fallback da rota ou encerrar opção 2 e pedir aprovação para opção D.
 - **2026-04-26 sextricies** (esta sessão, branch `claude/focused-einstein-GcWqc`) — Opção 2 (auditoria de handlers menores, etapa 10):
   30. `35502c5`: extraídos `build_web_search_test_timeout_payload(query)` e `build_web_search_test_no_response_payload(query)` em `server_helpers.py`, ambos delegando ao payload canônico de erro da rota. `server.py` migrou os retornos terminais (timeout 504 e sem resposta) para wrappers finos com esses helpers, removendo strings inline duplicadas do call site. `tests/test_server_helpers.py` ganhou 2 casos novos cobrindo os dois payloads terminais. Suite offline atualizada: **572 passed** em 17 arquivos. Próximo subpasso recomendado: concluir opção 2 com extração de helper puro para seleção de HTTP status terminal (sem tocar `browser.py`) ou validar se já podemos encerrar opção 2.
+- **2026-04-26 (esta sessão, branch `claude/continue-refactor-updates-wvOqd`) — Opção 2 (auditoria de handlers menores, etapa 11):**
+  41. `4e79c24`: extraídos `resolve_logs_tail_lines_limit(raw_lines)` (clamp canônico 10..800 com fallback 120) e `parse_from_end_flag(raw_value)` (idiom canônico `str(v).strip().lower() not in {"0","false","no"}`) para `Scripts/server_helpers.py`. `server.py` migrou `logs_tail` e `logs_stream` para wrappers finos desses helpers sem alterar IO/SSE. `tests/test_server_helpers.py` ganhou 16 casos novos cobrindo limites, fallback e variantes truthy/falsy. Suite offline atualizada: **588 passed** em 17 arquivos. Próxima opção recomendada: **encerrar a opção 2 por saturação dos idioms restantes (`queue_*`, `health_check`, `get_history`) e pedir aprovação explícita para a opção D antes de tocar `browser.py`**.
+- **2026-04-26 (esta sessão, branch `claude/continue-refactor-updates-wvOqd`) — Opção 2 (auditoria de handlers menores, etapa 12):**
+  42. `61cc8ea`: extraídos `extract_queue_failed_limit(raw_limit)` e `extract_queue_failed_retry_index(data)` para `Scripts/server_helpers.py`, reduzindo os idioms de parse numérico nos handlers `queue_failed` e `queue_failed_retry` em `server.py` a wrappers finos. `tests/test_server_helpers.py` ganhou 5 casos novos cobrindo default, parse de string e payload inválido (mapping e não-mapping). Suite offline atualizada: **593 passed** em 17 arquivos. Próxima opção recomendada: **encerrar a opção 2 (restante muito trivial em `health_check`/`get_history`) e pedir aprovação explícita para D antes de qualquer edição em `browser.py`**.
+- **2026-04-26 (esta sessão, branch `claude/continue-refactor-updates-wvOqd`) — Opção 2 (auditoria de handlers menores, etapa 13):**
+  43. `abfe12d`: extraído `advance_health_ping_state(ping_count, last_log_time, now, interval_sec=300)` para `Scripts/server_helpers.py`, isolando a transição pura de estado de `health_check` (incremento, janela de log e reset de contador). `server.py` migrou o handler `/health` para wrapper fino sobre esse helper, mantendo log e resposta HTTP inalterados. `tests/test_server_helpers.py` ganhou 5 casos novos cobrindo janela, borda de intervalo, valores defensivos (`None`) e `interval_sec` customizável. Suite offline atualizada: **598 passed** em 17 arquivos. Próxima opção recomendada: **encerrar a opção 2 (ganho residual mínimo em `get_history`) e pedir aprovação explícita para D antes de editar `browser.py`**.
+- **2026-04-26 (esta sessão, branch `claude/continue-refactor-updates-wvOqd`) — Opção 2 (auditoria de handlers menores, etapa 14):**
+  44. `4828ff8`: extraído `build_unauthorized_payload()` para `Scripts/server_helpers.py` e migrados 8 handlers protegidos em `server.py` para usar o payload 401 canônico via wrapper fino (`get_history`, `api_chat_lookup`, `api_chat_delete_local`, `api_sync`, `api_delete`, `_handle_browser_search_api`, `send_manual_whatsapp_reply`, `chat_completions`). Incluído `Scripts/codex_autoflow.sh` para execução contínua de comandos sem pausas interativas (fluxo automatizado local). `tests/test_server_helpers.py` ganhou 2 casos novos garantindo shape imutável do payload e retorno de novo dict por chamada. Suite offline atualizada: **600 passed** em 17 arquivos. Próxima opção recomendada: **opção 2 saturada; pedir aprovação explícita para D antes de qualquer edição em `browser.py`**.
+- **2026-04-26 (esta sessão, branch `claude/continue-refactor-updates-wvOqd`) — Hotfix de regressão + Opção 2 (etapa 15):**
+  45. `fba6626`: corrigido `NameError: _normalize_source_hint_impl is not defined` em `/v1/chat/completions` e `_handle_browser_search_api` restaurando o alias de import `normalize_source_hint as _normalize_source_hint_impl` no bloco `from server_helpers import (...)` de `server.py`. Adicionado teste smoke em `tests/test_server_helpers.py` que valida estaticamente a presença do alias no arquivo `Scripts/server.py`, prevenindo regressão idêntica em futuros refactors. Suite offline atualizada: **601 passed** em 17 arquivos. Próxima opção recomendada: **com opção 2 saturada, pedir aprovação explícita para D antes de editar `browser.py`**.
+- **2026-04-27 (esta sessão, branch `claude/continue-refactor-updates-wvOqd`) — Hotfix de boot (etapa 16):**
+  46. `ec36b34`: corrigido `ImportError: cannot import name 'normalize_source_hint' from 'server_helpers'` no boot (`main.py -> import server`) reintroduzindo a função pura `normalize_source_hint(value)` em `Scripts/server_helpers.py` com contrato canônico defensivo (`str(v).strip().lower()` + fallback vazio em exceção). Testes `tests/test_server_helpers.py` ampliados com 4 casos (`whitespace/case`, `None`, numérico e `__str__` com exceção). Suite offline atualizada: **605 passed** em 17 arquivos. Próxima opção recomendada: **opção 2 encerrada; pedir aprovação explícita antes de qualquer edição em `browser.py` (opção D)**.
+- **2026-04-27 (esta sessão, branch `claude/continue-refactor-updates-wvOqd`) — Automação do agente (etapa 17):**
+  47. `863a333`: `Scripts/auto_dev_agent.py` recebeu modo mais autônomo para ciclos contínuos de refactor: (a) orçamento aproximado de tokens por janela com cooldown + countdown automático ao atingir limite (`AUTODEV_AGENT_TOKEN_BUDGET`, `AUTODEV_AGENT_TOKEN_WINDOW_SEC`, `AUTODEV_AGENT_TOKEN_COOLDOWN_SEC`), (b) integração opcional para aplicar `Scripts/codex_autoflow.sh` automaticamente quando mudanças tocam hotspots de refactor (`server.py`, `server_helpers.py`, `REFACTOR_PROGRESS.md`), e (c) objetivo proativo do ciclo priorizando extrações puras + wrappers finos no eixo `server.py/server_helpers.py`. Suite offline preservada: **605 passed** em 17 arquivos.
+- **2026-04-27 (esta sessão, branch `claude/continue-refactor-updates-wvOqd`) — Hotfix de runtime crítico (etapa 18):**
+  48. `db0e94f`: corrigida regressão de produção `NameError: _build_active_chat_meta_impl is not defined` restaurando import alias em `server.py` e reintroduzindo no `server_helpers.py` o conjunto de helpers usados no runtime (perdidos em merge): `build_active_chat_meta`, `count_active_chats`, `count_unfinished_chats`, `find_expired_chat_ids`, `extract_manual_whatsapp_reply_targets`, `format_manual_whatsapp_requester_suffix`, `resolve_download_content_type`, `resolve_avatar_filename`. `tests/test_server_helpers.py` ganhou 6 casos novos cobrindo os helpers restaurados e smoke de alias em `server.py`. Suite offline atualizada: **611 passed** em 17 arquivos.
+- **2026-04-27 (esta sessão, branch `claude/continue-refactor-updates-wvOqd`) — UX de observabilidade do agente (etapa 19):**
+  49. `895bfff`: `Scripts/auto_dev_agent.py` ajustado para alertar espera/cooldown apenas UMA vez e manter somente countdown inline durante o período de anti-rate-limit, removendo spam de status repetitivo no console. Ao sair da espera, o agente emite uma única mensagem de retomada (`Espera concluída`) e retorna ao fluxo normal de eventos. Suite offline preservada: **611 passed**.
+- **2026-04-27 (esta sessão, branch `claude/continue-refactor-updates-wvOqd`) — Hotfix de stream NDJSON (etapa 20):**
+  50. `0b93625`: corrigido `NameError: _build_chat_id_event_impl is not defined` no generator de `/v1/chat/completions` (stream NDJSON). Reintroduzido helper puro `build_chat_id_event(chat_id)` em `Scripts/server_helpers.py`, exportado em `__all__`, importado como alias em `server.py` e integrado no primeiro `yield` do stream (`chat_id`). `tests/test_server_helpers.py` ganhou 2 casos novos (payload do helper + smoke de alias importado no server). Suite offline atualizada: **613 passed** em 17 arquivos.
 
 
 
