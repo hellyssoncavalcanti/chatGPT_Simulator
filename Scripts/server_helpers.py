@@ -15,9 +15,10 @@ from __future__ import annotations
 import base64
 import binascii
 import json
+import os
 import time
 from collections import deque
-from typing import Callable, Mapping, MutableSequence, Optional, Tuple
+from typing import Callable, List, Mapping, MutableSequence, Optional, Tuple
 
 
 def format_wait_seconds(seconds) -> str:
@@ -514,6 +515,148 @@ def extract_source_hint(data, headers) -> str:
     return candidate or ""
 
 
+def normalize_source_hint(value) -> str:
+    """Normaliza `source_hint` para o formato canônico de classificação.
+
+    Contrato histórico: `str(value).strip().lower()` com fallback vazio
+    em qualquer exceção inesperada.
+    """
+    try:
+        return str(value or "").strip().lower()
+    except Exception:
+        return ""
+
+
+def build_active_chat_meta(stream_queue, is_analyzer: bool, *, now: Optional[float] = None) -> dict:
+    """Inicializa o entry de `ACTIVE_CHATS[chat_id]` no formato histórico."""
+    ts = float(now) if now is not None else time.time()
+    return {
+        "queue": stream_queue,
+        "status": "",
+        "markdown": "",
+        "finished": False,
+        "finished_at": None,
+        "last_event_at": ts,
+        "is_analyzer": bool(is_analyzer),
+    }
+
+
+def count_active_chats(active_chats, *, now: Optional[float] = None, stale_threshold_sec: int = 300) -> dict:
+    """Agrega métricas de chats ativos para `/api/metrics`."""
+    current = float(now) if now is not None else time.time()
+    stale_cutoff = current - max(0, int(stale_threshold_sec))
+    total = remote = analyzer = stale = 0
+    if not isinstance(active_chats, Mapping):
+        return {"total": 0, "remote": 0, "analyzer": 0, "stale_candidates": 0}
+    for meta in active_chats.values():
+        if not isinstance(meta, Mapping):
+            continue
+        if meta.get("finished"):
+            continue
+        total += 1
+        if meta.get("is_analyzer"):
+            analyzer += 1
+        else:
+            remote += 1
+        last_event = meta.get("last_event_at")
+        try:
+            if float(last_event) < stale_cutoff:
+                stale += 1
+        except Exception:
+            stale += 1
+    return {"total": total, "remote": remote, "analyzer": analyzer, "stale_candidates": stale}
+
+
+def count_unfinished_chats(active_chats) -> int:
+    """Conta entradas não-finalizadas em `ACTIVE_CHATS`."""
+    if not isinstance(active_chats, Mapping):
+        return 0
+    total = 0
+    for meta in active_chats.values():
+        if isinstance(meta, Mapping) and not meta.get("finished"):
+            total += 1
+    return total
+
+
+def find_expired_chat_ids(active_chats, cutoff_ts: float) -> List[str]:
+    """IDs finalizados cujo `finished_at` está abaixo de `cutoff_ts`."""
+    if not isinstance(active_chats, Mapping):
+        return []
+    out: List[str] = []
+    for chat_id, meta in active_chats.items():
+        if not isinstance(meta, Mapping):
+            continue
+        if not meta.get("finished"):
+            continue
+        finished_at = meta.get("finished_at")
+        try:
+            if finished_at is not None and float(finished_at) < float(cutoff_ts):
+                out.append(str(chat_id))
+        except Exception:
+            continue
+    return out
+
+
+def extract_manual_whatsapp_reply_targets(data) -> Tuple[str, str, str, str, str]:
+    """Extrai os campos da rota `/api/send_manual_whatsapp_reply`."""
+    payload_get = getattr(data, "get", None)
+    if payload_get is None:
+        return "", "", "", "", ""
+    phone = str(payload_get("phone", "") or "").strip()
+    message = str(payload_get("message", "") or "").strip()
+    chat_id = str(payload_get("chat_id", "") or "").strip()
+    id_paciente = str(payload_get("id_paciente", "") or "").strip()
+    id_atendimento = str(payload_get("id_atendimento", "") or "").strip()
+    return phone, message, chat_id, id_paciente, id_atendimento
+
+
+def format_manual_whatsapp_requester_suffix(nome_membro, id_membro) -> str:
+    """Sufixo legado da rota manual de WhatsApp: ` por \"nome\" (id=123)`."""
+    nome = normalize_optional_text(nome_membro)
+    ident = normalize_optional_text(id_membro)
+    if nome and ident:
+        return f' por "{nome}" (id={ident})'
+    if nome:
+        return f' por "{nome}"'
+    return ""
+
+
+def resolve_download_content_type(content_type, filename: str) -> str:
+    """Resolve content-type de download por header explícito ou extensão."""
+    explicit = str(content_type or "").strip()
+    if explicit:
+        return explicit
+    name = str(filename or "").strip().lower()
+    if name.endswith(".pdf"):
+        return "application/pdf"
+    if name.endswith(".txt"):
+        return "text/plain; charset=utf-8"
+    if name.endswith(".json"):
+        return "application/json"
+    if name.endswith(".csv"):
+        return "text/csv; charset=utf-8"
+    if name.endswith(".png"):
+        return "image/png"
+    if name.endswith(".jpg") or name.endswith(".jpeg"):
+        return "image/jpeg"
+    if name.endswith(".gif"):
+        return "image/gif"
+    if name.endswith(".webp"):
+        return "image/webp"
+    return "application/octet-stream"
+
+
+def resolve_avatar_filename(raw_filename, user) -> Tuple[Optional[str], Optional[str]]:
+    """Valida extensão de avatar e devolve nome final `<user>_avatar.<ext>`."""
+    filename = str(raw_filename or "").strip()
+    if not filename:
+        return None, "Arquivo sem nome."
+    ext = os.path.splitext(filename)[1].lower()
+    if ext not in {".jpg", ".jpeg", ".png", ".gif", ".webp"}:
+        return None, "Formato de imagem inválido. Use JPG, PNG, GIF ou WEBP."
+    return f"{user}_avatar{ext}", None
+
+
 def coalesce_origin_url(data, header_value: str = "") -> str:
     """Resolve a URL de origem efetiva do pedido `/v1/chat/completions`.
 
@@ -686,6 +829,75 @@ def safe_int(value, default: int) -> int:
         return int(default)
 
 
+def resolve_logs_tail_lines_limit(
+    raw_lines,
+    *,
+    default: int = 120,
+    min_lines: int = 10,
+    max_lines: int = 800,
+) -> int:
+    """Normaliza `?lines=` de `/api/logs/tail` com clamp estável."""
+    requested = safe_int(raw_lines, default)
+    return max(int(min_lines), min(int(max_lines), int(requested)))
+
+
+def parse_from_end_flag(raw_value) -> bool:
+    """Interpreta `?from_end=` de `/api/logs/stream` com o idiom legado."""
+    return str(raw_value).strip().lower() not in {"0", "false", "no"}
+
+
+def extract_queue_failed_limit(raw_limit, default: int = 100) -> int:
+    """Normaliza `?limit=` de `/api/queue/failed`."""
+    return safe_int(raw_limit, default)
+
+
+def extract_queue_failed_retry_index(data, default: int = -1) -> int:
+    """Extrai índice de retry da DLQ (`data["index"]`) com fallback estável."""
+    if not isinstance(data, Mapping):
+        return int(default)
+    return safe_int(data.get("index", default), default)
+
+
+def advance_health_ping_state(
+    ping_count,
+    last_log_time,
+    now,
+    *,
+    interval_sec: int = 300,
+) -> dict:
+    """Avança o estado do `/health` preservando o contrato histórico.
+
+    Regras:
+      - Sempre incrementa `ping_count` em +1.
+      - Se `now - last_log_time >= interval_sec`, sinaliza log, atualiza
+        `last_log_time` para `now` e reseta `ping_count` para 0.
+      - Caso contrário, mantém `last_log_time` e conserva o contador
+        incrementado.
+    """
+    next_count = safe_int(ping_count, 0) + 1
+    prev_last = float(last_log_time or 0.0)
+    current = float(now or 0.0)
+    should_log = (current - prev_last) >= int(interval_sec)
+    if should_log:
+        return {
+            "should_log": True,
+            "next_ping_count": 0,
+            "next_last_log_time": current,
+            "logged_ping_count": next_count,
+        }
+    return {
+        "should_log": False,
+        "next_ping_count": next_count,
+        "next_last_log_time": prev_last,
+        "logged_ping_count": next_count,
+    }
+
+
+def build_unauthorized_payload() -> dict:
+    """Payload canônico para respostas HTTP 401 dos handlers protegidos."""
+    return {"error": "Unauthorized"}
+
+
 def safe_snapshot_stats(queue_obj) -> dict:
     """Wrapper defensivo para ``queue_obj.snapshot_stats()`` que jamais
     levanta exceção.
@@ -739,10 +951,25 @@ __all__ = [
     "build_markdown_event",
     "build_search_result_event",
     "build_search_finish_event",
+    "normalize_source_hint",
+    "build_active_chat_meta",
+    "count_active_chats",
+    "count_unfinished_chats",
+    "find_expired_chat_ids",
+    "extract_manual_whatsapp_reply_targets",
+    "format_manual_whatsapp_requester_suffix",
+    "resolve_download_content_type",
+    "resolve_avatar_filename",
     "format_requester_suffix",
     "format_origin_suffix",
     "compute_python_request_interval",
     "safe_int",
+    "resolve_logs_tail_lines_limit",
+    "parse_from_end_flag",
+    "extract_queue_failed_limit",
+    "extract_queue_failed_retry_index",
+    "advance_health_ping_state",
+    "build_unauthorized_payload",
     "safe_snapshot_stats",
 ]
 
