@@ -1275,10 +1275,65 @@ class TestBuildUnauthorizedPayload:
         assert first is not second
 
 
+class TestRecoveredServerHelpers:
+    def test_build_active_chat_meta_shape(self):
+        q = object()
+        out = sh.build_active_chat_meta(q, True, now=123.0)
+        assert out["queue"] is q
+        assert out["is_analyzer"] is True
+        assert out["finished"] is False
+        assert out["last_event_at"] == 123.0
+
+    def test_count_active_chats(self):
+        active = {
+            "a": {"finished": False, "is_analyzer": True, "last_event_at": 90.0},
+            "b": {"finished": False, "is_analyzer": False, "last_event_at": 10.0},
+            "c": {"finished": True, "is_analyzer": False, "last_event_at": 0.0},
+        }
+        out = sh.count_active_chats(active, now=100.0, stale_threshold_sec=20)
+        assert out == {"total": 2, "remote": 1, "analyzer": 1, "stale_candidates": 1}
+
+    def test_count_unfinished_and_find_expired(self):
+        active = {
+            "a": {"finished": False},
+            "b": {"finished": True, "finished_at": 10.0},
+            "c": {"finished": True, "finished_at": 200.0},
+        }
+        assert sh.count_unfinished_chats(active) == 1
+        assert sh.find_expired_chat_ids(active, 100.0) == ["b"]
+
+    def test_manual_whatsapp_helpers(self):
+        payload = {
+            "phone": " 5511 ",
+            "message": " oi ",
+            "chat_id": " c1 ",
+            "id_paciente": " p1 ",
+            "id_atendimento": " a1 ",
+        }
+        assert sh.extract_manual_whatsapp_reply_targets(payload) == (
+            "5511", "oi", "c1", "p1", "a1",
+        )
+        assert sh.format_manual_whatsapp_requester_suffix("Ana", "42") == ' por "Ana" (id=42)'
+
+    def test_download_content_type_and_avatar_filename(self):
+        assert sh.resolve_download_content_type(None, "a.pdf") == "application/pdf"
+        assert sh.resolve_download_content_type("text/plain", "x.bin") == "text/plain"
+        ok_name, err = sh.resolve_avatar_filename("foto.PNG", "user1")
+        assert ok_name == "user1_avatar.png"
+        assert err is None
+        fail_name, fail_err = sh.resolve_avatar_filename("foto.exe", "user1")
+        assert fail_name is None
+        assert "inválido" in fail_err.lower()
+
+
 class TestServerImportAliasSmoke:
     def test_normalize_source_hint_alias_imported_in_server(self):
         text = Path("Scripts/server.py").read_text(encoding="utf-8")
         assert "normalize_source_hint as _normalize_source_hint_impl" in text
+
+    def test_build_active_chat_meta_alias_imported_in_server(self):
+        text = Path("Scripts/server.py").read_text(encoding="utf-8")
+        assert "build_active_chat_meta as _build_active_chat_meta_impl" in text
 
 
 class TestSafeSnapshotStats:
