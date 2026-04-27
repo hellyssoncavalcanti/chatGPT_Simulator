@@ -402,6 +402,7 @@ Coletadas em `2026-04-22` via `wc -l` / `grep -nE "def "`:
 ### Estado atual (consolidado) — branch `claude/continue-refactor-updates-wvOqd`
 
 **Commits relevantes (mais recente → mais antigo):**
+- `0b93625` — Restaurar helper de chat_id no stream do chat *(esta sessão, ciclo 50 / hotfix de runtime)*
 - `895bfff` — Reduzir ruído de espera no status inline do AutoDevAgent *(esta sessão, ciclo 49 / UX observabilidade)*
 - `db0e94f` — Restaurar helpers críticos e aliases de chat_completions *(esta sessão, ciclo 48 / hotfix de runtime)*
 - `863a333` — Tornar auto_dev_agent autônomo para refactor contínuo *(esta sessão, ciclo 47 / automação)*
@@ -476,7 +477,7 @@ Coletadas em `2026-04-22` via `wc -l` / `grep -nE "def "`:
 - `1f3374b` — Extrair detecção de origem de request para módulo testável offline
 - `0c6216e` — docs: refinar backlog P0-P1-P2 com evidências concretas
 
-**Suite offline atual: 17 arquivos → 611 passed** (sem alteração no ciclo 49; suíte preservada).
+**Suite offline atual: 17 arquivos → 613 passed** (611 anterior + 2 novos no ciclo 50 em `tests/test_server_helpers.py`).
 
 Comando exato de validação:
 ```
@@ -774,6 +775,8 @@ analisador_prontuarios.py, PARAR — não está no escopo destas opções.
   48. `db0e94f`: corrigida regressão de produção `NameError: _build_active_chat_meta_impl is not defined` restaurando import alias em `server.py` e reintroduzindo no `server_helpers.py` o conjunto de helpers usados no runtime (perdidos em merge): `build_active_chat_meta`, `count_active_chats`, `count_unfinished_chats`, `find_expired_chat_ids`, `extract_manual_whatsapp_reply_targets`, `format_manual_whatsapp_requester_suffix`, `resolve_download_content_type`, `resolve_avatar_filename`. `tests/test_server_helpers.py` ganhou 6 casos novos cobrindo os helpers restaurados e smoke de alias em `server.py`. Suite offline atualizada: **611 passed** em 17 arquivos.
 - **2026-04-27 (esta sessão, branch `claude/continue-refactor-updates-wvOqd`) — UX de observabilidade do agente (etapa 19):**
   49. `895bfff`: `Scripts/auto_dev_agent.py` ajustado para alertar espera/cooldown apenas UMA vez e manter somente countdown inline durante o período de anti-rate-limit, removendo spam de status repetitivo no console. Ao sair da espera, o agente emite uma única mensagem de retomada (`Espera concluída`) e retorna ao fluxo normal de eventos. Suite offline preservada: **611 passed**.
+- **2026-04-27 (esta sessão, branch `claude/continue-refactor-updates-wvOqd`) — Hotfix de stream NDJSON (etapa 20):**
+  50. `0b93625`: corrigido `NameError: _build_chat_id_event_impl is not defined` no generator de `/v1/chat/completions` (stream NDJSON). Reintroduzido helper puro `build_chat_id_event(chat_id)` em `Scripts/server_helpers.py`, exportado em `__all__`, importado como alias em `server.py` e integrado no primeiro `yield` do stream (`chat_id`). `tests/test_server_helpers.py` ganhou 2 casos novos (payload do helper + smoke de alias importado no server). Suite offline atualizada: **613 passed** em 17 arquivos.
 
 
 

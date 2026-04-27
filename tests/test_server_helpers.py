@@ -1859,6 +1859,11 @@ class TestRecoveredServerHelpers:
         assert fail_name is None
         assert "inválido" in fail_err.lower()
 
+    def test_build_chat_id_event(self):
+        out = sh.build_chat_id_event("abc-123")
+        payload = json.loads(out)
+        assert payload == {"type": "chat_id", "content": "abc-123"}
+
 
 class TestServerImportAliasSmoke:
     def test_normalize_source_hint_alias_imported_in_server(self):
@@ -1868,6 +1873,10 @@ class TestServerImportAliasSmoke:
     def test_build_active_chat_meta_alias_imported_in_server(self):
         text = Path("Scripts/server.py").read_text(encoding="utf-8")
         assert "build_active_chat_meta as _build_active_chat_meta_impl" in text
+
+    def test_build_chat_id_event_alias_imported_in_server(self):
+        text = Path("Scripts/server.py").read_text(encoding="utf-8")
+        assert "build_chat_id_event as _build_chat_id_event_impl" in text
 
 
 class TestSafeSnapshotStats:

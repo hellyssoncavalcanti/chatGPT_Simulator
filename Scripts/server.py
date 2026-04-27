@@ -66,6 +66,7 @@ from server_helpers import (
     resolve_chat_url as _resolve_chat_url_impl,
     resolve_browser_profile as _resolve_browser_profile_impl,
     build_chat_task_payload as _build_chat_task_payload_impl,
+    build_chat_id_event as _build_chat_id_event_impl,
     build_queue_key as _build_queue_key_impl,
     build_error_event as _build_error_event_impl,
     build_status_event as _build_status_event_impl,

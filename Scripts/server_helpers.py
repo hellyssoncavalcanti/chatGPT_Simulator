@@ -946,6 +946,11 @@ def coalesce_origin_url(data, header_value: str = "") -> str:
     return str(candidate or "").strip()
 
 
+def build_chat_id_event(chat_id) -> str:
+    """Evento NDJSON canônico para anunciar `chat_id` no stream."""
+    return json.dumps({"type": "chat_id", "content": chat_id}, ensure_ascii=False)
+
+
 def build_error_event(content: str) -> str:
     """JSON do evento de erro consumido pelo SSE / `stream_queue`.
 
@@ -1290,6 +1295,7 @@ __all__ = [
     "normalize_source_hint",
     "build_queue_key",
     "build_chat_task_payload",
+    "build_chat_id_event",
     "build_error_event",
     "build_status_event",
     "build_markdown_event",
