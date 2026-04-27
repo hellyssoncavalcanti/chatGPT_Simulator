@@ -1754,6 +1754,8 @@ def _stream_chat_completion(
     last_status_logged: str = ""
     in_wait_countdown = False
     last_wait_mmss = ""
+    in_queue_countdown = False
+    last_queue_eta = ""
     last_markdown_size_reported = -1
     last_markdown_report_ts = 0.0
     MARKDOWN_REPORT_MIN_STEP = 1024   # chars
@@ -1777,6 +1779,17 @@ def _stream_chat_completion(
     def _extract_wait_mmss(text: str) -> Optional[str]:
         m = re.search(r"nova tentativa em\s*([0-9]{1,2}:[0-9]{2})", text or "", flags=re.IGNORECASE)
         return m.group(1) if m else None
+
+    def _fmt_eta_from_seconds(seconds: Optional[float]) -> str:
+        try:
+            total = max(0, int(round(float(seconds or 0.0))))
+        except Exception:
+            total = 0
+        mm, ss = divmod(total, 60)
+        if mm >= 60:
+            hh, mm = divmod(mm, 60)
+            return f"{hh:02d}:{mm:02d}:{ss:02d}"
+        return f"{mm:02d}:{ss:02d}"
 
     def _print_inline_status(text: str) -> None:
         nonlocal inline_status_open
@@ -1821,6 +1834,28 @@ def _stream_chat_completion(
             text = (str(c) if c is not None else "").strip()
             if not text:
                 continue
+            phase = str(msg.get("phase") or "").strip().lower()
+            queue_wait_seconds = msg.get("wait_seconds")
+            if phase == "server_python_queue_wait":
+                if not in_queue_countdown:
+                    _close_inline_status()
+                    log(
+                        f"⏳ Pedido em fila interna no {label}; "
+                        "mantendo countdown inline até liberação."
+                    )
+                    in_queue_countdown = True
+                    last_queue_eta = ""
+                eta = _fmt_eta_from_seconds(queue_wait_seconds)
+                if eta != last_queue_eta:
+                    _print_inline_status(f"Fila interna do servidor | liberação estimada em {eta}")
+                    last_queue_eta = eta
+                continue
+            if in_queue_countdown:
+                _close_inline_status()
+                log("✅ Fila interna liberada; seguindo processamento do pedido.")
+                in_queue_countdown = False
+                last_queue_eta = ""
+
             wait_mmss = _extract_wait_mmss(text)
             if wait_mmss:
                 if not in_wait_countdown:
