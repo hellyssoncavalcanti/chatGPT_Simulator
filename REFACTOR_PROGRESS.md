@@ -402,6 +402,8 @@ Coletadas em `2026-04-22` via `wc -l` / `grep -nE "def "`:
 ### Estado atual (consolidado) — branch `claude/continue-refactor-updates-wvOqd`
 
 **Commits relevantes (mais recente → mais antigo):**
+- `db0e94f` — Restaurar helpers críticos e aliases de chat_completions *(esta sessão, ciclo 48 / hotfix de runtime)*
+- `863a333` — Tornar auto_dev_agent autônomo para refactor contínuo *(esta sessão, ciclo 47 / automação)*
 - `ec36b34` — Restaurar normalize_source_hint em server_helpers *(esta sessão, ciclo 46 / hotfix de boot)*
 - `fba6626` — Restaurar alias normalize_source_hint no server *(esta sessão, ciclo 45 / hotfix + opção 2)*
 - `4828ff8` — Extrair payload 401 canônico + autoflow sem pausas *(esta sessão, ciclo 44 / opção 2)*
@@ -473,7 +475,7 @@ Coletadas em `2026-04-22` via `wc -l` / `grep -nE "def "`:
 - `1f3374b` — Extrair detecção de origem de request para módulo testável offline
 - `0c6216e` — docs: refinar backlog P0-P1-P2 com evidências concretas
 
-**Suite offline atual: 17 arquivos → 605 passed** (601 anterior + 4 novos no ciclo 46 em `tests/test_server_helpers.py`).
+**Suite offline atual: 17 arquivos → 611 passed** (605 anterior + 6 novos no ciclo 48 em `tests/test_server_helpers.py`).
 
 Comando exato de validação:
 ```
@@ -762,6 +764,10 @@ analisador_prontuarios.py, PARAR — não está no escopo destas opções.
   45. `fba6626`: corrigido `NameError: _normalize_source_hint_impl is not defined` em `/v1/chat/completions` e `_handle_browser_search_api` restaurando o alias de import `normalize_source_hint as _normalize_source_hint_impl` no bloco `from server_helpers import (...)` de `server.py`. Adicionado teste smoke em `tests/test_server_helpers.py` que valida estaticamente a presença do alias no arquivo `Scripts/server.py`, prevenindo regressão idêntica em futuros refactors. Suite offline atualizada: **601 passed** em 17 arquivos. Próxima opção recomendada: **com opção 2 saturada, pedir aprovação explícita para D antes de editar `browser.py`**.
 - **2026-04-27 (esta sessão, branch `claude/continue-refactor-updates-wvOqd`) — Hotfix de boot (etapa 16):**
   46. `ec36b34`: corrigido `ImportError: cannot import name 'normalize_source_hint' from 'server_helpers'` no boot (`main.py -> import server`) reintroduzindo a função pura `normalize_source_hint(value)` em `Scripts/server_helpers.py` com contrato canônico defensivo (`str(v).strip().lower()` + fallback vazio em exceção). Testes `tests/test_server_helpers.py` ampliados com 4 casos (`whitespace/case`, `None`, numérico e `__str__` com exceção). Suite offline atualizada: **605 passed** em 17 arquivos. Próxima opção recomendada: **opção 2 encerrada; pedir aprovação explícita antes de qualquer edição em `browser.py` (opção D)**.
+- **2026-04-27 (esta sessão, branch `claude/continue-refactor-updates-wvOqd`) — Automação do agente (etapa 17):**
+  47. `863a333`: `Scripts/auto_dev_agent.py` recebeu modo mais autônomo para ciclos contínuos de refactor: (a) orçamento aproximado de tokens por janela com cooldown + countdown automático ao atingir limite (`AUTODEV_AGENT_TOKEN_BUDGET`, `AUTODEV_AGENT_TOKEN_WINDOW_SEC`, `AUTODEV_AGENT_TOKEN_COOLDOWN_SEC`), (b) integração opcional para aplicar `Scripts/codex_autoflow.sh` automaticamente quando mudanças tocam hotspots de refactor (`server.py`, `server_helpers.py`, `REFACTOR_PROGRESS.md`), e (c) objetivo proativo do ciclo priorizando extrações puras + wrappers finos no eixo `server.py/server_helpers.py`. Suite offline preservada: **605 passed** em 17 arquivos.
+- **2026-04-27 (esta sessão, branch `claude/continue-refactor-updates-wvOqd`) — Hotfix de runtime crítico (etapa 18):**
+  48. `db0e94f`: corrigida regressão de produção `NameError: _build_active_chat_meta_impl is not defined` restaurando import alias em `server.py` e reintroduzindo no `server_helpers.py` o conjunto de helpers usados no runtime (perdidos em merge): `build_active_chat_meta`, `count_active_chats`, `count_unfinished_chats`, `find_expired_chat_ids`, `extract_manual_whatsapp_reply_targets`, `format_manual_whatsapp_requester_suffix`, `resolve_download_content_type`, `resolve_avatar_filename`. `tests/test_server_helpers.py` ganhou 6 casos novos cobrindo os helpers restaurados e smoke de alias em `server.py`. Suite offline atualizada: **611 passed** em 17 arquivos.
 
 
 
