@@ -951,6 +951,21 @@ def build_chat_id_event(chat_id) -> str:
     return json.dumps({"type": "chat_id", "content": chat_id}, ensure_ascii=False)
 
 
+def build_chat_meta_event(chat_id, url: str, chromium_profile: str = "") -> str:
+    """Evento NDJSON canônico para metadados iniciais do chat no stream."""
+    return json.dumps(
+        {
+            "type": "chat_meta",
+            "content": {
+                "chat_id": chat_id,
+                "url": str(url or ""),
+                "chromium_profile": str(chromium_profile or ""),
+            },
+        },
+        ensure_ascii=False,
+    )
+
+
 def build_error_event(content: str) -> str:
     """JSON do evento de erro consumido pelo SSE / `stream_queue`.
 
@@ -1296,6 +1311,7 @@ __all__ = [
     "build_queue_key",
     "build_chat_task_payload",
     "build_chat_id_event",
+    "build_chat_meta_event",
     "build_error_event",
     "build_status_event",
     "build_markdown_event",

@@ -67,6 +67,7 @@ from server_helpers import (
     resolve_browser_profile as _resolve_browser_profile_impl,
     build_chat_task_payload as _build_chat_task_payload_impl,
     build_chat_id_event as _build_chat_id_event_impl,
+    build_chat_meta_event as _build_chat_meta_event_impl,
     build_queue_key as _build_queue_key_impl,
     build_error_event as _build_error_event_impl,
     build_status_event as _build_status_event_impl,
@@ -125,6 +126,22 @@ except Exception:
     Counter = Gauge = None
     generate_latest = None
     CONTENT_TYPE_LATEST = "text/plain; version=0.0.4; charset=utf-8"
+
+# Compatibilidade defensiva: em ambientes com reload parcial/merge incompleto,
+# o alias pode não existir no escopo global. Evita NameError durante stream.
+if "_build_chat_meta_event_impl" not in globals():
+    def _build_chat_meta_event_impl(chat_id, url: str, chromium_profile: str = "") -> str:
+        return json.dumps(
+            {
+                "type": "chat_meta",
+                "content": {
+                    "chat_id": chat_id,
+                    "url": str(url or ""),
+                    "chromium_profile": str(chromium_profile or ""),
+                },
+            },
+            ensure_ascii=False,
+        )
 
 # ─────────────────────────────────────────────────────────────
 # CAPTURA CONFIGURAÇÃO DE DEBUG (que é estabelecida no arquivo "config.py").
@@ -2326,7 +2343,9 @@ def chat_completions():
             yield _build_chat_id_event_impl(chat_id) + "\n"
             if url and url != "None":
                 yield _build_chat_meta_event_impl(
-                    chat_id, url, effective_browser_profile,
+                    chat_id=chat_id,
+                    url=url,
+                    chromium_profile=effective_browser_profile or "",
                 ) + "\n"
 
             try:
