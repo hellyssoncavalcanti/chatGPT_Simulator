@@ -116,6 +116,22 @@ except Exception:
     generate_latest = None
     CONTENT_TYPE_LATEST = "text/plain; version=0.0.4; charset=utf-8"
 
+# Compatibilidade defensiva: em ambientes com reload parcial/merge incompleto,
+# o alias pode não existir no escopo global. Evita NameError durante stream.
+if "_build_chat_meta_event_impl" not in globals():
+    def _build_chat_meta_event_impl(chat_id, url: str, chromium_profile: str = "") -> str:
+        return json.dumps(
+            {
+                "type": "chat_meta",
+                "content": {
+                    "chat_id": chat_id,
+                    "url": str(url or ""),
+                    "chromium_profile": str(chromium_profile or ""),
+                },
+            },
+            ensure_ascii=False,
+        )
+
 # ─────────────────────────────────────────────────────────────
 # CAPTURA CONFIGURAÇÃO DE DEBUG (que é estabelecida no arquivo "config.py").
 # ─────────────────────────────────────────────────────────────
