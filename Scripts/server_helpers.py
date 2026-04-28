@@ -63,6 +63,40 @@ def queue_status_payload(wait_seconds, position: int, total: int, sender_label: 
     }, ensure_ascii=False)
 
 
+def extract_rate_limit_details(error_payload, *, classify_fn=None, rate_limit_marker=None):
+    """Extrai sinais de rate-limit de payloads vindos do browser.
+
+    Contrato de retorno preservado de `server._extract_rate_limit_details`:
+    `(is_rate_limited, message, retry_after_seconds|None)`.
+    """
+    code = ""
+    message = ""
+    retry_after = None
+
+    if isinstance(error_payload, Mapping):
+        code = str(error_payload.get("code") or "").strip().lower()
+        message = str(error_payload.get("message") or error_payload.get("error") or "").strip()
+        try:
+            retry_after_raw = error_payload.get("retry_after_seconds")
+            if retry_after_raw is not None:
+                retry_after = max(1, int(float(retry_after_raw)))
+        except Exception:
+            retry_after = None
+    else:
+        message = str(error_payload or "").strip()
+
+    if classify_fn is None or rate_limit_marker is None:
+        import error_catalog as _error_catalog
+        classify_fn = _error_catalog.classify_from_text
+        rate_limit_marker = _error_catalog.RATE_LIMIT
+
+    is_rate_limited = (
+        code in {"rate_limit", "too_many_requests"}
+        or classify_fn(f"{code} {message}") == rate_limit_marker
+    )
+    return is_rate_limited, message, retry_after
+
+
 def prune_old_attempts(
     dq: MutableSequence[float],
     window_sec: int,

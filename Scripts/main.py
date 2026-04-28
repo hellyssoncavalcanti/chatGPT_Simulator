@@ -38,6 +38,8 @@ CORE_DEPENDENCIES = [
 REPAIR_FLAG = "--repair-venv"
 SKIP_BOOTSTRAP_FLAG = "--skip-bootstrap"
 BROWSER_JOIN_TIMEOUT_SEC = max(1, int(os.getenv("SIMULATOR_BROWSER_JOIN_TIMEOUT_SEC", "8")))
+BROWSER_WORKER_RESTART_DELAY_SEC = max(1, int(os.getenv("SIMULATOR_BROWSER_RESTART_DELAY_SEC", "5")))
+HTTP_SERVER_RESTART_DELAY_SEC = max(1, int(os.getenv("SIMULATOR_HTTP_RESTART_DELAY_SEC", "5")))
 
 
 def _terminate_previous_same_server_instances(script_name: str) -> None:
@@ -342,18 +344,46 @@ def get_local_ip():
 
 
 def start_browser_thread(browser_module):
-    try:
-        browser_module.browser_loop()
-    except Exception as exc:
-        print(f"[ERRO] Falha no browser worker: {exc}")
+    attempt = 0
+    while True:
+        attempt += 1
+        try:
+            browser_module.browser_loop()
+            print(
+                f"[WARN] browser worker finalizou sem exceção (tentativa {attempt}); "
+                f"reiniciando em {BROWSER_WORKER_RESTART_DELAY_SEC}s."
+            )
+        except (KeyboardInterrupt, SystemExit):
+            print("[INFO] browser worker recebeu sinal de encerramento; finalizando thread.")
+            return
+        except Exception as exc:
+            print(
+                f"[ERRO] Falha no browser worker (tentativa {attempt}): {exc}. "
+                f"Reiniciando em {BROWSER_WORKER_RESTART_DELAY_SEC}s..."
+            )
+        time.sleep(BROWSER_WORKER_RESTART_DELAY_SEC)
 
 
 def start_http_server(config_module, server_module):
     http_port = config_module.PORT + 1
-    try:
-        server_module.app.run(host="0.0.0.0", port=http_port, debug=False, use_reloader=False)
-    except Exception as exc:
-        print(f"[ERRO] Falha ao iniciar HTTP na porta {http_port}: {exc}")
+    attempt = 0
+    while True:
+        attempt += 1
+        try:
+            server_module.app.run(host="0.0.0.0", port=http_port, debug=False, use_reloader=False)
+            print(
+                f"[WARN] Servidor HTTP na porta {http_port} finalizou sem exceção "
+                f"(tentativa {attempt}); reiniciando em {HTTP_SERVER_RESTART_DELAY_SEC}s."
+            )
+        except (KeyboardInterrupt, SystemExit):
+            print(f"[INFO] Servidor HTTP na porta {http_port} recebeu sinal de encerramento.")
+            return
+        except Exception as exc:
+            print(
+                f"[ERRO] Falha ao iniciar HTTP na porta {http_port} (tentativa {attempt}): {exc}. "
+                f"Reiniciando em {HTTP_SERVER_RESTART_DELAY_SEC}s..."
+            )
+        time.sleep(HTTP_SERVER_RESTART_DELAY_SEC)
 
 
 def _wait_for_port(host: str, port: int, timeout: int = 180, interval: float = 0.5) -> tuple[bool, float]:
