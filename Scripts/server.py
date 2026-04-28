@@ -54,6 +54,7 @@ from request_source import (
 )
 from server_helpers import (
     format_wait_seconds as _format_wait_seconds_impl,
+    extract_rate_limit_details as _extract_rate_limit_details_impl,
     queue_status_payload as _queue_status_payload_impl,
     prune_old_attempts as _prune_old_attempts_impl,
     count_active_chatgpt_profiles as _count_active_chatgpt_profiles_impl,
@@ -435,40 +436,11 @@ def _format_wait_seconds(seconds):
 
 
 def _extract_rate_limit_details(error_payload):
-    """
-    Identifica sinalização de rate-limit enviada pelo browser.py.
-    Aceita payload string ou dict.
-
-    Decisão de rate-limit usa duas fontes, nesta ordem:
-      1. Campo explícito `code` ∈ {rate_limit, too_many_requests} —
-         sinal autoritativo enviado pelo browser.py.
-      2. Classificação heurística do texto via `error_catalog.classify_from_text`
-         (PT-BR + EN; cobre "excesso de solicita", "too many request",
-         "rate limit", "chegou ao limite", etc.).
-
-    Contrato de retorno preservado: `(is_rate_limited, message, retry_after)`.
-    """
-    code = ""
-    message = ""
-    retry_after = None
-
-    if isinstance(error_payload, dict):
-        code = str(error_payload.get("code") or "").strip().lower()
-        message = str(error_payload.get("message") or error_payload.get("error") or "").strip()
-        try:
-            retry_after_raw = error_payload.get("retry_after_seconds")
-            if retry_after_raw is not None:
-                retry_after = max(1, int(float(retry_after_raw)))
-        except Exception:
-            retry_after = None
-    else:
-        message = str(error_payload or "").strip()
-
-    is_rate_limited = (
-        code in {"rate_limit", "too_many_requests"}
-        or _error_catalog.classify_from_text(f"{code} {message}") == _error_catalog.RATE_LIMIT
+    return _extract_rate_limit_details_impl(
+        error_payload,
+        classify_fn=_error_catalog.classify_from_text,
+        rate_limit_marker=_error_catalog.RATE_LIMIT,
     )
-    return is_rate_limited, message, retry_after
 
 
 def _register_chat_rate_limit(retry_after_seconds=None, reason=""):
