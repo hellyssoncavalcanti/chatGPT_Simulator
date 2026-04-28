@@ -83,6 +83,52 @@ class TestQueueStatusPayload:
         assert isinstance(json.loads(s), dict)
 
 
+class TestExtractRateLimitDetails:
+    def test_code_rate_limit_is_authoritative(self):
+        limited, message, retry = sh.extract_rate_limit_details({"code": "rate_limit"})
+        assert limited is True
+        assert message == ""
+        assert retry is None
+
+    def test_message_fallback_error_field(self):
+        limited, message, retry = sh.extract_rate_limit_details(
+            {"error": "Too many requests right now"},
+            classify_fn=lambda txt: "rate_limit" if "too many requests" in txt.lower() else "other",
+            rate_limit_marker="rate_limit",
+        )
+        assert limited is True
+        assert "Too many requests" in message
+        assert retry is None
+
+    def test_retry_after_is_parsed_and_clamped(self):
+        limited, message, retry = sh.extract_rate_limit_details(
+            {"code": "too_many_requests", "retry_after_seconds": "0.2"}
+        )
+        assert limited is True
+        assert message == ""
+        assert retry == 1
+
+    def test_invalid_retry_after_is_ignored(self):
+        limited, message, retry = sh.extract_rate_limit_details(
+            {"message": "x", "retry_after_seconds": "abc"},
+            classify_fn=lambda _: "other",
+            rate_limit_marker="rate_limit",
+        )
+        assert limited is False
+        assert message == "x"
+        assert retry is None
+
+    def test_string_payload_uses_classifier(self):
+        limited, message, retry = sh.extract_rate_limit_details(
+            "Chegou ao limite de solicitações",
+            classify_fn=lambda txt: "rate_limit" if "limite" in txt.lower() else "other",
+            rate_limit_marker="rate_limit",
+        )
+        assert limited is True
+        assert message == "Chegou ao limite de solicitações"
+        assert retry is None
+
+
 class TestPruneOldAttempts:
     def test_removes_entries_outside_window(self):
         dq = deque([100.0, 105.0, 110.0])
