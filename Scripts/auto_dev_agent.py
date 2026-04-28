@@ -1761,6 +1761,7 @@ def _stream_chat_completion(
     MARKDOWN_REPORT_MIN_STEP = 1024   # chars
     MARKDOWN_REPORT_MIN_INTERVAL = 3  # segundos
     inline_status_open = False
+    last_inline_render_len = 0
 
     def _clean_browser_prefix(text: str) -> str:
         s = (text or "").strip()
@@ -1792,39 +1793,40 @@ def _stream_chat_completion(
         return f"{mm:02d}:{ss:02d}"
 
     def _print_inline_status(text: str) -> None:
-        nonlocal inline_status_open
+        nonlocal inline_status_open, last_inline_render_len
         try:
             if not sys.stdout.isatty():
                 return
             normalized = re.sub(r"[\r\n\t]+", " ", _normalize_status(text)).strip()
             normalized = re.sub(r"\s{2,}", " ", normalized)
             cols = max(40, int(shutil.get_terminal_size(fallback=(120, 24)).columns))
-            prefix = "   ⏳ status: "
+            prefix = "   status: "
             max_payload_len = max(10, cols - len(prefix) - 3)
             if len(normalized) > max_payload_len:
                 normalized = normalized[:max_payload_len] + "..."
             rendered = f"{prefix}{normalized}"
-            clear_tail = max(8, cols - len(rendered))
-            sys.stdout.write("\x1b[2K\r" + rendered + (" " * clear_tail))
+            pad = max(0, last_inline_render_len - len(rendered))
+            sys.stdout.write("\r" + rendered + (" " * pad))
             sys.stdout.flush()
             inline_status_open = True
+            last_inline_render_len = len(rendered)
         except Exception:
             log(f"   ⏳ status: {_normalize_status(text)[:220]}")
 
     def _close_inline_status() -> None:
-        nonlocal inline_status_open
+        nonlocal inline_status_open, last_inline_render_len
         if inline_status_open:
             try:
                 if not sys.stdout.isatty():
                     inline_status_open = False
                     return
-                cols = max(40, int(shutil.get_terminal_size(fallback=(120, 24)).columns))
-                sys.stdout.write("\x1b[2K\r" + (" " * cols) + "\r")
+                sys.stdout.write("\r" + (" " * max(last_inline_render_len, 1)) + "\r")
                 sys.stdout.flush()
             except Exception:
                 pass
             finally:
                 inline_status_open = False
+                last_inline_render_len = 0
 
     started = time.time()
     last_event = started
