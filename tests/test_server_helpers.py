@@ -1,5 +1,6 @@
 import json
 from collections import deque
+from pathlib import Path
 
 import pytest
 
@@ -328,6 +329,23 @@ class TestExtractSourceHint:
 
         out = sh.extract_source_hint({}, FakeHeaders())
         assert out == "duck.py"
+
+
+class TestNormalizeSourceHint:
+    def test_normalizes_case_and_whitespace(self):
+        assert sh.normalize_source_hint("  Analyzer.PY  ") == "analyzer.py"
+
+    def test_none_returns_empty(self):
+        assert sh.normalize_source_hint(None) == ""
+
+    def test_non_string_is_stringified_and_lowered(self):
+        assert sh.normalize_source_hint(123) == "123"
+
+    def test_defensive_fallback_on_bad_str(self):
+        class _BadStr:
+            def __str__(self):
+                raise RuntimeError("boom")
+        assert sh.normalize_source_hint(_BadStr()) == ""
 
 
 # ─────────────────────────────────────────────────────────
@@ -1168,6 +1186,183 @@ class TestSafeInt:
         # Compatibilidade com idiom histórico (Python: int(True) == 1).
         assert sh.safe_int(True, 0) == 1
         assert sh.safe_int(False, 99) == 0
+
+
+class TestResolveLogsTailLinesLimit:
+    def test_default_when_missing(self):
+        assert sh.resolve_logs_tail_lines_limit(None) == 120
+
+    def test_clamp_min(self):
+        assert sh.resolve_logs_tail_lines_limit("1") == 10
+
+    def test_clamp_max(self):
+        assert sh.resolve_logs_tail_lines_limit("9999") == 800
+
+    def test_keeps_requested_inside_range(self):
+        assert sh.resolve_logs_tail_lines_limit("250") == 250
+
+    def test_invalid_value_uses_default_before_clamp(self):
+        assert sh.resolve_logs_tail_lines_limit("abc") == 120
+
+
+class TestParseFromEndFlag:
+    @pytest.mark.parametrize("raw_value", ["1", "true", "yes", "", None, "   "])
+    def test_truthy_variants(self, raw_value):
+        assert sh.parse_from_end_flag(raw_value) is True
+
+    @pytest.mark.parametrize("raw_value", ["0", "false", "no", " FALSE ", " No "])
+    def test_falsy_variants(self, raw_value):
+        assert sh.parse_from_end_flag(raw_value) is False
+
+
+class TestQueueFailedHelpers:
+    def test_extract_queue_failed_limit_uses_default(self):
+        assert sh.extract_queue_failed_limit(None) == 100
+
+    def test_extract_queue_failed_limit_parses_string(self):
+        assert sh.extract_queue_failed_limit("25") == 25
+
+    def test_extract_queue_failed_retry_index_happy_path(self):
+        assert sh.extract_queue_failed_retry_index({"index": "7"}) == 7
+
+    def test_extract_queue_failed_retry_index_invalid_mapping(self):
+        assert sh.extract_queue_failed_retry_index({"index": "x"}) == -1
+
+    def test_extract_queue_failed_retry_index_invalid_payload(self):
+        assert sh.extract_queue_failed_retry_index(None) == -1
+
+
+class TestAdvanceHealthPingState:
+    def test_increments_without_logging_inside_window(self):
+        out = sh.advance_health_ping_state(2, 1000.0, 1200.0, interval_sec=300)
+        assert out["should_log"] is False
+        assert out["next_ping_count"] == 3
+        assert out["next_last_log_time"] == 1000.0
+        assert out["logged_ping_count"] == 3
+
+    def test_logs_and_resets_when_interval_elapsed(self):
+        out = sh.advance_health_ping_state(4, 1000.0, 1300.0, interval_sec=300)
+        assert out["should_log"] is True
+        assert out["next_ping_count"] == 0
+        assert out["next_last_log_time"] == 1300.0
+        assert out["logged_ping_count"] == 5
+
+    def test_handles_none_values_defensively(self):
+        out = sh.advance_health_ping_state(None, None, None, interval_sec=300)
+        assert out["should_log"] is False
+        assert out["next_ping_count"] == 1
+        assert out["next_last_log_time"] == 0.0
+        assert out["logged_ping_count"] == 1
+
+    def test_safe_int_compat_on_ping_counter(self):
+        out = sh.advance_health_ping_state("7", 0.0, 1.0, interval_sec=300)
+        assert out["next_ping_count"] == 8
+
+    def test_custom_interval(self):
+        out = sh.advance_health_ping_state(0, 50.0, 60.0, interval_sec=10)
+        assert out["should_log"] is True
+        assert out["logged_ping_count"] == 1
+
+
+class TestBuildUnauthorizedPayload:
+    def test_shape_matches_legacy_contract(self):
+        assert sh.build_unauthorized_payload() == {"error": "Unauthorized"}
+
+    def test_returns_new_dict_each_call(self):
+        first = sh.build_unauthorized_payload()
+        second = sh.build_unauthorized_payload()
+        assert first == second
+        assert first is not second
+
+
+class TestRecoveredServerHelpers:
+    def test_build_active_chat_meta_shape(self):
+        q = object()
+        out = sh.build_active_chat_meta(q, True, now=123.0)
+        assert out["queue"] is q
+        assert out["is_analyzer"] is True
+        assert out["finished"] is False
+        assert out["last_event_at"] == 123.0
+
+    def test_count_active_chats(self):
+        active = {
+            "a": {"finished": False, "is_analyzer": True, "last_event_at": 90.0},
+            "b": {"finished": False, "is_analyzer": False, "last_event_at": 10.0},
+            "c": {"finished": True, "is_analyzer": False, "last_event_at": 0.0},
+        }
+        out = sh.count_active_chats(active, now=100.0, stale_threshold_sec=20)
+        assert out == {"total": 2, "remote": 1, "analyzer": 1, "stale_candidates": 1}
+
+    def test_count_unfinished_and_find_expired(self):
+        active = {
+            "a": {"finished": False},
+            "b": {"finished": True, "finished_at": 10.0},
+            "c": {"finished": True, "finished_at": 200.0},
+        }
+        assert sh.count_unfinished_chats(active) == 1
+        assert sh.find_expired_chat_ids(active, 100.0) == ["b"]
+
+    def test_manual_whatsapp_helpers(self):
+        payload = {
+            "phone": " 5511 ",
+            "message": " oi ",
+            "chat_id": " c1 ",
+            "id_paciente": " p1 ",
+            "id_atendimento": " a1 ",
+        }
+        assert sh.extract_manual_whatsapp_reply_targets(payload) == (
+            "5511", "oi", "c1", "p1", "a1",
+        )
+        assert sh.format_manual_whatsapp_requester_suffix("Ana", "42") == ' por "Ana" (id=42)'
+
+    def test_download_content_type_and_avatar_filename(self):
+        assert sh.resolve_download_content_type(None, "a.pdf") == "application/pdf"
+        assert sh.resolve_download_content_type("text/plain", "x.bin") == "text/plain"
+        ok_name, err = sh.resolve_avatar_filename("foto.PNG", "user1")
+        assert ok_name == "user1_avatar.png"
+        assert err is None
+        fail_name, fail_err = sh.resolve_avatar_filename("foto.exe", "user1")
+        assert fail_name is None
+        assert "inválido" in fail_err.lower()
+
+    def test_build_chat_id_event(self):
+        out = sh.build_chat_id_event("abc-123")
+        payload = json.loads(out)
+        assert payload == {"type": "chat_id", "content": "abc-123"}
+
+    def test_build_chat_meta_event(self):
+        out = sh.build_chat_meta_event(
+            chat_id="abc-123",
+            url="https://chatgpt.com/c/abc-123",
+            chromium_profile="Profile 1",
+        )
+        payload = json.loads(out)
+        assert payload == {
+            "type": "chat_meta",
+            "content": {
+                "chat_id": "abc-123",
+                "url": "https://chatgpt.com/c/abc-123",
+                "chromium_profile": "Profile 1",
+            },
+        }
+
+
+class TestServerImportAliasSmoke:
+    def test_normalize_source_hint_alias_imported_in_server(self):
+        text = Path("Scripts/server.py").read_text(encoding="utf-8")
+        assert "normalize_source_hint as _normalize_source_hint_impl" in text
+
+    def test_build_active_chat_meta_alias_imported_in_server(self):
+        text = Path("Scripts/server.py").read_text(encoding="utf-8")
+        assert "build_active_chat_meta as _build_active_chat_meta_impl" in text
+
+    def test_build_chat_id_event_alias_imported_in_server(self):
+        text = Path("Scripts/server.py").read_text(encoding="utf-8")
+        assert "build_chat_id_event as _build_chat_id_event_impl" in text
+
+    def test_build_chat_meta_event_alias_imported_in_server(self):
+        text = Path("Scripts/server.py").read_text(encoding="utf-8")
+        assert "build_chat_meta_event as _build_chat_meta_event_impl" in text
 
 
 class TestSafeSnapshotStats:
