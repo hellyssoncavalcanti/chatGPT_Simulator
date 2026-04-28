@@ -220,6 +220,19 @@ MAX_INCIDENTS_IN_CONTEXT = 60
 # notas ou quando as ações concretas falharam neste ciclo.
 MAX_CODEX_FORWARD_ATTEMPTS = int(_env("AUTODEV_AGENT_CODEX_FORWARD_MAX", "2"))
 
+# Orçamento aproximado de tokens por janela (0 desativa).
+# Estimativa usada: ~4 chars por token (heurística conservadora).
+TOKEN_BUDGET_PER_WINDOW = max(0, int(_env("AUTODEV_AGENT_TOKEN_BUDGET", "0")))
+TOKEN_BUDGET_WINDOW_SEC = max(60, int(_env("AUTODEV_AGENT_TOKEN_WINDOW_SEC", "3600")))
+TOKEN_BUDGET_COOLDOWN_SEC = max(10, int(_env("AUTODEV_AGENT_TOKEN_COOLDOWN_SEC", "120")))
+
+# Integração opcional com Scripts/codex_autoflow.sh para fluxos de refactor.
+ENABLE_REFACTOR_AUTOFLOW = _env_bool("AUTODEV_AGENT_REFACTOR_AUTOFLOW", True)
+REFACTOR_AUTOFLOW_CMD = _env(
+    "AUTODEV_AGENT_REFACTOR_AUTOFLOW_CMD",
+    "./Scripts/codex_autoflow.sh \"python3 -m pytest tests/test_server_helpers.py -q\"",
+).strip()
+
 # =============================================================================
 # CONFIGURAÇÃO — Segurança e Políticas
 # =============================================================================
@@ -428,6 +441,9 @@ class AgentState:
     cycles_with_fixes: int = 0          # ciclos que aplicaram correções
     total_actions: int = 0              # total de ações aplicadas
     last_services_signature: str = ""   # última assinatura do mapa de serviços
+    token_window_started_at: float = 0.0
+    token_window_used: int = 0
+    token_limit_hits: int = 0
 
 
 @dataclass
@@ -518,6 +534,58 @@ def _save_state() -> None:
 
 def _now_utc_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _estimate_tokens_from_text(text: Any) -> int:
+    try:
+        chars = len(str(text or ""))
+    except Exception:
+        chars = 0
+    return max(0, (chars + 3) // 4)
+
+
+def _register_token_usage(estimated_tokens: int) -> None:
+    if TOKEN_BUDGET_PER_WINDOW <= 0:
+        return
+    now = time.time()
+    started = float(_AGENT_STATE.token_window_started_at or 0.0)
+    if started <= 0 or (now - started) >= TOKEN_BUDGET_WINDOW_SEC:
+        _AGENT_STATE.token_window_started_at = now
+        _AGENT_STATE.token_window_used = 0
+    _AGENT_STATE.token_window_used = int(_AGENT_STATE.token_window_used or 0) + int(max(0, estimated_tokens))
+    _save_state()
+
+
+def _enforce_token_budget_if_needed() -> None:
+    """Aplica cooldown automático ao atingir o orçamento de tokens da janela."""
+    if TOKEN_BUDGET_PER_WINDOW <= 0:
+        return
+    now = time.time()
+    started = float(_AGENT_STATE.token_window_started_at or 0.0)
+    used = int(_AGENT_STATE.token_window_used or 0)
+    if started <= 0:
+        _AGENT_STATE.token_window_started_at = now
+        _AGENT_STATE.token_window_used = 0
+        _save_state()
+        return
+    elapsed = now - started
+    if elapsed >= TOKEN_BUDGET_WINDOW_SEC:
+        _AGENT_STATE.token_window_started_at = now
+        _AGENT_STATE.token_window_used = 0
+        _save_state()
+        return
+    if used < TOKEN_BUDGET_PER_WINDOW:
+        return
+    remaining_window = max(0, int(TOKEN_BUDGET_WINDOW_SEC - elapsed))
+    cooldown = max(TOKEN_BUDGET_COOLDOWN_SEC, min(remaining_window, TOKEN_BUDGET_WINDOW_SEC))
+    _AGENT_STATE.token_limit_hits = int(_AGENT_STATE.token_limit_hits or 0) + 1
+    _save_state()
+    log(
+        f"🧮 Limite de tokens atingido ({used}/{TOKEN_BUDGET_PER_WINDOW} na janela). "
+        f"Cooldown autônomo de {cooldown}s antes de retomar ciclos.",
+        logging.WARNING,
+    )
+    _sleep_with_countdown(cooldown, suggestion_remaining_sec=0)
 
 
 # =============================================================================
@@ -1624,6 +1692,11 @@ def _stream_chat_completion(
             )
     except Exception:
         payload_chars = 0
+    estimated_request_tokens = _estimate_tokens_from_text(
+        body.get("message")
+        if body.get("message") is not None
+        else body.get("messages")
+    )
 
     reuse_hint = ""
     if body.get("chat_id") or body.get("url"):
@@ -1679,11 +1752,16 @@ def _stream_chat_completion(
 
     # Controle de verbosidade para eventos repetitivos (status/markdown).
     last_status_logged: str = ""
+    in_wait_countdown = False
+    last_wait_mmss = ""
+    in_queue_countdown = False
+    last_queue_eta = ""
     last_markdown_size_reported = -1
     last_markdown_report_ts = 0.0
     MARKDOWN_REPORT_MIN_STEP = 1024   # chars
     MARKDOWN_REPORT_MIN_INTERVAL = 3  # segundos
     inline_status_open = False
+    last_inline_render_len = 0
 
     def _clean_browser_prefix(text: str) -> str:
         s = (text or "").strip()
@@ -1699,26 +1777,56 @@ def _stream_chat_completion(
             return f"Aguardando cooldown do ChatGPT | nova tentativa em {cooldown_match.group(1)}"
         return s
 
-    def _print_inline_status(text: str) -> None:
-        nonlocal inline_status_open
+    def _extract_wait_mmss(text: str) -> Optional[str]:
+        m = re.search(r"nova tentativa em\s*([0-9]{1,2}:[0-9]{2})", text or "", flags=re.IGNORECASE)
+        return m.group(1) if m else None
+
+    def _fmt_eta_from_seconds(seconds: Optional[float]) -> str:
         try:
-            rendered = f"   ⏳ status: {_normalize_status(text)[:220]}"
-            sys.stdout.write("\r" + rendered + " " * 24)
+            total = max(0, int(round(float(seconds or 0.0))))
+        except Exception:
+            total = 0
+        mm, ss = divmod(total, 60)
+        if mm >= 60:
+            hh, mm = divmod(mm, 60)
+            return f"{hh:02d}:{mm:02d}:{ss:02d}"
+        return f"{mm:02d}:{ss:02d}"
+
+    def _print_inline_status(text: str) -> None:
+        nonlocal inline_status_open, last_inline_render_len
+        try:
+            if not sys.stdout.isatty():
+                return
+            normalized = re.sub(r"[\r\n\t]+", " ", _normalize_status(text)).strip()
+            normalized = re.sub(r"\s{2,}", " ", normalized)
+            cols = max(40, int(shutil.get_terminal_size(fallback=(120, 24)).columns))
+            prefix = "   status: "
+            max_payload_len = max(10, cols - len(prefix) - 3)
+            if len(normalized) > max_payload_len:
+                normalized = normalized[:max_payload_len] + "..."
+            rendered = f"{prefix}{normalized}"
+            pad = max(0, last_inline_render_len - len(rendered))
+            sys.stdout.write("\r" + rendered + (" " * pad))
             sys.stdout.flush()
             inline_status_open = True
+            last_inline_render_len = len(rendered)
         except Exception:
             log(f"   ⏳ status: {_normalize_status(text)[:220]}")
 
     def _close_inline_status() -> None:
-        nonlocal inline_status_open
+        nonlocal inline_status_open, last_inline_render_len
         if inline_status_open:
             try:
-                sys.stdout.write("\r" + " " * 260 + "\r")
+                if not sys.stdout.isatty():
+                    inline_status_open = False
+                    return
+                sys.stdout.write("\r" + (" " * max(last_inline_render_len, 1)) + "\r")
                 sys.stdout.flush()
             except Exception:
                 pass
             finally:
                 inline_status_open = False
+                last_inline_render_len = 0
 
     started = time.time()
     last_event = started
@@ -1740,7 +1848,52 @@ def _stream_chat_completion(
 
         if t == "status":
             text = (str(c) if c is not None else "").strip()
-            if text and text != last_status_logged:
+            if not text:
+                continue
+            phase = str(msg.get("phase") or "").strip().lower()
+            queue_wait_seconds = msg.get("wait_seconds")
+            if phase == "server_python_queue_wait":
+                if not in_queue_countdown:
+                    _close_inline_status()
+                    log(
+                        f"⏳ Pedido em fila interna no {label}; "
+                        "mantendo countdown inline até liberação."
+                    )
+                    in_queue_countdown = True
+                    last_queue_eta = ""
+                eta = _fmt_eta_from_seconds(queue_wait_seconds)
+                if eta != last_queue_eta:
+                    _print_inline_status(f"Fila interna do servidor | liberação estimada em {eta}")
+                    last_queue_eta = eta
+                continue
+            if in_queue_countdown:
+                _close_inline_status()
+                log("✅ Fila interna liberada; seguindo processamento do pedido.")
+                in_queue_countdown = False
+                last_queue_eta = ""
+
+            wait_mmss = _extract_wait_mmss(text)
+            if wait_mmss:
+                if not in_wait_countdown:
+                    _close_inline_status()
+                    log(
+                        f"⏳ Cooldown/espera detectado em {label}; "
+                        "mantendo countdown inline até voltar ao normal."
+                    )
+                    in_wait_countdown = True
+                    last_wait_mmss = ""
+                if wait_mmss != last_wait_mmss:
+                    _print_inline_status(f"Aguardando cooldown do ChatGPT | nova tentativa em {wait_mmss}")
+                    last_wait_mmss = wait_mmss
+                continue
+
+            if in_wait_countdown:
+                _close_inline_status()
+                log("✅ Espera concluída; retomando fluxo normal de eventos.")
+                in_wait_countdown = False
+                last_wait_mmss = ""
+
+            if text != last_status_logged:
                 _print_inline_status(text)
                 last_status_logged = text
 
@@ -1805,6 +1958,8 @@ def _stream_chat_completion(
     if error_msg and not markdown_buf:
         raise RuntimeError(f"ChatGPT retornou erro: {error_msg}")
     _close_inline_status()
+    estimated_response_tokens = _estimate_tokens_from_text(markdown_buf)
+    _register_token_usage(estimated_request_tokens + estimated_response_tokens)
     return markdown_buf, chat_id, chat_url
 
 
@@ -2351,6 +2506,32 @@ def validate_changes(changed: Iterable[str]) -> Tuple[bool, Dict[str, Any]]:
     return ok, report
 
 
+def _should_run_refactor_autoflow(changed: Iterable[str]) -> bool:
+    if not ENABLE_REFACTOR_AUTOFLOW or not REFACTOR_AUTOFLOW_CMD:
+        return False
+    touched = {str(x).replace("\\", "/") for x in (changed or [])}
+    refactor_hotspots = (
+        "Scripts/server.py",
+        "Scripts/server_helpers.py",
+        "REFACTOR_PROGRESS.md",
+    )
+    return any(path in touched for path in refactor_hotspots)
+
+
+def _run_refactor_autoflow_if_needed(changed: Iterable[str]) -> None:
+    if not _should_run_refactor_autoflow(changed):
+        return
+    if not Path(SCRIPTS_DIR / "codex_autoflow.sh").exists():
+        return
+    log("🤖 Reforçando ciclo de refactor via codex_autoflow.sh (autônomo).")
+    code, out = run_shell(REFACTOR_AUTOFLOW_CMD, timeout=600, cwd=ROOT_DIR)
+    if code == 0:
+        log("✅ codex_autoflow.sh executado com sucesso.")
+    else:
+        tail = "\n".join(out[-20:]) if out else ""
+        log(f"⚠️ codex_autoflow.sh retornou código {code}.\n{tail}", logging.WARNING)
+
+
 # =============================================================================
 # GIT — COMMIT + PUSH AUTOMÁTICOS
 # =============================================================================
@@ -2440,7 +2621,9 @@ def _objective_for_cycle(has_errors: bool, incidents_summary: str) -> str:
     return (
         "Analisar o estado do sistema e propor UMA melhoria pequena, segura e "
         "incremental de robustez, performance, observabilidade (logs/métricas) "
-        "ou qualidade de código. Se já estiver tudo estável e não houver algo "
+        "ou qualidade de código, priorizando extrações puras de refactor em "
+        "server.py/server_helpers.py com wrappers finos e testes offline. "
+        "Se já estiver tudo estável e não houver algo "
         "claramente valioso, retorne lista 'actions' vazia com analysis explicando."
     )
 
@@ -2863,6 +3046,7 @@ def run_single_cycle() -> None:
                 if changed and any(r.ok for r in results):
                     _AGENT_STATE.cycles_with_fixes += 1
                     _AGENT_STATE.total_actions += sum(1 for r in results if r.ok)
+                    _run_refactor_autoflow_if_needed(changed)
                     git_commit_and_maybe_push(plan, results)
                 _save_state()
                 return
@@ -2952,6 +3136,7 @@ def run_single_cycle() -> None:
 
         # Commit/push se mudou alguma coisa
         if changed and ok_count:
+            _run_refactor_autoflow_if_needed(changed)
             git_commit_and_maybe_push(plan, results)
 
         _save_state()
@@ -3086,6 +3271,14 @@ def main_loop() -> None:
     log(f"🔗 Codex URL: {CODEX_URL or '(novo chat a cada ciclo de conversa)'}")
     log(f"🧭 Plataforma: {platform.system()} {platform.release()} | Python {sys.version.split(' ',1)[0]}")
     log(f"⚙️ AUTOFIX={ENABLE_AUTOFIX} AUTOCOMMIT={ENABLE_AUTOCOMMIT} AUTOPUSH={ENABLE_AUTOPUSH}")
+    if TOKEN_BUDGET_PER_WINDOW > 0:
+        log(
+            "🧮 Token-budget autônomo ativo: "
+            f"{TOKEN_BUDGET_PER_WINDOW}/janela de {TOKEN_BUDGET_WINDOW_SEC}s "
+            f"(cooldown mínimo {TOKEN_BUDGET_COOLDOWN_SEC}s)."
+        )
+    if ENABLE_REFACTOR_AUTOFLOW and REFACTOR_AUTOFLOW_CMD:
+        log(f"🤖 Refactor-autoflow ativo: {REFACTOR_AUTOFLOW_CMD}")
     if AUTOSTART_SIMULATOR_CMD:
         log(
             "🩺 Auto-start do Simulator habilitado "
@@ -3098,6 +3291,7 @@ def main_loop() -> None:
     wait_for_simulator()
 
     while True:
+        _enforce_token_budget_if_needed()
         started = time.time()
         try:
             run_single_cycle()
