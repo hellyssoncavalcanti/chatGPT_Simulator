@@ -2170,6 +2170,32 @@ def _is_browser_timeout_error(exc: Exception) -> bool:
     return timeout_hint and browser_hint
 
 
+def _is_transient_stream_error(exc: Exception) -> bool:
+    """Detecta falhas transitórias de transporte no stream HTTP.
+
+    Exemplos observados em produção:
+      - ConnectionResetError(10054) / "Connection broken"
+      - chunked transfer interrompido (incomplete read)
+      - remote disconnected / protocol error temporário
+    """
+    text = str(exc or "").lower()
+    if not text:
+        return False
+    transient_hints = (
+        "connection broken",
+        "connection reset",
+        "connectionreseterror",
+        "forçado o cancelamento de uma conexão existente",
+        "remote end closed connection",
+        "remotedisconnected",
+        "protocolerror",
+        "incomplete read",
+        "chunkedencodingerror",
+        "connection aborted",
+    )
+    return any(h in text for h in transient_hints)
+
+
 def ask_chatgpt_for_plan(context: Dict[str, Any],
                          objective: str,
                          source_files: Dict[str, str],
@@ -2231,9 +2257,15 @@ def ask_chatgpt_for_plan(context: Dict[str, Any],
             break
         except Exception as exc:
             last_exc = exc
-            if _is_browser_timeout_error(exc) and req_try < BROWSER_TIMEOUT_RETRY_ATTEMPTS:
+            retryable = _is_browser_timeout_error(exc) or _is_transient_stream_error(exc)
+            if retryable and req_try < BROWSER_TIMEOUT_RETRY_ATTEMPTS:
+                reason = (
+                    "timeout no browser.py"
+                    if _is_browser_timeout_error(exc)
+                    else "falha transitória de conexão/stream"
+                )
                 log(
-                    f"⚠️ Timeout no browser.py durante diagnóstico "
+                    f"⚠️ {reason.capitalize()} durante diagnóstico "
                     f"(tentativa {req_try}/{BROWSER_TIMEOUT_RETRY_ATTEMPTS}). "
                     "Reenviando o MESMO pedido automaticamente...",
                     logging.WARNING,
@@ -2917,9 +2949,15 @@ def forward_to_codex(context: Dict[str, Any],
                 body["url"] = codex_target_url
                 time.sleep(3)
                 continue
-            if _is_browser_timeout_error(exc) and codex_try < codex_max_tries:
+            retryable = _is_browser_timeout_error(exc) or _is_transient_stream_error(exc)
+            if retryable and codex_try < codex_max_tries:
+                reason = (
+                    "timeout no browser.py"
+                    if _is_browser_timeout_error(exc)
+                    else "falha transitória de conexão/stream"
+                )
                 log(
-                    f"⚠️ Timeout no browser.py durante forward para Codex "
+                    f"⚠️ {reason.capitalize()} durante forward para Codex "
                     f"(tentativa {codex_try}/{codex_max_tries}). "
                     "Reenviando o MESMO pedido automaticamente...",
                     logging.WARNING,
