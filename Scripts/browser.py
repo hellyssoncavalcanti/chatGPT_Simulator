@@ -37,7 +37,6 @@ import re
 import os
 import queue
 import sys
-import contextvars
 import requests
 from playwright.async_api import async_playwright
 import config
