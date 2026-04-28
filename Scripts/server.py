@@ -659,10 +659,14 @@ def _acquire_python_chat_slot(request_key: str,
 
             if stream_queue is not None:
                 try:
-                    pos = (_python_chat_queue_waiting.index(request_key) + 1)
+                    waiting_pos = (_python_chat_queue_waiting.index(request_key) + 1)
                 except ValueError:
-                    pos = 1
-                total = len(_python_chat_queue_waiting) + (1 if _python_chat_queue_active else 0)
+                    waiting_pos = 1
+                active_offset = (1 if _python_chat_queue_active else 0)
+                # Posição exibida para o cliente considera também o item em execução
+                # (quando houver), refletindo a fila real de pedidos já chegados.
+                pos = waiting_pos + active_offset
+                total = len(_python_chat_queue_waiting) + active_offset
                 stream_queue.put(_queue_status_payload(remaining, pos, total, sender_label))
 
             _python_chat_queue_cond.wait(timeout=min(PYTHON_CHAT_QUEUE_TICK_SEC, remaining))

@@ -1794,6 +1794,8 @@ def _stream_chat_completion(
     def _print_inline_status(text: str) -> None:
         nonlocal inline_status_open
         try:
+            if not sys.stdout.isatty():
+                return
             normalized = re.sub(r"[\r\n\t]+", " ", _normalize_status(text)).strip()
             normalized = re.sub(r"\s{2,}", " ", normalized)
             cols = max(40, int(shutil.get_terminal_size(fallback=(120, 24)).columns))
@@ -1803,7 +1805,7 @@ def _stream_chat_completion(
                 normalized = normalized[:max_payload_len] + "..."
             rendered = f"{prefix}{normalized}"
             clear_tail = max(8, cols - len(rendered))
-            sys.stdout.write("\r" + rendered + (" " * clear_tail))
+            sys.stdout.write("\x1b[2K\r" + rendered + (" " * clear_tail))
             sys.stdout.flush()
             inline_status_open = True
         except Exception:
@@ -1813,8 +1815,11 @@ def _stream_chat_completion(
         nonlocal inline_status_open
         if inline_status_open:
             try:
+                if not sys.stdout.isatty():
+                    inline_status_open = False
+                    return
                 cols = max(40, int(shutil.get_terminal_size(fallback=(120, 24)).columns))
-                sys.stdout.write("\r" + (" " * cols) + "\r")
+                sys.stdout.write("\x1b[2K\r" + (" " * cols) + "\r")
                 sys.stdout.flush()
             except Exception:
                 pass
