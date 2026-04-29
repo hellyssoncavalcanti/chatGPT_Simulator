@@ -25,3 +25,11 @@ $analyzerPattern     = 'Scripts\\analisador_prontuarios.py'
 # Chave de API do Simulator — deve ser idêntica à SIMULATOR_API_KEY (config.py).
 # Usada para atualizar/autenticar o proxy PHP remotamente. Preencher localmente.
 $remotePhpApiKey     = ''
+
+# Sync de PHP remoto (mantém comportamento histórico do deploy automático de JS/PHP).
+# Se deixar em branco, o script usará os defaults internos.
+$remotePhpSaveUrl    = 'https://conexaovida.org/editar_php.php?action=save_file_remote'
+$remotePhpLocalFile  = 'chatgpt_integracao_criado_pelo_gemini.js.php'
+$remotePhpTargetPath = 'scripts/js/chatgpt_integracao_criado_pelo_gemini.js.php'
+$remotePhpLocalFile2  = 'chatgpt_free_openai.js.php'
+$remotePhpTargetPath2 = 'scripts/js/chatgpt_free_openai.js.php'
