@@ -3364,6 +3364,18 @@ def _is_codex_url(url: str) -> bool:
     return ("chatgpt.com/codex" in u)
 
 
+def _is_claude_code_url(url: str) -> bool:
+    """Detecta se uma URL aponta para o Claude Code (claude.ai/code...).
+
+    Aceita qualquer subcaminho de claude.ai (ex.: /code, /chat, /chats/<id>)
+    porque o auto_dev_agent reusa a URL retornada pelo browser entre ciclos.
+    """
+    if not url:
+        return False
+    u = str(url).lower()
+    return "claude.ai" in u
+
+
 def _build_locator_from_chatgpt(raw: str) -> str:
     """Extrai um seletor CSS simples de uma resposta do ChatGPT."""
     txt = (raw or "").strip()
@@ -3902,6 +3914,382 @@ async def _goto_with_recovery(page, q, url: str, *, wait_until: str = "domconten
         raise
 
 
+async def _claude_wait_for_composer(page, q, timeout_ms: int = 25000) -> str:
+    """Aguarda o composer do Claude Code aparecer e o marca para reuso.
+
+    Cobre tanto o estado "splash/New session" quanto a sessão já aberta:
+      • Procura textarea / contenteditable visível usando aria-label/role,
+        evitando dependência de literais "New session" em PT/EN.
+      • Marca o elemento com data-autodev-claude-composer="1".
+    """
+    js_locate = """() => {
+        const norm = (s) => (s || '').toLowerCase().replace(/\\s+/g, ' ').trim();
+        const isVisible = (el) => {
+            if (!el) return false;
+            if (el.disabled) return false;
+            if (el.offsetParent === null) return false;
+            const r = el.getBoundingClientRect();
+            return r.width > 4 && r.height > 4;
+        };
+        // Heurísticas combinadas:
+        //   1) <textarea aria-label="..."> contendo "claude"/"message"/"send"/"ask"/"prompt"
+        //   2) [contenteditable=true] usado pelo composer ProseMirror
+        //   3) [role="textbox"] visível
+        const candidates = [
+            ...document.querySelectorAll('textarea[aria-label]'),
+            ...document.querySelectorAll('textarea'),
+            ...document.querySelectorAll('[contenteditable="true"]'),
+            ...document.querySelectorAll('[role="textbox"]'),
+        ];
+        const ok = candidates.find(el => {
+            if (!isVisible(el)) return false;
+            const al = norm(el.getAttribute('aria-label'));
+            const ph = norm(el.getAttribute('placeholder'));
+            const txt = al + ' ' + ph;
+            if (al || ph) {
+                if (txt.includes('claude') || txt.includes('message') ||
+                    txt.includes('mensagem') || txt.includes('ask ') ||
+                    txt.includes('pergunt') || txt.includes('prompt')) return true;
+            }
+            // Sem labels: aceita textarea/contenteditable de tamanho razoável.
+            const r = el.getBoundingClientRect();
+            return r.width >= 200 && r.height >= 24;
+        });
+        if (!ok) return false;
+        ok.setAttribute('data-autodev-claude-composer', '1');
+        return true;
+    }"""
+    deadline = time.time() + max(1.0, timeout_ms / 1000.0)
+    while time.time() < deadline:
+        try:
+            ok = await page.evaluate(js_locate)
+        except Exception:
+            ok = False
+        if ok:
+            return '[data-autodev-claude-composer="1"]'
+        # "New session" pode estar visível e o composer só aparecer após click.
+        try:
+            clicked = await page.evaluate("""() => {
+                const norm = (s) => (s || '').toLowerCase().replace(/\\s+/g, ' ').trim();
+                const buttons = Array.from(document.querySelectorAll(
+                    'button, [role="button"], a'
+                ));
+                const hit = buttons.find(b => {
+                    if (b.disabled) return false;
+                    if (b.offsetParent === null) return false;
+                    const al = norm(b.getAttribute('aria-label'));
+                    const tx = norm(b.innerText || b.textContent);
+                    const all = al + ' ' + tx;
+                    if (!all) return false;
+                    if (all.includes('new session') || all.includes('new chat') ||
+                        all.includes('nova sess') || all.includes('novo chat') ||
+                        all.includes('start new') || all === 'novo' ||
+                        al === 'new' || tx === 'new') return true;
+                    return false;
+                });
+                if (!hit) return false;
+                hit.scrollIntoView({block: 'center'});
+                hit.click();
+                return true;
+            }""")
+            if clicked:
+                emit_log(q, "Claude Code: clique em 'New session'/'Nova sessão' efetuado.")
+                await asyncio.sleep(1.0)
+        except Exception:
+            pass
+        await asyncio.sleep(0.5)
+    raise RuntimeError("Composer do Claude Code não encontrado (textarea/composer ausente).")
+
+
+async def _claude_pick_project(page, q, project: str) -> bool:
+    """Abre o seletor de projeto do Claude Code e escolhe `project`.
+
+    Estratégia (resiliente a mudanças de UI):
+      1) Procura botão visível cujo aria-label/texto inclua "project" ou
+         "projeto" e clica para abrir o dropdown.
+      2) Tenta digitar o nome num input de busca (placeholder/aria-label
+         contendo "project"/"search"/"buscar").
+      3) Clica na opção cujo texto bate com `project` (case-insensitive).
+    """
+    if not project:
+        return False
+    open_js = """(project) => {
+        const norm = (s) => (s || '').toLowerCase().replace(/\\s+/g, ' ').trim();
+        const target = norm(project);
+        const buttons = Array.from(document.querySelectorAll('button, [role="button"]'));
+        const hit = buttons.find(b => {
+            if (b.disabled) return false;
+            if (b.offsetParent === null) return false;
+            const al = norm(b.getAttribute('aria-label'));
+            const tx = norm(b.innerText || b.textContent);
+            const all = al + ' ' + tx;
+            if (!all) return false;
+            if (al.includes('project') || al.includes('projeto')) return true;
+            if (tx.includes('project') || tx.includes('projeto')) return true;
+            // Botão que já mostra o nome do projeto.
+            if (all.includes(target)) return true;
+            return false;
+        });
+        if (!hit) return false;
+        hit.scrollIntoView({block: 'center'});
+        hit.click();
+        return true;
+    }"""
+    opened = False
+    for _try in range(3):
+        try:
+            opened = await page.evaluate(open_js, project)
+        except Exception:
+            opened = False
+        if opened:
+            break
+        await asyncio.sleep(0.5)
+    if not opened:
+        emit_log(q, f'⚠️ Claude: botão de seleção de projeto não localizado para "{project}".')
+        return False
+    await asyncio.sleep(0.5)
+
+    search_js = """(project) => {
+        const norm = (s) => (s || '').toLowerCase().replace(/\\s+/g, ' ').trim();
+        const inputs = Array.from(document.querySelectorAll(
+            'input[placeholder], input[type="search"], input[type="text"], input[aria-label]'
+        ));
+        const hit = inputs.find(el => {
+            if (el.offsetParent === null) return false;
+            const al = norm(el.getAttribute('aria-label'));
+            const ph = norm(el.getAttribute('placeholder'));
+            const all = al + ' ' + ph;
+            if (!all) return false;
+            return all.includes('project') || all.includes('projeto') ||
+                   all.includes('search') || all.includes('buscar') ||
+                   all.includes('filter');
+        });
+        if (!hit) return false;
+        const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+        hit.focus();
+        setter.call(hit, '');
+        hit.dispatchEvent(new Event('input', {bubbles: true}));
+        setter.call(hit, project);
+        hit.dispatchEvent(new Event('input', {bubbles: true}));
+        return true;
+    }"""
+    try:
+        await page.evaluate(search_js, project)
+    except Exception:
+        pass
+    await asyncio.sleep(0.5)
+
+    pick_js = """(project) => {
+        const norm = (s) => (s || '').toLowerCase().replace(/\\s+/g, ' ').trim();
+        const target = norm(project);
+        const nodes = Array.from(document.querySelectorAll(
+            '[role="option"], [role="menuitem"], li, button, a, div'
+        ));
+        const visible = nodes.filter(n => {
+            if (!n.offsetParent) return false;
+            const t = norm(n.innerText || n.textContent || '');
+            return t === target || t.startsWith(target) || t.includes(target);
+        });
+        visible.sort((a, b) =>
+            (norm(a.innerText || a.textContent)).length -
+            (norm(b.innerText || b.textContent)).length
+        );
+        const hit = visible[0];
+        if (!hit) return false;
+        hit.scrollIntoView({block: 'center'});
+        hit.click();
+        return true;
+    }"""
+    picked = False
+    for _try in range(4):
+        try:
+            picked = await page.evaluate(pick_js, project)
+        except Exception:
+            picked = False
+        if picked:
+            break
+        await asyncio.sleep(0.4)
+    if not picked:
+        emit_log(q, f'⚠️ Claude: opção "{project}" não localizada no dropdown.')
+        try:
+            await page.keyboard.press('Escape')
+        except Exception:
+            pass
+        return False
+    emit_log(q, f'✅ Claude: projeto selecionado: {project}')
+    await asyncio.sleep(0.4)
+    return True
+
+
+async def _claude_paste_message(page, composer_selector: str, message: str, q, activityts):
+    """Cola a mensagem no composer do Claude Code via clipboard (Ctrl+V).
+
+    Reaproveita a lógica do Codex: descarta os marcadores [INICIO_TEXTO_COLADO]
+    /[FIM_TEXTO_COLADO] (já não fazem sentido após chegar aqui) e injeta o
+    texto em chunks via clipboard, com fallback para execCommand quando
+    `navigator.clipboard.writeText` falhar (ex.: foco perdido).
+    """
+    start_marker = "[INICIO_TEXTO_COLADO]"
+    end_marker = "[FIM_TEXTO_COLADO]"
+    text = message or ""
+    if start_marker in text and end_marker in text:
+        i = text.find(start_marker) + len(start_marker)
+        j = text.rfind(end_marker)
+        text = text[i:j]
+    text = text.replace('\r\n', '\n').replace('\r', '\n')
+
+    try:
+        await page.click(composer_selector, timeout=5000)
+    except Exception:
+        await page.evaluate(
+            "(sel) => { const el = document.querySelector(sel); if (el) el.focus(); }",
+            composer_selector,
+        )
+    await asyncio.sleep(0.2)
+
+    paste_chunk_size = 3500
+    chunks = [text[i:i + paste_chunk_size] for i in range(0, len(text), paste_chunk_size)] or ['']
+    total = len(text)
+    emit_log(q, f'Claude: colando bloco ({total} chars) em {len(chunks)} parte(s)...')
+    for idx, chunk in enumerate(chunks, 1):
+        emit_event(q, 'status',
+                   f'Claude: colando parte {idx}/{len(chunks)}: {len(chunk)} chars via clipboard...')
+        if activityts:
+            activityts[0] = time.time()
+        try:
+            await page.evaluate("(t) => navigator.clipboard.writeText(t)", chunk)
+        except Exception as clip_err:
+            emit_log(q, f'Claude: clipboard.writeText falhou ({clip_err}); usando execCommand fallback.')
+            await page.evaluate(
+                """(args) => {
+                    const el = document.querySelector(args.sel);
+                    if (!el) throw new Error('composer claude ausente');
+                    el.focus();
+                    if (el.isContentEditable) {
+                        document.execCommand('insertText', false, args.text);
+                    } else {
+                        const setter = Object.getOwnPropertyDescriptor(
+                            window.HTMLTextAreaElement.prototype, 'value').set;
+                        setter.call(el, (el.value || '') + args.text);
+                        el.dispatchEvent(new InputEvent('input', {bubbles: true,
+                            inputType: 'insertText', data: args.text}));
+                    }
+                }""",
+                {"sel": composer_selector, "text": chunk},
+            )
+            await asyncio.sleep(0.1)
+            continue
+        await asyncio.sleep(0.1)
+        await page.evaluate(
+            "(sel) => { const el = document.querySelector(sel); if (el) el.focus(); }",
+            composer_selector,
+        )
+        await page.keyboard.press('Control+V')
+        await asyncio.sleep(0.2)
+
+
+async def _claude_submit(page, q) -> bool:
+    """Clica no botão de envio do Claude Code (aria-label send/enviar)."""
+    submit_js = """() => {
+        const norm = (s) => (s || '').toLowerCase().replace(/\\s+/g, ' ').trim();
+        const buttons = Array.from(document.querySelectorAll('button, [role="button"]'));
+        const hit = buttons.find(b => {
+            if (b.disabled) return false;
+            if (b.offsetParent === null) return false;
+            const al = norm(b.getAttribute('aria-label'));
+            const tt = norm(b.getAttribute('title'));
+            const dt = norm(b.getAttribute('data-testid'));
+            const all = al + ' ' + tt + ' ' + dt;
+            if (!all) return false;
+            return all.includes('send') || all.includes('enviar') ||
+                   all.includes('submit') || dt.includes('send');
+        });
+        if (!hit) return false;
+        hit.scrollIntoView({block: 'center'});
+        hit.click();
+        return true;
+    }"""
+    for _try in range(5):
+        try:
+            ok = await page.evaluate(submit_js)
+        except Exception:
+            ok = False
+        if ok:
+            return True
+        try:
+            await page.keyboard.press('Control+Enter')
+            return True
+        except Exception:
+            pass
+        await asyncio.sleep(0.4)
+    return False
+
+
+async def handle_claude_code_task_inner(task, page, q, stop_event, activityts=None):
+    """Fluxo dedicado ao Claude Code (https://claude.ai/code):
+      1) Navega para a URL de claude.ai.
+      2) Garante o composer ativo (clicando em "New session" se necessário).
+      3) Seleciona o projeto chatGPT_Simulator no dropdown (quando informado).
+      4) Cola a mensagem via clipboard (Ctrl+V).
+      5) Submete o pedido e devolve uma confirmação JSON simples.
+    """
+    url = task.get('url') or 'https://claude.ai/code'
+    msg = task.get('message') or ''
+    project = task.get('claude_project') or ''
+
+    emit_log(q, f'Claude Code: abrindo {url}')
+    page = await _goto_with_recovery(
+        page, q, url,
+        wait_until='domcontentloaded',
+        timeout=30000,
+        reason="goto inicial Claude Code",
+    )
+    await asyncio.sleep(1.2)
+
+    if stop_event.is_set():
+        raise RuntimeError('Watchdog sinalizou falha antes do composer Claude Code.')
+
+    composer_sel = await _claude_wait_for_composer(page, q, timeout_ms=25000)
+
+    if project:
+        try:
+            await _claude_pick_project(page, q, project)
+        except Exception as exc:
+            emit_log(q, f'⚠️ Claude: erro ao selecionar projeto "{project}": {exc}')
+        # Após selecionar o projeto, o composer pode ser re-renderizado.
+        try:
+            composer_sel = await _claude_wait_for_composer(page, q, timeout_ms=10000)
+        except Exception:
+            pass
+
+    if stop_event.is_set():
+        raise RuntimeError('Watchdog sinalizou falha antes do paste Claude Code.')
+
+    await _claude_paste_message(page, composer_sel, msg, q, activityts)
+    await asyncio.sleep(0.4)
+
+    submitted = await _claude_submit(page, q)
+    if not submitted:
+        emit_event(q, 'error', 'Claude Code: não foi possível clicar em Enviar.')
+        return
+
+    emit_log(q, 'Claude Code: mensagem enviada.')
+    final_url = page.url or url
+    emit_event(q, 'chat_meta', {
+        'chat_id': task.get('chat_id'),
+        'url': final_url,
+        'source': 'claude_code_session',
+    })
+    confirmation = (
+        '{"analysis": "Pedido entregue ao Claude Code ('
+        + final_url
+        + '). Implementação ocorre na sessão remota — o agente local apenas registra o envio.",'
+        + ' "claude_flow_status": "submitted", "actions": []}'
+    )
+    emit_event(q, 'markdown', confirmation)
+    emit_event(q, 'finish', {'url': final_url, 'title': 'Claude Code Session'})
+
+
 async def handle_codex_task_inner(task, page, q, stop_event, activityts=None):
     """Fluxo dedicado ao Codex (chatgpt.com/codex/cloud):
       1) Navega para a Codex URL.
@@ -4057,6 +4445,10 @@ async def handle_chat_task_inner(task, page, q, stop_event: asyncio.Event, activ
     _url_for_routing = task.get('url') or ''
     if _is_codex_url(_url_for_routing):
         await handle_codex_task_inner(task, page, q, stop_event, activityts)
+        return
+    # Roteia para o fluxo dedicado do Claude Code (https://claude.ai/...).
+    if _is_claude_code_url(_url_for_routing):
+        await handle_claude_code_task_inner(task, page, q, stop_event, activityts)
         return
 
     url    = task.get('url')

@@ -165,6 +165,26 @@ CODEX_MIN_WAIT_SEC = int(_env("AUTODEV_AGENT_CODEX_MIN_WAIT_SEC", "600"))
 # indefinidamente se o Codex travar ou se o PR for fechado manualmente.
 CODEX_MAX_WAIT_SEC = int(_env("AUTODEV_AGENT_CODEX_MAX_WAIT_SEC", "2400"))
 
+# Claude Code (https://claude.ai/code) — destino opcional para o pedido
+# direto (REQUEST_TARGET="claude"). O browser.py reconhece a URL, abre o
+# site no perfil default do Chromium, clica em "New session" via aria-label,
+# escolhe o projeto correto no dropdown e cola a mensagem.
+CLAUDE_CODE_URL = _env("AUTODEV_AGENT_CLAUDE_CODE_URL", "https://claude.ai/code")
+CLAUDE_CODE_PROJECT = _env("AUTODEV_AGENT_CLAUDE_CODE_PROJECT", "chatGPT_Simulator")
+
+# Destino do pedido emitido a cada ciclo:
+#   "chatgpt" → fluxo legado (ChatGPT comum + forward para Codex se preciso).
+#   "codex"   → envia direto ao ChatGPT Codex com prompt focado em REFACTOR_PROGRESS.md.
+#   "claude"  → idem "codex", porém entrega ao Claude Code (claude.ai/code).
+# Lê primeiro a env var; se ausente, lê config.AUTODEV_REQUEST_TARGET; default = "chatgpt".
+_CFG_REQUEST_TARGET = (
+    str(getattr(config, "AUTODEV_REQUEST_TARGET", "chatgpt") or "chatgpt").strip().lower()
+    if config else "chatgpt"
+)
+REQUEST_TARGET = _env("AUTODEV_REQUEST_TARGET", _CFG_REQUEST_TARGET).strip().lower()
+if REQUEST_TARGET not in {"chatgpt", "codex", "claude"}:
+    REQUEST_TARGET = "chatgpt"
+
 SIMULATOR_MODEL = _env("AUTODEV_AGENT_MODEL", "ChatGPT Simulator", "AUTON_AGENT_MODEL")
 _CFG_API_KEY = getattr(config, "API_KEY", "") if config else ""
 API_KEY = _env("AUTODEV_AGENT_API_KEY", _CFG_API_KEY, "AUTON_AGENT_API_KEY")
@@ -435,6 +455,10 @@ class AgentState:
     # novo trabalho ao Codex enquanto houver uma tarefa destas em aberto.
     codex_pending_task_url: Optional[str] = None
     codex_pending_started_at: float = 0.0
+    # Sessão Claude Code (claude.ai/code) — separada das demais para
+    # permitir REQUEST_TARGET="claude" sem contaminar chats Codex/ChatGPT.
+    claude_chat_id: Optional[str] = None
+    claude_chat_url: Optional[str] = None
     last_suggestion_ts: float = 0.0     # timestamp da última rodada proativa
     cycles_total: int = 0               # total de ciclos executados
     cycles_with_errors: int = 0         # ciclos que detectaram incidentes
@@ -2741,6 +2765,115 @@ def _collect_pending_suggestions(results: List[ActionResult],
     return pieces
 
 
+def _load_refactor_progress(max_chars: int = 12000) -> str:
+    """Lê o REFACTOR_PROGRESS.md atual (truncado) para alimentar prompts diretos.
+
+    Retorna string vazia quando o arquivo não existe ou não pode ser lido —
+    o prompt seguirá funcional sem ele.
+    """
+    path = ROOT_DIR / "REFACTOR_PROGRESS.md"
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except FileNotFoundError:
+        return ""
+    except Exception as exc:
+        log(f"⚠️ Falha ao ler REFACTOR_PROGRESS.md: {exc}", logging.WARNING)
+        return ""
+    if max_chars > 0 and len(text) > max_chars:
+        head = text[: max_chars // 2]
+        tail = text[-max_chars // 2 :]
+        text = f"{head}\n\n... [REFACTOR_PROGRESS.md truncado para caber no prompt] ...\n\n{tail}"
+    return text
+
+
+def _build_direct_target_prompt(target: str,
+                                context: Dict[str, Any],
+                                source_files: Dict[str, str],
+                                objective: str) -> str:
+    """Constrói o prompt enviado DIRETAMENTE ao Codex/Claude (modos 2 e 3).
+
+    Diferente de `_build_user_prompt`, este prompt não pede um JSON de plano:
+    ele orienta o agente remoto a (a) prosseguir com o REFACTOR_PROGRESS.md e
+    (b) aplicar outras melhorias úteis usando o contexto enviado.
+    """
+    target_label = "Claude Code" if target == "claude" else "ChatGPT Codex"
+    refactor_md = _load_refactor_progress()
+    ctx_for_prompt = {
+        k: v for k, v in context.items()
+        if k in {"timestamp", "platform", "services", "incidents",
+                 "log_excerpts", "file_index", "traceback_files", "metrics"}
+    }
+    ctx_json = json.dumps(ctx_for_prompt, ensure_ascii=False)
+
+    parts: List[str] = []
+    parts.append(
+        f"Você é um engenheiro sênior assumindo a próxima rodada de manutenção "
+        f"contínua do projeto ChatGPT_Simulator via {target_label}.\n"
+    )
+    parts.append(
+        "OBJETIVO PRINCIPAL DESTE CICLO:\n"
+        "  1) Avançar a execução do REFACTOR_PROGRESS.md — escolha o próximo "
+        "passo pendente mais relevante e implemente-o por completo, sem deixar "
+        "TODOs ou trechos parciais.\n"
+        "  2) Em seguida, sugira e aplique outras melhorias que julgar úteis "
+        "com base no contexto abaixo (logs, incidentes recentes, código-fonte, "
+        "serviços ativos). Priorize robustez, observabilidade e correção de "
+        "bugs reais antes de refactors estéticos.\n"
+        "  3) Atualize o próprio REFACTOR_PROGRESS.md marcando o que foi "
+        "concluído neste ciclo e detalhando o que ficou pendente para o "
+        "próximo.\n"
+    )
+    parts.append(
+        "REGRAS DE SEGURANÇA (mesmas do agente local):\n"
+        "  • NUNCA edite Scripts/config.py nem caminhos em .git/, certs/, db/, "
+        "logs/, chrome_profile/.\n"
+        "  • Não emita comandos destrutivos (rm -rf, git reset --hard, "
+        "shutdown, format, dd, DROP TABLE, kill -9 1, chmod 777 -R).\n"
+        "  • Mudanças de código devem manter a suíte de testes verde "
+        "(`python3 -m pytest -q`).\n"
+    )
+    parts.append(f"OBJETIVO ESPECÍFICO DETECTADO PELO AGENTE LOCAL:\n{objective}\n")
+
+    if refactor_md:
+        parts.append(
+            "ESTADO ATUAL DO REFACTOR_PROGRESS.md (use como roadmap principal):\n"
+            "--- BEGIN FILE: REFACTOR_PROGRESS.md ---\n"
+            f"{refactor_md}\n"
+            "--- END FILE: REFACTOR_PROGRESS.md ---\n"
+        )
+    else:
+        parts.append(
+            "OBSERVAÇÃO: REFACTOR_PROGRESS.md não pôde ser lido neste ciclo — "
+            "use o contexto abaixo como única fonte para escolher próximas ações.\n"
+        )
+
+    parts.append("CONTEXTO DE EXECUÇÃO (JSON com serviços, incidentes, logs, métricas):\n" + ctx_json + "\n")
+
+    if source_files:
+        parts.append("CÓDIGO-FONTE RELEVANTE (use trechos exatos daqui ao editar):\n")
+        for rel, content in source_files.items():
+            parts.append(f"--- BEGIN FILE: {rel} ---\n{content}\n--- END FILE: {rel} ---\n")
+
+    if target == "claude":
+        parts.append(
+            "INSTRUÇÕES FINAIS PARA O CLAUDE CODE:\n"
+            "  • Trabalhe diretamente no projeto chatGPT_Simulator já selecionado "
+            "nesta sessão.\n"
+            "  • Faça commits claros e push para o branch de trabalho atual.\n"
+            "  • Não há necessidade de responder em JSON — implemente as mudanças "
+            "no repositório e deixe o resumo do que foi feito como mensagem final.\n"
+        )
+    else:
+        parts.append(
+            "INSTRUÇÕES FINAIS PARA O CODEX:\n"
+            "  • Trabalhe no ambiente/repositório já selecionado para chatGPT_Simulator.\n"
+            "  • Implemente as alterações e abra o PR/atualize a branch ao final.\n"
+            "  • Não há necessidade de responder em JSON — basta executar e deixar o "
+            "resumo do que foi feito como mensagem final.\n"
+        )
+    return "\n".join(parts)
+
+
 def _codex_task_looks_pending() -> Tuple[bool, str]:
     """Verifica se a última tarefa enviada ao Codex ainda está em execução.
 
@@ -3039,6 +3172,225 @@ def forward_to_codex(context: Dict[str, Any],
     return plan
 
 
+def forward_to_claude_code(context: Dict[str, Any],
+                           source_files: Dict[str, str],
+                           objective: str) -> Optional[Dict[str, Any]]:
+    """Envia um pedido DIRETO ao Claude Code (https://claude.ai/code).
+
+    Diferente de forward_to_codex, este envio:
+      • Não exige sugestões pendentes — é o ponto de entrada do REQUEST_TARGET="claude".
+      • Reusa a sessão Claude entre ciclos quando possível.
+      • O browser.py é responsável por abrir o site, clicar em "New session"
+        (quando não há sessão ativa), escolher o projeto chatGPT_Simulator e
+        colar o texto encapsulado por [INICIO_TEXTO_COLADO]…[FIM_TEXTO_COLADO].
+    """
+    if not simulator_is_ready():
+        return None
+
+    direct_prompt = _build_direct_target_prompt("claude", context, source_files, objective)
+    direct_prompt = _strip_paste_marker_instructions(direct_prompt)
+    wrapped = _wrap_for_paste(direct_prompt)
+
+    target_url = CLAUDE_CODE_URL or "https://claude.ai/code"
+    body: Dict[str, Any] = {
+        "model": SIMULATOR_MODEL,
+        "message": wrapped,
+        "messages": [{"role": "user", "content": wrapped}],
+        "temperature": 0.2,
+        "request_source": "auto_dev_agent.py/claude",
+        "origin_url": target_url,
+        "claude_project": CLAUDE_CODE_PROJECT,
+    }
+    if _AGENT_STATE.claude_chat_id and _AGENT_STATE.claude_chat_url \
+            and _AGENT_STATE.claude_chat_url.startswith("https://claude.ai/"):
+        body["chat_id"] = _AGENT_STATE.claude_chat_id
+        body["url"] = _AGENT_STATE.claude_chat_url
+    else:
+        body["url"] = target_url
+
+    log(f"🟣 Direct-to-Claude ({target_url}): pedindo execução do REFACTOR_PROGRESS.md "
+        f"+ melhorias contextuais.")
+
+    markdown = ""
+    chat_id = None
+    chat_url = None
+    last_exc: Optional[Exception] = None
+    max_tries = max(2, BROWSER_TIMEOUT_RETRY_ATTEMPTS)
+    for try_n in range(1, max_tries + 1):
+        try:
+            markdown, chat_id, chat_url = _stream_chat_completion(
+                body,
+                label="Claude Code",
+                apply_chat_spacing=False,
+            )
+            last_exc = None
+            break
+        except Exception as exc:
+            last_exc = exc
+            retryable = _is_browser_timeout_error(exc) or _is_transient_stream_error(exc)
+            if retryable and try_n < max_tries:
+                reason = (
+                    "timeout no browser.py"
+                    if _is_browser_timeout_error(exc)
+                    else "falha transitória de conexão/stream"
+                )
+                log(
+                    f"⚠️ {reason.capitalize()} durante envio ao Claude Code "
+                    f"(tentativa {try_n}/{max_tries}). Reenviando...",
+                    logging.WARNING,
+                )
+                time.sleep(2)
+                continue
+            break
+    if last_exc is not None:
+        log(f"❌ Direct-to-Claude falhou: {last_exc}", logging.ERROR)
+        return None
+
+    if chat_url and chat_url.startswith("https://claude.ai/"):
+        _AGENT_STATE.claude_chat_url = chat_url
+        if chat_id:
+            _AGENT_STATE.claude_chat_id = chat_id
+        _save_state()
+    elif chat_url:
+        log(
+            f"⚠️ Direct-to-Claude: URL retornada ({chat_url}) NÃO é claude.ai. "
+            "Descartando chat_id Claude para forçar nova navegação no próximo ciclo.",
+            logging.WARNING,
+        )
+        _AGENT_STATE.claude_chat_id = None
+        _AGENT_STATE.claude_chat_url = None
+        _save_state()
+
+    return {
+        "analysis": (
+            "Pedido entregue ao Claude Code "
+            f"({chat_url or target_url}). "
+            "Implementação ocorre na sessão remota; este ciclo apenas registra o envio."
+        ),
+        "actions": [],
+    }
+
+
+def forward_to_codex_direct(context: Dict[str, Any],
+                            source_files: Dict[str, str],
+                            objective: str) -> Optional[Dict[str, Any]]:
+    """Envia um pedido DIRETO ao ChatGPT Codex sem passar pelo ChatGPT comum.
+
+    Reutiliza toda a infra do `forward_to_codex` (incluindo seleção do repo
+    no dropdown e detecção de tarefa pendente) — a única diferença é o prompt
+    construído por `_build_direct_target_prompt`, focado em REFACTOR_PROGRESS.md.
+    """
+    if not simulator_is_ready():
+        return None
+
+    is_pending, reason = _codex_task_looks_pending()
+    if is_pending and CODEX_BLOCK_WHILE_PENDING:
+        log(f"⏸️  Direct-to-Codex pulado: {reason}")
+        return None
+    if is_pending and not CODEX_BLOCK_WHILE_PENDING:
+        log(
+            "ℹ️ Tarefa Codex anterior ainda parece pendente, "
+            "mas envio paralelo está habilitado; encaminhando novo pedido."
+        )
+
+    direct_prompt = _build_direct_target_prompt("codex", context, source_files, objective)
+    direct_prompt = _strip_paste_marker_instructions(direct_prompt)
+    wrapped = _wrap_for_paste(direct_prompt)
+
+    codex_target_url = CODEX_URL or "https://chatgpt.com/codex/cloud"
+    body: Dict[str, Any] = {
+        "model": SIMULATOR_MODEL,
+        "message": wrapped,
+        "messages": [{"role": "user", "content": wrapped}],
+        "temperature": 0.2,
+        "request_source": "auto_dev_agent.py/codex_direct",
+        "origin_url": codex_target_url,
+        "codex_repo": CODEX_REPO,
+    }
+    if CODEX_REUSE_CHAT and _AGENT_STATE.codex_chat_id and _AGENT_STATE.codex_chat_url \
+            and _AGENT_STATE.codex_chat_url.startswith(codex_target_url):
+        body["chat_id"] = _AGENT_STATE.codex_chat_id
+        body["url"] = _AGENT_STATE.codex_chat_url
+    else:
+        body["url"] = codex_target_url
+
+    log(f"🟢 Direct-to-Codex ({codex_target_url}): pedindo execução do "
+        f"REFACTOR_PROGRESS.md + melhorias contextuais.")
+
+    markdown = ""
+    chat_id = None
+    chat_url = None
+    last_exc: Optional[Exception] = None
+    codex_max_tries = max(2, BROWSER_TIMEOUT_RETRY_ATTEMPTS)
+    for codex_try in range(1, codex_max_tries + 1):
+        try:
+            markdown, chat_id, chat_url = _stream_chat_completion(
+                body,
+                label="ChatGPT Codex (direct)",
+                apply_chat_spacing=False,
+            )
+            last_exc = None
+            break
+        except Exception as exc:
+            last_exc = exc
+            exc_txt = str(exc)
+            composer_missing = (
+                "Composer do Codex não encontrado" in exc_txt
+                or "placeholder /plan ausente" in exc_txt
+            )
+            if composer_missing and codex_try < codex_max_tries:
+                log("⚠️ Composer do Codex ausente; limpando sessão e tentando reconexão.",
+                    logging.WARNING)
+                _AGENT_STATE.codex_chat_id = None
+                _AGENT_STATE.codex_chat_url = None
+                _save_state()
+                body.pop("chat_id", None)
+                body["url"] = codex_target_url
+                time.sleep(3)
+                continue
+            retryable = _is_browser_timeout_error(exc) or _is_transient_stream_error(exc)
+            if retryable and codex_try < codex_max_tries:
+                log("⚠️ Falha transitória durante direct-to-Codex; reenviando...",
+                    logging.WARNING)
+                time.sleep(2)
+                continue
+            break
+    if last_exc is not None:
+        log(f"❌ Direct-to-Codex falhou: {last_exc}", logging.ERROR)
+        return None
+
+    if CODEX_REUSE_CHAT:
+        if chat_url and chat_url.startswith(codex_target_url):
+            _AGENT_STATE.codex_chat_url = chat_url
+            if chat_id:
+                _AGENT_STATE.codex_chat_id = chat_id
+            _save_state()
+        else:
+            if chat_url:
+                log(f"⚠️ Direct-to-Codex: URL retornada ({chat_url}) NÃO é do "
+                    f"Codex ({codex_target_url}); descartando chat_id Codex.",
+                    logging.WARNING)
+            _AGENT_STATE.codex_chat_id = None
+            _AGENT_STATE.codex_chat_url = None
+            _save_state()
+
+    plan = _extract_json_object(markdown or "") or {}
+    codex_flow_status = str(plan.get("codex_flow_status") or "").strip().lower()
+    if codex_flow_status in {"final_controls_clicked", "final_controls_detected"}:
+        _clear_codex_pending_task(reason=codex_flow_status)
+    else:
+        _record_codex_pending_task(chat_url)
+
+    return {
+        "analysis": (
+            "Pedido entregue ao ChatGPT Codex "
+            f"({chat_url or codex_target_url}). "
+            "Implementação/PR ocorre na tarefa remota; este ciclo apenas registra o envio."
+        ),
+        "actions": [],
+    }
+
+
 def run_single_cycle() -> None:
     _AGENT_STATE.cycles_total += 1
     context = collect_runtime_context()
@@ -3047,6 +3399,26 @@ def run_single_cycle() -> None:
     has_errors = any(i.get("level") == "error" for i in context.get("incidents", []))
     time_for_suggestion = (time.time() - _AGENT_STATE.last_suggestion_ts) >= SUGGESTION_INTERVAL_SEC
 
+    # Modos diretos (Codex/Claude) disparam em TODO ciclo: o agente remoto
+    # atua de forma assíncrona, então o gating local de incidentes/sugestão
+    # do fluxo ChatGPT não se aplica.
+    if REQUEST_TARGET in {"codex", "claude"}:
+        if has_errors:
+            _AGENT_STATE.cycles_with_errors += 1
+        _AGENT_STATE.last_suggestion_ts = time.time()
+
+        src_budget = max(8000, int(MAX_CONTEXT_CHARS * 0.8))
+        source_files = select_relevant_source_files(context, src_budget)
+        objective = _objective_for_cycle(has_errors, _summarize_incidents(context))
+
+        if REQUEST_TARGET == "claude":
+            forward_to_claude_code(context, source_files, objective)
+        else:
+            forward_to_codex_direct(context, source_files, objective)
+        _save_state()
+        return
+
+    # === Modo legado: REQUEST_TARGET == "chatgpt" ===
     if not has_errors and not time_for_suggestion:
         log("⌛ Nenhum incidente e intervalo de sugestão não atingido; pulando consulta.")
         _save_state()
@@ -3340,6 +3712,8 @@ def main_loop() -> None:
     log(f"📄 Log: {AGENT_LOG}")
     log(f"🔗 Simulator URL: {SIMULATOR_URL}")
     log(f"🔗 Codex URL: {CODEX_URL or '(novo chat a cada ciclo de conversa)'}")
+    log(f"🎯 REQUEST_TARGET: {REQUEST_TARGET} "
+        f"(claude_url={CLAUDE_CODE_URL}, claude_project={CLAUDE_CODE_PROJECT})")
     log(f"🧭 Plataforma: {platform.system()} {platform.release()} | Python {sys.version.split(' ',1)[0]}")
     log(f"⚙️ AUTOFIX={ENABLE_AUTOFIX} AUTOCOMMIT={ENABLE_AUTOCOMMIT} AUTOPUSH={ENABLE_AUTOPUSH}")
     if TOKEN_BUDGET_PER_WINDOW > 0:

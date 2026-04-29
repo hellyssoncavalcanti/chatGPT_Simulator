@@ -2213,6 +2213,10 @@ def chat_completions():
         # https://chatgpt.com/codex/cloud antes do paste da mensagem.
         # Opcional — quando ausente, browser.py usa a seleção atual do UI.
         codex_repo=data.get('codex_repo'),
+        # Claude Code: projeto a ser escolhido após "New session" em
+        # https://claude.ai/code. Opcional — quando ausente, o browser.py
+        # mantém a seleção atual e/ou tenta reutilizar a sessão ativa.
+        claude_project=data.get('claude_project'),
         # Perfil Chromium alvo (ex.: "default", "segunda_chance"). Opcional.
         # browser.py resolve contra config.CHROMIUM_PROFILES; valor ausente
         # ou chave inválida → fallback para "default" (perfil compartilhado).

@@ -105,6 +105,14 @@ REQUEST_TIMEOUT_SEC = _env_int(
 )
 AUTODEV_AGENT_REQUEST_TIMEOUT = REQUEST_TIMEOUT_SEC
 
+# Destino do pedido emitido a cada ciclo do auto_dev_agent.py. Três opções:
+#   "chatgpt" → fluxo legado: pergunta primeiro ao ChatGPT comum e, se preciso,
+#               encaminha ao Codex automaticamente.
+#   "codex"   → envia o pedido DIRETAMENTE ao ChatGPT Codex, com prompt
+#               orientado a prosseguir com REFACTOR_PROGRESS.md.
+#   "claude"  → idem "codex", porém entregue ao Claude Code (https://claude.ai/code).
+AUTODEV_REQUEST_TARGET = _env("AUTODEV_REQUEST_TARGET", "chatgpt")  # "chatgpt" | "codex" | "claude"
+
 # GitHub sync — preencha via env var ou edite após a cópia inicial.
 GITHUB_TOKEN = _env("CHATGPT_SIMULATOR_GITHUB_TOKEN", "")
 GH_USER = _env("CHATGPT_SIMULATOR_GITHUB_USER", "")
