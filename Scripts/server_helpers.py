@@ -1152,6 +1152,7 @@ def build_chat_task_payload(
     stream_queue,
     codex_repo,
     effective_browser_profile,
+    claude_project=None,
 ) -> dict:
     """Monta o dicionário enviado ao `browser_queue` em `chat_completions`.
 
@@ -1187,6 +1188,7 @@ def build_chat_task_payload(
         'attachment_paths': saved_paths,
         'stream_queue':     stream_queue,
         'codex_repo':       normalize_optional_text(codex_repo),
+        'claude_project':   normalize_optional_text(claude_project),
         'browser_profile':  effective_browser_profile,
     }
 

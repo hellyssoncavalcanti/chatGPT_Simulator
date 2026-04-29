@@ -134,6 +134,21 @@ REQUEST_TIMEOUT_SEC = _env_int(
 # Alias explícito para manter compatibilidade com scripts legados.
 AUTODEV_AGENT_REQUEST_TIMEOUT = REQUEST_TIMEOUT_SEC
 
+# Destino do pedido emitido a cada ciclo do auto_dev_agent.py. Três opções:
+#   "chatgpt" → fluxo legado: pergunta primeiro ao ChatGPT comum (browser.py
+#               via /v1/chat/completions); se a resposta vier com sugestões/
+#               actions vazias, encaminha automaticamente ao Codex.
+#   "codex"   → envia o pedido DIRETAMENTE ao ChatGPT Codex (sem passar pelo
+#               diagnóstico do ChatGPT comum). O prompt já vem orientado a
+#               prosseguir com REFACTOR_PROGRESS.md e a propor outras
+#               melhorias úteis a partir do contexto coletado.
+#   "claude"  → mesmo comportamento do "codex", porém o pedido é entregue ao
+#               Claude Code (https://claude.ai/code) no perfil default do
+#               navegador. O browser.py abre o site, clica em "New session",
+#               escolhe o projeto "chatGPT_Simulator" no seletor e cola o
+#               texto encapsulado por [INICIO_TEXTO_COLADO]…[FIM_TEXTO_COLADO].
+AUTODEV_REQUEST_TARGET = _env("AUTODEV_REQUEST_TARGET", "chatgpt")  # "chatgpt" | "codex" | "claude"
+
 # GitHub sync (compatibilidade com scripts legados que liam credenciais daqui)
 GITHUB_TOKEN = _env("CHATGPT_SIMULATOR_GITHUB_TOKEN", "")
 GH_USER = _env("CHATGPT_SIMULATOR_GITHUB_USER", "hellyssoncavalcanti")

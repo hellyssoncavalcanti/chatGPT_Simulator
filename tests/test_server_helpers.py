@@ -1358,6 +1358,12 @@ class TestBuildChatTaskPayload:
         assert self._payload(codex_repo="   ")["codex_repo"] is None
         assert self._payload(codex_repo=None)["codex_repo"] is None
 
+    def test_claude_project_normalized(self):
+        assert self._payload(claude_project="  chatGPT_Simulator  ")["claude_project"] == "chatGPT_Simulator"
+        assert self._payload(claude_project="")["claude_project"] is None
+        assert self._payload(claude_project="   ")["claude_project"] is None
+        assert self._payload()["claude_project"] is None
+
     def test_browser_profile_passed_through(self):
         out = self._payload(effective_browser_profile="segunda_chance")
         assert out["browser_profile"] == "segunda_chance"
@@ -1374,10 +1380,11 @@ class TestBuildChatTaskPayload:
     def test_all_historical_keys_present(self):
         out = self._payload()
         # Conjunto exato de chaves que o `browser.py` consome historicamente.
+        # `claude_project` foi acrescentado com o suporte a REQUEST_TARGET="claude".
         assert set(out.keys()) == {
             "action", "url", "chat_id", "message", "is_analyzer",
             "sender", "request_source", "attachment_paths", "stream_queue",
-            "codex_repo", "browser_profile",
+            "codex_repo", "claude_project", "browser_profile",
         }
 
 
