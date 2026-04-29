@@ -1754,6 +1754,8 @@ def _stream_chat_completion(
     last_status_logged: str = ""
     in_wait_countdown = False
     last_wait_mmss = ""
+    in_python_interval_countdown = False
+    last_python_interval_eta = ""
     in_queue_countdown = False
     last_queue_eta = ""
     last_markdown_size_reported = -1
@@ -1780,6 +1782,15 @@ def _stream_chat_completion(
     def _extract_wait_mmss(text: str) -> Optional[str]:
         m = re.search(r"nova tentativa em\s*([0-9]{1,2}:[0-9]{2})", text or "", flags=re.IGNORECASE)
         return m.group(1) if m else None
+
+    def _extract_wait_seconds(text: str) -> Optional[int]:
+        m = re.search(r"aguardando\s*([0-9]{1,6})s", text or "", flags=re.IGNORECASE)
+        if not m:
+            return None
+        try:
+            return max(0, int(m.group(1)))
+        except Exception:
+            return None
 
     def _fmt_eta_from_seconds(seconds: Optional[float]) -> str:
         try:
@@ -1871,6 +1882,28 @@ def _stream_chat_completion(
                 log("✅ Fila interna liberada; seguindo processamento do pedido.")
                 in_queue_countdown = False
                 last_queue_eta = ""
+
+            anti_rate_secs = _extract_wait_seconds(text)
+            is_python_anti_rate = ("intervalo anti-rate-limit para pedidos python" in text.lower())
+            if is_python_anti_rate and anti_rate_secs is not None:
+                if not in_python_interval_countdown:
+                    _close_inline_status()
+                    log(
+                        f"⏳ Intervalo anti-rate-limit detectado em {label}; "
+                        "mantendo countdown inline até liberação."
+                    )
+                    in_python_interval_countdown = True
+                    last_python_interval_eta = ""
+                eta = _fmt_eta_from_seconds(anti_rate_secs)
+                if eta != last_python_interval_eta:
+                    _print_inline_status(f"Intervalo anti-rate-limit (Python) | liberação em {eta}")
+                    last_python_interval_eta = eta
+                continue
+            if in_python_interval_countdown:
+                _close_inline_status()
+                log("✅ Intervalo anti-rate-limit concluído; retomando fluxo normal.")
+                in_python_interval_countdown = False
+                last_python_interval_eta = ""
 
             wait_mmss = _extract_wait_mmss(text)
             if wait_mmss:
