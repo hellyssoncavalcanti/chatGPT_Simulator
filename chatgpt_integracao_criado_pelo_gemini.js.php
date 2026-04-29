@@ -4872,6 +4872,25 @@ Responder SOMENTE com o JSON.`;
         wrapper.insertBefore(actionBar, wrapper.firstChild);
     }
 
+    // Detecta SQL diretamente em <pre><code> renderizados (sem precisar de backticks
+    // no texto), retornando { queries, target } se encontrar.
+    function _extractSQLFromRenderedBubble(bubble) {
+        const codeNodes = bubble.querySelectorAll('pre code, pre');
+        const SQL_HEAD  = /^\s*(SELECT|WITH|INSERT|UPDATE|DELETE|REPLACE|SHOW|DESCRIBE|EXPLAIN)\b/i;
+        const queries = [];
+        let firstTarget = null;
+        for (const node of codeNodes) {
+            const raw = (node.textContent || '').trim();
+            if (!raw) continue;
+            // Remove cabeçalho "SQL" no topo, caso o markdown malformado tenha sobrado.
+            const cleaned = raw.replace(/^\s*SQL\s*\n+/i, '').replace(/^\s*;+|;+\s*$/g, '').trim();
+            if (!cleaned || !SQL_HEAD.test(cleaned)) continue;
+            queries.push({ query: cleaned, reason: 'Consulta solicitada pela IA' });
+            if (!firstTarget) firstTarget = (node.tagName.toLowerCase() === 'code' ? node.parentElement || node : node);
+        }
+        return queries.length ? { queries, target: firstTarget } : null;
+    }
+
     function injectSQLButtons() {
         const container = document.getElementById('ow-messages') || document.body;
         const assistantBubbles = container.querySelectorAll('.msg-ai');
@@ -4881,7 +4900,19 @@ Responder SOMENTE com o JSON.`;
             if (!sourceText) return;
             if (sourceText.length > 120000) return;
 
-            const sqlQueries = extractSQLFromResponse(sourceText);
+            let sqlQueries = extractSQLFromResponse(sourceText);
+            let preferredTarget = null;
+
+            // Fallback: a extração baseada em backticks falha quando o texto vem
+            // de innerText (já renderizado). Procura SQL em <pre><code> direto.
+            if (!sqlQueries || sqlQueries.length === 0) {
+                const fromDom = _extractSQLFromRenderedBubble(bubble);
+                if (fromDom) {
+                    sqlQueries = fromDom.queries;
+                    preferredTarget = fromDom.target;
+                }
+            }
+
             if (!sqlQueries || sqlQueries.length === 0) return;
 
             // Assinatura simples do payload para evitar duplicidade após reload/sync.
@@ -4891,7 +4922,7 @@ Responder SOMENTE com o JSON.`;
             }
 
             // Encontrar o melhor alvo visual para anexar a barra.
-            let target = bubble.querySelector('pre');
+            let target = preferredTarget || bubble.querySelector('pre');
             if (!target) {
                 target = bubble.querySelector('code');
             }
@@ -5124,8 +5155,28 @@ Responder SOMENTE com o JSON.`;
         return html;
     }
 
+    // Algumas respostas do ChatGPT chegam com a SQL "explodida" em quatro fences:
+    //   ```\nSQL\n\n```\n<corpo SELECT>\n```\n```
+    // O que faz o corpo ficar fora de qualquer code-fence (vira parágrafo com <br>).
+    // Aqui detectamos esse padrão e reconstruimos um bloco ```sql ... ``` válido
+    // antes do parser de markdown e antes da extração de SQL.
+    function _normalizeMalformedSQLBlocks(text) {
+        if (!text || typeof text !== 'string' || text.indexOf('```') === -1) return text;
+        const fence = /```[ \t]*\r?\n[ \t]*(SQL|MYSQL|MySQL|sql|mysql|Sql|MySql|PSQL|psql|PgSQL|pgsql)[ \t]*\r?\n(?:[ \t]*\r?\n)*```[ \t]*\r?\n([\s\S]*?)\r?\n[ \t]*```[ \t]*\r?\n[ \t]*```/g;
+        return text.replace(fence, (_m, _lang, body) => {
+            const cleaned = String(body || '')
+                .replace(/\[([^\]\n]+?)\]\(https?:\/\/[^)\s]+\)/g, '$1')
+                .replace(/[ \t]{2,}\r?\n/g, '\n')
+                .replace(/[ \t]+$/gm, '')
+                .trim();
+            return '```sql\n' + cleaned + '\n```';
+        });
+    }
+
     function formatMarkdown(text) {
         if (!text) return '';
+
+        text = _normalizeMalformedSQLBlocks(text);
 
         // ── Prioridade: marked.js (confiável, full CommonMark + GFM) ───────────
         if (typeof marked !== 'undefined') {
@@ -7806,6 +7857,13 @@ Responder SOMENTE com o JSON.`;
         // [FIX] markdownify (Python) escapa underscores: sql_queries → sql\_queries
         // Normaliza antes de qualquer verificação ou parse
         text = text.replace(/\\_/g, '_').replace(/\\\*/g, '*');
+
+        // [FIX] ChatGPT às vezes emite a SQL em padrão malformado de 4 fences
+        // (```\nSQL\n```\n<corpo>\n```\n```) que deixa o SELECT fora do code-block.
+        // Reconstrói para um bloco ```sql ... ``` válido antes de extrair.
+        if (typeof _normalizeMalformedSQLBlocks === 'function') {
+            text = _normalizeMalformedSQLBlocks(text);
+        }
 
         if (text.includes('resultado do SQL executado') || text.includes('execute o seguinte comando')) {
             console.log(`${FILE_PREFIX} 🐬 SQL já foi executado pelo backend PHP, pulando frontend execution`);
