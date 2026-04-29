@@ -5108,12 +5108,193 @@ Responder SOMENTE com o JSON.`;
     }
 
     document.addEventListener('DOMContentLoaded', initRawUIObserver);
-    
+
     // ==========================================
     // UI DE BOTÃO COPIAR PARA BLOCOS RAW / JSON
     // ===================== FIM =====================
-    
-    
+
+
+    // ===================== INICIO =====================
+    // UI DE BOTÃO COPIAR PARA TABELAS HTML (compatível com Word)
+    // ==========================================
+
+    // Constrói um HTML de tabela autocontido que o Word interpreta com bordas
+    // e estilos básicos quando colado. Mantém estrutura semântica thead/tbody.
+    function _buildWordReadyTableHtml(tableEl) {
+        const clone = tableEl.cloneNode(true);
+        clone.removeAttribute('class');
+        clone.removeAttribute('style');
+        clone.setAttribute('border', '1');
+        clone.setAttribute('cellspacing', '0');
+        clone.setAttribute('cellpadding', '6');
+        clone.style.borderCollapse = 'collapse';
+        clone.style.fontFamily     = 'Calibri, Arial, sans-serif';
+        clone.style.fontSize       = '11pt';
+        clone.querySelectorAll('th').forEach(th => {
+            th.style.background = '#f2f2f2';
+            th.style.fontWeight = 'bold';
+            th.style.border     = '1px solid #999';
+            th.style.padding    = '4px 8px';
+            th.style.textAlign  = 'left';
+        });
+        clone.querySelectorAll('td').forEach(td => {
+            td.style.border  = '1px solid #999';
+            td.style.padding = '4px 8px';
+        });
+        // Wrapper mínimo com cabeçalho HTML completo — alguns alvos (Word) exigem.
+        return [
+            '<html><head><meta charset="utf-8"></head><body>',
+            clone.outerHTML,
+            '</body></html>'
+        ].join('');
+    }
+
+    // Versão TSV (tab-separated) como fallback e para colagem em Excel.
+    function _buildTableTsv(tableEl) {
+        const rows = [...tableEl.querySelectorAll('tr')];
+        return rows.map(tr => {
+            return [...tr.children].map(cell => {
+                return (cell.innerText || cell.textContent || '')
+                    .replace(/\s+/g, ' ')
+                    .trim();
+            }).join('\t');
+        }).join('\n');
+    }
+
+    function _attachTableCopyButton(tableEl) {
+        if (!tableEl || tableEl.dataset.owTableUi === '1') return;
+
+        // O _postProcessHtml já envolve <table> em .ow-table-scroll. Reaproveita.
+        let scrollWrap = tableEl.closest('.ow-table-scroll');
+        if (!scrollWrap) {
+            scrollWrap = document.createElement('div');
+            scrollWrap.className = 'ow-table-scroll';
+            tableEl.parentNode.insertBefore(scrollWrap, tableEl);
+            scrollWrap.appendChild(tableEl);
+        }
+
+        // Já existe a barra logo acima? Não duplica.
+        const prev = scrollWrap.previousElementSibling;
+        if (prev && prev.classList.contains('ow-table-actions-bar')) {
+            tableEl.dataset.owTableUi = '1';
+            return;
+        }
+
+        const actionBar = document.createElement('div');
+        actionBar.className = 'ow-table-actions-bar';
+        actionBar.style.cssText = `
+            display: flex; justify-content: space-between; align-items: center;
+            background: #f1f3f4; border: 1px solid #e0e0e0; border-bottom: none;
+            border-radius: 8px 8px 0 0;
+            height: 36px; padding: 0 10px; margin-top: 10px;
+        `;
+
+        const typeLabel = document.createElement('span');
+        typeLabel.textContent = 'tabela';
+        typeLabel.style.cssText = `
+            font-size: 11px; font-weight: 600; color: #8b949e;
+            font-family: monospace; letter-spacing: .5px; text-transform: lowercase;
+        `;
+
+        const iconSVG = `<svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor" style="vertical-align:middle"><path d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z"/></svg>`;
+        const defaultHTML = `${iconSVG}<span style="font-size:12px;font-weight:600;vertical-align:middle;margin-left:5px">Copiar para Word</span>`;
+        const btnCopy = document.createElement('button');
+        btnCopy.innerHTML = defaultHTML;
+        btnCopy.style.cssText = `
+            background: none; border: none; color: #5f6368; cursor: pointer;
+            padding: 3px 8px; border-radius: 4px;
+            display: flex; align-items: center;
+            transition: background .2s, color .2s;
+        `;
+        btnCopy.onmouseover = () => btnCopy.style.background = 'rgba(0,0,0,0.07)';
+        btnCopy.onmouseout  = () => btnCopy.style.background = 'none';
+
+        btnCopy.onclick = async () => {
+            const html = _buildWordReadyTableHtml(tableEl);
+            const tsv  = _buildTableTsv(tableEl);
+            const showOk = () => {
+                btnCopy.innerHTML = `<span style="font-size:12px;color:#0d652d;font-weight:bold">✅ Copiado!</span>`;
+                setTimeout(() => { btnCopy.innerHTML = defaultHTML; }, 2000);
+            };
+            const showErr = (msg) => {
+                console.warn(`${FILE_PREFIX} ⚠️ Falha ao copiar tabela:`, msg);
+                btnCopy.innerHTML = `<span style="font-size:12px;color:#c62828;font-weight:bold">❌ Erro</span>`;
+                setTimeout(() => { btnCopy.innerHTML = defaultHTML; }, 2000);
+            };
+            try {
+                if (navigator.clipboard && typeof ClipboardItem !== 'undefined' && navigator.clipboard.write) {
+                    await navigator.clipboard.write([
+                        new ClipboardItem({
+                            'text/html':  new Blob([html], { type: 'text/html'  }),
+                            'text/plain': new Blob([tsv],  { type: 'text/plain' })
+                        })
+                    ]);
+                    return showOk();
+                }
+            } catch (e) {
+                // cai para fallback abaixo
+            }
+            // Fallback: execCommand('copy') sobre uma seleção temporária do HTML
+            try {
+                const holder = document.createElement('div');
+                holder.contentEditable = 'true';
+                holder.style.cssText = 'position:fixed;left:-99999px;top:-99999px;opacity:0;';
+                holder.innerHTML = html;
+                document.body.appendChild(holder);
+                const range = document.createRange();
+                range.selectNodeContents(holder);
+                const sel = window.getSelection();
+                sel.removeAllRanges();
+                sel.addRange(range);
+                const ok = document.execCommand('copy');
+                sel.removeAllRanges();
+                holder.remove();
+                if (ok) return showOk();
+                // Último recurso: TSV como texto puro
+                await navigator.clipboard.writeText(tsv);
+                return showOk();
+            } catch (e2) {
+                showErr(e2 && e2.message);
+            }
+        };
+
+        actionBar.appendChild(typeLabel);
+        actionBar.appendChild(btnCopy);
+        scrollWrap.parentNode.insertBefore(actionBar, scrollWrap);
+        // Remove a margem dupla — a barra já carrega o margin-top.
+        scrollWrap.style.marginTop = '0';
+        // Cantos: a barra é o topo, a tabela rolável é a base.
+        scrollWrap.style.borderTopLeftRadius  = '0';
+        scrollWrap.style.borderTopRightRadius = '0';
+
+        tableEl.dataset.owTableUi = '1';
+    }
+
+    function injectTableCopyButtons() {
+        const container = document.getElementById('ow-messages') || document.body;
+        container.querySelectorAll('.msg-ai table').forEach(tableEl => {
+            _attachTableCopyButton(tableEl);
+        });
+    }
+
+    function initTableCopyObserver() {
+        const chatBox = document.getElementById('ow-messages') || document.body;
+        const observer = new MutationObserver(() => {
+            clearTimeout(window._tableCopyTimeout);
+            window._tableCopyTimeout = setTimeout(injectTableCopyButtons, 300);
+        });
+        observer.observe(chatBox, { childList: true, subtree: true, characterData: true });
+        setTimeout(injectTableCopyButtons, 500);
+        setTimeout(injectTableCopyButtons, 1500);
+    }
+
+    document.addEventListener('DOMContentLoaded', initTableCopyObserver);
+
+    // ==========================================
+    // UI DE BOTÃO COPIAR PARA TABELAS HTML
+    // ===================== FIM =====================
+
+
     // Helper interno: formatação inline (bold, italic, code)
     function _inlineFmt(text) {
         const ic = [];
