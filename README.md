@@ -401,7 +401,7 @@ set_notificacao_pendente() atualiza a coluna no banco
  a partir de chatgpt_atendimentos_analise.id_criador)
         │
         ▼
-Frontend PHP (chat.js.php) faz polling a cada 30s
+Frontend PHP (`chat.js.php`) faz polling a cada 30s
 via ?action=check_pendencias
         │
         ├─ Badge vermelho aparece no botão toggle (#ow-toggle-btn)
@@ -424,7 +424,7 @@ acompanhamento_whatsapp.py envia a mensagem via WhatsApp Web ao paciente,
 registra no histórico (chatgpt_chats.mensagens) e reseta notificacao_pendente = 'false'
 ```
 
-#### Handlers PHP (chat.js.php)
+#### Handlers PHP (`chat.js.php`)
 
 | Action | Método | Descrição |
 |---|---|---|
