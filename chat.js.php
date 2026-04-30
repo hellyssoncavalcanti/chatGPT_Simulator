@@ -5279,6 +5279,7 @@ Responder SOMENTE com o JSON.`;
     function injectSQLButtons() {
         const container = document.getElementById('ow-messages') || document.body;
         const assistantBubbles = container.querySelectorAll('.msg-ai');
+        const SQL_HEAD_RE = /^\s*(SELECT|WITH|INSERT|UPDATE|DELETE|REPLACE|SHOW|DESCRIBE|EXPLAIN)\b/i;
 
         assistantBubbles.forEach((bubble) => {
             const sourceText = bubble.innerText || bubble.textContent || '';
@@ -5306,22 +5307,47 @@ Responder SOMENTE com o JSON.`;
                 return;
             }
 
-            // Encontrar o melhor alvo visual para anexar a barra.
-            let target = preferredTarget || bubble.querySelector('pre');
-            if (!target) {
-                target = bubble.querySelector('code');
-            }
-            if (!target) {
-                target = bubble.querySelector('p');
-            }
-            if (!target) {
-                target = bubble.querySelector('.msg-bubble, .msg-content') || bubble;
+            // ── Anexa botões a CADA <pre> que contenha SQL (suporte a múltiplos blocos) ──
+            let attached = 0;
+            bubble.querySelectorAll('pre').forEach(pre => {
+                // Já tem barra SQL — pula
+                if (pre.querySelector('.ow-sql-actions-bar')) return;
+                if (pre.parentElement?.querySelector(':scope > .ow-sql-actions-bar')) return;
+
+                const preText = (pre.textContent || '').trim();
+                if (!preText || preText.length > 30000) return;
+
+                const cleaned = preText.replace(/^\s*SQL\s*\n+/i, '').replace(/^\s*;+|;+\s*$/g, '').trim();
+
+                if (SQL_HEAD_RE.test(cleaned)) {
+                    // Bloco SQL direto → botão individual para esse bloco
+                    _attachSQLButtons(pre, [{ query: cleaned, reason: 'Consulta solicitada pela IA' }]);
+                    attached++;
+                } else if (preText.includes('"sql_queries"') && attached === 0) {
+                    // Bloco JSON com todas as queries → usa lista completa
+                    _attachSQLButtons(pre, sqlQueries);
+                    attached++;
+                }
+            });
+
+            // Fallback: nenhum <pre> com SQL — usa lógica original (p, code, etc.)
+            if (attached === 0) {
+                let target = preferredTarget || bubble.querySelector('pre');
+                if (!target) target = bubble.querySelector('code');
+                if (!target) target = bubble.querySelector('p');
+                if (!target) target = bubble.querySelector('.msg-bubble, .msg-content') || bubble;
+
+                if (!target || target.querySelector('.ow-sql-actions-bar')) {
+                    bubble.dataset.sqlUiSignature = signature;
+                    return;
+                }
+                if ((target.innerText || target.textContent || '').length > 30000) {
+                    bubble.dataset.sqlUiSignature = signature;
+                    return;
+                }
+                _attachSQLButtons(target, sqlQueries);
             }
 
-            if (!target || target.querySelector('.ow-sql-actions-bar')) return;
-            if ((target.innerText || target.textContent || '').length > 30000) return;
-
-            _attachSQLButtons(target, sqlQueries);
             bubble.dataset.sqlUiSignature = signature;
         });
     }
