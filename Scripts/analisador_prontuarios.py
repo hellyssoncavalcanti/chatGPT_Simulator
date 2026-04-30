@@ -248,7 +248,7 @@ DEBUG_LOG = _cfg("DEBUG_LOG", False)
 # ─────────────────────────────────────────────────────────────
 # CONFIGURAÇÃO (valores vindos de config.py → fallback local)
 # ─────────────────────────────────────────────────────────────
-PHP_URL        = _cfg("ANALISADOR_PHP_URL",       "https://conexaovida.org/scripts/js/chatgpt_integracao_criado_pelo_gemini.js.php")
+PHP_URL        = _cfg("ANALISADOR_PHP_URL",       "https://conexaovida.org/scripts/js/chat.js.php")
 API_KEY        = _cfg("API_KEY",                   "CVAPI_2b9c80c2abf94a76baf8b3e68d89cb7e")
 
 LLM_URL        = _cfg("ANALISADOR_LLM_URL",       "http://127.0.0.1:3003/v1/chat/completions")

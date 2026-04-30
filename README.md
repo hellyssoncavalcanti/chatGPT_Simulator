@@ -401,7 +401,7 @@ set_notificacao_pendente() atualiza a coluna no banco
  a partir de chatgpt_atendimentos_analise.id_criador)
         │
         ▼
-Frontend PHP (chatgpt_integracao_criado_pelo_gemini.js.php) faz polling a cada 30s
+Frontend PHP (chat.js.php) faz polling a cada 30s
 via ?action=check_pendencias
         │
         ├─ Badge vermelho aparece no botão toggle (#ow-toggle-btn)
@@ -424,7 +424,7 @@ acompanhamento_whatsapp.py envia a mensagem via WhatsApp Web ao paciente,
 registra no histórico (chatgpt_chats.mensagens) e reseta notificacao_pendente = 'false'
 ```
 
-#### Handlers PHP (chatgpt_integracao_criado_pelo_gemini.js.php)
+#### Handlers PHP (chat.js.php)
 
 | Action | Método | Descrição |
 |---|---|---|
@@ -700,7 +700,7 @@ A pesquisa web é uma feature nativa do simulador.
 
 ### O que ele faz
 - roda como daemon;
-- consulta dados clínicos via um endpoint PHP externo (`chatgpt_integracao_criado_pelo_gemini.js.php`);
+- consulta dados clínicos via um endpoint PHP externo (`chat.js.php`);
 - chama `POST /v1/chat/completions` do simulador como backend LLM local;
 - se o ChatGPT Simulator cair/ficar indisponível, **não encerra o processo**:
   permanece em loop de reconexão e retoma automaticamente quando o serviço volta;
@@ -793,7 +793,7 @@ Além deste README completo, o refactor criou documentos segmentados em `docs/` 
 
 ## Integração com PHP/proxy externo
 
-O projeto também foi desenhado para ser consumido por um frontend/proxy PHP externo. Isso aparece nas referências do `server.py` e do `analisador_prontuarios.py` ao arquivo `chatgpt_integracao_criado_pelo_gemini.js.php` hospedado no ambiente do Conexão Vida.
+O projeto também foi desenhado para ser consumido por um frontend/proxy PHP externo. Isso aparece nas referências do `server.py` e do `analisador_prontuarios.py` ao arquivo `chat.js.php` hospedado no ambiente do Conexão Vida.
 
 Na prática, esse PHP parece funcionar como ponte entre a aplicação principal do site e o simulador, incluindo chamadas SQL e envio de prompts para a LLM via backend local.
 

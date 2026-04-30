@@ -59,7 +59,7 @@ except ImportError:
 # ─────────────────────────────────────────────────────────────
 PHP_URL = os.getenv(
     "PYWA_PHP_URL",
-    "https://conexaovida.org/scripts/js/chatgpt_integracao_criado_pelo_gemini.js.php",
+    "https://conexaovida.org/scripts/js/chat.js.php",
 )
 PHP_API_KEY = os.getenv("PYWA_PHP_API_KEY", "CVAPI_2b9c80c2abf94a76baf8b3e68d89cb7e")
 

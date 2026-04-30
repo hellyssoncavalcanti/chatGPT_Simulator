@@ -205,7 +205,7 @@ for d in DIRS.values(): os.makedirs(d, exist_ok=True)
 # para não quebrar caso alguma seja removida acidentalmente deste arquivo.
 
 # Conexão e identidade
-ANALISADOR_PHP_URL        = "https://conexaovida.org/scripts/js/chatgpt_integracao_criado_pelo_gemini.js.php"
+ANALISADOR_PHP_URL        = "https://conexaovida.org/scripts/js/chat.js.php"
 ANALISADOR_LLM_URL        = "http://127.0.0.1:3003/v1/chat/completions"
 ANALISADOR_LLM_MODEL      = "ChatGPT Simulator"
 ANALISADOR_PROMPT_VERSION  = "v16.1"  # v16.1: + busca web + enriquecimento com evidências
