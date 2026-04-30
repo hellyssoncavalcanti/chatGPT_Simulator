@@ -8272,6 +8272,7 @@ Responder SOMENTE com o JSON.`;
                 console.log(`%c🔄 LOOP AGENTE: [${isChatGPTMode ? 'ChatGPT — msg única' : 'Ollama — histórico completo'}]`, "color: #3f51b5; font-weight: bold;");
                 console.log(`   ID: ${data.chat_id} | URL: ${data.url}`);
 
+                _apiStreamHandledSQL = true;
                 return await apiCallStream(endpoint, method, data, onChunk, signal, retryCount);
             }
             // -----------------------------------------------------
@@ -9418,6 +9419,7 @@ Responder SOMENTE com o JSON.`;
     }
 
     let _owProcessingDepth = 0;
+    let _apiStreamHandledSQL = false;
     function _hasActiveBlinkCursor() {
         return !!document.querySelector('#ow-messages .cursor-blink');
     }
@@ -9546,6 +9548,7 @@ Responder SOMENTE com o JSON.`;
                 </div>`;
         }
         try {
+            _apiStreamHandledSQL = false;
             await apiCallStream('/v1/chat/completions', 'POST', {
                 model:    effectiveModel,
                 messages: state.messages,
@@ -9626,9 +9629,49 @@ Responder SOMENTE com o JSON.`;
             }, currentAbortController.signal);
 
             // ── Pós-stream: detecta SQL e executa round de agente ──────────
-            if (typeof detectAndExecuteSQL === 'function') {
-                const sqlDetected = await detectAndExecuteSQL(fullC, userTxt, ctx, ui);
-                if (sqlDetected) {
+            // Só roda se apiCallStream não tratou SQL internamente (evita dupla execução).
+            if (!_apiStreamHandledSQL && typeof detectAndExecuteSQL === 'function') {
+                const sqlResultContext = await detectAndExecuteSQL(fullC, userTxt, ctx, ui);
+                if (sqlResultContext) {
+                    _setOwProcessing(true);
+                    try {
+                        state.messages.push({ role: 'user', content: sqlResultContext });
+                        const uiSql = addAiMarkup();
+                        let fullCSql = '';
+                        await apiCallStream(PROXY_URL, 'POST', {
+                            model:   effectiveModel,
+                            messages: state.messages,
+                            stream:  useStream,
+                            chat_id: Session.chatId  || null,
+                            url:     Session.chatUrl || null
+                        }, chunkSql => {
+                            let cSql = '';
+                            let forceReplaceSql = false;
+                            if      (chunkSql.type === 'markdown' || chunkSql.type === 'html') { fullCSql = chunkSql.content; cSql = fullCSql; forceReplaceSql = true; }
+                            else if (chunkSql.type === 'status')     { return; }
+                            else if (chunkSql.type === 'finish')     { const fd = chunkSql.content||{}; Session.setChat(fd.chat_id, fd.url, null); return; }
+                            else if (chunkSql.type === 'screenshot') { if (typeof updateScreenshotThumb === 'function') updateScreenshotThumb(uiSql.mID, chunkSql.content); return; }
+                            else if (chunkSql.choices?.[0]?.delta?.content) { cSql = chunkSql.choices[0].delta.content; fullCSql += cSql; }
+                            if (cSql || forceReplaceSql) {
+                                const mElSql = document.getElementById(uiSql.mID);
+                                if (mElSql) mElSql.innerHTML = formatMarkdown(fullCSql);
+                                scroll();
+                            }
+                        }, currentAbortController.signal);
+
+                        const mElSql = document.getElementById(uiSql.mID);
+                        if (mElSql) { mElSql.classList.remove('cursor-blink'); mElSql.innerHTML = formatMarkdown(fullCSql); }
+                        if (typeof injectSearchButtons === 'function') setTimeout(() => injectSearchButtons(), 0);
+                        if (fullCSql.trim()) {
+                            state.messages.push({ role: 'assistant', content: fullCSql });
+                            saveLocal();
+                            if (typeof saveChatMetaToDatabase === 'function') saveChatMetaToDatabase();
+                        }
+                    } catch (sqlCallErr) {
+                        console.error(`${FILE_PREFIX} ❌ Erro ao chamar LLM com resultados SQL:`, sqlCallErr);
+                    } finally {
+                        _setOwProcessing(false);
+                    }
                     btn.innerText = 'Enviar';
                     btn.classList.remove('stop-mode');
                     return;
