@@ -269,8 +269,8 @@ function Import-Settings {
         whatsappWindowTitle = 'WhatsApp Follow-up Server (Web)'
         remotePhpSaveUrl    = if ($env:CHATGPT_SIMULATOR_REMOTE_PHP_SAVE_URL) { $env:CHATGPT_SIMULATOR_REMOTE_PHP_SAVE_URL } else { 'https://conexaovida.org/editar_php.php?action=save_file_remote' }
         remotePhpApiKey      = if ($env:CHATGPT_SIMULATOR_REMOTE_PHP_API_KEY) { $env:CHATGPT_SIMULATOR_REMOTE_PHP_API_KEY } else { 'CVAPI_2b9c80c2abf94a76baf8b3e68d89cb7e' }
-        remotePhpLocalFile   = if ($env:CHATGPT_SIMULATOR_REMOTE_PHP_LOCAL_FILE) { $env:CHATGPT_SIMULATOR_REMOTE_PHP_LOCAL_FILE } else { 'chatgpt_integracao_criado_pelo_gemini.js.php' }
-        remotePhpTargetPath  = if ($env:CHATGPT_SIMULATOR_REMOTE_PHP_TARGET_PATH) { $env:CHATGPT_SIMULATOR_REMOTE_PHP_TARGET_PATH } else { 'scripts/js/chatgpt_integracao_criado_pelo_gemini.js.php' }
+        remotePhpLocalFile   = if ($env:CHATGPT_SIMULATOR_REMOTE_PHP_LOCAL_FILE) { $env:CHATGPT_SIMULATOR_REMOTE_PHP_LOCAL_FILE } else { 'chat.js.php' }
+        remotePhpTargetPath  = if ($env:CHATGPT_SIMULATOR_REMOTE_PHP_TARGET_PATH) { $env:CHATGPT_SIMULATOR_REMOTE_PHP_TARGET_PATH } else { 'scripts/js/chat.js.php' }
         remotePhpLocalFile2  = if ($env:CHATGPT_SIMULATOR_REMOTE_PHP_LOCAL_FILE_2) { $env:CHATGPT_SIMULATOR_REMOTE_PHP_LOCAL_FILE_2 } else { 'chatgpt_free_openai.js.php' }
         remotePhpTargetPath2 = if ($env:CHATGPT_SIMULATOR_REMOTE_PHP_TARGET_PATH_2) { $env:CHATGPT_SIMULATOR_REMOTE_PHP_TARGET_PATH_2 } else { 'scripts/js/chatgpt_free_openai.js.php' }
     }

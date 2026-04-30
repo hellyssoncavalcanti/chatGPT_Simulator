@@ -29,7 +29,7 @@ $remotePhpApiKey     = ''
 # Sync de PHP remoto (mantém comportamento histórico do deploy automático de JS/PHP).
 # Se deixar em branco, o script usará os defaults internos.
 $remotePhpSaveUrl    = 'https://conexaovida.org/editar_php.php?action=save_file_remote'
-$remotePhpLocalFile  = 'chatgpt_integracao_criado_pelo_gemini.js.php'
-$remotePhpTargetPath = 'scripts/js/chatgpt_integracao_criado_pelo_gemini.js.php'
+$remotePhpLocalFile  = 'chat.js.php'
+$remotePhpTargetPath = 'scripts/js/chat.js.php'
 $remotePhpLocalFile2  = 'chatgpt_free_openai.js.php'
 $remotePhpTargetPath2 = 'scripts/js/chatgpt_free_openai.js.php'

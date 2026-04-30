@@ -37,7 +37,7 @@ if %errorLevel% neq 0 (
     echo [ERRO] Verifique acesso a https://web.whatsapp.com/ e se o login QR foi realizado.
     echo [ERRO] Endpoints utilizados por padrao:
     echo [ERRO] - SIMULATOR_URL: http://127.0.0.1:3003/v1/chat/completions
-    echo [ERRO] - PHP_URL: https://conexaovida.org/scripts/js/chatgpt_integracao_criado_pelo_gemini.js.php
+    echo [ERRO] - PHP_URL: https://conexaovida.org/scripts/js/chat.js.php
     echo.
     echo [AJUDA] Guia de configuracao:
     echo [AJUDA] 1^) Acesso WhatsApp Web: https://web.whatsapp.com/
