@@ -1,3 +1,8 @@
+import json
+import os
+
+import pytest
+
 import server
 
 
@@ -49,3 +54,57 @@ def test_logs_tail_endpoint(monkeypatch, tmp_path):
     payload = r.get_json()
     assert payload["success"] is True
     assert payload["lines"][-2:] == ["line2", "line3"]
+
+
+# ---------------------------------------------------------------------------
+# MockProvider tests
+# ---------------------------------------------------------------------------
+
+@pytest.fixture(autouse=False)
+def mock_provider_env(monkeypatch):
+    monkeypatch.setenv("SIMULATOR_LLM_PROVIDER", "mock")
+
+
+def _iter_ndjson(data: bytes):
+    for line in data.splitlines():
+        line = line.strip()
+        if line:
+            yield json.loads(line)
+
+
+def test_chat_completions_streaming_mock(monkeypatch, mock_provider_env):
+    """MockProvider deve emitir status → markdown → finish sem precisar de browser."""
+    _reset_security_state()
+    c = server.app.test_client()
+
+    resp = c.post(
+        "/v1/chat/completions",
+        json={"message": "olá", "stream": True},
+        query_string={"api_key": server.config.API_KEY},
+    )
+    assert resp.status_code == 200
+
+    events = list(_iter_ndjson(resp.data))
+    types = [e.get("type") for e in events]
+
+    assert "markdown" in types, f"esperado evento 'markdown', recebido: {types}"
+    assert "finish" in types, f"esperado evento 'finish', recebido: {types}"
+
+    markdown_evt = next(e for e in events if e.get("type") == "markdown")
+    assert markdown_evt["content"] == "MOCK"
+
+
+def test_chat_completions_block_mock(monkeypatch, mock_provider_env):
+    """Modo bloco deve retornar JSON com success=True e html=MOCK."""
+    _reset_security_state()
+    c = server.app.test_client()
+
+    resp = c.post(
+        "/v1/chat/completions",
+        json={"message": "olá", "stream": False},
+        query_string={"api_key": server.config.API_KEY},
+    )
+    assert resp.status_code == 200
+    payload = resp.get_json()
+    assert payload.get("success") is True
+    assert payload.get("html") == "MOCK"

@@ -43,6 +43,7 @@ from flask import Flask, request, jsonify, Response, send_from_directory, stream
 from flask_cors import CORS
 import config
 from shared import browser_queue, get_file_info
+from llm_providers.factory import get_provider as _get_llm_provider
 import storage
 import auth
 from utils import log as file_log
@@ -2239,7 +2240,7 @@ def chat_completions():
                 is_python_source,
                 stream_q if stream else None,
             )
-            browser_queue.put(chat_task_payload)
+            _get_llm_provider().dispatch_task(chat_task_payload)
         except TimeoutError as queue_timeout:
             stream_q.put(_build_error_event_impl(
                 f"Timeout aguardando fila interna do servidor: {queue_timeout}"
