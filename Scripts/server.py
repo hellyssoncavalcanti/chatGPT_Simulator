@@ -12,7 +12,7 @@
 #   • Importa: config, shared (browser_queue), storage, auth, utils
 #   • Chamado por: main.py (em duas threads: HTTPS 3002 e HTTP 3003)
 #   • Consome de: browser.py (via browser_queue + ACTIVE_CHATS)
-#   • Serve: chatgpt_integracao_criado_pelo_gemini_js.php, analisador_prontuarios.py
+#   • Serve: chat.js.php, analisador_prontuarios.py
 #
 # ROTAS PRINCIPAIS:
 #   POST /login                     — autenticação
