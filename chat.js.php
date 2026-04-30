@@ -5032,18 +5032,27 @@ Responder SOMENTE com o JSON.`;
         // Guarda real: só a presença física da barra (sobrevive a innerHTML replacements)
         if (el.querySelector('.ow-sql-actions-bar') || (el.previousElementSibling && el.previousElementSibling.classList.contains('ow-sql-actions-bar'))) return;
 
-        // Cria wrapper externo para isolar overflow do <pre> da barra sticky
-        const wrapper = document.createElement('div');
-        wrapper.className = el.tagName.toLowerCase() === 'pre' ? 'ow-code-wrapper' : '';
-        if (el.tagName.toLowerCase() !== 'pre') {
-            wrapper.style.cssText = 'display:block; background:#f8f9fa; border:1px solid #e0e0e0; border-radius:8px; margin-top:10px; overflow:hidden;';
-            el.style.fontFamily   = 'monospace';
-            el.style.whiteSpace   = 'pre-wrap';
-            el.style.padding      = '15px';
-            el.style.overflowX    = 'auto';
+        // Remove barra RAW caso já tenha sido injetada antes (evita cabeçalho duplo)
+        const existingRawBar = el.parentElement?.querySelector(':scope > .ow-raw-actions-bar');
+        if (existingRawBar) existingRawBar.remove();
+
+        // Reutiliza wrapper existente (do raw injection) ou cria novo
+        let wrapper;
+        if (el.parentElement?.classList?.contains('ow-code-wrapper')) {
+            wrapper = el.parentElement;
+        } else {
+            wrapper = document.createElement('div');
+            wrapper.className = el.tagName.toLowerCase() === 'pre' ? 'ow-code-wrapper' : '';
+            if (el.tagName.toLowerCase() !== 'pre') {
+                wrapper.style.cssText = 'display:block; background:#f8f9fa; border:1px solid #e0e0e0; border-radius:8px; margin-top:10px; overflow:hidden;';
+                el.style.fontFamily   = 'monospace';
+                el.style.whiteSpace   = 'pre-wrap';
+                el.style.padding      = '15px';
+                el.style.overflowX    = 'auto';
+            }
+            el.parentNode.insertBefore(wrapper, el);
+            wrapper.appendChild(el);
         }
-        el.parentNode.insertBefore(wrapper, el);
-        wrapper.appendChild(el);
 
         const actionBar = document.createElement('div');
         actionBar.className  = 'ow-sql-actions-bar';
@@ -5413,6 +5422,9 @@ Responder SOMENTE com o JSON.`;
         const container = document.getElementById('ow-messages') || document.body;
         const elements  = container.querySelectorAll('pre, code');
 
+        // Regex de detecção SQL — igual ao usado em _extractSQLFromRenderedBubble
+        const SQL_HEAD = /^\s*(SELECT|WITH|INSERT|UPDATE|DELETE|REPLACE|SHOW|DESCRIBE|EXPLAIN)\b/i;
+
         elements.forEach(el => {
             // Já tem barra SQL ou RAW — ignora
             if (el.querySelector('.ow-sql-actions-bar') || el.querySelector('.ow-raw-actions-bar')) return;
@@ -5424,31 +5436,43 @@ Responder SOMENTE com o JSON.`;
                 if (target.querySelector('.ow-sql-actions-bar') || target.querySelector('.ow-raw-actions-bar')) return;
             }
 
+            // Ignora também se o wrapper pai já tem barra SQL (evita double-header)
+            if (target.parentElement?.classList?.contains('ow-code-wrapper') &&
+                target.parentElement.querySelector('.ow-sql-actions-bar')) return;
+
             const text = el.textContent?.trim();
             if (!text || text.length < 10 || text.length > 50000) return;
 
-            // Bloco SQL ou pesquisa já tratado pelos respectivos injectButtons — pula
+            // Blocos SQL ou pesquisa: delegados para injectSQLButtons/injectSearchButtons
+            if (SQL_HEAD.test(text)) return;
             if (text.includes('"sql_queries"')) return;
             if (text.includes('"search_queries"') || text.includes('"pesquisa_query"')) return;
 
-            // Detecta JSON válido ou bloco raw relevante
+            // Tenta extrair o nome da linguagem da classe do <code> (ex: lang-json, language-python)
             let isJSON  = false;
             let label   = 'raw';
             let content = text;
+
+            const codeEl = (el.tagName === 'CODE') ? el : el.querySelector('code');
+            if (codeEl) {
+                const langClass = [...codeEl.classList].find(c => c.startsWith('lang-') || c.startsWith('language-'));
+                if (langClass) label = langClass.replace(/^lang(uage)?-/i, '').toLowerCase() || 'raw';
+            }
 
             try {
                 const parsed = JSON.parse(text);
                 if (typeof parsed === 'object' && parsed !== null) {
                     isJSON  = true;
-                    label   = 'json';
-                    // Pretty-print para facilitar leitura ao copiar
+                    label   = label === 'raw' ? 'json' : label;
                     content = JSON.stringify(parsed, null, 2);
                 }
             } catch (_) {
-                // Não é JSON — verifica se parece um bloco de código com conteúdo útil
-                // (pelo menos 2 linhas ou estrutura chave:valor)
-                const lines = text.split('\n').filter(l => l.trim());
-                if (lines.length < 2) return;
+                // Pre elements always need the header — CSS has border-top:none expecting it.
+                // For standalone inline <code>, require at least 2 lines to avoid clutter.
+                if (target.tagName !== 'PRE') {
+                    const lines = text.split('\n').filter(l => l.trim());
+                    if (lines.length < 2) return;
+                }
             }
 
             // Deepest-element check: evita injetar no wrapper externo
