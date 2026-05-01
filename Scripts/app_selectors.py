@@ -16,6 +16,9 @@ CRITICAL_SELECTORS = {
     ],
     "send_button": [
         "button[data-testid='send-button']",
+        "button[data-testid='composer-submit-button']",
+        "button#composer-submit-button",
+        "button[aria-label*='Enviar prompt']",
         "button[aria-label*='Send']",
     ],
     "menu_button": [

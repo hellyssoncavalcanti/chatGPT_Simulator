@@ -329,11 +329,24 @@ async def _keep_chat_render_alive(page, q, stop_event: asyncio.Event, activity_t
 
 def _composer_state_script():
     return r"""() => {
+        const pickSendButton = () => {
+            const candidates = Array.from(document.querySelectorAll(
+                "button[data-testid='send-button'], button[data-testid='composer-submit-button'], button#composer-submit-button, button[aria-label*='Enviar prompt'], button[aria-label*='Send']"
+            ));
+            const visible = candidates.filter((btn) => btn && btn.offsetParent !== null);
+            const pool = visible.length ? visible : candidates;
+            for (const btn of pool) {
+                const aria = (btn.getAttribute('aria-label') || '').toLowerCase();
+                if (aria.includes('voz') || aria.includes('voice') || aria.includes('ditado')) continue;
+                return btn;
+            }
+            return null;
+        };
         const composerRoot = document.querySelector('form')
             || document.querySelector('[data-testid="composer"]')
             || document.querySelector('main');
         const ta = document.querySelector('#prompt-textarea');
-        const sendBtn = document.querySelector('button[data-testid="send-button"]');
+        const sendBtn = pickSendButton();
         const stopBtn = document.querySelector('button[aria-label="Stop generating"], button[data-testid="stop-button"]');
         const attachmentNodes = Array.from(document.querySelectorAll(
             'button[aria-label="Remove file"], [data-testid*="attachment"], [data-testid*="file-preview"], [data-testid*="composer-attachment"], [data-testid*="upload-preview"], [data-testid*="file-chip"]'
@@ -463,17 +476,62 @@ async def _wait_for_composer_ready(page, q=None, timeout: float = 20.0):
     return last_state or {}
 
 
+async def _wait_for_submit_button_ready(page, q=None, timeout: float = 18.0) -> dict:
+    """Aguarda botão de submit ficar realmente habilitado após cola/anexo.
+
+    Nota: esse wait é importante quando o ChatGPT converte a cola em anexos e
+    faz indexação assíncrona sem sempre expor spinner de upload confiável.
+    """
+    deadline = time.time() + timeout
+    last_state = {}
+    stable_ok = 0
+    while time.time() < deadline:
+        state = await _get_composer_state(page)
+        last_state = state or {}
+        send_enabled = bool(last_state.get("sendEnabled"))
+        uploading = bool(last_state.get("uploading") or last_state.get("ariaBusy"))
+        has_payload = bool(last_state.get("textReady") or last_state.get("hasAttachments"))
+        if has_payload and send_enabled and not uploading:
+            stable_ok += 1
+            if stable_ok >= 2:
+                return last_state
+        else:
+            stable_ok = 0
+        await asyncio.sleep(0.25)
+
+    if q:
+        emit_log(
+            q,
+            "⚠️ Submit não confirmou estado habilitado após indexação; tentando envio assim mesmo "
+            f"(texto={last_state.get('textLength')}, anexos={last_state.get('attachmentCount')}, "
+            f"sendEnabled={last_state.get('sendEnabled')}, uploading={last_state.get('uploading')})."
+        )
+    return last_state
+
+
 async def _submit_prompt(page, q=None, timeout: float = 12.0) -> bool:
+    user_count_before = await _get_user_message_count(page)
     state = await _wait_for_composer_ready(page, q=q, timeout=timeout)
     if q and state.get('hasAttachments') and not state.get('textReady'):
         emit_log(q,
                  f"ChatGPT converteu a cola em {state.get('attachmentCount')} anexo(s); enviando pelo botão.")
 
+    if state.get("hasAttachments") or state.get("pasteAsAttachment"):
+        state = await _wait_for_submit_button_ready(page, q=q, timeout=max(8.0, timeout))
+
     submit_attempts = [
         ('click', lambda: page.locator(SEND_BUTTON_SELECTORS[0] if SEND_BUTTON_SELECTORS else 'button[data-testid=\"send-button\"]').first.click(timeout=2000)),
         ('force_click', lambda: page.locator(SEND_BUTTON_SELECTORS[0] if SEND_BUTTON_SELECTORS else 'button[data-testid=\"send-button\"]').first.click(timeout=2000, force=True)),
         ('dom_click', lambda: page.evaluate("""() => {
-            const btn = document.querySelector('button[data-testid=\"send-button\"]');
+            const candidates = Array.from(document.querySelectorAll(
+                "button[data-testid='send-button'], button[data-testid='composer-submit-button'], button#composer-submit-button, button[aria-label*='Enviar prompt'], button[aria-label*='Send']"
+            ));
+            const visible = candidates.filter((b) => b && b.offsetParent !== null);
+            const pool = visible.length ? visible : candidates;
+            const btn = pool.find((b) => {
+                const aria = (b.getAttribute('aria-label') || '').toLowerCase();
+                return !aria.includes('voz') && !aria.includes('voice') && !aria.includes('ditado');
+            }) || null;
             if (!btn) return false;
             btn.click();
             return true;
@@ -492,9 +550,14 @@ async def _submit_prompt(page, q=None, timeout: float = 12.0) -> bool:
         verify_deadline = time.time() + 4.0
         while time.time() < verify_deadline:
             current = await _get_composer_state(page)
+            user_count_after = await _get_user_message_count(page)
             if current.get('stopVisible'):
                 return True
+            if user_count_after > user_count_before:
+                return True
             if not current.get('sendEnabled') and (current.get('ariaBusy') or current.get('uploading')):
+                return True
+            if not current.get('sendEnabled') and (state.get('textReady') or state.get('hasAttachments')):
                 return True
             if (state.get('textReady') or state.get('hasAttachments')) and not current.get('textReady') and not current.get('hasAttachments'):
                 return True
@@ -917,8 +980,15 @@ async def wait_for_chat_ready(page, url: str, q=None, timeout: int = 30) -> bool
             return { ready: false, signal: 'generating' };
         }
 
-        // Sinal 3: send-button existe e não está disabled/aria-disabled
-        const btn = document.querySelector('button[data-testid="send-button"]');
+        // Sinal 3: botão de envio (variações de markup) existe e está habilitado
+        const sendCandidates = Array.from(document.querySelectorAll(
+            "button[data-testid='send-button'], button[data-testid='composer-submit-button'], button#composer-submit-button, button[aria-label*='Enviar prompt'], button[aria-label*='Send']"
+        ));
+        const visibleCandidates = sendCandidates.filter((b) => b && b.offsetParent !== null);
+        const btn = (visibleCandidates.length ? visibleCandidates : sendCandidates).find((b) => {
+            const aria = (b.getAttribute('aria-label') || '').toLowerCase();
+            return !aria.includes('voz') && !aria.includes('voice') && !aria.includes('ditado');
+        }) || null;
         if (btn) {
             const ariaDisabled = btn.getAttribute('aria-disabled');
             if (!btn.disabled && ariaDisabled !== 'true') {
@@ -1098,6 +1168,16 @@ async def _get_assistant_message_count(page) -> int:
     try:
         n = await page.evaluate("""() => {
             return document.querySelectorAll('[data-message-author-role="assistant"]').length || 0;
+        }""")
+        return int(n or 0)
+    except Exception:
+        return 0
+
+
+async def _get_user_message_count(page) -> int:
+    try:
+        n = await page.evaluate("""() => {
+            return document.querySelectorAll('[data-message-author-role="user"]').length || 0;
         }""")
         return int(n or 0)
     except Exception:
@@ -4226,13 +4306,17 @@ async def handle_chat_task_inner(task, page, q, stop_event: asyncio.Event, activ
 
     emit_event(q, "status", "Enviando...")
     sent = False
-    try:
-        btn = page.locator('button[data-testid="send-button"]').first
-        if await btn.is_visible() and not await btn.is_disabled():
-            await btn.click()
-            sent = True
-    except:
-        pass
+    for sel in (SEND_BUTTON_SELECTORS or ['button[data-testid="send-button"]']):
+        try:
+            btn = page.locator(sel).first
+            if await btn.count() == 0:
+                continue
+            if await btn.is_visible() and not await btn.is_disabled():
+                await btn.click(timeout=2500)
+                sent = True
+                break
+        except Exception:
+            continue
 
     if not sent:
         await page.keyboard.press("Enter")

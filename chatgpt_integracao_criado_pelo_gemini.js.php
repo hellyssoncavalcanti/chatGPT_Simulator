@@ -4878,7 +4878,7 @@ Responder SOMENTE com o JSON.`;
 
         assistantBubbles.forEach((bubble) => {
             const sourceText = bubble.innerText || bubble.textContent || '';
-            if (!sourceText || !/sql_queries/i.test(sourceText)) return;
+            if (!sourceText) return;
             if (sourceText.length > 120000) return;
 
             const sqlQueries = extractSQLFromResponse(sourceText);
@@ -4903,7 +4903,7 @@ Responder SOMENTE com o JSON.`;
             }
 
             if (!target || target.querySelector('.ow-sql-actions-bar')) return;
-            if ((target.innerText || target.textContent || '').length > 5000) return;
+            if ((target.innerText || target.textContent || '').length > 30000) return;
 
             _attachSQLButtons(target, sqlQueries);
             bubble.dataset.sqlUiSignature = signature;
@@ -7812,9 +7812,35 @@ Responder SOMENTE com o JSON.`;
             return null;
         }
 
-        if (!/sql_queries/i.test(text)) {
-            return null;
-        }
+        const _extractRawSQLBlocks = (inputText) => {
+            const blocks = [...String(inputText || '').matchAll(/```(?:\s*(\w+))?\s*([\s\S]*?)```/gi)];
+            if (!blocks.length) return [];
+
+            const isLikelySQL = (lang, body) => {
+                const normalizedLang = String(lang || '').trim().toLowerCase();
+                const normalizedBody = String(body || '').trim();
+                if (!normalizedBody) return false;
+                if (normalizedLang === 'sql' || normalizedLang === 'mysql') return true;
+                if (/^\s*SQL\s*$/im.test(normalizedBody)) return true;
+                if (/^\s*(SELECT|WITH|INSERT|UPDATE|DELETE|REPLACE|SHOW|DESCRIBE|EXPLAIN)\b/i.test(normalizedBody)) return true;
+                return false;
+            };
+
+            const cleanupSQL = (body) => {
+                let cleaned = String(body || '').replace(/^\s*SQL\s*$/gim, '').trim();
+                cleaned = cleaned.replace(/^\s*;+|;+\s*$/g, '').trim();
+                return cleaned;
+            };
+
+            const out = [];
+            for (const [, lang, body] of blocks) {
+                if (!isLikelySQL(lang, body)) continue;
+                const query = cleanupSQL(body);
+                if (!query) continue;
+                out.push({ query, reason: 'Consulta solicitada pela IA' });
+            }
+            return out;
+        };
         
         function sanitizeJSON(jsonStr) {
             return jsonStr
@@ -7828,14 +7854,16 @@ Responder SOMENTE com o JSON.`;
         }
         
         try {
-            // 1. Tenta primeiro encontrar um bloco Markdown (Padrão seguro)
-            const markdownBlocks = [...text.matchAll(/```(?:json)?\s*([\s\S]*?)```/gi)];
-            if (markdownBlocks.length) {
-                for (const match of markdownBlocks) {
-                    const json = JSON.parse(sanitizeJSON(match[1]));
-                    if (json.sql_queries && Array.isArray(json.sql_queries) && json.sql_queries.length > 0) {
-                        console.log(`${FILE_PREFIX} 🐬 SQL extraído (Markdown)`);
-                        return json.sql_queries;
+            // 1. Tenta primeiro encontrar sql_queries em bloco Markdown JSON
+            if (/sql_queries/i.test(text)) {
+                const markdownBlocks = [...text.matchAll(/```(?:json)?\s*([\s\S]*?)```/gi)];
+                if (markdownBlocks.length) {
+                    for (const match of markdownBlocks) {
+                        const json = JSON.parse(sanitizeJSON(match[1]));
+                        if (json.sql_queries && Array.isArray(json.sql_queries) && json.sql_queries.length > 0) {
+                            console.log(`${FILE_PREFIX} 🐬 SQL extraído (Markdown JSON)`);
+                            return json.sql_queries;
+                        }
                     }
                 }
             }
@@ -7866,6 +7894,15 @@ Responder SOMENTE com o JSON.`;
         } catch(e) {
             console.log(`%c${FILE_PREFIX} ℹ️ Ignorado: Texto continha "sql_queries", mas não formava um JSON válido.`, "color: #9e9e9e;");
         }
+
+        // 2. Fallback: resposta mista com texto + bloco ```sql ... ```
+        try {
+            const rawSqlBlocks = _extractRawSQLBlocks(text);
+            if (rawSqlBlocks.length > 0) {
+                console.log(`${FILE_PREFIX} 🐬 SQL extraído (bloco Markdown SQL)`);
+                return rawSqlBlocks;
+            }
+        } catch (_) {}
 
         // 3. Fallback resiliente: extrai pares query/reason mesmo com JSON parcial/malformado
         try {
