@@ -275,6 +275,13 @@ function Import-Settings {
         remotePhpTargetPath2 = if ($env:CHATGPT_SIMULATOR_REMOTE_PHP_TARGET_PATH_2) { $env:CHATGPT_SIMULATOR_REMOTE_PHP_TARGET_PATH_2 } else { 'scripts/js/chatgpt_free_openai.js.php' }
     }
 
+    # Restaura base de configuração padrão (env/defaults) para evitar
+    # campos vazios quando o settings local não define mapeamentos remotos.
+    $script:Config = [ordered]@{}
+    foreach ($entry in $defaults.GetEnumerator()) {
+        $script:Config[$entry.Key] = $entry.Value
+    }
+
     $hasSettingsPath = -not [string]::IsNullOrWhiteSpace([string]$settingsPath)
     if ($hasSettingsPath -and (Test-Path -LiteralPath $settingsPath)) {
         . $settingsPath

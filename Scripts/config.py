@@ -133,6 +133,10 @@ REQUEST_TIMEOUT_SEC = _env_int(
 )
 # Alias explícito para manter compatibilidade com scripts legados.
 AUTODEV_AGENT_REQUEST_TIMEOUT = REQUEST_TIMEOUT_SEC
+# Destino do AutoDevAgent:
+# - "chatgpt" (padrão): trabalha apenas no fluxo principal do Simulator.
+# - "codex": permite encaminhamento de planos para o fluxo Codex.
+AUTODEV_AGENT_REQUEST_TARGET = os.getenv("AUTODEV_AGENT_REQUEST_TARGET", "chatgpt").strip().lower()
 
 # GitHub sync (compatibilidade com scripts legados que liam credenciais daqui)
 GITHUB_TOKEN = _env("CHATGPT_SIMULATOR_GITHUB_TOKEN", "")
