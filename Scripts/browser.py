@@ -509,6 +509,7 @@ async def _wait_for_submit_button_ready(page, q=None, timeout: float = 18.0) -> 
 
 
 async def _submit_prompt(page, q=None, timeout: float = 12.0) -> bool:
+    user_count_before = await _get_user_message_count(page)
     state = await _wait_for_composer_ready(page, q=q, timeout=timeout)
     if q and state.get('hasAttachments') and not state.get('textReady'):
         emit_log(q,
@@ -548,9 +549,14 @@ async def _submit_prompt(page, q=None, timeout: float = 12.0) -> bool:
         verify_deadline = time.time() + 4.0
         while time.time() < verify_deadline:
             current = await _get_composer_state(page)
+            user_count_after = await _get_user_message_count(page)
             if current.get('stopVisible'):
                 return True
+            if user_count_after > user_count_before:
+                return True
             if not current.get('sendEnabled') and (current.get('ariaBusy') or current.get('uploading')):
+                return True
+            if not current.get('sendEnabled') and (state.get('textReady') or state.get('hasAttachments')):
                 return True
             if (state.get('textReady') or state.get('hasAttachments')) and not current.get('textReady') and not current.get('hasAttachments'):
                 return True
@@ -1143,6 +1149,16 @@ async def _get_assistant_message_count(page) -> int:
     try:
         n = await page.evaluate("""() => {
             return document.querySelectorAll('[data-message-author-role="assistant"]').length || 0;
+        }""")
+        return int(n or 0)
+    except Exception:
+        return 0
+
+
+async def _get_user_message_count(page) -> int:
+    try:
+        n = await page.evaluate("""() => {
+            return document.querySelectorAll('[data-message-author-role="user"]').length || 0;
         }""")
         return int(n or 0)
     except Exception:
