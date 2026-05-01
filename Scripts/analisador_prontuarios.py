@@ -4272,17 +4272,24 @@ REGRA OBRIGATÓRIA (DOSE-ALVO E RETORNO):
             "LIMIT 1"
         )
         if id_atendimento:
+            # IN em vez de = : garante que o prompt padrão ('atendimentos_analise')
+            # sempre seja candidato, mesmo que o criador do atendimento não tenha
+            # prompt próprio configurado. O ORDER BY prioriza o prompt específico (0)
+            # sobre o padrão (1), e o LIMIT 1 retorna o mais específico disponível.
             prompt_sql = (
                 "SELECT p.conteudo "
                 "FROM chatgpt_prompts p "
                 "WHERE p.tipo='system' "
                 "  AND p.escopo='analisador_prontuarios' "
-                "  AND p.id_criador = COALESCE(("
-                "    SELECT CAST(a.id_criador AS CHAR) "
-                "    FROM chatgpt_atendimentos_analise a "
-                f"    WHERE a.id_atendimento = {int(id_atendimento)} "
-                "    ORDER BY a.id DESC LIMIT 1"
-                "  ), 'atendimentos_analise') "
+                "  AND p.id_criador IN ("
+                "    COALESCE(("
+                "      SELECT CAST(a.id_criador AS CHAR) "
+                "      FROM chatgpt_atendimentos_analise a "
+                f"      WHERE a.id_atendimento = {int(id_atendimento)} "
+                "      ORDER BY a.id DESC LIMIT 1"
+                "    ), 'atendimentos_analise'),"
+                "    'atendimentos_analise'"
+                "  ) "
                 "ORDER BY CASE WHEN p.id_criador='atendimentos_analise' THEN 1 ELSE 0 END "
                 "LIMIT 1"
             )
@@ -4290,12 +4297,20 @@ REGRA OBRIGATÓRIA (DOSE-ALVO E RETORNO):
         try:
             data = sql_exec(prompt_sql, reason="buscar_prompt_analisador")
         except Exception:
-            # Compatibilidade temporária: bancos ainda sem coluna escopo.
-            data = sql_exec(
-                "SELECT conteudo FROM chatgpt_prompts WHERE tipo='system' AND id_criador='atendimentos_analise' LIMIT 1",
-                reason="buscar_prompt_analisador_legacy"
-            )
-        rows = data.get("data") or []
+            data = None
+
+        rows = (data.get("data") or []) if data else []
+
+        if not rows:
+            # Fallback: banco sem coluna escopo, ou query principal sem resultado.
+            try:
+                data = sql_exec(
+                    "SELECT conteudo FROM chatgpt_prompts WHERE tipo='system' AND id_criador='atendimentos_analise' LIMIT 1",
+                    reason="buscar_prompt_analisador_legacy"
+                )
+                rows = data.get("data") or []
+            except Exception:
+                rows = []
         if rows and rows[0].get("conteudo"):
             conteudo = rows[0]["conteudo"]
             if "[INICIO_TEXTO_COLADO]" not in conteudo:
