@@ -475,11 +475,47 @@ async def _wait_for_composer_ready(page, q=None, timeout: float = 20.0):
     return last_state or {}
 
 
+async def _wait_for_submit_button_ready(page, q=None, timeout: float = 18.0) -> dict:
+    """Aguarda botão de submit ficar realmente habilitado após cola/anexo.
+
+    Nota: esse wait é importante quando o ChatGPT converte a cola em anexos e
+    faz indexação assíncrona sem sempre expor spinner de upload confiável.
+    """
+    deadline = time.time() + timeout
+    last_state = {}
+    stable_ok = 0
+    while time.time() < deadline:
+        state = await _get_composer_state(page)
+        last_state = state or {}
+        send_enabled = bool(last_state.get("sendEnabled"))
+        uploading = bool(last_state.get("uploading") or last_state.get("ariaBusy"))
+        has_payload = bool(last_state.get("textReady") or last_state.get("hasAttachments"))
+        if has_payload and send_enabled and not uploading:
+            stable_ok += 1
+            if stable_ok >= 2:
+                return last_state
+        else:
+            stable_ok = 0
+        await asyncio.sleep(0.25)
+
+    if q:
+        emit_log(
+            q,
+            "⚠️ Submit não confirmou estado habilitado após indexação; tentando envio assim mesmo "
+            f"(texto={last_state.get('textLength')}, anexos={last_state.get('attachmentCount')}, "
+            f"sendEnabled={last_state.get('sendEnabled')}, uploading={last_state.get('uploading')})."
+        )
+    return last_state
+
+
 async def _submit_prompt(page, q=None, timeout: float = 12.0) -> bool:
     state = await _wait_for_composer_ready(page, q=q, timeout=timeout)
     if q and state.get('hasAttachments') and not state.get('textReady'):
         emit_log(q,
                  f"ChatGPT converteu a cola em {state.get('attachmentCount')} anexo(s); enviando pelo botão.")
+
+    if state.get("hasAttachments") or state.get("pasteAsAttachment"):
+        state = await _wait_for_submit_button_ready(page, q=q, timeout=max(8.0, timeout))
 
     submit_attempts = [
         ('click', lambda: page.locator(SEND_BUTTON_SELECTORS[0] if SEND_BUTTON_SELECTORS else 'button[data-testid=\"send-button\"]').first.click(timeout=2000)),
