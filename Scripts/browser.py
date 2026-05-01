@@ -545,12 +545,23 @@ _PICK_SEND_BUTTON_JS = r"""
 
 _FORCE_CLICK_SEND_JS = "() => {\n" + _PICK_SEND_BUTTON_JS.replace(
     "return enabled[0] || visible[0] || filtered[0] || null;",
-    """const btn = enabled[0] || visible[0] || filtered[0] || null;
-    if (!btn) return { clicked: false, reason: 'no_button' };
-    try {
-        if (btn.disabled) btn.disabled = false;
-        if (btn.getAttribute('aria-disabled') === 'true') btn.removeAttribute('aria-disabled');
-    } catch (e) {}
+    """const btn = enabled[0] || null;
+    // Importante: NÃO clicar em botão disabled/aria-disabled. O React do ChatGPT
+    // mantém estado interno separado do atributo DOM e ignora a submissão. O
+    // chamador deve aguardar o botão ficar realmente habilitado antes desta
+    // função ser invocada (ver _wait_for_submit_button_ready).
+    if (!btn) {
+        const fallback = visible[0] || filtered[0] || null;
+        if (!fallback) return { clicked: false, reason: 'no_button' };
+        return {
+            clicked: false,
+            reason: 'button_disabled',
+            disabled: !!fallback.disabled,
+            ariaDisabled: fallback.getAttribute('aria-disabled') || null,
+            id: fallback.id || null,
+            testid: fallback.getAttribute('data-testid') || null
+        };
+    }
     try {
         btn.scrollIntoView({ block: 'center', inline: 'center' });
     } catch (e) {}
@@ -559,9 +570,9 @@ _FORCE_CLICK_SEND_JS = "() => {\n" + _PICK_SEND_BUTTON_JS.replace(
         const cx = rect.left + rect.width / 2;
         const cy = rect.top + rect.height / 2;
         const opts = { bubbles: true, cancelable: true, view: window, clientX: cx, clientY: cy, button: 0 };
-        btn.dispatchEvent(new PointerEvent('pointerdown', opts));
+        try { btn.dispatchEvent(new PointerEvent('pointerdown', opts)); } catch (e) {}
         btn.dispatchEvent(new MouseEvent('mousedown', opts));
-        btn.dispatchEvent(new PointerEvent('pointerup', opts));
+        try { btn.dispatchEvent(new PointerEvent('pointerup', opts)); } catch (e) {}
         btn.dispatchEvent(new MouseEvent('mouseup', opts));
         btn.dispatchEvent(new MouseEvent('click', opts));
     } catch (e) {}
@@ -586,15 +597,15 @@ async def _force_click_send_button_via_js(page) -> dict:
         return {"clicked": False, "error": str(exc)}
 
 
-async def _submit_prompt(page, q=None, timeout: float = 12.0) -> bool:
-    state = await _wait_for_composer_ready(page, q=q, timeout=timeout)
-    if q and state.get('hasAttachments') and not state.get('textReady'):
-        emit_log(q,
-                 f"ChatGPT converteu a cola em {state.get('attachmentCount')} anexo(s); enviando pelo botão.")
+async def _submit_with_verification(page, baseline_state: dict | None = None, q=None) -> bool:
+    """Tenta múltiplas estratégias de envio e VERIFICA se a submissão ocorreu.
 
-    if state.get("hasAttachments") or state.get("pasteAsAttachment"):
-        state = await _wait_for_submit_button_ready(page, q=q, timeout=max(8.0, timeout))
-
+    Cada tentativa é seguida de verificação real (stop button visível, composer
+    limpo, busy/uploading sinalizando processamento) — só assim consideramos
+    enviado. Sem isso, dispatch DOM em botão prematuramente "habilitado" pode
+    sair silenciosamente sem submeter.
+    """
+    state = baseline_state or await _get_composer_state(page) or {}
     selectors = list(SEND_BUTTON_SELECTORS) or ['button[data-testid="send-button"]']
     voice_aria = ("voz", "voice", "ditad", "dictat")
 
@@ -616,6 +627,13 @@ async def _submit_prompt(page, q=None, timeout: float = 12.0) -> bool:
                 if any(token in aria for token in voice_aria):
                     continue
                 try:
+                    if not force:
+                        # Sem `force`, só clica se o botão estiver realmente
+                        # habilitado — clicar com aria-disabled vira no-op em React.
+                        if not await candidate.is_visible():
+                            continue
+                        if await candidate.is_disabled():
+                            continue
                     await candidate.click(timeout=1500, force=force)
                     return True
                 except Exception as exc:
@@ -641,6 +659,8 @@ async def _submit_prompt(page, q=None, timeout: float = 12.0) -> bool:
         ('mod_enter', lambda: page.keyboard.press('Control+Enter')),
     ]
 
+    had_payload = bool(state.get('textReady') or state.get('hasAttachments'))
+
     for label, submitter in submit_attempts:
         try:
             await submitter()
@@ -649,17 +669,39 @@ async def _submit_prompt(page, q=None, timeout: float = 12.0) -> bool:
             continue
 
         verify_deadline = time.time() + 4.0
+        confirmed = False
         while time.time() < verify_deadline:
-            current = await _get_composer_state(page)
+            current = await _get_composer_state(page) or {}
             if current.get('stopVisible'):
-                return True
+                confirmed = True
+                break
             if not current.get('sendEnabled') and (current.get('ariaBusy') or current.get('uploading')):
-                return True
-            if (state.get('textReady') or state.get('hasAttachments')) and not current.get('textReady') and not current.get('hasAttachments'):
-                return True
+                confirmed = True
+                break
+            if had_payload and not current.get('textReady') and not current.get('hasAttachments'):
+                # Composer foi limpo após o envio — sinal forte de submissão.
+                confirmed = True
+                break
             await asyncio.sleep(0.2)
 
+        if confirmed:
+            emit_log(q, f"✅ Envio confirmado via '{label}'.")
+            return True
+        emit_log(q, f"ℹ️ Tentativa '{label}' não confirmou envio; tentando próxima estratégia.")
+
     return False
+
+
+async def _submit_prompt(page, q=None, timeout: float = 12.0) -> bool:
+    state = await _wait_for_composer_ready(page, q=q, timeout=timeout)
+    if q and state.get('hasAttachments') and not state.get('textReady'):
+        emit_log(q,
+                 f"ChatGPT converteu a cola em {state.get('attachmentCount')} anexo(s); enviando pelo botão.")
+
+    if state.get("hasAttachments") or state.get("pasteAsAttachment"):
+        state = await _wait_for_submit_button_ready(page, q=q, timeout=max(8.0, timeout))
+
+    return await _submit_with_verification(page, state, q=q)
 
 
 async def _dismiss_rate_limit_modal_if_any(page, q=None):
@@ -4770,42 +4812,14 @@ async def handle_chat_task_inner(task, page, q, stop_event: asyncio.Event, activ
         raise RuntimeError("Watchdog sinalizou falha após digitação.")
 
     emit_event(q, "status", "Enviando...")
-    sent = False
-    voice_aria = ("voz", "voice", "ditad", "dictat")
-    for sel in (SEND_BUTTON_SELECTORS or ['button[data-testid="send-button"]']):
-        if sent:
-            break
-        try:
-            locator = page.locator(sel)
-            count = await locator.count()
-        except Exception:
-            continue
-        for i in range(min(count, 5)):
-            candidate = locator.nth(i)
-            try:
-                aria = (await candidate.get_attribute('aria-label') or '').lower()
-            except Exception:
-                aria = ''
-            if any(token in aria for token in voice_aria):
-                continue
-            try:
-                if await candidate.is_visible() and not await candidate.is_disabled():
-                    await candidate.click(timeout=2500)
-                    sent = True
-                    break
-            except Exception:
-                continue
 
-    if not sent:
-        # Fallback robusto: pierce DOM e tenta clicar mesmo em botão disabled
-        # (cobre variantes onde data-testid='send-button' não existe).
-        try:
-            result = await _force_click_send_button_via_js(page)
-            if result and result.get("clicked"):
-                sent = True
-                emit_log(q, f"✅ Envio via fallback DOM (id={result.get('id')}, testid={result.get('testid')}).")
-        except Exception as exc:
-            emit_log(q, f"Fallback DOM de envio falhou: {exc}")
+    # Aguarda o composer ficar realmente pronto (anexos indexados, sendEnabled=True).
+    # Sem isso o React do ChatGPT ignora o click mesmo em botão "habilitado" no DOM.
+    pre_state = await _wait_for_composer_ready(page, q=q, timeout=12.0)
+    if pre_state.get("hasAttachments") or pre_state.get("pasteAsAttachment"):
+        pre_state = await _wait_for_submit_button_ready(page, q=q, timeout=15.0)
+
+    sent = await _submit_with_verification(page, pre_state, q=q)
 
     if not sent:
         emit_log(q, "⚠️ Não foi possível confirmar o envio da mensagem.")
