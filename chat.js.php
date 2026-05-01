@@ -5759,6 +5759,53 @@ Responder SOMENTE com o JSON.`;
             /<a\s+href="([^"]*action=download_file[^"]+)"[^>]*>([^<]+)<\/a>/gi,
             '<a class="ow-file-download" href="$1" target="_blank" download>$2</a>'
         );
+
+        // 4) Fix bloco de código malformado onde o conteúdo ficou fora da fence:
+        //    <pre><code>LANG</code></pre> seguido de <p> com o conteúdo real.
+        //    Absorve o parágrafo de volta para dentro do bloco de código.
+        if (html.includes('<pre>') && html.includes('</p>')) {
+            try {
+                const tmp = document.createElement('div');
+                tmp.innerHTML = html;
+                let modified = false;
+                tmp.querySelectorAll('pre').forEach(pre => {
+                    const code = pre.querySelector('code');
+                    if (!code) return;
+                    const rawContent = code.textContent;
+                    const content = rawContent.trim();
+                    // Só age se o bloco contém apenas um nome de linguagem (palavra simples)
+                    if (content && !/^\w{2,20}$/.test(content)) return;
+                    const langName = (content || 'code').toLowerCase();
+
+                    const next = pre.nextElementSibling;
+                    if (!next || next.tagName !== 'P') return;
+
+                    // Converte <br> → \n e remove tags HTML residuais
+                    const pText = next.innerHTML
+                        .replace(/<br\s*\/?>/gi, '\n')
+                        .replace(/<a[^>]*href="[^"]*"[^>]*>([^<]*)<\/a>/gi, '$1')
+                        .replace(/<[^>]+>/g, '');
+                    const trimmed = pText.trim();
+                    if (!trimmed || trimmed.length < 10) return;
+                    // Só absorve conteúdo estruturado (JSON, multilinhas, etc.)
+                    if (!trimmed.startsWith('{') && !trimmed.startsWith('[') && !trimmed.includes('\n')) return;
+
+                    code.textContent = trimmed;
+                    code.className   = 'language-' + langName;
+                    next.remove();
+
+                    // Remove o <pre> vazio que o ChatGPT deixa como fence de fechamento
+                    const afterNext = pre.nextElementSibling;
+                    if (afterNext?.tagName === 'PRE') {
+                        const ac = afterNext.querySelector('code');
+                        if (ac && !ac.textContent.trim()) afterNext.remove();
+                    }
+                    modified = true;
+                });
+                if (modified) html = tmp.innerHTML;
+            } catch (_) { /* silently ignore — DOM manipulation is best-effort */ }
+        }
+
         return html;
     }
 
@@ -5780,10 +5827,26 @@ Responder SOMENTE com o JSON.`;
         });
     }
 
+    // Handles the ChatGPT 4-fence pattern for non-SQL languages (JSON, YAML, Python, etc.):
+    //   ```\n<LANG>\n\n```\n<content>\n```\n```
+    // where the content "escapes" the first fence and sits outside it.
+    function _normalizeOrphanedCodeContent(text) {
+        if (!text || typeof text !== 'string' || text.indexOf('```') === -1) return text;
+        const fence = /```[ \t]*\r?\n[ \t]*([a-zA-Z][a-zA-Z0-9_+-]{1,20})[ \t]*\r?\n(?:[ \t]*\r?\n)*```[ \t]*\r?\n([\s\S]*?)\r?\n[ \t]*```[ \t]*\r?\n[ \t]*```/g;
+        return text.replace(fence, (match, lang, body) => {
+            const cleaned = body.trim();
+            if (!cleaned) return match;
+            // SQL has its own normalizer — skip here to avoid double-processing
+            if (/^(sql|mysql|postgresql|psql|pgsql)$/i.test(lang)) return match;
+            return '```' + lang.toLowerCase() + '\n' + cleaned + '\n```';
+        });
+    }
+
     function formatMarkdown(text) {
         if (!text) return '';
 
         text = _normalizeMalformedSQLBlocks(text);
+        text = _normalizeOrphanedCodeContent(text);
 
         // ── Prioridade: marked.js (confiável, full CommonMark + GFM) ───────────
         if (typeof marked !== 'undefined') {
