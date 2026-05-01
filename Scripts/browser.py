@@ -404,24 +404,84 @@ def _composer_state_script():
             .filter(Boolean)
             .slice(0, 6);
 
-        // Detecção robusta de chip de anexo em estado "carregando":
-        // o ChatGPT marca o botão/anexo com class "cursor-wait" e/ou um
-        // <svg class="animate-spin"> enquanto a indexação não termina.
-        // Sem detectar isso o composer aparenta estar pronto (sendEnabled
-        // pode até estar true) mas o React ignora o submit.
-        const attachmentChipScope = composerRoot || document;
-        const loadingAttachmentNodes = Array.from(attachmentChipScope.querySelectorAll(
-            '[class*="cursor-wait"], [aria-busy="true"], svg.animate-spin, [class*="animate-spin"], progress, [data-testid*="uploading"], [data-testid*="processing"], [role="progressbar"]'
-        )).filter((node) => {
-            if (!node) return false;
-            // Ignora elementos de status genéricos fora do composer (ex.: header).
-            if (composerRoot && !composerRoot.contains(node)) return false;
-            return node.offsetParent !== null;
+        // Detecção robusta de chip de anexo em estado "carregando".
+        //
+        // OBSERVAÇÕES PRÁTICAS (validadas em jsdom contra HTML real do ChatGPT):
+        //
+        // 1) `node.className` em SVG retorna SVGAnimatedString, não string.
+        //    Sempre usar `node.getAttribute('class')` para checagens.
+        // 2) `node.offsetParent` em SVG é `undefined` (não null), então o
+        //    filtro `offsetParent !== null` deixava passar QUALQUER svg da
+        //    página — inclusive ícones decorativos persistentes fora do
+        //    composer. Visibilidade em SVG precisa usar getBoundingClientRect.
+        // 3) A classe `cursor-wait` no chip pode persistir em alguns layouts;
+        //    o sinal mais confiável de "ainda carregando" é a presença de um
+        //    SPINNER (`svg.animate-spin` / `[class*="animate-spin"]`) VISÍVEL
+        //    *dentro* de um chip de anexo. Quando termina, o spinner é
+        //    substituído por um ícone de arquivo (sem animate-spin).
+        //
+        // Estratégia: localiza chips de anexo (file-tile / role=group dentro
+        // do composer) e, para cada um, considera "loading" se houver um
+        // spinner visível (rect com width/height > 0) OU se o chip estiver
+        // marcado com aria-busy.
+        const chipScope = composerRoot || document;
+        const isVisibleEl = (el) => {
+            if (!el) return false;
+            try {
+                const rect = el.getBoundingClientRect();
+                if (!rect || rect.width <= 0 || rect.height <= 0) return false;
+            } catch (e) {
+                return false;
+            }
+            return true;
+        };
+        const chipCandidates = Array.from(chipScope.querySelectorAll(
+            '[class*="file-tile"], [role="group"][aria-label], [data-testid*="composer-attachment"], [data-testid*="attachment"], [data-testid*="file-preview"], [data-testid*="upload-preview"], [data-testid*="file-chip"]'
+        )).filter((chip) => {
+            if (!chip) return false;
+            if (composerRoot && !composerRoot.contains(chip)) return false;
+            return isVisibleEl(chip);
         });
-        const attachmentsLoading = loadingAttachmentNodes.length > 0;
-        const loadingAttachmentSamples = loadingAttachmentNodes
+        const chipIsLoading = (chip) => {
+            try {
+                if (chip.getAttribute('aria-busy') === 'true') return true;
+                const busyDescendants = chip.querySelectorAll('[aria-busy="true"]');
+                if (busyDescendants.length > 0) return true;
+                const spinners = chip.querySelectorAll('svg, [class*="animate-spin"], [role="progressbar"], progress');
+                for (const s of spinners) {
+                    const cls = (s.getAttribute && s.getAttribute('class') || '').toLowerCase();
+                    const role = (s.getAttribute && s.getAttribute('role') || '').toLowerCase();
+                    const isSpinnerLike = cls.includes('animate-spin') || cls.includes('spinner')
+                        || role === 'progressbar' || s.tagName.toLowerCase() === 'progress';
+                    if (!isSpinnerLike) continue;
+                    if (isVisibleEl(s)) return true;
+                }
+            } catch (e) {}
+            return false;
+        };
+        const loadingChips = chipCandidates.filter(chipIsLoading);
+        // Fallback: se não encontramos chips estruturados mas existem cards de
+        // paste-as-attachment detectados, herda o estado de carregamento deles.
+        const fallbackLoadingNodes = pasteAsAttachmentNodes.filter((n) => {
+            if (!n) return false;
+            try {
+                if (composerRoot && !composerRoot.contains(n)) return false;
+                if (n.getAttribute && n.getAttribute('aria-busy') === 'true') return true;
+                const sp = n.querySelectorAll('[class*="animate-spin"], [role="progressbar"], progress');
+                for (const s of sp) {
+                    if (isVisibleEl(s)) return true;
+                }
+            } catch (e) {}
+            return false;
+        });
+        const attachmentsLoading = loadingChips.length > 0 || fallbackLoadingNodes.length > 0;
+        const loadingAttachmentSamples = loadingChips
             .slice(0, 3)
-            .map((node) => (node.getAttribute('aria-label') || node.className || node.tagName || '').toString().slice(0, 80));
+            .map((c) => {
+                const label = (c.getAttribute && c.getAttribute('aria-label')) || '';
+                const cls = (c.getAttribute && c.getAttribute('class')) || '';
+                return (label || cls || c.tagName || '').toString().slice(0, 80);
+            });
 
         const busyNodes = Array.from(document.querySelectorAll('[aria-busy="true"], progress, [data-testid*="uploading"], [data-testid*="spinner"], svg.animate-spin'));
         const textValue = ta ? ((ta.innerText || ta.value || '').trim()) : '';
