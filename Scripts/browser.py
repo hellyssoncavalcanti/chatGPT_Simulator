@@ -4598,17 +4598,9 @@ async def handle_chat_task_inner(task, page, q, stop_event: asyncio.Event, activ
         raise RuntimeError("Watchdog sinalizou falha após digitação.")
 
     emit_event(q, "status", "Enviando...")
-    sent = False
-    try:
-        btn = page.locator('button[data-testid="send-button"]').first
-        if await btn.is_visible() and not await btn.is_disabled():
-            await btn.click()
-            sent = True
-    except:
-        pass
-
+    sent = await _submit_prompt(page, q=q)
     if not sent:
-        await page.keyboard.press("Enter")
+        emit_log(q, "⚠️ Não foi possível confirmar o envio da mensagem.")
     await emit_chat_meta_if_ready()
 
     emit_event(q, "status", "Aguardando resposta...")
