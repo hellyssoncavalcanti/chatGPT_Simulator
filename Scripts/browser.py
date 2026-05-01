@@ -329,11 +329,24 @@ async def _keep_chat_render_alive(page, q, stop_event: asyncio.Event, activity_t
 
 def _composer_state_script():
     return r"""() => {
+        const pickSendButton = () => {
+            const candidates = Array.from(document.querySelectorAll(
+                "button[data-testid='send-button'], button[data-testid='composer-submit-button'], button#composer-submit-button, button[aria-label*='Enviar prompt'], button[aria-label*='Send']"
+            ));
+            const visible = candidates.filter((btn) => btn && btn.offsetParent !== null);
+            const pool = visible.length ? visible : candidates;
+            for (const btn of pool) {
+                const aria = (btn.getAttribute('aria-label') || '').toLowerCase();
+                if (aria.includes('voz') || aria.includes('voice') || aria.includes('ditado')) continue;
+                return btn;
+            }
+            return null;
+        };
         const composerRoot = document.querySelector('form')
             || document.querySelector('[data-testid="composer"]')
             || document.querySelector('main');
         const ta = document.querySelector('#prompt-textarea');
-        const sendBtn = document.querySelector('button[data-testid="send-button"]');
+        const sendBtn = pickSendButton();
         const stopBtn = document.querySelector('button[aria-label="Stop generating"], button[data-testid="stop-button"]');
         const attachmentNodes = Array.from(document.querySelectorAll(
             'button[aria-label="Remove file"], [data-testid*="attachment"], [data-testid*="file-preview"], [data-testid*="composer-attachment"], [data-testid*="upload-preview"], [data-testid*="file-chip"]'
@@ -473,7 +486,15 @@ async def _submit_prompt(page, q=None, timeout: float = 12.0) -> bool:
         ('click', lambda: page.locator(SEND_BUTTON_SELECTORS[0] if SEND_BUTTON_SELECTORS else 'button[data-testid=\"send-button\"]').first.click(timeout=2000)),
         ('force_click', lambda: page.locator(SEND_BUTTON_SELECTORS[0] if SEND_BUTTON_SELECTORS else 'button[data-testid=\"send-button\"]').first.click(timeout=2000, force=True)),
         ('dom_click', lambda: page.evaluate("""() => {
-            const btn = document.querySelector('button[data-testid=\"send-button\"]');
+            const candidates = Array.from(document.querySelectorAll(
+                "button[data-testid='send-button'], button[data-testid='composer-submit-button'], button#composer-submit-button, button[aria-label*='Enviar prompt'], button[aria-label*='Send']"
+            ));
+            const visible = candidates.filter((b) => b && b.offsetParent !== null);
+            const pool = visible.length ? visible : candidates;
+            const btn = pool.find((b) => {
+                const aria = (b.getAttribute('aria-label') || '').toLowerCase();
+                return !aria.includes('voz') && !aria.includes('voice') && !aria.includes('ditado');
+            }) || null;
             if (!btn) return false;
             btn.click();
             return true;
@@ -917,8 +938,15 @@ async def wait_for_chat_ready(page, url: str, q=None, timeout: int = 30) -> bool
             return { ready: false, signal: 'generating' };
         }
 
-        // Sinal 3: send-button existe e não está disabled/aria-disabled
-        const btn = document.querySelector('button[data-testid="send-button"]');
+        // Sinal 3: botão de envio (variações de markup) existe e está habilitado
+        const sendCandidates = Array.from(document.querySelectorAll(
+            "button[data-testid='send-button'], button[data-testid='composer-submit-button'], button#composer-submit-button, button[aria-label*='Enviar prompt'], button[aria-label*='Send']"
+        ));
+        const visibleCandidates = sendCandidates.filter((b) => b && b.offsetParent !== null);
+        const btn = (visibleCandidates.length ? visibleCandidates : sendCandidates).find((b) => {
+            const aria = (b.getAttribute('aria-label') || '').toLowerCase();
+            return !aria.includes('voz') && !aria.includes('voice') && !aria.includes('ditado');
+        }) || null;
         if (btn) {
             const ariaDisabled = btn.getAttribute('aria-disabled');
             if (!btn.disabled && ariaDisabled !== 'true') {
@@ -4226,13 +4254,17 @@ async def handle_chat_task_inner(task, page, q, stop_event: asyncio.Event, activ
 
     emit_event(q, "status", "Enviando...")
     sent = False
-    try:
-        btn = page.locator('button[data-testid="send-button"]').first
-        if await btn.is_visible() and not await btn.is_disabled():
-            await btn.click()
-            sent = True
-    except:
-        pass
+    for sel in (SEND_BUTTON_SELECTORS or ['button[data-testid="send-button"]']):
+        try:
+            btn = page.locator(sel).first
+            if await btn.count() == 0:
+                continue
+            if await btn.is_visible() and not await btn.is_disabled():
+                await btn.click(timeout=2500)
+                sent = True
+                break
+        except Exception:
+            continue
 
     if not sent:
         await page.keyboard.press("Enter")
