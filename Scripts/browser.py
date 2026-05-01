@@ -652,73 +652,55 @@ async def smart_input(page, message, q=None, activityts=None):
                 if inner.strip():
                     emit_log(q, f'Colando bloco ({len(inner)} chars)...')
                     txt = inner.replace('\r\n', '\n').replace('\r', '\n')
-                    paste_chunk_size = 3500
-                    paste_chunks = [txt[i:i + paste_chunk_size] for i in range(0, len(txt), paste_chunk_size)] or ['']
                     total = 0
-                    paste_became_attachment = False
-                    for chunk_index, paste_chunk in enumerate(paste_chunks, start=1):
-                        # Se um chunk anterior já virou anexo, o ChatGPT já tem o conteúdo.
-                        # Colar mais chunks geraria anexos duplicados — pula os restantes.
-                        if paste_became_attachment:
-                            total += len(paste_chunk)
-                            continue
-                        label = 'Colando' if len(paste_chunks) == 1 else f'Colando parte {chunk_index}/{len(paste_chunks)}'
-                        try:
-                            # Tenta colar via clipboard (Ctrl+V) -- rápido, mas em sub-blocos para evitar anexos automáticos.
-                            inserted_now = await _paste_clipboard(paste_chunk, label)
-                            # Detecta se este chunk virou anexo (0 chars no textarea mas retornou total)
-                            check_state = await _get_composer_state(page)
-                            if int(check_state.get('textLength') or 0) == 0 and (check_state.get('hasAttachments') or check_state.get('pasteAsAttachment') or check_state.get('sendEnabled')):
-                                paste_became_attachment = True
-                                # Contabiliza todos os chars restantes como "colados via anexo"
-                                remaining = sum(len(paste_chunks[i]) for i in range(chunk_index, len(paste_chunks)))
-                                total += inserted_now + remaining
-                                emit_log(q, f"ChatGPT converteu todo o bloco em anexo. Pulando {len(paste_chunks) - chunk_index} chunk(s) restante(s).")
-                                continue
-                        except Exception as clipboard_err:
-                            # Fallback: chunks com execCommand se clipboard falhar
-                            emit_log(q, f'Clipboard falhou ({clipboard_err}), usando fallback por chunks...')
-                            CHUNK_SIZE = 300
-                            js_inject = """(text) => {
-                                const ta = document.getElementById('prompt-textarea')
-                                         || document.querySelector('#prompt-textarea');
-                                if (!ta) throw new Error('prompt-textarea nao encontrado');
-                                if (ta.isContentEditable) {
-                                    ta.focus();
-                                    const sel = window.getSelection();
-                                    const range = document.createRange();
-                                    range.selectNodeContents(ta);
-                                    range.collapse(false);
-                                    sel.removeAllRanges();
-                                    sel.addRange(range);
-                                    document.execCommand('insertText', false, text);
-                                    return ta.innerText.length;
-                                }
-                                const setter = Object.getOwnPropertyDescriptor(
-                                    window.HTMLTextAreaElement.prototype, 'value').set;
-                                setter.call(ta, (ta.value || '') + text);
-                                ta.dispatchEvent(new InputEvent('input', {
-                                    bubbles: true, cancelable: true, inputType: 'insertText', data: text
-                                }));
-                                return ta.value.length;
-                            }"""
-                            total_chars = len(paste_chunk)
-                            inserted_now = 0
-                            while inserted_now < total_chars:
-                                chunk = paste_chunk[inserted_now:inserted_now + CHUNK_SIZE]
-                                await page.evaluate(js_inject, chunk)
-                                inserted_now += len(chunk)
-                                pct = int(inserted_now / total_chars * 100)
-                                if q: emit_event(q, 'status', f'Colando (fallback)... {pct}%')
-                                if activityts: activityts[0] = time.time()
-                                await asyncio.sleep(0.08)
-                        total += inserted_now if inserted_now else len(paste_chunk)
-                        await asyncio.sleep(0.15)
+                    try:
+                        # Cola o bloco inteiro de uma vez via clipboard (Ctrl+V).
+                        # _paste_clipboard já detecta se o ChatGPT converteu em anexo.
+                        inserted_now = await _paste_clipboard(txt, 'Colando')
+                        total = inserted_now
+                    except Exception as clipboard_err:
+                        # Fallback: injeção JS direta em sub-blocos se clipboard falhar
+                        emit_log(q, f'Clipboard falhou ({clipboard_err}), usando fallback por chunks...')
+                        CHUNK_SIZE = 300
+                        js_inject = """(text) => {
+                            const ta = document.getElementById('prompt-textarea')
+                                     || document.querySelector('#prompt-textarea');
+                            if (!ta) throw new Error('prompt-textarea nao encontrado');
+                            if (ta.isContentEditable) {
+                                ta.focus();
+                                const sel = window.getSelection();
+                                const range = document.createRange();
+                                range.selectNodeContents(ta);
+                                range.collapse(false);
+                                sel.removeAllRanges();
+                                sel.addRange(range);
+                                document.execCommand('insertText', false, text);
+                                return ta.innerText.length;
+                            }
+                            const setter = Object.getOwnPropertyDescriptor(
+                                window.HTMLTextAreaElement.prototype, 'value').set;
+                            setter.call(ta, (ta.value || '') + text);
+                            ta.dispatchEvent(new InputEvent('input', {
+                                bubbles: true, cancelable: true, inputType: 'insertText', data: text
+                            }));
+                            return ta.value.length;
+                        }"""
+                        total_chars = len(txt)
+                        inserted_now = 0
+                        while inserted_now < total_chars:
+                            chunk = txt[inserted_now:inserted_now + CHUNK_SIZE]
+                            await page.evaluate(js_inject, chunk)
+                            inserted_now += len(chunk)
+                            pct = int(inserted_now / total_chars * 100)
+                            if q: emit_event(q, 'status', f'Colando (fallback)... {pct}%')
+                            if activityts: activityts[0] = time.time()
+                            await asyncio.sleep(0.08)
+                        total = inserted_now
                     expected_len = len(txt)
                     state_after_paste = await _get_composer_state(page)
                     if total < expected_len * 0.9 and not state_after_paste.get('hasAttachments') and not state_after_paste.get('sendEnabled'):
                         emit_log(q, f'Aviso: colados {total} de ~{len(inner)} chars')
-                    elif state_after_paste.get('hasAttachments') or paste_became_attachment:
+                    elif state_after_paste.get('hasAttachments'):
                         emit_log(q,
                                  f"Bloco aceito como anexo(s): {state_after_paste.get('attachmentCount', '?')} item(ns).")
                     elif total < expected_len * 0.9 and state_after_paste.get('sendEnabled'):
