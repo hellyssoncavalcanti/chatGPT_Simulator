@@ -188,6 +188,14 @@ if REQUEST_TARGET not in {"chatgpt", "codex", "claude"}:
 SIMULATOR_MODEL = _env("AUTODEV_AGENT_MODEL", "ChatGPT Simulator", "AUTON_AGENT_MODEL")
 _CFG_API_KEY = getattr(config, "API_KEY", "") if config else ""
 API_KEY = _env("AUTODEV_AGENT_API_KEY", _CFG_API_KEY, "AUTON_AGENT_API_KEY")
+REQUEST_TARGET = str(
+    _env(
+        "AUTODEV_AGENT_REQUEST_TARGET",
+        str(getattr(config, "AUTODEV_AGENT_REQUEST_TARGET", "chatgpt")) if config else "chatgpt",
+    )
+).strip().lower()
+if REQUEST_TARGET not in {"chatgpt", "codex"}:
+    REQUEST_TARGET = "chatgpt"
 
 # =============================================================================
 # CONFIGURAÇÃO — Ciclos e Temporização
@@ -1664,6 +1672,8 @@ def _should_forward_plan_to_codex(plan: Dict[str, Any],
                                   results: List[ActionResult],
                                   changed: List[str]) -> bool:
     """Decide forward com base no sinal do LLM + fallback estrutural robusto."""
+    if REQUEST_TARGET != "codex":
+        return False
     if changed:
         return False
     if bool(plan.get("should_forward_to_codex")):
@@ -3566,7 +3576,12 @@ def run_single_cycle() -> None:
                 if not pending:
                     break
         elif not changed and ENABLE_AUTOFIX and not should_forward_to_codex:
-            log("ℹ️ Plano sinalizou should_forward_to_codex=false; sem encaminhar ao Codex.")
+            if REQUEST_TARGET != "codex":
+                log(
+                    f"ℹ️ REQUEST_TARGET={REQUEST_TARGET}; encaminhamento ao Codex desativado por configuração."
+                )
+            else:
+                log("ℹ️ Plano sinalizou should_forward_to_codex=false; sem encaminhar ao Codex.")
 
         # Resumo do ciclo
         ok_count = sum(1 for r in results if r.ok)
@@ -3711,9 +3726,12 @@ def main_loop() -> None:
     log("🚀 AutoDevAgent iniciando")
     log(f"📄 Log: {AGENT_LOG}")
     log(f"🔗 Simulator URL: {SIMULATOR_URL}")
-    log(f"🔗 Codex URL: {CODEX_URL or '(novo chat a cada ciclo de conversa)'}")
-    log(f"🎯 REQUEST_TARGET: {REQUEST_TARGET} "
-        f"(claude_url={CLAUDE_CODE_URL}, claude_project={CLAUDE_CODE_PROJECT})")
+    log(f"🎯 REQUEST_TARGET: {REQUEST_TARGET}")
+    if REQUEST_TARGET == "codex":
+        log(f"🔗 Codex URL: {CODEX_URL or '(novo chat a cada ciclo de conversa)'}")
+        log(f"🧩 Codex Repo: {CODEX_REPO}")
+    else:
+        log("🔗 Destino operacional: chatgpt (sem encaminhamento ao Codex).")
     log(f"🧭 Plataforma: {platform.system()} {platform.release()} | Python {sys.version.split(' ',1)[0]}")
     log(f"⚙️ AUTOFIX={ENABLE_AUTOFIX} AUTOCOMMIT={ENABLE_AUTOCOMMIT} AUTOPUSH={ENABLE_AUTOPUSH}")
     if TOKEN_BUDGET_PER_WINDOW > 0:

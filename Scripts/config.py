@@ -133,6 +133,10 @@ REQUEST_TIMEOUT_SEC = _env_int(
 )
 # Alias explícito para manter compatibilidade com scripts legados.
 AUTODEV_AGENT_REQUEST_TIMEOUT = REQUEST_TIMEOUT_SEC
+# Destino do AutoDevAgent:
+# - "chatgpt" (padrão): trabalha apenas no fluxo principal do Simulator.
+# - "codex": permite encaminhamento de planos para o fluxo Codex.
+AUTODEV_AGENT_REQUEST_TARGET = os.getenv("AUTODEV_AGENT_REQUEST_TARGET", "chatgpt").strip().lower()
 
 # Destino do pedido emitido a cada ciclo do auto_dev_agent.py. Três opções:
 #   "chatgpt" → fluxo legado: pergunta primeiro ao ChatGPT comum (browser.py

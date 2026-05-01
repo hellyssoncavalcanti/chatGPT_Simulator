@@ -5348,6 +5348,10 @@ Responder SOMENTE com o JSON.`;
                 _attachSQLButtons(target, sqlQueries);
             }
 
+            if (!target || target.querySelector('.ow-sql-actions-bar')) return;
+            if ((target.innerText || target.textContent || '').length > 30000) return;
+
+            _attachSQLButtons(target, sqlQueries);
             bubble.dataset.sqlUiSignature = signature;
         });
     }
