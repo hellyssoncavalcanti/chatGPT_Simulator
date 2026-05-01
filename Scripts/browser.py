@@ -403,6 +403,26 @@ def _composer_state_script():
             .map((node) => (node.innerText || node.getAttribute('aria-label') || '').trim())
             .filter(Boolean)
             .slice(0, 6);
+
+        // Detecção robusta de chip de anexo em estado "carregando":
+        // o ChatGPT marca o botão/anexo com class "cursor-wait" e/ou um
+        // <svg class="animate-spin"> enquanto a indexação não termina.
+        // Sem detectar isso o composer aparenta estar pronto (sendEnabled
+        // pode até estar true) mas o React ignora o submit.
+        const attachmentChipScope = composerRoot || document;
+        const loadingAttachmentNodes = Array.from(attachmentChipScope.querySelectorAll(
+            '[class*="cursor-wait"], [aria-busy="true"], svg.animate-spin, [class*="animate-spin"], progress, [data-testid*="uploading"], [data-testid*="processing"], [role="progressbar"]'
+        )).filter((node) => {
+            if (!node) return false;
+            // Ignora elementos de status genéricos fora do composer (ex.: header).
+            if (composerRoot && !composerRoot.contains(node)) return false;
+            return node.offsetParent !== null;
+        });
+        const attachmentsLoading = loadingAttachmentNodes.length > 0;
+        const loadingAttachmentSamples = loadingAttachmentNodes
+            .slice(0, 3)
+            .map((node) => (node.getAttribute('aria-label') || node.className || node.tagName || '').toString().slice(0, 80));
+
         const busyNodes = Array.from(document.querySelectorAll('[aria-busy="true"], progress, [data-testid*="uploading"], [data-testid*="spinner"], svg.animate-spin'));
         const textValue = ta ? ((ta.innerText || ta.value || '').trim()) : '';
         const textLength = textValue.length;
@@ -417,11 +437,12 @@ def _composer_state_script():
         // verifica se o ChatGPT aceitou conteúdo (possível anexo não detectado pelos seletores)
         const sendEnabledNoContent = sendEnabled && !textReady && !hasAttachments;
 
-        const uploading = busyNodes.some((node) => {
+        const busyUploading = busyNodes.some((node) => {
             if (!node) return false;
             const txt = (node.innerText || node.getAttribute?.('aria-label') || '').toLowerCase();
             return !txt || txt.includes('upload') || txt.includes('carreg') || txt.includes('process') || txt.includes('analys');
         });
+        const uploading = busyUploading || attachmentsLoading;
         return {
             textLength,
             textReady,
@@ -432,6 +453,8 @@ def _composer_state_script():
             sendEnabled,
             stopVisible,
             uploading,
+            attachmentsLoading,
+            loadingAttachmentSamples,
             ariaBusy: !!(ta && ta.getAttribute('aria-busy') === 'true'),
             composerVisible: !!(composerRoot && composerRoot.offsetParent !== null),
             pasteAsAttachment: pasteAsAttachmentNodes.length > 0 || sendEnabledNoContent,
@@ -453,6 +476,8 @@ async def _get_composer_state(page):
             'sendEnabled': False,
             'stopVisible': False,
             'uploading': False,
+            'attachmentsLoading': False,
+            'loadingAttachmentSamples': [],
             'ariaBusy': False,
             'composerVisible': False,
         }
@@ -465,7 +490,8 @@ async def _wait_for_composer_ready(page, q=None, timeout: float = 20.0):
         state = await _get_composer_state(page)
         last_state = state
         has_payload = bool(state.get('textReady') or state.get('hasAttachments'))
-        if has_payload and state.get('sendEnabled') and not state.get('uploading'):
+        uploading = bool(state.get('uploading') or state.get('attachmentsLoading'))
+        if has_payload and state.get('sendEnabled') and not uploading:
             return state
         await asyncio.sleep(0.25)
 
@@ -474,25 +500,35 @@ async def _wait_for_composer_ready(page, q=None, timeout: float = 20.0):
             q,
             "⚠️ Composer não ficou pronto a tempo; tentando enviar assim mesmo "
             f"(texto={last_state.get('textLength')}, anexos={last_state.get('attachmentCount')}, "
-            f"sendEnabled={last_state.get('sendEnabled')}, uploading={last_state.get('uploading')})."
+            f"sendEnabled={last_state.get('sendEnabled')}, uploading={last_state.get('uploading')}, "
+            f"attachmentsLoading={last_state.get('attachmentsLoading')})."
         )
     return last_state or {}
 
 
-async def _wait_for_submit_button_ready(page, q=None, timeout: float = 18.0) -> dict:
+async def _wait_for_submit_button_ready(page, q=None, timeout: float = 30.0) -> dict:
     """Aguarda botão de submit ficar realmente habilitado após cola/anexo.
 
-    Nota: esse wait é importante quando o ChatGPT converte a cola em anexos e
-    faz indexação assíncrona sem sempre expor spinner de upload confiável.
+    Critério de "pronto":
+    - há payload (texto ou anexos)
+    - sendEnabled=True (botão não está disabled/aria-disabled)
+    - attachmentsLoading=False (nenhum chip de anexo com cursor-wait/animate-spin)
+    - uploading=False (nenhum spinner/progress global)
+    - estado estável por 2 leituras consecutivas
+
+    Sem essa espera o React do ChatGPT pode estar ainda indexando a cola
+    convertida em anexos; o click vira no-op silencioso.
     """
     deadline = time.time() + timeout
     last_state = {}
     stable_ok = 0
+    last_progress_log = 0.0
+    started = time.time()
     while time.time() < deadline:
         state = await _get_composer_state(page)
         last_state = state or {}
         send_enabled = bool(last_state.get("sendEnabled"))
-        uploading = bool(last_state.get("uploading") or last_state.get("ariaBusy"))
+        uploading = bool(last_state.get("uploading") or last_state.get("ariaBusy") or last_state.get("attachmentsLoading"))
         has_payload = bool(last_state.get("textReady") or last_state.get("hasAttachments"))
         if has_payload and send_enabled and not uploading:
             stable_ok += 1
@@ -500,6 +536,16 @@ async def _wait_for_submit_button_ready(page, q=None, timeout: float = 18.0) -> 
                 return last_state
         else:
             stable_ok = 0
+            now = time.time()
+            if q and last_state.get("attachmentsLoading") and (now - last_progress_log) >= 3.0:
+                samples = last_state.get("loadingAttachmentSamples") or []
+                emit_log(
+                    q,
+                    f"⏳ Aguardando anexos terminarem de carregar ({int(now - started)}s, "
+                    f"sendEnabled={send_enabled}, anexos={last_state.get('attachmentCount')}, "
+                    f"loading={samples[:1]})"
+                )
+                last_progress_log = now
         await asyncio.sleep(0.25)
 
     if q:
@@ -507,7 +553,8 @@ async def _wait_for_submit_button_ready(page, q=None, timeout: float = 18.0) -> 
             q,
             "⚠️ Submit não confirmou estado habilitado após indexação; tentando envio assim mesmo "
             f"(texto={last_state.get('textLength')}, anexos={last_state.get('attachmentCount')}, "
-            f"sendEnabled={last_state.get('sendEnabled')}, uploading={last_state.get('uploading')})."
+            f"sendEnabled={last_state.get('sendEnabled')}, uploading={last_state.get('uploading')}, "
+            f"attachmentsLoading={last_state.get('attachmentsLoading')})."
         )
     return last_state
 
@@ -4825,9 +4872,12 @@ async def handle_chat_task_inner(task, page, q, stop_event: asyncio.Event, activ
 
     # Aguarda o composer ficar realmente pronto (anexos indexados, sendEnabled=True).
     # Sem isso o React do ChatGPT ignora o click mesmo em botão "habilitado" no DOM.
-    pre_state = await _wait_for_composer_ready(page, q=q, timeout=12.0)
-    if pre_state.get("hasAttachments") or pre_state.get("pasteAsAttachment"):
-        pre_state = await _wait_for_submit_button_ready(page, q=q, timeout=15.0)
+    # Anexos grandes (cola convertida em vários blocos) podem levar 20-40s para
+    # terminar a indexação — o sinal real é a perda da classe `cursor-wait` no
+    # chip de anexo (capturado em attachmentsLoading).
+    pre_state = await _wait_for_composer_ready(page, q=q, timeout=15.0)
+    if pre_state.get("hasAttachments") or pre_state.get("pasteAsAttachment") or pre_state.get("attachmentsLoading"):
+        pre_state = await _wait_for_submit_button_ready(page, q=q, timeout=45.0)
 
     sent = await _submit_with_verification(page, pre_state, q=q)
 
