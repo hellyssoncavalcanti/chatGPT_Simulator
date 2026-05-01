@@ -3731,7 +3731,7 @@ def main_loop() -> None:
         log(f"🔗 Codex URL: {CODEX_URL or '(novo chat a cada ciclo de conversa)'}")
         log(f"🧩 Codex Repo: {CODEX_REPO}")
     else:
-        log("🔗 Destino operacional: chatgpt (sem encaminhamento ao Codex).")
+        log("🔗 Destino operacional: chatgpt (com encaminhamento ao Codex quando o plano JSON solicitar).")
     log(f"🧭 Plataforma: {platform.system()} {platform.release()} | Python {sys.version.split(' ',1)[0]}")
     log(f"⚙️ AUTOFIX={ENABLE_AUTOFIX} AUTOCOMMIT={ENABLE_AUTOCOMMIT} AUTOPUSH={ENABLE_AUTOPUSH}")
     if TOKEN_BUDGET_PER_WINDOW > 0:
