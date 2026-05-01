@@ -330,16 +330,20 @@ def _composer_state_script():
     return r"""() => {
         const pickSendButton = () => {
             const candidates = Array.from(document.querySelectorAll(
-                "button[data-testid='send-button'], button[data-testid='composer-submit-button'], button#composer-submit-button, button[aria-label*='Enviar prompt'], button[aria-label*='Send']"
+                "button[data-testid='send-button'], button[data-testid='composer-submit-button'], button#composer-submit-button, button[aria-label*='Enviar prompt'], button[aria-label*='Send'], button.composer-submit-btn, button.composer-submit-button-color, form button[class*='composer-submit']"
             ));
-            const visible = candidates.filter((btn) => btn && btn.offsetParent !== null);
-            const pool = visible.length ? visible : candidates;
-            for (const btn of pool) {
+            const isVoice = (btn) => {
                 const aria = (btn.getAttribute('aria-label') || '').toLowerCase();
-                if (aria.includes('voz') || aria.includes('voice') || aria.includes('ditado')) continue;
-                return btn;
-            }
-            return null;
+                const dt = (btn.getAttribute('data-testid') || '').toLowerCase();
+                const cls = (btn.getAttribute('class') || '').toLowerCase();
+                if (aria.includes('voz') || aria.includes('voice') || aria.includes('ditad') || aria.includes('dictat')) return true;
+                if (dt.includes('voice') || dt.includes('dictation')) return true;
+                if (cls.includes('composer-submit-btn-text')) return true;
+                return false;
+            };
+            const filtered = candidates.filter((btn) => btn && !isVoice(btn));
+            const visible = filtered.filter((btn) => btn.offsetParent !== null);
+            return visible[0] || filtered[0] || null;
         };
         const composerRoot = document.querySelector('form')
             || document.querySelector('[data-testid="composer"]')
@@ -508,6 +512,80 @@ async def _wait_for_submit_button_ready(page, q=None, timeout: float = 18.0) -> 
     return last_state
 
 
+_SEND_BUTTON_QUERY_JS = (
+    "button[data-testid='send-button'], "
+    "button[data-testid='composer-submit-button'], "
+    "button#composer-submit-button, "
+    "button[aria-label*='Enviar prompt'], "
+    "button[aria-label*='Send'], "
+    "button.composer-submit-btn, "
+    "button.composer-submit-button-color, "
+    "form button[class*='composer-submit']"
+)
+
+
+_PICK_SEND_BUTTON_JS = r"""
+    const root = document;
+    const candidates = Array.from(root.querySelectorAll(""" + repr(_SEND_BUTTON_QUERY_JS) + r"""));
+    const isVoice = (b) => {
+        const aria = (b.getAttribute('aria-label') || '').toLowerCase();
+        const dt = (b.getAttribute('data-testid') || '').toLowerCase();
+        const cls = (b.getAttribute('class') || '').toLowerCase();
+        if (aria.includes('voz') || aria.includes('voice') || aria.includes('ditad') || aria.includes('dictat')) return true;
+        if (dt.includes('voice') || dt.includes('dictation')) return true;
+        if (cls.includes('composer-submit-btn-text')) return true; // botão de voz reusa este nome
+        return false;
+    };
+    const filtered = candidates.filter((b) => b && !isVoice(b));
+    const visible = filtered.filter((b) => b.offsetParent !== null);
+    const enabled = visible.filter((b) => !b.disabled && b.getAttribute('aria-disabled') !== 'true');
+    return enabled[0] || visible[0] || filtered[0] || null;
+"""
+
+
+_FORCE_CLICK_SEND_JS = "() => {\n" + _PICK_SEND_BUTTON_JS.replace(
+    "return enabled[0] || visible[0] || filtered[0] || null;",
+    """const btn = enabled[0] || visible[0] || filtered[0] || null;
+    if (!btn) return { clicked: false, reason: 'no_button' };
+    try {
+        if (btn.disabled) btn.disabled = false;
+        if (btn.getAttribute('aria-disabled') === 'true') btn.removeAttribute('aria-disabled');
+    } catch (e) {}
+    try {
+        btn.scrollIntoView({ block: 'center', inline: 'center' });
+    } catch (e) {}
+    try {
+        const rect = btn.getBoundingClientRect();
+        const cx = rect.left + rect.width / 2;
+        const cy = rect.top + rect.height / 2;
+        const opts = { bubbles: true, cancelable: true, view: window, clientX: cx, clientY: cy, button: 0 };
+        btn.dispatchEvent(new PointerEvent('pointerdown', opts));
+        btn.dispatchEvent(new MouseEvent('mousedown', opts));
+        btn.dispatchEvent(new PointerEvent('pointerup', opts));
+        btn.dispatchEvent(new MouseEvent('mouseup', opts));
+        btn.dispatchEvent(new MouseEvent('click', opts));
+    } catch (e) {}
+    try { btn.click(); } catch (e) {}
+    try {
+        const form = btn.closest('form');
+        if (form && typeof form.requestSubmit === 'function') form.requestSubmit(btn);
+        else if (form) form.submit();
+    } catch (e) {}
+    return { clicked: true, tag: btn.tagName, testid: btn.getAttribute('data-testid') || null, id: btn.id || null };
+"""
+) + "\n}"
+
+
+async def _force_click_send_button_via_js(page) -> dict:
+    """Localiza o botão de envio via JS cobrindo todas as variantes conhecidas
+    e dispara click + form.requestSubmit, removendo `disabled`/`aria-disabled`
+    quando necessário."""
+    try:
+        return await page.evaluate(_FORCE_CLICK_SEND_JS) or {"clicked": False}
+    except Exception as exc:
+        return {"clicked": False, "error": str(exc)}
+
+
 async def _submit_prompt(page, q=None, timeout: float = 12.0) -> bool:
     state = await _wait_for_composer_ready(page, q=q, timeout=timeout)
     if q and state.get('hasAttachments') and not state.get('textReady'):
@@ -517,23 +595,48 @@ async def _submit_prompt(page, q=None, timeout: float = 12.0) -> bool:
     if state.get("hasAttachments") or state.get("pasteAsAttachment"):
         state = await _wait_for_submit_button_ready(page, q=q, timeout=max(8.0, timeout))
 
+    selectors = list(SEND_BUTTON_SELECTORS) or ['button[data-testid="send-button"]']
+    voice_aria = ("voz", "voice", "ditad", "dictat")
+
+    async def _try_locator_click(force: bool):
+        last_exc = None
+        for sel in selectors:
+            try:
+                locator = page.locator(sel)
+                count = await locator.count()
+            except Exception as exc:
+                last_exc = exc
+                continue
+            for i in range(min(count, 5)):
+                candidate = locator.nth(i)
+                try:
+                    aria = (await candidate.get_attribute('aria-label') or '').lower()
+                except Exception:
+                    aria = ''
+                if any(token in aria for token in voice_aria):
+                    continue
+                try:
+                    await candidate.click(timeout=1500, force=force)
+                    return True
+                except Exception as exc:
+                    last_exc = exc
+                    continue
+        if last_exc:
+            raise last_exc
+        raise RuntimeError("nenhum botão de envio localizado")
+
+    async def _dom_click():
+        result = await _force_click_send_button_via_js(page)
+        if not result or not result.get("clicked"):
+            raise RuntimeError(
+                f"DOM click não encontrou botão de envio ({result.get('reason') or result.get('error') or 'sem detalhes'})"
+            )
+        return True
+
     submit_attempts = [
-        ('click', lambda: page.locator(SEND_BUTTON_SELECTORS[0] if SEND_BUTTON_SELECTORS else 'button[data-testid=\"send-button\"]').first.click(timeout=2000)),
-        ('force_click', lambda: page.locator(SEND_BUTTON_SELECTORS[0] if SEND_BUTTON_SELECTORS else 'button[data-testid=\"send-button\"]').first.click(timeout=2000, force=True)),
-        ('dom_click', lambda: page.evaluate("""() => {
-            const candidates = Array.from(document.querySelectorAll(
-                "button[data-testid='send-button'], button[data-testid='composer-submit-button'], button#composer-submit-button, button[aria-label*='Enviar prompt'], button[aria-label*='Send']"
-            ));
-            const visible = candidates.filter((b) => b && b.offsetParent !== null);
-            const pool = visible.length ? visible : candidates;
-            const btn = pool.find((b) => {
-                const aria = (b.getAttribute('aria-label') || '').toLowerCase();
-                return !aria.includes('voz') && !aria.includes('voice') && !aria.includes('ditado');
-            }) || null;
-            if (!btn) return false;
-            btn.click();
-            return true;
-        }""")),
+        ('click', lambda: _try_locator_click(force=False)),
+        ('force_click', lambda: _try_locator_click(force=True)),
+        ('dom_click', _dom_click),
         ('enter', lambda: page.keyboard.press('Enter')),
         ('mod_enter', lambda: page.keyboard.press('Control+Enter')),
     ]
@@ -957,12 +1060,17 @@ async def wait_for_chat_ready(page, url: str, q=None, timeout: int = 30) -> bool
 
         // Sinal 3: botão de envio (variações de markup) existe e está habilitado
         const sendCandidates = Array.from(document.querySelectorAll(
-            "button[data-testid='send-button'], button[data-testid='composer-submit-button'], button#composer-submit-button, button[aria-label*='Enviar prompt'], button[aria-label*='Send']"
+            "button[data-testid='send-button'], button[data-testid='composer-submit-button'], button#composer-submit-button, button[aria-label*='Enviar prompt'], button[aria-label*='Send'], button.composer-submit-btn, button.composer-submit-button-color, form button[class*='composer-submit']"
         ));
         const visibleCandidates = sendCandidates.filter((b) => b && b.offsetParent !== null);
         const btn = (visibleCandidates.length ? visibleCandidates : sendCandidates).find((b) => {
             const aria = (b.getAttribute('aria-label') || '').toLowerCase();
-            return !aria.includes('voz') && !aria.includes('voice') && !aria.includes('ditado');
+            const dt = (b.getAttribute('data-testid') || '').toLowerCase();
+            const cls = (b.getAttribute('class') || '').toLowerCase();
+            if (aria.includes('voz') || aria.includes('voice') || aria.includes('ditad') || aria.includes('dictat')) return false;
+            if (dt.includes('voice') || dt.includes('dictation')) return false;
+            if (cls.includes('composer-submit-btn-text')) return false;
+            return true;
         }) || null;
         if (btn) {
             const ariaDisabled = btn.getAttribute('aria-disabled');
@@ -4663,17 +4771,41 @@ async def handle_chat_task_inner(task, page, q, stop_event: asyncio.Event, activ
 
     emit_event(q, "status", "Enviando...")
     sent = False
+    voice_aria = ("voz", "voice", "ditad", "dictat")
     for sel in (SEND_BUTTON_SELECTORS or ['button[data-testid="send-button"]']):
+        if sent:
+            break
         try:
-            btn = page.locator(sel).first
-            if await btn.count() == 0:
-                continue
-            if await btn.is_visible() and not await btn.is_disabled():
-                await btn.click(timeout=2500)
-                sent = True
-                break
+            locator = page.locator(sel)
+            count = await locator.count()
         except Exception:
             continue
+        for i in range(min(count, 5)):
+            candidate = locator.nth(i)
+            try:
+                aria = (await candidate.get_attribute('aria-label') or '').lower()
+            except Exception:
+                aria = ''
+            if any(token in aria for token in voice_aria):
+                continue
+            try:
+                if await candidate.is_visible() and not await candidate.is_disabled():
+                    await candidate.click(timeout=2500)
+                    sent = True
+                    break
+            except Exception:
+                continue
+
+    if not sent:
+        # Fallback robusto: pierce DOM e tenta clicar mesmo em botão disabled
+        # (cobre variantes onde data-testid='send-button' não existe).
+        try:
+            result = await _force_click_send_button_via_js(page)
+            if result and result.get("clicked"):
+                sent = True
+                emit_log(q, f"✅ Envio via fallback DOM (id={result.get('id')}, testid={result.get('testid')}).")
+        except Exception as exc:
+            emit_log(q, f"Fallback DOM de envio falhou: {exc}")
 
     if not sent:
         emit_log(q, "⚠️ Não foi possível confirmar o envio da mensagem.")
@@ -4855,7 +4987,7 @@ async def handle_chat_task_inner(task, page, q, stop_event: asyncio.Event, activ
 
         gen_state = await page.evaluate("""() => {
             const stopBtn = document.querySelector('button[aria-label="Stop generating"], button[data-testid="stop-button"]');
-            const sendBtn = document.querySelector('button[data-testid="send-button"]');
+            const sendBtn = document.querySelector('button[data-testid="send-button"], button[data-testid="composer-submit-button"], button#composer-submit-button, button.composer-submit-btn');
             const ta = document.querySelector('#prompt-textarea');
             const stopVisible = !!(stopBtn && stopBtn.offsetParent !== null);
             // sendDisabled isoladamente não indica geração:
