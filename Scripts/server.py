@@ -66,12 +66,23 @@ from server_helpers import (
     resolve_chat_url as _resolve_chat_url_impl,
     resolve_browser_profile as _resolve_browser_profile_impl,
     build_chat_task_payload as _build_chat_task_payload_impl,
+    build_chat_id_event as _build_chat_id_event_impl,
+    build_chat_meta_event as _build_chat_meta_event_impl,
     build_queue_key as _build_queue_key_impl,
     build_error_event as _build_error_event_impl,
     build_status_event as _build_status_event_impl,
     build_markdown_event as _build_markdown_event_impl,
     build_search_result_event as _build_search_result_event_impl,
     build_search_finish_event as _build_search_finish_event_impl,
+    build_active_chat_meta as _build_active_chat_meta_impl,
+    count_active_chats as _count_active_chats_impl,
+    count_unfinished_chats as _count_unfinished_chats_impl,
+    find_expired_chat_ids as _find_expired_chat_ids_impl,
+    extract_manual_whatsapp_reply_targets as _extract_manual_whatsapp_reply_targets_impl,
+    format_manual_whatsapp_requester_suffix as _format_manual_whatsapp_requester_suffix_impl,
+    resolve_download_content_type as _resolve_download_content_type_impl,
+    resolve_avatar_filename as _resolve_avatar_filename_impl,
+    normalize_source_hint as _normalize_source_hint_impl,
     normalize_optional_text as _normalize_optional_text_impl,
     extract_requester_identity as _extract_requester_identity_impl,
     resolve_lookup_origin_url as _resolve_lookup_origin_url_impl,
@@ -87,6 +98,12 @@ from server_helpers import (
     format_requester_suffix as _format_requester_suffix_impl,
     format_origin_suffix as _format_origin_suffix_impl,
     safe_int as _safe_int_impl,
+    resolve_logs_tail_lines_limit as _resolve_logs_tail_lines_limit_impl,
+    parse_from_end_flag as _parse_from_end_flag_impl,
+    extract_queue_failed_limit as _extract_queue_failed_limit_impl,
+    extract_queue_failed_retry_index as _extract_queue_failed_retry_index_impl,
+    advance_health_ping_state as _advance_health_ping_state_impl,
+    build_unauthorized_payload as _build_unauthorized_payload_impl,
     safe_snapshot_stats as _safe_snapshot_stats_impl,
 )
 import error_catalog as _error_catalog
@@ -98,6 +115,22 @@ except Exception:
     Counter = Gauge = None
     generate_latest = None
     CONTENT_TYPE_LATEST = "text/plain; version=0.0.4; charset=utf-8"
+
+# Compatibilidade defensiva: em ambientes com reload parcial/merge incompleto,
+# o alias pode não existir no escopo global. Evita NameError durante stream.
+if "_build_chat_meta_event_impl" not in globals():
+    def _build_chat_meta_event_impl(chat_id, url: str, chromium_profile: str = "") -> str:
+        return json.dumps(
+            {
+                "type": "chat_meta",
+                "content": {
+                    "chat_id": chat_id,
+                    "url": str(url or ""),
+                    "chromium_profile": str(chromium_profile or ""),
+                },
+            },
+            ensure_ascii=False,
+        )
 
 # ─────────────────────────────────────────────────────────────
 # CAPTURA CONFIGURAÇÃO DE DEBUG (que é estabelecida no arquivo "config.py").
@@ -624,10 +657,14 @@ def _acquire_python_chat_slot(request_key: str,
 
             if stream_queue is not None:
                 try:
-                    pos = (_python_chat_queue_waiting.index(request_key) + 1)
+                    waiting_pos = (_python_chat_queue_waiting.index(request_key) + 1)
                 except ValueError:
-                    pos = 1
-                total = len(_python_chat_queue_waiting) + (1 if _python_chat_queue_active else 0)
+                    waiting_pos = 1
+                active_offset = (1 if _python_chat_queue_active else 0)
+                # Posição exibida para o cliente considera também o item em execução
+                # (quando houver), refletindo a fila real de pedidos já chegados.
+                pos = waiting_pos + active_offset
+                total = len(_python_chat_queue_waiting) + active_offset
                 stream_queue.put(_queue_status_payload(remaining, pos, total, sender_label))
 
             _python_chat_queue_cond.wait(timeout=min(PYTHON_CHAT_QUEUE_TICK_SEC, remaining))
@@ -1087,14 +1124,19 @@ _health_last_log_time = 0
 def health_check():
     global _health_ping_count, _health_last_log_time
 
-    _health_ping_count += 1
     now = time.time()
+    state = _advance_health_ping_state_impl(
+        _health_ping_count,
+        _health_last_log_time,
+        now,
+        interval_sec=300,
+    )
+    _health_ping_count = state["next_ping_count"]
+    _health_last_log_time = state["next_last_log_time"]
     # Loga apenas 1x a cada 5 minutos para não poluir
-    if now - _health_last_log_time >= 300:
+    if state["should_log"]:
         caller = request.headers.get("User-Agent", "desconhecido")
-        log(f"🏥 Health check #{_health_ping_count} (origem: {caller})")
-        _health_last_log_time = now
-        _health_ping_count = 0  # reseta contador após logar
+        log(f"🏥 Health check #{state['logged_ping_count']} (origem: {caller})")
 
     return jsonify({"status": "ok", "service": "ChatGPT Simulator"}), 200
 
@@ -1119,7 +1161,7 @@ def queue_status():
 @app.route("/api/queue/failed", methods=["GET"])
 def queue_failed():
     """DLQ: lista tarefas que falharam no browser loop."""
-    limit = _safe_int_impl(request.args.get("limit", 100), 100)
+    limit = _extract_queue_failed_limit_impl(request.args.get("limit", 100))
     items = browser_queue.list_failed(limit=limit) if hasattr(browser_queue, "list_failed") else []
     return jsonify({"success": True, "failed": items, "count": len(items)}), 200
 
@@ -1128,7 +1170,7 @@ def queue_failed():
 def queue_failed_retry():
     """Reinsere item da DLQ na fila principal por índice."""
     data = request.get_json(silent=True) or {}
-    idx = _safe_int_impl(data.get("index", -1), -1)
+    idx = _extract_queue_failed_retry_index_impl(data)
     if not hasattr(browser_queue, "retry_failed"):
         return jsonify({"success": False, "error": "dlq_not_supported"}), 400
     retried = browser_queue.retry_failed(idx)
@@ -1143,8 +1185,7 @@ def logs_tail():
     Retorna as últimas linhas do log atual do simulator.
     Ideal para polling leve no frontend (toast de observabilidade).
     """
-    requested = _safe_int_impl(request.args.get("lines", 120), 120)
-    lines_limit = max(10, min(800, requested))
+    lines_limit = _resolve_logs_tail_lines_limit_impl(request.args.get("lines", 120))
 
     path = getattr(config, "LOG_PATH", "")
     if not path or not os.path.exists(path):
@@ -1186,7 +1227,7 @@ def logs_stream():
     if not path or not os.path.exists(path):
         return jsonify({"success": False, "error": "log_not_found", "path": path}), 404
 
-    from_end = str(request.args.get("from_end", "1")).strip().lower() not in {"0", "false", "no"}
+    from_end = _parse_from_end_flag_impl(request.args.get("from_end", "1"))
 
     @stream_with_context
     def generate():
@@ -1289,7 +1330,7 @@ def index():
 def get_history():
     # Valida a autenticação (via Cookie na UI ou via Bearer Token remotamente)
     if not check_auth():
-        return jsonify({"error": "Unauthorized"}), 401
+        return jsonify(_build_unauthorized_payload_impl()), 401
     
     # Carrega e devolve o histórico em formato JSON
     history = storage.load_chats()
@@ -1298,7 +1339,7 @@ def get_history():
 @app.route('/api/chat_lookup', methods=['POST'])
 def api_chat_lookup():
     if not check_auth():
-        return jsonify({"error": "Unauthorized"}), 401
+        return jsonify(_build_unauthorized_payload_impl()), 401
 
     data = request.get_json() or {}
     origin_url = _resolve_lookup_origin_url_impl(data)
@@ -1317,7 +1358,7 @@ def api_chat_delete_local():
     """Remove chat(s) do histórico local (history.json) por chat_id e/ou origin_url.
     Não exclui do ChatGPT — apenas do storage local do servidor Python."""
     if not check_auth():
-        return jsonify({"error": "Unauthorized"}), 401
+        return jsonify(_build_unauthorized_payload_impl()), 401
 
     data = request.get_json() or {}
     chat_id, origin_url = _extract_chat_delete_local_targets_impl(data)
@@ -1384,7 +1425,7 @@ def menu_execute():
 @app.route("/api/sync", methods=["POST"])
 def api_sync():
     if not check_auth():
-        return jsonify({"error": "Unauthorized"}), 401
+        return jsonify(_build_unauthorized_payload_impl()), 401
 
     data = request.get_json() or {}
     url     = data.get("url")
@@ -1573,7 +1614,7 @@ def api_sync():
 def api_delete():
     # Validação de Segurança
     if not check_auth():
-        return jsonify({"error": "Unauthorized"}), 401
+        return jsonify(_build_unauthorized_payload_impl()), 401
 
     data = request.get_json() or {}
     url, chat_id = _extract_delete_request_targets_impl(data)
@@ -1625,7 +1666,7 @@ def api_delete():
 # Retorna as regras bloqueando todos os robôs
 def _handle_browser_search_api(execute_fn, *, route_label, source_label):
     if not check_auth():
-        return jsonify({'error': 'Unauthorized'}), 401
+        return jsonify(_build_unauthorized_payload_impl()), 401
 
     data    = request.get_json() or {}
     queries = data.get('queries', [])  # lista de strings
@@ -2038,7 +2079,7 @@ def robots_txt():
 @app.route("/api/send_manual_whatsapp_reply", methods=["POST"])
 def send_manual_whatsapp_reply():
     if not check_auth():
-        return jsonify({"error": "Unauthorized"}), 401
+        return jsonify(_build_unauthorized_payload_impl()), 401
 
     data = request.get_json() or {}
     phone, message, chat_id, id_paciente, id_atendimento = (
@@ -2089,7 +2130,7 @@ def send_manual_whatsapp_reply():
 @app.route("/v1/chat/completions", methods=["POST"])
 def chat_completions():
     if not check_auth():
-        return jsonify({"error": "Unauthorized"}), 401
+        return jsonify(_build_unauthorized_payload_impl()), 401
 
     data = request.get_json() or {}
 
@@ -2300,17 +2341,12 @@ def chat_completions():
                 log(f"[WARN] Falha no dreno de stream pós-disconnect para chat {chat_id}: {e}")
 
         def generate():
-            yield json.dumps({"type": "chat_id", "content": chat_id}) + "\n"
+            yield _build_chat_id_event_impl(chat_id) + "\n"
             if url and url != "None":
-                yield json.dumps(
-                    {
-                        "type": "chat_meta",
-                        "content": {
-                            "chat_id": chat_id,
-                            "url": url,
-                            "chromium_profile": effective_browser_profile or "",
-                        },
-                    }
+                yield _build_chat_meta_event_impl(
+                    chat_id=chat_id,
+                    url=url,
+                    chromium_profile=effective_browser_profile or "",
                 ) + "\n"
 
             try:
