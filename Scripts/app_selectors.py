@@ -20,6 +20,9 @@ CRITICAL_SELECTORS = {
         "button#composer-submit-button",
         "button[aria-label*='Enviar prompt']",
         "button[aria-label*='Send']",
+        "button.composer-submit-btn",
+        "button.composer-submit-button-color",
+        "form button[class*='composer-submit']",
     ],
     "menu_button": [
         "button[data-testid='conversation-menu-button']",
