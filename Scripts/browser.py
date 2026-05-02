@@ -57,6 +57,11 @@ try:
 except ImportError:
     def _format_rate_limit_reason(text):  # type: ignore[misc]
         return str(text or "")
+try:
+    from log_sanitizer import sanitize as _sanitize_log_msg
+except ImportError:
+    def _sanitize_log_msg(text: str) -> str:  # type: ignore[misc]
+        return str(text)
 from markdownify import markdownify as md
 
 # ─────────────────────────────────────────────────────────────
@@ -99,7 +104,8 @@ def emit_log(q, msg):
     sender = _CURRENT_TASK_SENDER.get()
     prefix = f"[browser.py] [{sender}] "
     if q:
-        q.put(json.dumps({"type": "log", "content": f"{prefix}{msg}"}) + "\n")
+        safe_msg = _sanitize_log_msg(f"{prefix}{msg}")
+        q.put(json.dumps({"type": "log", "content": safe_msg}) + "\n")
     file_log("browser.py", f"[{sender}] {msg}")
 
 
@@ -134,7 +140,7 @@ async def _save_error_html(page, label: str, chat_id: str = "", q=None) -> str |
             msg = f"📄 HTML de erro salvo: {filepath}"
             file_log("browser.py", msg)
             if q:
-                q.put(json.dumps({"type": "log", "content": f"[browser.py] {msg}"}) + "\n")
+                q.put(json.dumps({"type": "log", "content": _sanitize_log_msg(f"[browser.py] {msg}")}) + "\n")
             return filepath
 
         # ── Fallback: screenshot JPEG ─────────────────────────────────────────
@@ -152,7 +158,7 @@ async def _save_error_html(page, label: str, chat_id: str = "", q=None) -> str |
                 )
                 file_log("browser.py", msg)
                 if q:
-                    q.put(json.dumps({"type": "log", "content": f"[browser.py] {msg}"}) + "\n")
+                    q.put(json.dumps({"type": "log", "content": _sanitize_log_msg(f"[browser.py] {msg}")}) + "\n")
                 return filepath
         except Exception as exc:
             scr_exc = exc
@@ -164,14 +170,14 @@ async def _save_error_html(page, label: str, chat_id: str = "", q=None) -> str |
         )
         file_log("browser.py", msg)
         if q:
-            q.put(json.dumps({"type": "log", "content": f"[browser.py] {msg}"}) + "\n")
+            q.put(json.dumps({"type": "log", "content": _sanitize_log_msg(f"[browser.py] {msg}")}) + "\n")
         return None
 
     except Exception as exc:
         msg = f"⚠️ Erro inesperado em _save_error_html('{label}'): {exc}"
         file_log("browser.py", msg)
         if q:
-            q.put(json.dumps({"type": "log", "content": f"[browser.py] {msg}"}) + "\n")
+            q.put(json.dumps({"type": "log", "content": _sanitize_log_msg(f"[browser.py] {msg}")}) + "\n")
         return None
 
 
