@@ -655,7 +655,7 @@ claude/continue-refactor-updates-wvOqd.
 Leia APENAS a seção "PONTO DE RETOMADA (última atualização em 2026-05-02
 octuagies)" em REFACTOR_PROGRESS.md — é autocontida.
 
-Estado atual: commit `7bf6c04` (docs: commit `<DOCS_HASH>`).
+Estado atual: commit `7bf6c04` (docs: commit `9528c26`).
 Suite offline: **989 passed em 23 arquivos**.
 
 Concluído nesta sessão (2026-05-02 octuagies):
