@@ -42,7 +42,7 @@ from playwright.async_api import async_playwright
 import config
 import app_selectors
 import humanizer
-from shared import browser_queue, register_file
+from shared import browser_queue, register_file, profile_concurrency_tracker as _profile_concurrency_tracker
 from utils import log as file_log
 from browser_predicates import (
     extract_task_sender as _extract_task_sender_impl,
@@ -5709,6 +5709,40 @@ async def browser_loop_async():
         browsers: dict[str, "BrowserContext"] = {}
         chat_profile_rr_index = 0
 
+        # Semáforos asyncio por perfil — limite de tarefas simultâneas.
+        # Configurável via config.CHROMIUM_PROFILE_CONCURRENCY (int global ou
+        # dict {profile: limit}). Default: 1 por perfil (conservador).
+        _profile_semaphores: dict[str, asyncio.Semaphore] = {}
+
+        def _profile_concurrency_limit(profile_key: str) -> int:
+            cfg = getattr(config, "CHROMIUM_PROFILE_CONCURRENCY", None)
+            if isinstance(cfg, dict):
+                v = cfg.get(profile_key, cfg.get("*", 1))
+            elif isinstance(cfg, int):
+                v = cfg
+            else:
+                v = 1
+            try:
+                return max(1, int(v))
+            except Exception:
+                return 1
+
+        def _get_profile_semaphore(profile_key: str) -> asyncio.Semaphore:
+            if profile_key not in _profile_semaphores:
+                _profile_semaphores[profile_key] = asyncio.Semaphore(
+                    _profile_concurrency_limit(profile_key)
+                )
+            return _profile_semaphores[profile_key]
+
+        async def _guarded(profile_key: str, coro):
+            """Executa coro com o semáforo do perfil adquirido e rastreia no tracker."""
+            async with _get_profile_semaphore(profile_key):
+                _profile_concurrency_tracker.acquire(profile_key)
+                try:
+                    await coro
+                finally:
+                    _profile_concurrency_tracker.release(profile_key)
+
         async def start_browser(profile_dir: str):
             b = await p.chromium.launch_persistent_context(
                 profile_dir,
@@ -5766,7 +5800,11 @@ async def browser_loop_async():
 
         def _choose_profile_for_new_chat(explicit_profile: str | None, task: dict) -> str | None:
             nonlocal chat_profile_rr_index
-            if explicit_profile:
+            # "default" é tratado como "sem preferência explícita" — permite
+            # round-robin quando há múltiplos perfis disponíveis.  Perfis
+            # distintos de "default" (ex.: "segunda_chance") são respeitados.
+            rr_eligible = (not explicit_profile) or (explicit_profile == "default")
+            if not rr_eligible:
                 return explicit_profile
             if str(task.get("action") or "").upper() != "CHAT":
                 return explicit_profile
@@ -5836,17 +5874,17 @@ async def browser_loop_async():
                     action = task.get('action', 'CHAT')
 
                     if action in ['GET_MENU', 'EXEC_MENU']:
-                        _spawn_task(handle_menu_task(browser, task), task, action)
+                        _spawn_task(_guarded(profile_key, handle_menu_task(browser, task)), task, action)
                     elif action == 'SYNC':
-                        _spawn_task(handle_sync_task(browser, task), task, action)
+                        _spawn_task(_guarded(profile_key, handle_sync_task(browser, task)), task, action)
                     elif action == 'SEARCH':
-                        _spawn_task(handle_search_task(browser, task), task, action)
+                        _spawn_task(_guarded(profile_key, handle_search_task(browser, task)), task, action)
                     elif action == 'UPTODATE_SEARCH':
-                        _spawn_task(handle_uptodate_search_task(browser, task), task, action)
+                        _spawn_task(_guarded(profile_key, handle_uptodate_search_task(browser, task)), task, action)
                     elif action == 'DOWNLOAD_FILE':
-                        _spawn_task(handle_download_file(browser, task), task, action)
+                        _spawn_task(_guarded(profile_key, handle_download_file(browser, task)), task, action)
                     else:
-                        _spawn_task(handle_chat_task(browser, task, get_browser_for_profile=lambda k: get_browser_for(*_resolve_profile_dir(k))), task, action)
+                        _spawn_task(_guarded(profile_key, handle_chat_task(browser, task, get_browser_for_profile=lambda k: get_browser_for(*_resolve_profile_dir(k)))), task, action)
 
                 except Exception as e:
                     print(f"Erro no loop principal: {e}")

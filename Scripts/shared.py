@@ -282,3 +282,10 @@ def list_files() -> dict:
     """Retorna cópia do registro inteiro (para debug)."""
     with _file_registry_lock:
         return dict(_file_registry)
+
+
+# Rastreador de tarefas ativas por perfil Chromium.
+# Populado por browser.py (acquire/release ao redor de cada tarefa) e
+# lido por server.py para /api/metrics.
+from profile_concurrency import ProfileConcurrencyLimiter
+profile_concurrency_tracker = ProfileConcurrencyLimiter()
