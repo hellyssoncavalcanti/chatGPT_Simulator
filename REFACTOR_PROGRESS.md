@@ -402,7 +402,7 @@ Coletadas em `2026-04-22` via `wc -l` / `grep -nE "def "`:
 ### Estado atual (consolidado) — branch `claude/fix-rate-limit-interval-1vPbB`
 
 **Commits relevantes (mais recente → mais antigo):**
-- *(hash pendente — ver após push)* — Sanitizar fila SSE de log em browser.py (emit_log + _save_error_html) *(esta sessão)*
+- `070a37d` — Sanitizar fila SSE de log em browser.py (emit_log + _save_error_html) *(esta sessão)*
 - `a034d61` — Implementar concorrência por perfil e round-robin de profiles no browser
 - `185e222` — Auditar server.py para referências _impl indefinidas *(esta sessão)*
 - `6a3a3c5` — Corrigir duplicatas em server_helpers e restaurar suite para 698 testes *(root-commit do repo local)*
@@ -637,7 +637,7 @@ claude/fix-rate-limit-interval-1vPbB.
 Leia APENAS a seção "PONTO DE RETOMADA (última atualização em 2026-05-02
 quinquadragies)" em REFACTOR_PROGRESS.md — é autocontida.
 
-Estado atual: branch claude/fix-rate-limit-interval-1vPbB (ver hash após push).
+Estado atual: commit `070a37d`.
 Suite offline: **815 passed em 20 arquivos**.
 
 Concluído nesta sessão (2026-05-02 quinquadragies):
@@ -687,7 +687,7 @@ Se for prompt/dados extensos: colagem via clipboard.
 - [ ] `git status` limpo e último commit pushado para `origin/claude/fix-rate-limit-interval-1vPbB`.
 
 ### Histórico de sessões (para auditoria — NÃO precisa reler)
-- **2026-05-02 quinquadragies** — branch `claude/fix-rate-limit-interval-1vPbB`, *(hash pendente)*: Opção A concluída — import defensivo de `log_sanitizer.sanitize` em `browser.py`; `emit_log` sanitiza antes do `q.put` (cobre todos os callers); `_save_error_html` sanitiza nos 4 pontos inline de `q.put` (HTML salvo, screenshot fallback, ambos falharam, exceção inesperada). `tests/test_browser_log_sanitization.py` (21 casos). Suite offline: **815 passed em 20 arquivos** (+21 novos).
+- **2026-05-02 quinquadragies** — branch `claude/fix-rate-limit-interval-1vPbB`, `070a37d`: Opção A concluída — import defensivo de `log_sanitizer.sanitize` em `browser.py`; `emit_log` sanitiza antes do `q.put` (cobre todos os callers); `_save_error_html` sanitiza nos 4 pontos inline de `q.put` (HTML salvo, screenshot fallback, ambos falharam, exceção inesperada). `tests/test_browser_log_sanitization.py` (21 casos). Suite offline: **815 passed em 20 arquivos** (+21 novos).
 - **2026-04-22** (sessão original) — `1f3374b`: extração de `request_source.py`.
 - **2026-04-22 bis** — `0c6216e`: replanejamento, DoD refinados, sem código.
 - **2026-04-22 ter** — `3334bf6`: catálogo central de erros (Lote P0 passo 1).
