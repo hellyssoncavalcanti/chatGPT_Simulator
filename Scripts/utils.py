@@ -253,6 +253,11 @@ def setup_frontend():
     #errorsMonitorOverlay .api-panel { display: none; }
     #errorsMonitorOverlay .api-panel.active { display: block; }
     #errorsMonitorOverlay .errors-body { max-height: 65vh; overflow-y: auto; padding: 4px; font-size: 0.88rem; line-height: 1.5; color: #d8d8d8; }
+    #errorsMonitorOverlay .claude-stream-output { background: #1c1d22; border: 1px solid #353741; border-radius: 6px; padding: 12px; min-height: 200px; max-height: 50vh; overflow-y: auto; font-size: 0.85rem; line-height: 1.55; color: #ececf1; }
+    #errorsMonitorOverlay .claude-stream-output pre { background: #000; padding: 10px; border-radius: 4px; overflow-x: auto; font-size: 0.78rem; }
+    #errorsMonitorOverlay .claude-stream-output code { background: rgba(0,0,0,0.3); padding: 2px 4px; border-radius: 3px; font-family: monospace; font-size: 0.82rem; }
+    #errorsMonitorOverlay .claude-stream-output a { color: #19c37d; }
+    #errorsMonitorOverlay .claude-status-line { font-size: 0.78rem; color: #19c37d; padding: 4px 0; border-bottom: 1px dashed #353741; margin-bottom: 6px; }
     .err-entry { border-left: 3px solid #888; padding: 8px 10px; margin-bottom: 8px; background: #2a2b32; border-radius: 4px; }
     .err-entry .err-id { font-weight: bold; font-size: 0.82rem; }
     .err-entry .err-pattern { font-size: 0.72rem; color: #aaa; margin: 4px 0; font-family: monospace; word-break: break-all; }
@@ -408,6 +413,7 @@ def setup_frontend():
         <div class="monitor-tabs" style="background:#1d1e24;">
             <div class="api-tab active" data-tab="known" onclick="switchApiTab('known')">✅ Conhecidos (<span id="errorsKnownCount">0</span>)</div>
             <div class="api-tab" data-tab="new" onclick="switchApiTab('new')">🆕 Novos (<span id="errorsNewCount">0</span>)</div>
+            <div class="api-tab" data-tab="claude" onclick="switchApiTab('claude')">🤖 Análise Claude</div>
         </div>
         <div class="share-content" style="padding: 16px 20px; background:#171717;">
             <div class="api-panel active" data-tab="known">
@@ -417,6 +423,18 @@ def setup_frontend():
                 <div id="errorsNewBody" class="errors-body">
                     <button id="errorsScanBtn" class="err-scan-btn" onclick="runErrorsScan()">🔍 Verificar se há novos erros</button>
                     <div id="errorsScanStatus" style="text-align:left;"><em style="color:#888">Clique acima para escanear os logs em busca de erros novos.</em></div>
+                </div>
+            </div>
+            <div class="api-panel" data-tab="claude">
+                <div id="errorsClaudeBody" class="errors-body">
+                    <button id="errorsClaudeBtn" class="err-scan-btn" onclick="runClaudeFix()">🚀 Solicitar análise + correção via Claude</button>
+                    <div style="font-size:0.78rem; color:#888; text-align:center; margin-bottom:12px;">
+                        Envia os erros novos ao Claude Code (claude.ai/code) para corrigir o código e abrir um PR no GitHub.
+                    </div>
+                    <div id="errorsClaudeStatus" style="font-size:0.78rem; color:#aaa; min-height:18px; margin-bottom:8px;"></div>
+                    <div id="errorsClaudeStream" class="claude-stream-output">
+                        <em style="color:#888">A resposta do Claude aparecerá aqui em tempo real após o clique.</em>
+                    </div>
                 </div>
             </div>
         </div>
@@ -657,6 +675,91 @@ def setup_frontend():
         renderKnown();
         if (errorsMonitorTimer) clearInterval(errorsMonitorTimer);
         errorsMonitorTimer = setInterval(renderKnown, 5000);
+    }
+
+    async function runClaudeFix() {
+        const btn = document.getElementById('errorsClaudeBtn');
+        const statusEl = document.getElementById('errorsClaudeStatus');
+        const streamEl = document.getElementById('errorsClaudeStream');
+        if (btn.disabled) return;
+        btn.disabled = true;
+        const originalLabel = btn.innerText;
+        btn.innerText = '⏳ Claude trabalhando...';
+        statusEl.innerHTML = '<em style="color:#aaa">Conectando ao Claude Code...</em>';
+        streamEl.innerHTML = '';
+        let markdownContent = '';
+        let chatId = null;
+        let chatUrl = null;
+        const renderMarkdown = (md) => {
+            try {
+                streamEl.innerHTML = (typeof marked !== 'undefined') ? marked.parse(md) : _escapeHtmlErr(md);
+            } catch (e) {
+                streamEl.innerText = md;
+            }
+            streamEl.scrollTop = streamEl.scrollHeight;
+        };
+        const appendStatus = (txt) => {
+            const div = document.createElement('div');
+            div.className = 'claude-status-line';
+            div.innerText = txt;
+            statusEl.innerHTML = '';
+            statusEl.appendChild(div);
+        };
+        try {
+            const res = await fetch('/api/errors/claude_fix', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json', 'Authorization': 'Bearer ' + API_KEY}
+            });
+            if (!res.ok || !res.body) {
+                const txt = await res.text().catch(() => '');
+                statusEl.innerHTML = `<span style="color:#f56c6c">HTTP ${res.status}: ${_escapeHtmlErr(txt.slice(0,300))}</span>`;
+                return;
+            }
+            const reader = res.body.getReader();
+            const decoder = new TextDecoder('utf-8');
+            let buffer = '';
+            while (true) {
+                const {value, done} = await reader.read();
+                if (done) break;
+                buffer += decoder.decode(value, {stream: true});
+                let idx;
+                while ((idx = buffer.indexOf('\n')) >= 0) {
+                    const line = buffer.slice(0, idx).trim();
+                    buffer = buffer.slice(idx + 1);
+                    if (!line) continue;
+                    let evt;
+                    try { evt = JSON.parse(line); } catch { continue; }
+                    const t = evt.type;
+                    if (t === 'chat_id') {
+                        chatId = evt.content || evt.chat_id || null;
+                    } else if (t === 'chat_meta') {
+                        chatUrl = (evt.content && evt.content.url) || evt.url || null;
+                        if (chatUrl) {
+                            appendStatus(`💬 Chat: ${chatUrl}`);
+                        }
+                    } else if (t === 'status') {
+                        appendStatus('⏳ ' + (evt.content || ''));
+                    } else if (t === 'markdown') {
+                        markdownContent = evt.content || '';
+                        renderMarkdown(markdownContent);
+                    } else if (t === 'finish') {
+                        const fin = evt.content || {};
+                        const finalUrl = fin.url || chatUrl;
+                        appendStatus(`✅ Concluído${finalUrl ? ' — ' + finalUrl : ''}`);
+                    } else if (t === 'error') {
+                        const ec = document.createElement('div');
+                        ec.style = 'color:#f56c6c; padding:6px 0;';
+                        ec.innerText = '❌ ' + (evt.content || 'erro desconhecido');
+                        statusEl.appendChild(ec);
+                    }
+                }
+            }
+        } catch (e) {
+            statusEl.innerHTML = `<span style="color:#f56c6c">Erro de conexão: ${_escapeHtmlErr(String(e))}</span>`;
+        } finally {
+            btn.disabled = false;
+            btn.innerText = originalLabel.startsWith('🚀') ? '🚀 Reenviar ao Claude' : originalLabel;
+        }
     }
 
     async function runErrorsScan() {
