@@ -207,7 +207,15 @@ facilitar auditoria e melhorar rastreabilidade:
 5. **CORS configurável via ambiente** (`SIMULATOR_CORS_ALLOWED_ORIGINS`) com
    `supports_credentials=True`;
 6. **Política de cookie de sessão configurável** (`secure`/`samesite`) por
-   variáveis de ambiente.
+   variáveis de ambiente;
+7. **Validação de payload** (`Scripts/payload_validators.py`) nos endpoints
+   críticos: limites de tamanho em `message` (100k chars), `password` (256 chars),
+   `url` (2048 chars), sanitização de `browser_profile` (alphanum + `-_`),
+   quota de `attachments` (20 itens), rejeição de 400 com mensagem clara antes
+   de qualquer processamento;
+8. **Correlation-ID ponta-a-ponta** (`Scripts/correlation.py`): lê
+   `X-Correlation-Id` do request ou gera UUID4-8hex; propaga para o payload
+   da fila de browser e aparece nos logs como `[cid:xxxx]`.
 
 ### Variáveis novas de segurança (config.py)
 
@@ -290,10 +298,14 @@ python3 -m pytest \
   tests/test_sync_dedup.py \
   tests/test_python_request_throttle.py \
   tests/test_web_search_throttle.py \
-  tests/test_error_scanner_helpers.py
+  tests/test_error_scanner_helpers.py \
+  tests/test_profile_concurrency.py \
+  tests/test_browser_log_sanitization.py \
+  tests/test_payload_validators.py \
+  tests/test_correlation.py
 ```
 
-Esperado: **775 passed**. (`tests/test_server_api.py` é excluído porque
+Esperado: **908 passed**. (`tests/test_server_api.py` é excluído porque
 exige `flask` e `cryptography` — roda no CI completo via o comando da
 seção anterior. `tests/test_storage.py` também roda no CI completo.)
 
@@ -318,6 +330,8 @@ seção anterior. `tests/test_storage.py` também roda no CI completo.)
 | `Scripts/python_request_throttle.py` | Classe `PythonRequestThrottle` — throttle global anti-rate-limit para requests Python com `begin`/`remaining_seconds`/`commit`/`snapshot`. | `tests/test_python_request_throttle.py` |
 | `Scripts/web_search_throttle.py` | Classe `WebSearchThrottle` — agendamento global de busca web com intervalo humano (`reserve_slot`/`snapshot`) e injeção de `now_func`/`rng_func` (`snapshot` inclui `age_seconds`). Import carregado no topo de `server.py` para evitar `NameError` no boot. | `tests/test_web_search_throttle.py` |
 | `Scripts/analisador_parsers.py` | Detecção de rate-limit em texto, strip/extract/normalize/parse JSON tolerante, heurística de truncamento, remoção de `<think>…</think>`, parser de fallback para queries de pesquisa com `max_queries` injetável. | `tests/test_analisador_parsers.py` |
+| `Scripts/payload_validators.py` | Validação de entrada para rotas críticas: `validate_login_request` (username/password com limites de tamanho), `validate_chat_request` (message, chat_id, url, browser_profile, attachments, stream, messages, source_hint) e `validate_sync_request` (url/chat_id obrigatório par, browser_profile sanitizado). Módulo puro; server.py importa via try/except defensivo. | `tests/test_payload_validators.py` |
+| `Scripts/correlation.py` | Suporte a Correlation-ID ponta-a-ponta: `extract_correlation_id` (lê `X-Correlation-Id` ou gera UUID4-8hex), `format_log_prefix` (prefixo `[cid:xxxx]` para logs), `inject_into_payload` (injeta sem mutar o original). Propagado em `chat_completions` e `api_sync`. | `tests/test_correlation.py` |
 
 Os callers (`server.py`, `browser.py`, `analisador_prontuarios.py`,
 `utils.py`) mantêm wrappers finos com as mesmas assinaturas originais —

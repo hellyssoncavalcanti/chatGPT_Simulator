@@ -1195,7 +1195,8 @@ def api_sync():
     _quem = _format_requester_suffix_impl(nome_membro, id_membro)
     _url_info  = f' | url: {url}'     if url     else ''
     _cid_info  = f' | chat_id: {chat_id}' if chat_id else ''
-    print(f"\n[🔄 SYNC] Pedido de sincronização recebido{_quem}{_cid_info}{_url_info}")
+    _cid = _format_cid_prefix(correlation_id)
+    print(f"\n[🔄 SYNC]{_cid} Pedido de sincronização recebido{_quem}{_cid_info}{_url_info}")
 
     if not chat_id and not url:
         return jsonify({"success": False, "error": "Missing chat_id and url"}), 400
@@ -1290,15 +1291,16 @@ def api_sync():
     if not url: return jsonify({"success": False, "error": "Missing url"}), 400
     
     sync_q = queue.Queue()
-    browser_queue.put(
+    browser_queue.put(_inject_correlation_id(
         {
             'action': 'SYNC',
             'url': url,
             'chat_id': chat_id,
             'stream_queue': sync_q,
             'browser_profile': sync_browser_profile,
-        }
-    )
+        },
+        correlation_id,
+    ))
     
     try:
         while True:

@@ -393,17 +393,19 @@ Coletadas em `2026-04-22` via `wc -l` / `grep -nE "def "`:
 
 ---
 
-## 🆕 PONTO DE RETOMADA (última atualização em 2026-05-02 sexquadragies)
+## 🆕 PONTO DE RETOMADA (última atualização em 2026-05-02 septuagies)
 
 > **Leia APENAS esta seção ao retomar em outro chat.** Ela é autocontida:
 > não é necessário reler seções anteriores a menos que haja dúvida sobre
 > detalhe específico. Seções históricas acima existem apenas para auditoria.
 
-### Estado atual (consolidado) — branch `claude/fix-rate-limit-interval-1vPbB`
+### Estado atual (consolidado) — branch `claude/continue-refactor-updates-wvOqd`
 
 **Commits relevantes (mais recente → mais antigo):**
-- `2340738` — Extrair resolve_client_ip + payloads bloco chat_completions *(esta sessão)*
-- `070a37d` — Sanitizar fila SSE de log em browser.py (emit_log + _save_error_html) *(sessão anterior)*
+- `09ec07c` — payload_validators + correlation-id + README *(esta sessão)*
+- `bed9994` — docs: registrar commit 2340738 no PONTO DE RETOMADA
+- `2340738` — Extrair resolve_client_ip + payloads bloco chat_completions *(sessão anterior)*
+- `070a37d` — Sanitizar fila SSE de log em browser.py (emit_log + _save_error_html)
 - `a034d61` — Implementar concorrência por perfil e round-robin de profiles no browser
 - `185e222` — Auditar server.py para referências _impl indefinidas *(esta sessão)*
 - `6a3a3c5` — Corrigir duplicatas em server_helpers e restaurar suite para 698 testes *(root-commit do repo local)*
@@ -476,7 +478,7 @@ Coletadas em `2026-04-22` via `wc -l` / `grep -nE "def "`:
 - `1f3374b` — Extrair detecção de origem de request para módulo testável offline
 - `0c6216e` — docs: refinar backlog P0-P1-P2 com evidências concretas
 
-**Suite offline atual: 20 arquivos → 832 passed** (após sessão de 2026-05-02 sexquadragies — extração de helpers de chat_completions + correção de testes no-op + resolve_client_ip).
+**Suite offline atual: 22 arquivos → 910 passed** (após sessão de 2026-05-02 septuagies — payload_validators, correlation-id, README).
 
 O estado do repo local foi restaurado a partir da cópia de trabalho (histórico git reiniciado como root-commit `6a3a3c5`). As seguintes correções foram aplicadas em relação ao estado anterior da cópia de trabalho:
 - Removidas 9 definições duplicadas (linhas 820-959) de `server_helpers.py` que sobrescreviam as implementações corretas dos ciclos 31-43.
@@ -528,6 +530,8 @@ Esperado: **815 passed**. (NÃO usar `python -m pytest tests/` cru — `tests/te
 | `Scripts/analisador_parsers.py` | ~330 | `detect_rate_limit_preview` (matcher injetável), `build_rate_limit_error_message`, `strip_code_fences`, `extract_json_block`, `normalize_llm_json`, `parse_json_block`, `json_looks_incomplete` (heurística de truncamento), `decode_json_string_fragment`, `extract_visible_llm_markdown` (remove `<think>…</think>`), `extract_search_queries_fallback` (parser tolerante de queries com `max_queries` injetável). | `tests/test_analisador_parsers.py` (64) |
 | `Scripts/humanizer.py` | 124 | Módulo original (inalterado); testes ampliados com invariantes anti-robotização. | `tests/test_humanizer.py` (33) |
 | `Scripts/error_scanner_helpers.py` | ~210 | Helpers puros para `/api/errors/{known,scan,claude_fix}`: filtragem canônica de snippets (`is_unwanted_snippet`, constante `UNWANTED_SNIPPET_KEYS`), conversão de snippets/exceções em entradas (`build_scan_match_entry`, `build_scan_error_entry`), prompt do Claude Code (`build_claude_fix_prompt`), body do POST proxy (`build_claude_fix_request_body`), payloads de `/api/errors/known` (`build_known_errors_missing_payload`, `build_known_errors_loaded_payload`, `build_known_errors_error_payload`) e linhas NDJSON do stream claude_fix (`build_claude_fix_empty_stream_lines`, `build_claude_fix_status_line`, `build_claude_fix_error_line`, `build_claude_fix_finish_line`). | `tests/test_error_scanner_helpers.py` (53) |
+| `Scripts/payload_validators.py` | ~170 | `validate_login_request` (username/password + limites), `validate_chat_request` (message, chat_id, url, browser_profile, attachments, stream, messages, source_hint), `validate_sync_request` (url/chat_id obrigatório par, browser_profile sanitizado). Integrado em `login_route`, `chat_completions`, `api_sync` via import defensivo. | `tests/test_payload_validators.py` (56) |
+| `Scripts/correlation.py` | ~80 | `generate_correlation_id` (UUID4-8hex), `extract_correlation_id` (lê `X-Correlation-Id` ou gera), `format_log_prefix` (`[cid:xxxx]`), `inject_into_payload` (sem mutar o original). Propagado em `chat_completions` e `api_sync`. | `tests/test_correlation.py` (20) |
 | `Scripts/profile_concurrency.py` | ~45 | Classe `ProfileConcurrencyLimiter` (thread-safe, sem Flask/Playwright/config): `acquire(profile)`, `release(profile)` (idempotente), `active_count(profile)`, `snapshot()`. Normaliza `None`/`""` para `"default"`. Singleton `profile_concurrency_tracker` exportado via `shared.py`. Consumido por `browser.py` (asyncio) e `server.py` (métricas em `/api/metrics::profile_concurrency`). | `tests/test_profile_concurrency.py` (19) |
 
 ### Integrações já feitas (em caminho quente)
@@ -642,47 +646,45 @@ Esperado: **815 passed**. (NÃO usar `python -m pytest tests/` cru — `tests/te
 
 ```
 Continue o refactor do /home/user/chatGPT_Simulator na branch
-claude/fix-rate-limit-interval-1vPbB.
+claude/continue-refactor-updates-wvOqd.
 Leia APENAS a seção "PONTO DE RETOMADA (última atualização em 2026-05-02
-quinquadragies)" em REFACTOR_PROGRESS.md — é autocontida.
+septuagies)" em REFACTOR_PROGRESS.md — é autocontida.
 
-Estado atual: commit `070a37d`.
-Suite offline: **832 passed em 20 arquivos**.
+Estado atual: commit `09ec07c` (push: `65d77b1` docs).
+Suite offline: **910 passed em 22 arquivos**.
 
-Concluído nesta sessão (2026-05-02 sexquadragies):
-- ~~Opção A (auditar chat_completions)~~ FEITA:
-  · resolve_client_ip (pure) + wrappers em _client_ip.
-  · build_chat_block_error_payload + build_chat_block_success_payload
-    em server_helpers; 3 sites de dict literal migrados em chat_completions.
-  · Inconsistência corrigida: timeout bloco agora usa _mark_chat_finished_impl.
-  · 4 testes no-op corrigidos (wrap_paste + ensure_paste_wrappers).
-  · 17 novos testes offline (TestResolveClientIp + TestChatBlockPayloads).
+Concluído nesta sessão (2026-05-02 septuagies):
+- payload_validators.py (puro): validate_login/chat/sync — 56 testes.
+- correlation.py (puro): generate/extract/format/inject correlation-id — 20 testes.
+- Integração em login_route, chat_completions e api_sync via import defensivo.
+- README.md atualizado (arquitetura, suite, hardening itens 7+8).
 
 Próximas opções (escolher UMA):
 
-**A. Extrair helpers puros de analisador_prontuarios.py** — parsers e
-   helpers adicionais ainda não cobertos por testes offline. Risco MÉDIO.
+**A. Extrair helpers puros de analisador_prontuarios.py** — funções de
+   processamento de prontuários ainda não cobertas por testes offline.
+   Risco MÉDIO.
 
 **B. Modularização de browser.py por ações** (P2 #22) — requer plano de
    design; toca async/Playwright. Risco ALTO.
 
-**C. Extração de helpers de api_sync** — `_url_info` / `_cid_info` e
-   normalização inline de campos; baixo valor mas zero risco. Risco BAIXO.
+**C. Extração de helpers de api_sync** — normalização inline de campos;
+   baixo valor mas zero risco. Risco BAIXO.
 
 Regras obrigatórias:
 (a) escolher UMA opção e executar do começo ao fim;
-(b) manter os 832 testes offline passando + eventuais novos;
+(b) manter os 910 testes offline passando + eventuais novos;
 (c) ANTES do commit/push final, ATUALIZAR esta seção com novo commit hash,
     contagem de testes e próxima opção;
 (d) commit com título em PT-BR no imperativo;
-(e) push para claude/fix-rate-limit-interval-1vPbB.
+(e) push para claude/continue-refactor-updates-wvOqd.
 
 Se browser.py envolver perguntas ao ChatGPT: realistic typing.
 Se for prompt/dados extensos: colagem via clipboard.
 ```
 
 ### Checklist de "antes de terminar a sessão" (rodar sempre)
-- [ ] Suite offline passa: `python -m pytest tests/test_humanizer.py tests/test_shared_queue.py tests/test_selectors_smoke.py tests/test_request_source.py tests/test_error_catalog.py tests/test_server_helpers.py tests/test_browser_predicates.py tests/test_rate_limit_integration.py tests/test_log_sanitizer.py tests/test_analisador_rate_limit.py tests/test_audit_sanitization.py tests/test_security_state.py tests/test_chat_rate_limit_cooldown.py tests/test_analisador_parsers.py tests/test_sync_dedup.py tests/test_python_request_throttle.py tests/test_web_search_throttle.py tests/test_error_scanner_helpers.py tests/test_profile_concurrency.py tests/test_browser_log_sanitization.py` (esperado: **832 passed**).
+- [ ] Suite offline passa: `python -m pytest tests/test_humanizer.py tests/test_shared_queue.py tests/test_selectors_smoke.py tests/test_request_source.py tests/test_error_catalog.py tests/test_server_helpers.py tests/test_browser_predicates.py tests/test_rate_limit_integration.py tests/test_log_sanitizer.py tests/test_analisador_rate_limit.py tests/test_audit_sanitization.py tests/test_security_state.py tests/test_chat_rate_limit_cooldown.py tests/test_analisador_parsers.py tests/test_sync_dedup.py tests/test_python_request_throttle.py tests/test_web_search_throttle.py tests/test_error_scanner_helpers.py tests/test_profile_concurrency.py tests/test_browser_log_sanitization.py tests/test_payload_validators.py tests/test_correlation.py` (esperado: **910 passed**).
 - [ ] `python -c "import ast; ast.parse(open('Scripts/server.py', encoding='utf-8').read())"` OK.
 - [ ] `python -c "import ast; ast.parse(open('Scripts/browser.py', encoding='utf-8').read())"` OK.
 - [ ] `python -c "import ast; ast.parse(open('Scripts/analisador_prontuarios.py', encoding='utf-8').read())"` OK.
