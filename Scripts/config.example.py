@@ -134,6 +134,7 @@ DIRS = {
     "users": os.path.join(BASE_DIR, "db", "users"),
     "logs": os.path.join(BASE_DIR, "logs"),
     "profile": os.path.join(BASE_DIR, "chrome_profile"),
+    "profile_analisador": os.path.join(BASE_DIR, "chrome_profile_analisador"),
     "profile_segunda_chance": os.path.join(BASE_DIR, "chrome_profile_segunda_chance"),
     "temp": os.path.join(BASE_DIR, "temp"),
     "downloads": os.path.join(BASE_DIR, "downloads"),
@@ -152,15 +153,20 @@ LOG_PATH = os.path.join(DIRS["logs"], log_filename)
 for d in DIRS.values(): os.makedirs(d, exist_ok=True)
 
 # =============================================================================
-# Perfis de navegador Chromium (para casos onde múltiplas contas ChatGPT Plus
-# são utilizadas, ex.: uma para usuário humano e outra para o analisador).
-# Cada chave mapeia para um diretório de perfil persistente independente.
-# O `browser.py` abre contextos separados sob demanda e faz fallback para
-# "default" quando a chave solicitada não existir.
+# Perfis de navegador Chromium
+# Cada chave mapeia para um diretório de perfil Chromium persistente independente.
+# O browser.py abre contextos sob demanda; chave inexistente cai em "default".
+#
+# Seleção automática (browser_profile omitido ou null/default):
+#   round-robin entre "default" e "segunda_chance".
+# Failover bilateral de rate-limit:
+#   "default" ↔ "segunda_chance" — cada perfil tentado no máximo uma vez por tarefa.
+# "analisador": reservado ao pipeline clínico (analisador_prontuarios.py).
 # =============================================================================
 CHROMIUM_PROFILES = {
-    "default": DIRS["profile"],
+    "default":        DIRS["profile"],
     "segunda_chance": DIRS["profile_segunda_chance"],
+    "analisador":     DIRS["profile_analisador"],
 }
 
 # =============================================================================
