@@ -302,10 +302,11 @@ python3 -m pytest \
   tests/test_profile_concurrency.py \
   tests/test_browser_log_sanitization.py \
   tests/test_payload_validators.py \
-  tests/test_correlation.py
+  tests/test_correlation.py \
+  tests/test_analisador_helpers.py
 ```
 
-Esperado: **908 passed**. (`tests/test_server_api.py` é excluído porque
+Esperado: **989 passed**. (`tests/test_server_api.py` é excluído porque
 exige `flask` e `cryptography` — roda no CI completo via o comando da
 seção anterior. `tests/test_storage.py` também roda no CI completo.)
 
@@ -332,6 +333,7 @@ seção anterior. `tests/test_storage.py` também roda no CI completo.)
 | `Scripts/analisador_parsers.py` | Detecção de rate-limit em texto, strip/extract/normalize/parse JSON tolerante, heurística de truncamento, remoção de `<think>…</think>`, parser de fallback para queries de pesquisa com `max_queries` injetável. | `tests/test_analisador_parsers.py` |
 | `Scripts/payload_validators.py` | Validação de entrada para rotas críticas: `validate_login_request` (username/password com limites de tamanho), `validate_chat_request` (message, chat_id, url, browser_profile, attachments, stream, messages, source_hint) e `validate_sync_request` (url/chat_id obrigatório par, browser_profile sanitizado). Módulo puro; server.py importa via try/except defensivo. | `tests/test_payload_validators.py` |
 | `Scripts/correlation.py` | Suporte a Correlation-ID ponta-a-ponta: `extract_correlation_id` (lê `X-Correlation-Id` ou gera UUID4-8hex), `format_log_prefix` (prefixo `[cid:xxxx]` para logs), `inject_into_payload` (injeta sem mutar o original). Propagado em `chat_completions` e `api_sync`. | `tests/test_correlation.py` |
+| `Scripts/analisador_helpers.py` | Helpers puros de `analisador_prontuarios.py`: serialização compacta (`stringify_compact`, 5 duplicatas eliminadas), formatação para prompt LLM (`format_compiled_value_for_prompt`), normalização/agrupamento de erros esgotados, resumo de paciente com upsert por datetime, normalização de grafo clínico (nodes/edges — aliases EN→PT), deduplicação de nodes, strip HTML, detecção de erros de conexão LLM. | `tests/test_analisador_helpers.py` |
 
 Os callers (`server.py`, `browser.py`, `analisador_prontuarios.py`,
 `utils.py`) mantêm wrappers finos com as mesmas assinaturas originais —

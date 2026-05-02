@@ -393,7 +393,7 @@ Coletadas em `2026-04-22` via `wc -l` / `grep -nE "def "`:
 
 ---
 
-## 🆕 PONTO DE RETOMADA (última atualização em 2026-05-02 septuagies)
+## 🆕 PONTO DE RETOMADA (última atualização em 2026-05-02 octuagies)
 
 > **Leia APENAS esta seção ao retomar em outro chat.** Ela é autocontida:
 > não é necessário reler seções anteriores a menos que haja dúvida sobre
@@ -402,6 +402,7 @@ Coletadas em `2026-04-22` via `wc -l` / `grep -nE "def "`:
 ### Estado atual (consolidado) — branch `claude/continue-refactor-updates-wvOqd`
 
 **Commits relevantes (mais recente → mais antigo):**
+- `7bf6c04` — analisador_helpers.py (13 helpers puros, 79 testes) *(esta sessão)*
 - `09ec07c` — payload_validators + correlation-id + README *(esta sessão)*
 - `bed9994` — docs: registrar commit 2340738 no PONTO DE RETOMADA
 - `2340738` — Extrair resolve_client_ip + payloads bloco chat_completions *(sessão anterior)*
@@ -478,7 +479,7 @@ Coletadas em `2026-04-22` via `wc -l` / `grep -nE "def "`:
 - `1f3374b` — Extrair detecção de origem de request para módulo testável offline
 - `0c6216e` — docs: refinar backlog P0-P1-P2 com evidências concretas
 
-**Suite offline atual: 22 arquivos → 910 passed** (após sessão de 2026-05-02 septuagies — payload_validators, correlation-id, README).
+**Suite offline atual: 23 arquivos → 989 passed** (após sessão de 2026-05-02 octuagies — analisador_helpers, payload_validators, correlation-id).
 
 O estado do repo local foi restaurado a partir da cópia de trabalho (histórico git reiniciado como root-commit `6a3a3c5`). As seguintes correções foram aplicadas em relação ao estado anterior da cópia de trabalho:
 - Removidas 9 definições duplicadas (linhas 820-959) de `server_helpers.py` que sobrescreviam as implementações corretas dos ciclos 31-43.
@@ -532,6 +533,7 @@ Esperado: **815 passed**. (NÃO usar `python -m pytest tests/` cru — `tests/te
 | `Scripts/error_scanner_helpers.py` | ~210 | Helpers puros para `/api/errors/{known,scan,claude_fix}`: filtragem canônica de snippets (`is_unwanted_snippet`, constante `UNWANTED_SNIPPET_KEYS`), conversão de snippets/exceções em entradas (`build_scan_match_entry`, `build_scan_error_entry`), prompt do Claude Code (`build_claude_fix_prompt`), body do POST proxy (`build_claude_fix_request_body`), payloads de `/api/errors/known` (`build_known_errors_missing_payload`, `build_known_errors_loaded_payload`, `build_known_errors_error_payload`) e linhas NDJSON do stream claude_fix (`build_claude_fix_empty_stream_lines`, `build_claude_fix_status_line`, `build_claude_fix_error_line`, `build_claude_fix_finish_line`). | `tests/test_error_scanner_helpers.py` (53) |
 | `Scripts/payload_validators.py` | ~170 | `validate_login_request` (username/password + limites), `validate_chat_request` (message, chat_id, url, browser_profile, attachments, stream, messages, source_hint), `validate_sync_request` (url/chat_id obrigatório par, browser_profile sanitizado). Integrado em `login_route`, `chat_completions`, `api_sync` via import defensivo. | `tests/test_payload_validators.py` (56) |
 | `Scripts/correlation.py` | ~80 | `generate_correlation_id` (UUID4-8hex), `extract_correlation_id` (lê `X-Correlation-Id` ou gera), `format_log_prefix` (`[cid:xxxx]`), `inject_into_payload` (sem mutar o original). Propagado em `chat_completions` e `api_sync`. | `tests/test_correlation.py` (20) |
+| `Scripts/analisador_helpers.py` | ~300 | `stringify_compact` (serialização compacta de valores compilados — 5 cópias idênticas deduplicas), `format_compiled_value_for_prompt` (normaliza/trunca para prompt LLM), `normalize_esgotado_reason` (motivo legível de erro acumulado), `group_esgotado_reasons` (Counter.most_common 5), `montar_resumo_fallback` (upsert de linha por datetime), `normalizar_node` / `normalizar_edge` (grafo clínico — aliases EN→PT, id gerado), `deduplicar_nodes_grafo` (chave tipo+normalizado), `primeiro_node_representativo` (prioridade clínica), `ensure_list` (normaliza para lista), `is_grafo_generico` (< 2 nodes relevantes), `strip_html` (HTMLParser + unescape), `is_llm_connection_error` (erros transitórios de conexão). | `tests/test_analisador_helpers.py` (79) |
 | `Scripts/profile_concurrency.py` | ~45 | Classe `ProfileConcurrencyLimiter` (thread-safe, sem Flask/Playwright/config): `acquire(profile)`, `release(profile)` (idempotente), `active_count(profile)`, `snapshot()`. Normaliza `None`/`""` para `"default"`. Singleton `profile_concurrency_tracker` exportado via `shared.py`. Consumido por `browser.py` (asyncio) e `server.py` (métricas em `/api/metrics::profile_concurrency`). | `tests/test_profile_concurrency.py` (19) |
 
 ### Integrações já feitas (em caminho quente)
@@ -601,11 +603,14 @@ Esperado: **815 passed**. (NÃO usar `python -m pytest tests/` cru — `tests/te
 4. Helper público e idempotente no módulo puro (ex.: `format_reason` em `error_catalog.py`) — permite chamada em dois pontos sem risco de duplicação.
 5. Exceções específicas do domínio (ex.: `ChatGPTRateLimitError`) permanecem no arquivo impuro; o módulo puro retorna preview/decisão e o wrapper monta a exceção.
 
-### Integrações desta sessão (2026-05-02 sexquadragies)
+### Integrações desta sessão (2026-05-02 octuagies)
+- `payload_validators.py` (puro): `validate_login/chat/sync_request` integrados em `login_route`, `chat_completions`, `api_sync` via import defensivo. 56 testes.
+- `correlation.py` (puro): `generate/extract/format/inject` correlation-id integrado em `chat_completions` e `api_sync`. Header `X-Correlation-Id` propagado. 20 testes.
+- `analisador_helpers.py` (puro): 13 helpers extraídos de `analisador_prontuarios.py`. 5 cópias de `_stringify_compact` deduplicas por `replace_all`. 79 testes. Wrappers finos preservam nomes originais com fallback inline.
 - `server._client_ip` convertida para wrapper 1-liner sobre `_resolve_client_ip_impl` (X-Forwarded-For → primeiro IP da cadeia, fallback remote_addr).
 - Modo bloco de `chat_completions`: 3 sites de `{"success": False, "error": ..., "chat_id": ...}` migrados para `_build_chat_block_error_payload_impl`; payload de sucesso migrado para `_build_chat_block_success_payload_impl`.
-- Inconsistência corrigida: timeout do modo bloco (linha ~1862) agora usa `_mark_chat_finished_impl` em vez de assignment direto (`ACTIVE_CHATS[chat_id]['finished'] = True; finished_at = time.time()`).
-- 4 testes corrigidos para refletir o comportamento no-op de `wrap_paste_if_python_source` e `ensure_paste_wrappers` (marcadores removidos do sistema — `test_python_source_wraps_plain_text` → `test_python_source_returns_unchanged`, `test_already_wrapped_not_double_wrapped` → `test_already_wrapped_strips_markers`, `test_wraps_unmarked_text` → `test_unmarked_text_not_wrapped`, `test_partial_marker_is_wrapped` → `test_partial_marker_not_wrapped`).
+- Inconsistência corrigida: timeout do modo bloco (linha ~1862) agora usa `_mark_chat_finished_impl` em vez de assignment direto.
+- README.md: suite offline atualizada (910 → 989), tabela de módulos (payload_validators, correlation, analisador_helpers), seção hardening (itens 7+8).
 
 ---
 
@@ -648,32 +653,33 @@ Esperado: **815 passed**. (NÃO usar `python -m pytest tests/` cru — `tests/te
 Continue o refactor do /home/user/chatGPT_Simulator na branch
 claude/continue-refactor-updates-wvOqd.
 Leia APENAS a seção "PONTO DE RETOMADA (última atualização em 2026-05-02
-septuagies)" em REFACTOR_PROGRESS.md — é autocontida.
+octuagies)" em REFACTOR_PROGRESS.md — é autocontida.
 
-Estado atual: commit `09ec07c` (push: `65d77b1` docs).
-Suite offline: **910 passed em 22 arquivos**.
+Estado atual: commit `7bf6c04` (docs: commit `9528c26`).
+Suite offline: **989 passed em 23 arquivos**.
 
-Concluído nesta sessão (2026-05-02 septuagies):
+Concluído nesta sessão (2026-05-02 octuagies):
 - payload_validators.py (puro): validate_login/chat/sync — 56 testes.
-- correlation.py (puro): generate/extract/format/inject correlation-id — 20 testes.
-- Integração em login_route, chat_completions e api_sync via import defensivo.
-- README.md atualizado (arquitetura, suite, hardening itens 7+8).
+- correlation.py (puro): generate/extract/format/inject — 20 testes.
+- analisador_helpers.py (puro): 13 helpers, 5 cópias de _stringify_compact
+  deduplicas, 79 testes.
+- Integrações via import defensivo em login_route, chat_completions, api_sync,
+  analisador_prontuarios (13 wrappers finos).
 
 Próximas opções (escolher UMA):
 
-**A. Extrair helpers puros de analisador_prontuarios.py** — funções de
-   processamento de prontuários ainda não cobertas por testes offline.
-   Risco MÉDIO.
-
-**B. Modularização de browser.py por ações** (P2 #22) — requer plano de
+**A. Modularização de browser.py por ações** (P2 #22) — requer plano de
    design; toca async/Playwright. Risco ALTO.
 
-**C. Extração de helpers de api_sync** — normalização inline de campos;
+**B. Extração de helpers de api_sync** — normalização inline de campos;
    baixo valor mas zero risco. Risco BAIXO.
+
+**C. Cobertura de testes para analisador_prontuarios (integração offline)**
+   — funções que dependem de sql_exec mockado. Risco BAIXO.
 
 Regras obrigatórias:
 (a) escolher UMA opção e executar do começo ao fim;
-(b) manter os 910 testes offline passando + eventuais novos;
+(b) manter os 989 testes offline passando + eventuais novos;
 (c) ANTES do commit/push final, ATUALIZAR esta seção com novo commit hash,
     contagem de testes e próxima opção;
 (d) commit com título em PT-BR no imperativo;
@@ -684,7 +690,7 @@ Se for prompt/dados extensos: colagem via clipboard.
 ```
 
 ### Checklist de "antes de terminar a sessão" (rodar sempre)
-- [ ] Suite offline passa: `python -m pytest tests/test_humanizer.py tests/test_shared_queue.py tests/test_selectors_smoke.py tests/test_request_source.py tests/test_error_catalog.py tests/test_server_helpers.py tests/test_browser_predicates.py tests/test_rate_limit_integration.py tests/test_log_sanitizer.py tests/test_analisador_rate_limit.py tests/test_audit_sanitization.py tests/test_security_state.py tests/test_chat_rate_limit_cooldown.py tests/test_analisador_parsers.py tests/test_sync_dedup.py tests/test_python_request_throttle.py tests/test_web_search_throttle.py tests/test_error_scanner_helpers.py tests/test_profile_concurrency.py tests/test_browser_log_sanitization.py tests/test_payload_validators.py tests/test_correlation.py` (esperado: **910 passed**).
+- [ ] Suite offline passa: `python -m pytest tests/test_humanizer.py tests/test_shared_queue.py tests/test_selectors_smoke.py tests/test_request_source.py tests/test_error_catalog.py tests/test_server_helpers.py tests/test_browser_predicates.py tests/test_rate_limit_integration.py tests/test_log_sanitizer.py tests/test_analisador_rate_limit.py tests/test_audit_sanitization.py tests/test_security_state.py tests/test_chat_rate_limit_cooldown.py tests/test_analisador_parsers.py tests/test_sync_dedup.py tests/test_python_request_throttle.py tests/test_web_search_throttle.py tests/test_error_scanner_helpers.py tests/test_profile_concurrency.py tests/test_browser_log_sanitization.py tests/test_payload_validators.py tests/test_correlation.py tests/test_analisador_helpers.py` (esperado: **989 passed**).
 - [ ] `python -c "import ast; ast.parse(open('Scripts/server.py', encoding='utf-8').read())"` OK.
 - [ ] `python -c "import ast; ast.parse(open('Scripts/browser.py', encoding='utf-8').read())"` OK.
 - [ ] `python -c "import ast; ast.parse(open('Scripts/analisador_prontuarios.py', encoding='utf-8').read())"` OK.
