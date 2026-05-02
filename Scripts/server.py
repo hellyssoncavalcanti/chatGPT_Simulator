@@ -104,6 +104,10 @@ from server_helpers import (
     advance_health_ping_state as _advance_health_ping_state_impl,
     build_unauthorized_payload as _build_unauthorized_payload_impl,
     safe_snapshot_stats as _safe_snapshot_stats_impl,
+    build_search_progress_extras as _build_search_progress_extras_impl,
+    build_search_phase_label as _build_search_phase_label_impl,
+    build_search_prepare_message as _build_search_prepare_message_impl,
+    build_search_keepalive_message as _build_search_keepalive_message_impl,
 )
 import error_catalog as _error_catalog
 from error_scanner_helpers import (
@@ -1643,12 +1647,11 @@ def _handle_browser_search_api(execute_fn, *, route_label, source_label):
 
             for idx, query_str in enumerate(queries, start=1):
                 yield _build_status_event_impl(
-                    f'📚 Preparando busca {source_label} {idx}/{len(queries)}.',
-                    query=query_str,
-                    index=idx,
-                    total=len(queries),
-                    phase=f'{route_label.lower()}_prepare',
-                    source=source_label,
+                    _build_search_prepare_message_impl(source_label, idx, len(queries)),
+                    **_build_search_progress_extras_impl(
+                        query_str, idx, len(queries), source_label,
+                        phase=_build_search_phase_label_impl(route_label, "prepare"),
+                    ),
                 ) + "\n"
 
                 progress_q = queue.Queue()
@@ -1664,12 +1667,11 @@ def _handle_browser_search_api(execute_fn, *, route_label, source_label):
                         item = progress_q.get(timeout=15)
                     except queue.Empty:
                         yield _build_status_event_impl(
-                            f'⏳ Busca {source_label} por "{query_str}" ainda em andamento...',
-                            query=query_str,
-                            index=idx,
-                            total=len(queries),
-                            phase=f'{route_label.lower()}_keepalive',
-                            source=source_label,
+                            _build_search_keepalive_message_impl(source_label, query_str),
+                            **_build_search_progress_extras_impl(
+                                query_str, idx, len(queries), source_label,
+                                phase=_build_search_phase_label_impl(route_label, "keepalive"),
+                            ),
                         ) + "\n"
                         continue
 
@@ -1678,10 +1680,9 @@ def _handle_browser_search_api(execute_fn, *, route_label, source_label):
                         all_results.append(result)
                         yield _build_search_result_event_impl(
                             result,
-                            query=query_str,
-                            index=idx,
-                            total=len(queries),
-                            source=source_label,
+                            **_build_search_progress_extras_impl(
+                                query_str, idx, len(queries), source_label,
+                            ),
                         ) + "\n"
                         break
 

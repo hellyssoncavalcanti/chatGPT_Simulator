@@ -472,7 +472,7 @@ Coletadas em `2026-04-22` via `wc -l` / `grep -nE "def "`:
 - `1f3374b` — Extrair detecção de origem de request para módulo testável offline
 - `0c6216e` — docs: refinar backlog P0-P1-P2 com evidências concretas
 
-**Suite offline atual: 18 arquivos → 751 passed** (após etapa 51 — extração de `error_scanner_helpers.py`).
+**Suite offline atual: 18 arquivos → 770 passed** (após etapa 52 — extração de helpers de progresso de busca em `server_helpers.py`).
 
 O estado do repo local foi restaurado a partir da cópia de trabalho (histórico git reiniciado como root-commit `6a3a3c5`). As seguintes correções foram aplicadas em relação ao estado anterior da cópia de trabalho:
 - Removidas 9 definições duplicadas (linhas 820-959) de `server_helpers.py` que sobrescreviam as implementações corretas dos ciclos 31-43.
@@ -503,7 +503,7 @@ python -m pytest \
   tests/test_web_search_throttle.py \
   tests/test_error_scanner_helpers.py
 ```
-Esperado: **751 passed**. (NÃO usar `python -m pytest tests/` cru — `tests/test_server_api.py` e `tests/test_storage.py` falham por requerer `flask` / `cryptography` indisponíveis neste ambiente.)
+Esperado: **770 passed**. (NÃO usar `python -m pytest tests/` cru — `tests/test_server_api.py` e `tests/test_storage.py` falham por requerer `flask` / `cryptography` indisponíveis neste ambiente.)
 
 ### Mapa de módulos puros já criados
 
@@ -776,6 +776,14 @@ analisador_prontuarios.py, PARAR — não está no escopo destas opções.
 ### Próxima opção recomendada (continuar nesta branch ou pedir aprovação para tocar `browser.py`)
 - **Continuar baixo risco**: auditar `chat_completions` (linhas 2150+) e `api_sync` (linhas 1450+) por idioms duplicados ainda não cobertos. Helpers candidatos: builders de payloads de erro/timeout em `chat_completions`, normalização de cabeçalhos `X-Forwarded-*` em `_client_ip`, filtros de query-string em `/api/web_search/test`.
 - **Alto risco (BLOQUEADO)**: Opção D (catálogo em `browser._dismiss_rate_limit_modal_if_any`) e Opção 9 (modularização do `server.py` por domínio Flask Blueprint). Ambas requerem aprovação explícita.
+
+- **2026-05-02 (esta sessão, branch `claude/focused-einstein-HT0Xs`) — Lote P2 ciclo seguinte: kwargs canônicos de busca:**
+  52. Extraídos 4 helpers em `Scripts/server_helpers.py` para reduzir duplicação no `_handle_browser_search_api.generate()`:
+      - `build_search_progress_extras(query, idx, total, source, *, phase=None)` — kwargs canônicos preservando ordem histórica das chaves no JSON (`{query, index, total, phase, source}` para status; `{query, index, total, source}` para result). Sem `phase`, é byte-equivalente ao kwargs do result event; com `phase`, é byte-equivalente ao kwargs dos status events.
+      - `build_search_phase_label(route_label, kind)` — colapsa `f"{route_label.lower()}_{kind}"` (`web_search_prepare`, `uptodate_search_keepalive`).
+      - `build_search_prepare_message(source_label, idx, total)` — `"📚 Preparando busca {source} {idx}/{total}."`.
+      - `build_search_keepalive_message(source_label, query)` — `'⏳ Busca {source} por "{query}" ainda em andamento...'`.
+      `server.py` migrou os 3 yields do generator (status prepare, status keepalive, result event) para wrappers finos. Antes: 39 linhas de kwargs literais duplicados; agora: 21 linhas com helpers compostos. `tests/test_server_helpers.py` ganhou 4 classes novas (`TestBuildSearchProgressExtras`, `TestBuildSearchPhaseLabel`, `TestBuildSearchPrepareMessage`, `TestBuildSearchKeepaliveMessage`) + classe `TestSearchHelpersComposedEquivalence` que prova byte-equivalência da composição completa com o JSON literal histórico (3 cenários: prepare, keepalive, result). Suite offline atualizada: **770 passed** em 18 arquivos (+19 novos).
 
 
 

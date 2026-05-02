@@ -2082,3 +2082,141 @@ class TestSearchHandlerStatusEventEquivalence:
         new_positions = [new.find(k) for k in expected_order]
         assert legacy_positions == new_positions
         assert all(p >= 0 for p in legacy_positions)
+
+
+class TestBuildSearchProgressExtras:
+    def test_basic_shape(self):
+        extras = sh.build_search_progress_extras("q", 2, 5, "web")
+        assert extras == {"query": "q", "index": 2, "total": 5, "source": "web"}
+
+    def test_each_call_returns_new_dict(self):
+        a = sh.build_search_progress_extras("q", 1, 1, "web")
+        b = sh.build_search_progress_extras("q", 1, 1, "web")
+        assert a is not b
+
+    def test_unicode_query_preserved(self):
+        extras = sh.build_search_progress_extras('"diluição"', 1, 1, "uptodate")
+        assert extras["query"] == '"diluição"'
+        assert extras["source"] == "uptodate"
+
+    def test_kwargs_unpack_into_status_event(self):
+        # Confirma que o helper produz exatamente os mesmos kwargs que o legacy.
+        extras = sh.build_search_progress_extras("q", 3, 7, "web", phase="web_search_prepare")
+        new = sh.build_status_event("msg", **extras)
+        # Forma legacy via dict literal preservando ordem histórica das chaves.
+        legacy = sh.build_status_event(
+            "msg", query="q", index=3, total=7, phase="web_search_prepare", source="web",
+        )
+        assert new == legacy
+
+    def test_phase_omitted_when_none(self):
+        extras = sh.build_search_progress_extras("q", 1, 1, "web")
+        assert "phase" not in extras
+        assert list(extras.keys()) == ["query", "index", "total", "source"]
+
+    def test_phase_inserted_between_total_and_source(self):
+        extras = sh.build_search_progress_extras("q", 1, 1, "web", phase="x")
+        # Ordem histórica das chaves: query, index, total, phase, source.
+        assert list(extras.keys()) == ["query", "index", "total", "phase", "source"]
+
+
+class TestBuildSearchPhaseLabel:
+    def test_basic(self):
+        assert sh.build_search_phase_label("WEB_SEARCH", "prepare") == "web_search_prepare"
+
+    def test_uptodate(self):
+        assert sh.build_search_phase_label("UPTODATE_SEARCH", "keepalive") == "uptodate_search_keepalive"
+
+    def test_already_lowercase(self):
+        assert sh.build_search_phase_label("web_search", "result") == "web_search_result"
+
+    def test_none_inputs(self):
+        assert sh.build_search_phase_label(None, "prepare") == "_prepare"
+        assert sh.build_search_phase_label("WEB", None) == "web_"
+        assert sh.build_search_phase_label(None, None) == "_"
+
+    def test_non_string_inputs_coerced(self):
+        # Aceita ints (improvável, mas defensivo).
+        assert sh.build_search_phase_label(42, "k") == "42_k"
+
+
+class TestBuildSearchPrepareMessage:
+    def test_basic(self):
+        msg = sh.build_search_prepare_message("web", 1, 3)
+        assert msg == "📚 Preparando busca web 1/3."
+
+    def test_uptodate(self):
+        assert sh.build_search_prepare_message("uptodate", 2, 5) == "📚 Preparando busca uptodate 2/5."
+
+    def test_zero_total(self):
+        assert sh.build_search_prepare_message("web", 0, 0) == "📚 Preparando busca web 0/0."
+
+
+class TestBuildSearchKeepaliveMessage:
+    def test_basic(self):
+        msg = sh.build_search_keepalive_message("web", "tratamento")
+        assert msg == '⏳ Busca web por "tratamento" ainda em andamento...'
+
+    def test_query_with_quotes(self):
+        # Aspas internas mantidas literalmente — quem serializa em JSON é
+        # build_status_event (ensure_ascii=False).
+        msg = sh.build_search_keepalive_message("uptodate", 'cefepime')
+        assert msg == '⏳ Busca uptodate por "cefepime" ainda em andamento...'
+
+
+class TestSearchHelpersComposedEquivalence:
+    """Composição dos 4 helpers novos produz byte-identicamente o legacy."""
+
+    def test_prepare_composition(self):
+        idx, total, route_label, source_label, query_str = 1, 3, "WEB_SEARCH", "web", "tratamento"
+        # Composição via novos helpers.
+        progress_extras = sh.build_search_progress_extras(
+            query_str, idx, total, source_label,
+            phase=sh.build_search_phase_label(route_label, "prepare"),
+        )
+        new = sh.build_status_event(
+            sh.build_search_prepare_message(source_label, idx, total),
+            **progress_extras,
+        )
+        # Forma legacy inline.
+        legacy = json.dumps({
+            'type': 'status',
+            'content': f'📚 Preparando busca {source_label} {idx}/{total}.',
+            'query': query_str,
+            'index': idx,
+            'total': total,
+            'phase': f'{route_label.lower()}_prepare',
+            'source': source_label,
+        }, ensure_ascii=False)
+        assert new == legacy
+
+    def test_keepalive_composition(self):
+        idx, total, route_label, source_label, query_str = 2, 5, "UPTODATE_SEARCH", "uptodate", "dose"
+        progress_extras = sh.build_search_progress_extras(
+            query_str, idx, total, source_label,
+            phase=sh.build_search_phase_label(route_label, "keepalive"),
+        )
+        new = sh.build_status_event(
+            sh.build_search_keepalive_message(source_label, query_str),
+            **progress_extras,
+        )
+        legacy = json.dumps({
+            'type': 'status',
+            'content': f'⏳ Busca {source_label} por "{query_str}" ainda em andamento...',
+            'query': query_str,
+            'index': idx,
+            'total': total,
+            'phase': f'{route_label.lower()}_keepalive',
+            'source': source_label,
+        }, ensure_ascii=False)
+        assert new == legacy
+
+    def test_result_composition(self):
+        idx, total, source_label, query_str = 1, 1, "web", "q"
+        progress_extras = sh.build_search_progress_extras(query_str, idx, total, source_label)
+        result = {"success": True, "items": []}
+        new = sh.build_search_result_event(result, **progress_extras)
+        legacy = sh.build_search_result_event(
+            result, query=query_str, index=idx, total=total, source=source_label,
+        )
+        assert new == legacy
