@@ -402,7 +402,7 @@ Coletadas em `2026-04-22` via `wc -l` / `grep -nE "def "`:
 ### Estado atual (consolidado) — branch `claude/fix-rate-limit-interval-1vPbB`
 
 **Commits relevantes (mais recente → mais antigo):**
-- `<COMMIT_HASH>` — payload_validators + correlation-id + README *(esta sessão)*
+- `09ec07c` — payload_validators + correlation-id + README *(esta sessão)*
 - `bed9994` — docs: registrar commit 2340738 no PONTO DE RETOMADA
 - `2340738` — Extrair resolve_client_ip + payloads bloco chat_completions *(sessão anterior)*
 - `070a37d` — Sanitizar fila SSE de log em browser.py (emit_log + _save_error_html)
@@ -478,7 +478,7 @@ Coletadas em `2026-04-22` via `wc -l` / `grep -nE "def "`:
 - `1f3374b` — Extrair detecção de origem de request para módulo testável offline
 - `0c6216e` — docs: refinar backlog P0-P1-P2 com evidências concretas
 
-**Suite offline atual: 22 arquivos → 908 passed** (após sessão de 2026-05-02 septuagies — payload_validators, correlation-id, README).
+**Suite offline atual: 22 arquivos → 910 passed** (após sessão de 2026-05-02 septuagies — payload_validators, correlation-id, README).
 
 O estado do repo local foi restaurado a partir da cópia de trabalho (histórico git reiniciado como root-commit `6a3a3c5`). As seguintes correções foram aplicadas em relação ao estado anterior da cópia de trabalho:
 - Removidas 9 definições duplicadas (linhas 820-959) de `server_helpers.py` que sobrescreviam as implementações corretas dos ciclos 31-43.
