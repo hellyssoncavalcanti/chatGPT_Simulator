@@ -1206,6 +1206,10 @@ Detecção de incidentes:
 
 Ferramenta que identifica o **log mais recente de cada sistema** e extrai apenas os trechos relevantes (erros, avisos, exceções), sem ler o arquivo inteiro. Projetada para diagnóstico eficiente e para consumo por LLMs (evita gastar tokens com linhas de log normais).
 
+O relatório separa automaticamente erros em duas categorias:
+- **🆕 Erros novos** — nunca antes investigados; requerem atenção.
+- **🔵 Erros conhecidos** — já catalogados em `Scripts/erros_conhecidos.json`; Claude **não** reinvestiga.
+
 ```bash
 # Todos os sistemas
 python Scripts/log_scanner.py
@@ -1218,6 +1222,18 @@ python Scripts/log_scanner.py --context 8
 
 # Salvar relatório em arquivo
 python Scripts/log_scanner.py --output logs/relatorio_erros.md
+
+# Registrar um bug como corrigido (evita reinvestigação futura)
+python Scripts/log_scanner.py --add-known "trecho que aparece no log" \
+  --status fixed --description "o que era" --fix "o que foi feito" \
+  --files "Scripts/browser.py"
+
+# Registrar falso positivo ou dado histórico de banco
+python Scripts/log_scanner.py --add-known "padrão" \
+  --status false_positive --description "por que não é erro de código"
+
+# Listar todos os erros já catalogados
+python Scripts/log_scanner.py --list-known
 ```
 
 Sistemas monitorados automaticamente:
@@ -1231,6 +1247,20 @@ Sistemas monitorados automaticamente:
 | `ddns-client`             | Atualização de DNS dinâmico           |
 | `sync_github`             | Sync automático com GitHub            |
 
+### Banco de erros conhecidos (`Scripts/erros_conhecidos.json`)
+
+Arquivo JSON versionado que persiste o histórico de erros já investigados entre sessões do Claude Code. Cada entrada contém: padrão de busca, status, descrição, fix aplicado e data de resolução.
+
+Status disponíveis:
+
+| Status | Ícone | Significado |
+|--------|-------|-------------|
+| `fixed` | 🔵 | Bug corrigido no código |
+| `false_positive` | ⚪ | Linha de log normal que casa com keyword mas não é erro |
+| `historico_db` | 🗄️ | Erro antigo gravado no banco, sem impacto no código atual |
+| `suppressed` | 🔕 | Comportamento aceito/esperado, não requer ação |
+| `monitoring` | 👁️ | Conhecido, ainda ativo — monitorar frequência |
+
 ### Snapshots HTML de erros (`logs/html_dos_erros/`)
 
 O `browser.py` captura automaticamente o HTML renderizado da página do Chromium e salva em `logs/html_dos_erros/` nos seguintes eventos críticos:
@@ -1243,11 +1273,11 @@ O nome de cada arquivo segue o padrão `YYYYMMDD_HHMMSS_<tipo>_<chat_id>.html`. 
 
 ### Prompt de monitoramento para Claude Code
 
-Para acionar uma sessão de revisão de logs com correção automática, envie ao Claude Code:
+Para acionar uma sessão de revisão de logs com correção automática, envie ao Claude Code (ou configure como Routine):
 
 > **Monitora os logs do projeto e corrija os erros encontrados.**
 
-O fluxo seguido é: rodar `log_scanner.py` → analisar apenas trechos extraídos → ler somente as linhas relevantes dos arquivos de código → aplicar correção mínima. Detalhes e comandos de referência em [`docs/prompt_monitoramento_logs.md`](docs/prompt_monitoramento_logs.md).
+O fluxo seguido: rodar `log_scanner.py` → ignorar erros conhecidos → investigar apenas os 🆕 novos → corrigir → registrar com `--add-known`. Detalhes e referência completa em [`docs/prompt_monitoramento_logs.md`](docs/prompt_monitoramento_logs.md).
 
 ---
 
