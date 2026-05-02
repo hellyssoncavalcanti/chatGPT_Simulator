@@ -402,7 +402,9 @@ Coletadas em `2026-04-22` via `wc -l` / `grep -nE "def "`:
 ### Estado atual (consolidado) — branch `claude/continue-refactor-updates-wvOqd`
 
 **Commits relevantes (mais recente → mais antigo):**
-- `6a3a3c5` — Corrigir duplicatas em server_helpers e restaurar suite para 698 testes *(esta sessão — root-commit do repo local)*
+- `a034d61` — Implementar concorrência por perfil e round-robin de profiles no browser *(esta sessão)*
+- `185e222` — Auditar server.py para referências _impl indefinidas *(esta sessão)*
+- `6a3a3c5` — Corrigir duplicatas em server_helpers e restaurar suite para 698 testes *(root-commit do repo local)*
 - `4828ff8` — Extrair payload 401 canônico + autoflow sem pausas *(esta sessão, ciclo 44 / opção 2)*
 - `abfe12d` — Extrair transição de estado do health_check *(esta sessão, ciclo 43 / opção 2)*
 - `61cc8ea` — Extrair helpers de queue_failed/queue_failed_retry *(esta sessão, ciclo 42 / opção 2)*
@@ -472,7 +474,7 @@ Coletadas em `2026-04-22` via `wc -l` / `grep -nE "def "`:
 - `1f3374b` — Extrair detecção de origem de request para módulo testável offline
 - `0c6216e` — docs: refinar backlog P0-P1-P2 com evidências concretas
 
-**Suite offline atual: 18 arquivos → 775 passed** (após etapa 53 — extração de `push_error_and_close_queue` em `server_helpers.py`).
+**Suite offline atual: 19 arquivos → 794 passed** (após sessão de 2026-05-02 — concorrência por perfil + round-robin + Blueprint busca).
 
 O estado do repo local foi restaurado a partir da cópia de trabalho (histórico git reiniciado como root-commit `6a3a3c5`). As seguintes correções foram aplicadas em relação ao estado anterior da cópia de trabalho:
 - Removidas 9 definições duplicadas (linhas 820-959) de `server_helpers.py` que sobrescreviam as implementações corretas dos ciclos 31-43.
@@ -501,9 +503,10 @@ python -m pytest \
   tests/test_sync_dedup.py \
   tests/test_python_request_throttle.py \
   tests/test_web_search_throttle.py \
-  tests/test_error_scanner_helpers.py
+  tests/test_error_scanner_helpers.py \
+  tests/test_profile_concurrency.py
 ```
-Esperado: **775 passed**. (NÃO usar `python -m pytest tests/` cru — `tests/test_server_api.py` e `tests/test_storage.py` falham por requerer `flask` / `cryptography` indisponíveis neste ambiente.)
+Esperado: **794 passed**. (NÃO usar `python -m pytest tests/` cru — `tests/test_server_api.py` e `tests/test_storage.py` falham por requerer `flask` / `cryptography` indisponíveis neste ambiente.)
 
 ### Mapa de módulos puros já criados
 
@@ -522,6 +525,7 @@ Esperado: **775 passed**. (NÃO usar `python -m pytest tests/` cru — `tests/te
 | `Scripts/analisador_parsers.py` | ~330 | `detect_rate_limit_preview` (matcher injetável), `build_rate_limit_error_message`, `strip_code_fences`, `extract_json_block`, `normalize_llm_json`, `parse_json_block`, `json_looks_incomplete` (heurística de truncamento), `decode_json_string_fragment`, `extract_visible_llm_markdown` (remove `<think>…</think>`), `extract_search_queries_fallback` (parser tolerante de queries com `max_queries` injetável). | `tests/test_analisador_parsers.py` (64) |
 | `Scripts/humanizer.py` | 124 | Módulo original (inalterado); testes ampliados com invariantes anti-robotização. | `tests/test_humanizer.py` (33) |
 | `Scripts/error_scanner_helpers.py` | ~210 | Helpers puros para `/api/errors/{known,scan,claude_fix}`: filtragem canônica de snippets (`is_unwanted_snippet`, constante `UNWANTED_SNIPPET_KEYS`), conversão de snippets/exceções em entradas (`build_scan_match_entry`, `build_scan_error_entry`), prompt do Claude Code (`build_claude_fix_prompt`), body do POST proxy (`build_claude_fix_request_body`), payloads de `/api/errors/known` (`build_known_errors_missing_payload`, `build_known_errors_loaded_payload`, `build_known_errors_error_payload`) e linhas NDJSON do stream claude_fix (`build_claude_fix_empty_stream_lines`, `build_claude_fix_status_line`, `build_claude_fix_error_line`, `build_claude_fix_finish_line`). | `tests/test_error_scanner_helpers.py` (53) |
+| `Scripts/profile_concurrency.py` | ~45 | Classe `ProfileConcurrencyLimiter` (thread-safe, sem Flask/Playwright/config): `acquire(profile)`, `release(profile)` (idempotente), `active_count(profile)`, `snapshot()`. Normaliza `None`/`""` para `"default"`. Singleton `profile_concurrency_tracker` exportado via `shared.py`. Consumido por `browser.py` (asyncio) e `server.py` (métricas em `/api/metrics::profile_concurrency`). | `tests/test_profile_concurrency.py` (19) |
 
 ### Integrações já feitas (em caminho quente)
 - `server.chat_completions` usa `request_source.is_analyzer_chat_request`, `server_helpers.combine_openai_messages`, `server_helpers.build_sender_label`, `server_helpers.wrap_paste_if_python_source`, `server_helpers.coalesce_origin_url`, `server_helpers.decode_attachment` (laço de anexos — IO/log preservados no call site), `server_helpers.resolve_browser_profile`, `server_helpers.resolve_chat_url` (sentinela `"None"` agora vira `None` — `storage.save_chat` e `browser.py:~4159` já eram defensivos contra "None" string, então a integração é byte-equivalente para todos os fluxos observáveis), `server_helpers.build_chat_task_payload` (substitui dict literal de 20 linhas), `server_helpers.build_queue_key` (no `_dispatch_chat_task`), `server_helpers.build_error_event` (2 sites em `_dispatch_chat_task`).
@@ -549,7 +553,7 @@ Esperado: **775 passed**. (NÃO usar `python -m pytest tests/` cru — `tests/te
 
 ### Integrações pendentes (NÃO feitas)
 1. ~~Catálogo em `browser._dismiss_rate_limit_modal_if_any`~~ — **FEITO** (2026-05-02, commit `d8762df`): JS captura `modal.innerText` antes de clicar; log usa `format_reason` com prefixo `[RATE_LIMIT]`; import defensivo com fallback `str()` se módulo ausente.
-2. Concorrência por `browser_profile` — **BLOQUEADO: requer aprovação do usuário** (toca `browser.py` async).
+2. ~~Concorrência por `browser_profile`~~ — **FEITO** (2026-05-02, commit `a034d61`): `profile_concurrency.py` + asyncio Semaphore por perfil em `browser.py` + round-robin corrigido + Blueprint `server_busca.py` + singleton em `shared.py` + `check_auth` em `auth.py`. 19 testes offline adicionados em `test_profile_concurrency.py`.
 3. **Integração inicial ChatGPT ↔ Gemini com pré-check de login no startup** — adicionar após as pendências acima, sem alterar a estrutura do refactor:
    - Gemini pode abrir no **`browser_profile=default`** (mesma diretriz de fallback já consolidada).
    - No **start do sistema**, validar sinais de sessão/logado no Gemini (heurística equivalente ao fluxo atual de validação de login do ChatGPT).
@@ -608,17 +612,18 @@ Esperado: **775 passed**. (NÃO usar `python -m pytest tests/` cru — `tests/te
 **6. ~~Integrar catálogo em `browser._dismiss_rate_limit_modal_if_any`~~ (FEITO em 2026-05-02, commit `d8762df`)**
 - JS captura `modal.innerText` (até 200 chars) antes de clicar; Python usa `_format_rate_limit_reason` (import defensivo com fallback `str()`). Log: `ℹ️ Modal de rate-limit detectado e fechado antes da digitação. [RATE_LIMIT] …`.
 
-**7. Plano de concorrência por `browser_profile` (ALTO risco, BLOQUEADO)**
-- Entregável inicial: documento em `docs/concurrency_per_profile.md` (sem código) — **FEITO** em 2026-04-26 duovicies (`511d667`).
-- Próximo passo: alteração em `browser.py` com aprovação explícita.
+**7. ~~Concorrência por `browser_profile`~~ (COMPLETA)**
+- Documento de design em `docs/concurrency_per_profile.md` — **FEITO** em 2026-04-26 duovicies (`511d667`).
+- Implementação em `browser.py` — **FEITO** em 2026-05-02 (`a034d61`): asyncio Semaphore por perfil, round-robin corrigido para tratar "default" como "sem preferência", `ProfileConcurrencyLimiter` puro em `profile_concurrency.py`, singleton em `shared.py`, Blueprint `server_busca.py` com `check_auth` movido para `auth.py`.
 
 **8. ~~Auditar/cobrir endpoints menores ainda sem testes offline~~ (FEITO em 2026-04-26 quatervicies)**
 - Auditoria identificou 2 idioms duplicados; extraídos `safe_int(value, default)` e `safe_snapshot_stats(queue_obj)` em `server_helpers.py`. 5 sites migrados (`queue_status`, `queue_failed`, `queue_failed_retry`, `logs_tail`, `api_metrics`). +17 testes em `tests/test_server_helpers.py::TestSafeInt`/`TestSafeSnapshotStats` cobrindo coerções, fallback de exceção, ausência de método, valores `None`/`""`/`bool`/float, defaults negativos.
 
-**9. ~~Modularização do `server.py` (P2 #21, MÉDIO risco)~~ — CONCLUÍDA (4 Blueprints)**
+**9. ~~Modularização do `server.py` (P2 #21, MÉDIO risco)~~ — CONCLUÍDA (5 Blueprints)**
 - **Fase 1** (`d8762df`): `server_observabilidade.py` (queue_*, logs_*) + `server_recursos.py` (serve_download, get_avatar, robots_txt). 8 rotas. server.py: 2731 → 2529 linhas. Corrigido NameError latente em `logs_stream`.
-- **Fase 2** (esta sessão): `server_usuario.py` (logout, user_info, update_pass, upload_avatar) + `server_admin.py` (api_errors_known, api_errors_scan, api_errors_claude_fix). 7 rotas adicionais. Bloco completo `error_scanner_helpers` removido de server.py.
-- Rotas complexas (`chat_completions`, `api_sync`, `api_web_search_test`, `api_metrics`, `login`, `health_check`) permanecem em `server.py` — correto, pois usam estado interno (`_SECURITY_STATE`, `_audit_event`, `_is_ip_blocked`).
+- **Fase 2** (sessão anterior): `server_usuario.py` (logout, user_info, update_pass, upload_avatar) + `server_admin.py` (api_errors_known, api_errors_scan, api_errors_claude_fix). 7 rotas adicionais. Bloco completo `error_scanner_helpers` removido de server.py.
+- **Fase 3** (2026-05-02, commit `a034d61`): `server_busca.py` (api_web_search_test). 1 rota. ~290 linhas removidas de server.py. `check_auth` extraído para `auth.py` para evitar import circular.
+- Rotas complexas (`chat_completions`, `api_sync`, `api_metrics`, `login`, `health_check`) permanecem em `server.py` — correto, pois usam estado interno (`_SECURITY_STATE`, `_audit_event`, `_is_ip_blocked`).
 
 ### Prompt de retomada (COPIAR EXATAMENTE EM NOVO CHAT)
 
@@ -628,43 +633,43 @@ claude/continue-refactor-updates-wvOqd.
 Leia APENAS a seção "PONTO DE RETOMADA (última atualização em 2026-05-02
 unquadragies+)" em REFACTOR_PROGRESS.md — é autocontida.
 
-Estado atual: commit `185e222`.
-Suite offline: **775 passed em 18 arquivos**.
-Suite completa (CI): **777 passed** (excluindo test_server_api.py e
-test_browser_resolve_anchors.py que falham por requerer flask/cryptography).
+Estado atual: commit `a034d61`.
+Suite offline: **794 passed em 19 arquivos**.
 
 Concluído nesta sessão:
-- Opção D: browser._dismiss_rate_limit_modal_if_any integrada com format_reason.
-- Opção 9 (COMPLETA — 4 Blueprints Flask):
-  · server_observabilidade.py: queue_status, queue_failed, queue_failed_retry,
-    logs_tail, logs_stream (corrigiu NameError latente).
-  · server_recursos.py: serve_download, get_avatar, robots_txt.
-  · server_usuario.py: logout, user_info, update_pass, upload_avatar.
-  · server_admin.py: api_errors_known, api_errors_scan, api_errors_claude_fix.
-  15 rotas movidas no total. Bloco error_scanner_helpers removido de server.py.
-- test_error_scanner_helpers.py adicionado à suite offline (+53 testes).
-- README.md: seção de componentes atualizada com os 4 blueprints.
+- Opção A (busca modularizada — 5º Blueprint): server_busca.py para
+  api_web_search_test; check_auth extraído para auth.py para evitar
+  import circular; ~290 linhas removidas de server.py.
+- Opção B (concorrência por browser_profile — COMPLETA):
+  · profile_concurrency.py: ProfileConcurrencyLimiter puro + 19 testes.
+  · shared.py: singleton profile_concurrency_tracker.
+  · browser.py: round-robin corrigido (tratar "default" como "sem preferência")
+    + asyncio Semaphore por perfil (_guarded wrapper).
+  · server.py: profile_concurrency em /api/metrics.
+- README.md e REFACTOR_PROGRESS.md atualizados.
 
 Próximas opções (escolher UMA com aprovação):
 
-**A. Modularizar busca** — extrair `api_web_search_test` para Blueprint, ou
-   extrair `_handle_browser_search_api` para server_helpers. Risco MÉDIO.
+**A. Lote P1: sanitizar logs de browser.py** — integrar log_sanitizer em
+   _save_error_html e outros pontos de log no browser. Risco BAIXO.
 
-**B. Concorrência por browser_profile** — implementar limite de tarefas
-   simultâneas por perfil (doc em docs/concurrency_per_profile.md já existe).
-   Requer aprovação explícita (toca browser.py async).
+**B. Extrair helpers puros de analisador_prontuarios.py** — parsers e
+   helpers adicionais ainda não cobertos por testes offline. Risco MÉDIO.
+
+**C. Modularização de browser.py por ações** (P2 #22) — requer plano de
+   design; toca async/Playwright. Risco ALTO.
 
 Regras obrigatórias:
 (a) escolher UMA opção e executar do começo ao fim;
 (b) NÃO tocar browser.py/analisador_prontuarios.py sem aprovação explícita;
-(c) manter os 775 testes offline passando + eventuais novos;
+(c) manter os 794 testes offline passando + eventuais novos;
 (d) ANTES do commit/push final, ATUALIZAR esta seção com novo commit hash,
     contagem de testes e próxima opção;
 (e) commit com título em PT-BR no imperativo;
 (f) push para claude/continue-refactor-updates-wvOqd.
 
-Se encontrar algo inesperado em server.py, PARAR e pedir confirmação antes
-de editar.
+Se encontrar algo inesperado em server.py ou browser.py, PARAR e pedir
+confirmação antes de editar.
 ```
 
 ### Checklist de "antes de terminar a sessão" (rodar sempre)

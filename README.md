@@ -70,6 +70,9 @@ Cliente humano / PHP / analisador_prontuarios.py
 - **`Scripts/server_admin.py`** *(Blueprint Flask)*
   Diagnóstico e correção automática: listagem de erros conhecidos, varredura de logs e encaminhamento ao Claude Code via streaming NDJSON.
 
+- **`Scripts/server_busca.py`** *(Blueprint Flask)*
+  Pesquisa web automatizada: rota `/api/web_search/test` com streaming NDJSON de progresso e resultado.
+
 - **`Scripts/browser.py`**
   Motor de automação com Playwright. É responsável por abrir o ChatGPT, digitar/colar mensagens, anexar arquivos, sincronizar histórico, pesquisar no Google e manipular menus de contexto.
   Correções recentes:
@@ -77,9 +80,14 @@ Cliente humano / PHP / analisador_prontuarios.py
   - **Snapshots HTML em erros**: função `_save_error_html()` salva o HTML renderizado em `logs/html_dos_erros/` ao detectar watchdog timeout, timeout 660 s ou erro genérico de chat.
   - **`is_disabled()` sem timeout bloqueava 30 s**: chamadas `is_disabled()` e `is_visible()` agora usam `timeout=2000` ms, evitando que o Playwright aguarde 30 s (default) pela reestabilização da página após conversão de paste em anexos.
   - **Timeout de submit proporcional a anexos**: quando o ChatGPT converte um bloco colado em múltiplos anexos, o tempo de espera pelo botão de envio é calculado como `max(20 s, 5 s + (n_anexos − 3) × 5 s)` — por exemplo, 70 s para 13 anexos em vez dos 12 s anteriores.
+  - **Round-robin de perfis corrigido**: `_choose_profile_for_new_chat` agora trata `browser_profile="default"` como "sem preferência explícita", permitindo que o sistema alterne entre `default` e `segunda_chance`. Antes, qualquer string truthy (inclusive `"default"`) cortocircuitava o round-robin.
+  - **Concorrência por perfil Chromium**: semáforos asyncio por perfil (`config.CHROMIUM_PROFILE_CONCURRENCY`) limitam tarefas simultâneas por perfil. Com dois perfis e limite=1 cada, duas análises simultâneas do analisador podem ser processadas em paralelo.
 
 - **`Scripts/shared.py`**
-  Define a fila `browser_queue`, que desacopla o Flask do loop assíncrono do Playwright.
+  Define a fila `browser_queue`, que desacopla o Flask do loop assíncrono do Playwright. Também exporta o singleton `profile_concurrency_tracker` (`ProfileConcurrencyLimiter`) para rastrear tarefas ativas por perfil Chromium.
+
+- **`Scripts/profile_concurrency.py`**
+  Módulo puro (sem Flask/Playwright) que implementa `ProfileConcurrencyLimiter`: rastreador thread-safe de tarefas ativas por perfil Chromium, consumido pelo `browser.py` (asyncio) e exposto em `/api/metrics` pelo `server.py`.
 
 - **`Scripts/db.py`**
   Camada SQLite compartilhada com schema/migração inicial (chats, mensagens, usuários e sessões).
