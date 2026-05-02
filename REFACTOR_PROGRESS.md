@@ -614,8 +614,13 @@ Esperado: **698 passed**. (NÃO usar `python -m pytest tests/` cru — `tests/te
 **8. ~~Auditar/cobrir endpoints menores ainda sem testes offline~~ (FEITO em 2026-04-26 quatervicies)**
 - Auditoria identificou 2 idioms duplicados; extraídos `safe_int(value, default)` e `safe_snapshot_stats(queue_obj)` em `server_helpers.py`. 5 sites migrados (`queue_status`, `queue_failed`, `queue_failed_retry`, `logs_tail`, `api_metrics`). +17 testes em `tests/test_server_helpers.py::TestSafeInt`/`TestSafeSnapshotStats` cobrindo coerções, fallback de exceção, ausência de método, valores `None`/`""`/`bool`/float, defaults negativos.
 
-**9. Modularização do `server.py` (P2 #21, MÉDIO risco)**
-- Quando os módulos puros pararem de crescer (próximo de saturação dos idioms), agrupar wrappers por domínio (auth, chats, observabilidade, administração, busca) em sub-módulos `Scripts/server_<domínio>.py`. Padrão: blueprints Flask + import explícito. Não fazer sem plano explícito.
+**9. Modularização do `server.py` (P2 #21, MÉDIO risco) — PARCIALMENTE CONCLUÍDA**
+- Primeira fase entregue: Blueprints `server_observabilidade.py` (queue_*, logs_*) e
+  `server_recursos.py` (serve_download, get_avatar, robots_txt). 8 rotas movidas.
+  server.py: 2731 → 2529 linhas. Corrigido NameError latente em logs_stream.
+- Próxima fase (quando aprovada): auth parcial (logout, user_info, update_pass)
+  e busca (api_web_search_test) — requerem extração de check_auth para módulo compartilhado.
+  Rotas complexas (chat_completions, api_sync) permanecem em server.py.
 
 ### Prompt de retomada (COPIAR EXATAMENTE EM NOVO CHAT)
 
@@ -625,44 +630,43 @@ claude/continue-refactor-updates-wvOqd.
 Leia APENAS a seção "PONTO DE RETOMADA (última atualização em 2026-05-02
 unquadragies+)" em REFACTOR_PROGRESS.md — é autocontida.
 
-Estado atual: commit `6a3a3c5` (root-commit do repo local reiniciado).
-Suite offline: **698 passed em 17 arquivos**.
+Estado atual: commit `d8762df`.
+Suite offline: **700 passed em 17 arquivos**.
 
-Opção 2 (auditoria de handlers menores) foi CONCLUÍDA e está SATURADA:
-- Todos os handlers auditados e cobertos.
-- Último achado migrado: segundo site MIME map inline em serve_download
-  migrado para _resolve_download_content_type_impl.
-- Handlers queue_status/failed/retry, logs_tail/stream, health_check,
-  get_history confirmados saturados.
+Opção D (browser._dismiss_rate_limit_modal_if_any) foi CONCLUÍDA:
+- JS captura modal.innerText antes de clicar; log usa format_reason com
+  prefixo [RATE_LIMIT]; import defensivo com fallback str() se ausente.
 
-Próximas opções (escolher UMA e executar do começo ao fim):
+Opção 9 (modularização server.py) foi PARCIALMENTE CONCLUÍDA (fase 1):
+- Scripts/server_observabilidade.py: Blueprint com queue_status, queue_failed,
+  queue_failed_retry, logs_tail, logs_stream (corrigiu NameError latente).
+- Scripts/server_recursos.py: Blueprint com serve_download, get_avatar, robots_txt.
+- server.py: 2731 → 2529 linhas. 5 imports _impl exclusivos removidos.
 
-**D. Integrar catálogo em `browser._dismiss_rate_limit_modal_if_any`** (ALTO
-   risco, BLOQUEADO — toca `browser.py` async/Playwright; pede aprovação
-   explícita do usuário antes de qualquer edição).
+Próximas opções (escolher UMA com aprovação):
 
-**9. Modularização do `server.py` (P2 #21, MÉDIO risco)** — agrupar wrappers
-   por domínio (auth, chats, observabilidade, administração, busca) em
-   sub-módulos `Scripts/server_<domínio>.py`. Não fazer sem plano explícito.
-   Pedir aprovação ao usuário antes de iniciar.
+**9b. Fase 2 de modularização** (MÉDIO risco) — extrair check_auth para módulo
+   compartilhado e criar blueprints para auth parcial (logout/user_info/
+   update_pass) e busca (api_web_search_test). Requer aprovação explícita.
+
+**A. Log sanitizer em _audit_event** (ver backlog P1 #17) — integrar em
+   utils.file_log e _audit_event. Requer aprovação explícita.
 
 Regras obrigatórias:
-(a) escolher UMA opção (D ou 9) e executar do começo ao fim;
-(b) NÃO criar novos arquivos em browser.py/analisador_prontuarios.py — fora
-    de escopo (sem aprovação explícita);
-(c) manter os 698 testes offline passando + eventuais novos;
+(a) escolher UMA opção e executar do começo ao fim;
+(b) NÃO tocar browser.py/analisador_prontuarios.py sem aprovação explícita;
+(c) manter os 700 testes offline passando + eventuais novos;
 (d) ANTES do commit/push final, ATUALIZAR esta seção com novo commit hash,
     contagem de testes e próxima opção;
 (e) commit com título em PT-BR no imperativo;
 (f) push para claude/continue-refactor-updates-wvOqd.
 
 Se encontrar algo inesperado em server.py, PARAR e pedir confirmação antes
-de editar. Se precisar tocar em browser.py (async/Playwright) ou em
-analisador_prontuarios.py, PARAR — não está no escopo destas opções.
+de editar.
 ```
 
 ### Checklist de "antes de terminar a sessão" (rodar sempre)
-- [ ] Suite offline passa: `python -m pytest tests/test_humanizer.py tests/test_shared_queue.py tests/test_selectors_smoke.py tests/test_request_source.py tests/test_error_catalog.py tests/test_server_helpers.py tests/test_browser_predicates.py tests/test_rate_limit_integration.py tests/test_log_sanitizer.py tests/test_analisador_rate_limit.py tests/test_audit_sanitization.py tests/test_security_state.py tests/test_chat_rate_limit_cooldown.py tests/test_analisador_parsers.py tests/test_sync_dedup.py tests/test_python_request_throttle.py tests/test_web_search_throttle.py` (esperado: **698 passed**).
+- [ ] Suite offline passa: `python -m pytest tests/test_humanizer.py tests/test_shared_queue.py tests/test_selectors_smoke.py tests/test_request_source.py tests/test_error_catalog.py tests/test_server_helpers.py tests/test_browser_predicates.py tests/test_rate_limit_integration.py tests/test_log_sanitizer.py tests/test_analisador_rate_limit.py tests/test_audit_sanitization.py tests/test_security_state.py tests/test_chat_rate_limit_cooldown.py tests/test_analisador_parsers.py tests/test_sync_dedup.py tests/test_python_request_throttle.py tests/test_web_search_throttle.py` (esperado: **700 passed**).
 - [ ] `python3 -c "import ast; ast.parse(open('Scripts/server.py').read())"` OK.
 - [ ] `python3 -c "import ast; ast.parse(open('Scripts/browser.py').read())"` OK.
 - [ ] `python3 -c "import ast; ast.parse(open('Scripts/analisador_prontuarios.py').read())"` OK.
@@ -757,6 +761,8 @@ analisador_prontuarios.py, PARAR — não está no escopo destas opções.
   49. `895bfff`: `Scripts/auto_dev_agent.py` ajustado para alertar espera/cooldown apenas UMA vez e manter somente countdown inline durante o período de anti-rate-limit, removendo spam de status repetitivo no console. Ao sair da espera, o agente emite uma única mensagem de retomada (`Espera concluída`) e retorna ao fluxo normal de eventos. Suite offline preservada: **611 passed**.
 - **2026-04-27 (esta sessão, branch `claude/continue-refactor-updates-wvOqd`) — Hotfix de stream NDJSON (etapa 20):**
   50. `0b93625`: corrigido `NameError: _build_chat_id_event_impl is not defined` no generator de `/v1/chat/completions` (stream NDJSON). Reintroduzido helper puro `build_chat_id_event(chat_id)` em `Scripts/server_helpers.py`, exportado em `__all__`, importado como alias em `server.py` e integrado no primeiro `yield` do stream (`chat_id`). `tests/test_server_helpers.py` ganhou 2 casos novos (payload do helper + smoke de alias importado no server). Suite offline atualizada: **613 passed** em 17 arquivos.
+- **2026-05-02 (esta sessão, branch `claude/continue-refactor-updates-wvOqd`) — Opção D + Opção 9 (fase 1):**
+  51. `d8762df`: **Opção D** — integrado `error_catalog.format_reason` em `browser._dismiss_rate_limit_modal_if_any`: JS captura `modal.innerText` antes de clicar (retorna string ou `true`), log operacional recebe sufixo `[RATE_LIMIT]` classificado quando aplicável; import defensivo com fallback `str(text or "")`. **Opção 9 fase 1** — criados `Scripts/server_observabilidade.py` (Blueprint Flask: `queue_status`, `queue_failed`, `queue_failed_retry`, `logs_tail`, `logs_stream`) e `Scripts/server_recursos.py` (Blueprint Flask: `serve_download`, `get_avatar`, `robots_txt`); registrados em `server.py` via `app.register_blueprint`; 5 imports `_impl` exclusivos removidos; `get_file_info` removido do import de `shared`; corrigido `NameError` latente em `logs_stream` (imports `build_log_stream_*` ausentes). `server.py`: 2731 → 2529 linhas (−202). Suite offline: **700 passed** em 17 arquivos.
 
 
 

@@ -42,7 +42,7 @@ from collections import deque
 from flask import Flask, request, jsonify, Response, send_from_directory, stream_with_context, make_response
 from flask_cors import CORS
 import config
-from shared import browser_queue, get_file_info
+from shared import browser_queue
 from llm_providers.factory import get_provider as _get_llm_provider
 import storage
 import auth
