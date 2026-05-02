@@ -56,7 +56,19 @@ Cliente humano / PHP / analisador_prontuarios.py
   Ponto de entrada. Sobe o browser em uma thread, o servidor HTTP auxiliar em outra thread e o servidor HTTPS principal no processo principal.
 
 - **`Scripts/server.py`**
-  Camada HTTP/REST. Autentica, valida origem, recebe chamadas da UI/API, envia tarefas para o browser e consolida respostas em JSON ou streaming.
+  Camada HTTP/REST principal. Autentica, valida origem, recebe chamadas da UI/API (chat, sync, busca, métricas), envia tarefas para o browser e consolida respostas em JSON ou streaming. As rotas de suporte foram extraídas para Blueprints Flask dedicados (ver abaixo).
+
+- **`Scripts/server_observabilidade.py`** *(Blueprint Flask)*
+  Rotas de monitoramento: status da fila (`/api/queue/status`, `/api/queue/failed`), retry de tarefas falhas e streaming de logs (`/api/logs/tail`, `/api/logs/stream`).
+
+- **`Scripts/server_recursos.py`** *(Blueprint Flask)*
+  Servir avatares de usuário, proxy de downloads do ChatGPT sob demanda e `robots.txt`.
+
+- **`Scripts/server_usuario.py`** *(Blueprint Flask)*
+  Autenticação leve e perfil: logout, info do usuário, troca de senha e upload de avatar.
+
+- **`Scripts/server_admin.py`** *(Blueprint Flask)*
+  Diagnóstico e correção automática: listagem de erros conhecidos, varredura de logs e encaminhamento ao Claude Code via streaming NDJSON.
 
 - **`Scripts/browser.py`**
   Motor de automação com Playwright. É responsável por abrir o ChatGPT, digitar/colar mensagens, anexar arquivos, sincronizar histórico, pesquisar no Google e manipular menus de contexto.
@@ -269,13 +281,13 @@ python3 -m pytest \
   tests/test_analisador_parsers.py \
   tests/test_sync_dedup.py \
   tests/test_python_request_throttle.py \
-  tests/test_web_search_throttle.py
+  tests/test_web_search_throttle.py \
+  tests/test_error_scanner_helpers.py
 ```
 
-Esperado: **653 passed**. (Os arquivos `tests/test_server_api.py` e
-`tests/test_storage.py` são excluídos porque exigem `flask` e
-`cryptography`, que não estão nesta lista de smoke offline — eles
-rodam no CI completo via o comando da seção anterior.)
+Esperado: **775 passed**. (`tests/test_server_api.py` é excluído porque
+exige `flask` e `cryptography` — roda no CI completo via o comando da
+seção anterior. `tests/test_storage.py` também roda no CI completo.)
 
 > Compatibilidade offline: `import server` agora funciona mesmo quando
 > `cryptography`/`markdownify` não puderem ser instalados (ex.: proxy 403).

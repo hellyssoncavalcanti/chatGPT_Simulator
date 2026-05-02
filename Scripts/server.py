@@ -82,7 +82,6 @@ from server_helpers import (
     find_expired_chat_ids as _find_expired_chat_ids_impl,
     extract_manual_whatsapp_reply_targets as _extract_manual_whatsapp_reply_targets_impl,
     format_manual_whatsapp_requester_suffix as _format_manual_whatsapp_requester_suffix_impl,
-    resolve_avatar_filename as _resolve_avatar_filename_impl,
     normalize_source_hint as _normalize_source_hint_impl,
     normalize_optional_text as _normalize_optional_text_impl,
     extract_requester_identity as _extract_requester_identity_impl,
@@ -110,6 +109,8 @@ from log_sanitizer import sanitize_mapping as _sanitize_audit_payload
 import threading
 from server_observabilidade import bp as _bp_observabilidade
 from server_recursos import bp as _bp_recursos
+from server_usuario import bp as _bp_usuario
+from server_admin import bp as _bp_admin
 try:
     from prometheus_client import Counter, Gauge, generate_latest, CONTENT_TYPE_LATEST
 except Exception:
@@ -294,12 +295,6 @@ class No401AuthLog(logging.Filter):
         return True
 logging.getLogger("werkzeug").addFilter(No401AuthLog())
 
-try:
-    from PIL import Image
-    HAS_PIL = True
-except ImportError:
-    HAS_PIL = False
-
 app = Flask(__name__, static_folder=config.DIRS["frontend"])
 # CORS: apenas origens explicitamente configuradas em config.CORS_ALLOWED_ORIGINS.
 # Vazio = nenhuma origem cross-site (mas chamadas same-origin/API-key funcionam).
@@ -307,6 +302,8 @@ CORS(app, resources={r"/*": {"origins": list(getattr(config, "CORS_ALLOWED_ORIGI
      supports_credentials=True)
 app.register_blueprint(_bp_observabilidade)
 app.register_blueprint(_bp_recursos)
+app.register_blueprint(_bp_usuario)
+app.register_blueprint(_bp_admin)
 
 from security_state import SecurityState
 
@@ -943,53 +940,6 @@ def login_route():
     _audit_event("login_failed", username=(data.get("username") or "")[:80])
     return jsonify({"success": False, "error": "Credenciais inválidas"}), 401
 
-@app.route("/logout", methods=["POST"])
-def logout_route():
-    token = request.cookies.get('session_token')
-    auth.logout(token)
-    resp = jsonify({"success": True})
-    resp.set_cookie('session_token', '', expires=0)
-    return resp
-
-@app.route("/api/user/info", methods=["GET"])
-def user_info():
-    token = request.cookies.get('session_token')
-    info = auth.get_user_info(token)
-    if info: return jsonify(info)
-    return jsonify({"error": "No session"}), 401
-
-@app.route("/api/user/update_password", methods=["POST"])
-def update_pass():
-    data = request.get_json() or {}
-    user = auth.check_session(request)
-    if user and auth.change_password(user, data.get("new_password")):
-        return jsonify({"success": True})
-    return jsonify({"success": False})
-
-@app.route("/api/user/upload_avatar", methods=["POST"])
-def upload_avatar():
-    user = auth.check_session(request)
-    if not user: return jsonify({"success": False}), 401
-    if 'file' not in request.files: return jsonify({"success": False})
-    file = request.files['file']
-    if file.filename == '': return jsonify({"success": False})
-    if file:
-        filename, err = _resolve_avatar_filename_impl(file.filename, user)
-        if err:
-            return jsonify({"success": False, "error": err})
-        save_path = os.path.join(config.DIRS["users"], filename)
-        try:
-            if HAS_PIL:
-                img = Image.open(file)
-                img.thumbnail((150, 150))
-                if img.mode in ("RGBA", "P"): img = img.convert("RGB")
-                img.save(save_path, quality=85, optimize=True)
-            else:
-                file.save(save_path)
-            auth.update_avatar(user, filename)
-            return jsonify({"success": True, "avatar": filename})
-        except Exception as e:
-            return jsonify({"success": False, "error": str(e)})
 
 # --- ROTAS GERAIS ---
 
@@ -1049,259 +999,6 @@ def api_metrics():
     }
     return jsonify({"success": True, "metrics": metrics}), 200
 
-
-@app.route("/api/errors/known", methods=["GET"])
-def api_errors_known():
-    """
-    Retorna a lista de erros conhecidos (Scripts/erros_conhecidos.json).
-    Endpoint LEVE para polling do toast de monitor de erros — apenas leitura
-    de arquivo JSON, sem execução do scanner.
-    """
-    from pathlib import Path as _Path
-    json_path = _Path(__file__).resolve().parent / "erros_conhecidos.json"
-    if not json_path.exists():
-        return jsonify({
-            "success": True, "entries": [], "count": 0,
-            "path": str(json_path), "missing": True
-        }), 200
-    try:
-        data = json.loads(json_path.read_text(encoding="utf-8"))
-        entries = data.get("entries", []) or []
-        return jsonify({
-            "success": True,
-            "entries": entries,
-            "count": len(entries),
-            "version": data.get("version"),
-        }), 200
-    except Exception as e:
-        return jsonify({"success": False, "error": str(e)}), 500
-
-
-@app.route("/api/errors/scan", methods=["GET"])
-def api_errors_scan():
-    """
-    Executa o log_scanner programaticamente e retorna apenas erros NOVOS
-    (não casados com erros_conhecidos.json).
-    Endpoint PESADO: deve ser chamado apenas sob demanda do usuário (botão).
-    """
-    from pathlib import Path as _Path
-    try:
-        from log_scanner import (
-            get_latest_logs, scan_file, load_known_errors,
-            CONTEXT_LINES as _CTX, MAX_MATCHES as _MAX,
-        )
-    except Exception as e:
-        return jsonify({
-            "success": False,
-            "error": f"log_scanner indisponível: {e}"
-        }), 500
-
-    logs_dir = _Path(__file__).resolve().parent.parent / "logs"
-    if not logs_dir.exists():
-        return jsonify({
-            "success": False, "error": "logs_dir_not_found",
-            "path": str(logs_dir)
-        }), 404
-
-    try:
-        known = load_known_errors()
-        all_logs = get_latest_logs(logs_dir)
-    except Exception as e:
-        return jsonify({"success": False, "error": str(e)}), 500
-
-    new_errors = []
-    scanned = []
-    for system, log_path in all_logs.items():
-        scanned.append(system)
-        try:
-            snippets = scan_file(
-                log_path, context=_CTX, max_matches=_MAX, known_errors=known
-            )
-        except Exception as e:
-            new_errors.append({
-                "system": system, "log_file": log_path.name,
-                "line_num": 0, "severity": "error",
-                "context": f"[scan_file error] {e}",
-            })
-            continue
-        for s in snippets:
-            if s.get("known_entry") or s.get("truncated") or s.get("read_error"):
-                continue
-            new_errors.append({
-                "system": system,
-                "log_file": log_path.name,
-                "line_num": s.get("line_num"),
-                "severity": s.get("severity"),
-                "context": s.get("context", ""),
-            })
-
-    return jsonify({
-        "success": True,
-        "new_errors": new_errors,
-        "count": len(new_errors),
-        "scanned_systems": scanned,
-        "known_count": len(known),
-    }), 200
-
-
-def _build_claude_fix_prompt(new_errors: list) -> str:
-    """Constrói o prompt enviado ao Claude Code para analisar+corrigir erros novos."""
-    head = [
-        "Você é Claude Code, assistente de desenvolvimento autônomo do projeto chatGPT_Simulator.",
-        "",
-        f"Foram detectados {len(new_errors)} erro(s) novo(s) nos logs do projeto, ainda NÃO registrados em Scripts/erros_conhecidos.json.",
-        "",
-        "TAREFA (execute na ordem, sem perguntar):",
-        "  1. Para cada erro abaixo, leia APENAS as linhas relevantes do código (use offset+limit). NUNCA leia arquivos .log inteiros.",
-        "  2. Identifique a causa-raiz e aplique a CORREÇÃO MÍNIMA necessária diretamente nos arquivos.",
-        "  3. Para cada erro tratado, registre no banco de erros conhecidos imediatamente após corrigir:",
-        "       python Scripts/log_scanner.py --add-known \"<trecho do log>\" --status fixed --description \"<o que era>\" --fix \"<o que foi feito>\" --files \"<Scripts/arquivo.py>\"",
-        "  4. Falsos positivos: registre com --status false_positive e --description \"<por que não é erro>\".",
-        "  5. Ao final de TODAS as correções:",
-        "       a. Crie UM commit consolidado com mensagem 'fix: corrige <N> erros detectados pelo log_scanner' (use HEREDOC para a mensagem).",
-        "       b. Faça push do commit para o remote.",
-        "       c. Abra um Pull Request no GitHub via `gh pr create` com:",
-        "          - título curto e descritivo",
-        "          - corpo listando cada correção (arquivo:linha → o que foi feito)",
-        "  6. Reporte ao final desta resposta:",
-        "       - URL do PR criado",
-        "       - lista de correções aplicadas (arquivo:linha)",
-        "       - erros sem correção (com motivo)",
-        "",
-        "REGRAS:",
-        "  - Não pergunte por confirmação — execute autonomamente.",
-        "  - Não modifique arquivos fora de Scripts/, frontend/ ou raiz do projeto.",
-        "  - Se um erro for irreproduzível ou exigir contexto externo, registre-o como suppressed/monitoring com explicação.",
-        "",
-        f"=== {len(new_errors)} ERRO(S) NOVO(S) ===",
-        "",
-    ]
-    for i, e in enumerate(new_errors, 1):
-        head.extend([
-            f"--- ERRO #{i}: [{e.get('severity', '?')}] {e.get('system', '')}:{e.get('line_num', '?')} ---",
-            f"Arquivo de log: logs/{e.get('log_file', '')}",
-            "Trecho do log:",
-            "```",
-            (e.get("context", "") or "").rstrip(),
-            "```",
-            "",
-        ])
-    return "\n".join(head)
-
-
-@app.route("/api/errors/claude_fix", methods=["POST", "GET"])
-def api_errors_claude_fix():
-    """
-    Encaminha os erros novos detectados pelo log_scanner ao Claude Code
-    (https://claude.ai/code) via /v1/chat/completions, instruindo-o a
-    aplicar correções e abrir um PR no GitHub.
-    Retorna o stream NDJSON do Claude em tempo real.
-    """
-    from pathlib import Path as _Path
-    try:
-        from log_scanner import (
-            get_latest_logs, scan_file, load_known_errors,
-            CONTEXT_LINES as _CTX, MAX_MATCHES as _MAX,
-        )
-    except Exception as e:
-        return jsonify({
-            "success": False,
-            "error": f"log_scanner indisponível: {e}",
-        }), 500
-
-    logs_dir = _Path(__file__).resolve().parent.parent / "logs"
-    known = load_known_errors() if logs_dir.exists() else []
-    new_errors = []
-    if logs_dir.exists():
-        for system, log_path in get_latest_logs(logs_dir).items():
-            try:
-                snippets = scan_file(
-                    log_path, context=_CTX, max_matches=_MAX, known_errors=known
-                )
-            except Exception:
-                continue
-            for s in snippets:
-                if s.get("known_entry") or s.get("truncated") or s.get("read_error"):
-                    continue
-                new_errors.append({
-                    "system": system,
-                    "log_file": log_path.name,
-                    "line_num": s.get("line_num"),
-                    "severity": s.get("severity"),
-                    "context": s.get("context", ""),
-                })
-
-    if not new_errors:
-        def _empty_stream():
-            yield json.dumps({
-                "type": "markdown",
-                "content": "✅ Nenhum erro novo encontrado para análise. "
-                           f"({len(known)} erro(s) conhecido(s) no banco)"
-            }) + "\n"
-            yield json.dumps({"type": "finish", "content": {}}) + "\n"
-        return Response(_empty_stream(), mimetype="application/x-ndjson")
-
-    prompt = _build_claude_fix_prompt(new_errors)
-
-    target_url = os.environ.get(
-        "AUTODEV_AGENT_CLAUDE_CODE_URL", "https://claude.ai/code"
-    )
-    claude_project = os.environ.get(
-        "AUTODEV_AGENT_CLAUDE_CODE_PROJECT", "chatGPT_Simulator"
-    )
-
-    body = {
-        "api_key": config.API_KEY,
-        "model": "Claude Code",
-        "message": prompt,
-        "messages": [{"role": "user", "content": prompt}],
-        "stream": True,
-        "url": target_url,
-        "origin_url": target_url,
-        "claude_project": claude_project,
-        "request_source": "errors_monitor.py/claude_fix",
-    }
-
-    http_port = int(getattr(config, "PORT", 3002)) + 1
-    completions_url = f"http://127.0.0.1:{http_port}/v1/chat/completions"
-
-    try:
-        import requests as _req  # noqa: PLC0415
-    except Exception as e:
-        return jsonify({
-            "success": False,
-            "error": f"módulo 'requests' indisponível: {e}"
-        }), 500
-
-    @stream_with_context
-    def proxy():
-        yield json.dumps({
-            "type": "status",
-            "content": f"Enviando {len(new_errors)} erro(s) ao Claude Code..."
-        }) + "\n"
-        try:
-            with _req.post(
-                completions_url,
-                json=body,
-                stream=True,
-                timeout=900,
-                headers={"Authorization": f"Bearer {config.API_KEY}"},
-            ) as r:
-                for raw in r.iter_lines(decode_unicode=True):
-                    if raw is None:
-                        continue
-                    line = raw.strip()
-                    if not line:
-                        continue
-                    yield line + "\n"
-        except Exception as e:
-            yield json.dumps({
-                "type": "error",
-                "content": f"Falha ao chamar Claude Code: {e}"
-            }) + "\n"
-            yield json.dumps({"type": "finish", "content": {}}) + "\n"
-
-    return Response(proxy(), mimetype="application/x-ndjson")
 
 
 @app.route("/metrics", methods=["GET"])

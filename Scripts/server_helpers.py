@@ -1119,6 +1119,64 @@ def build_unauthorized_payload() -> dict:
     return {"error": "Unauthorized"}
 
 
+def push_error_and_close_queue(stream_queue, message: str) -> None:
+    """Empurra um evento SSE de erro seguido do sentinela `None` que fecha
+    o stream para o consumer.
+
+    Idiom canônico do dispatcher de chat (`_dispatch_chat_task` em
+    `server.py`) para sinalizar falha e encerrar a sessão de stream sem
+    fazer o consumer esperar pelo timeout. Aceita qualquer fila com
+    método `.put(item)` (Queue, mock, etc.).
+    """
+    stream_queue.put(build_error_event(message))
+    stream_queue.put(None)
+
+
+def build_search_progress_extras(
+    query, idx: int, total: int, source: str, *, phase=None,
+) -> dict:
+    """Kwargs canônicos para eventos SSE de progresso de busca web/uptodate.
+
+    Sites usuais: `_handle_browser_search_api.generate()` — usado em 3 yields
+    (prepare, keepalive, result). Quando `phase` é fornecido, é inserido entre
+    `total` e `source` para preservar a ordem histórica das chaves no JSON
+    (`{query, index, total, phase, source}` para status; `{query, index, total,
+    source}` para result).
+    """
+    extras = {
+        "query": query,
+        "index": idx,
+        "total": total,
+    }
+    if phase is not None:
+        extras["phase"] = phase
+    extras["source"] = source
+    return extras
+
+
+def build_search_phase_label(route_label, kind) -> str:
+    """Constrói o label canônico de `phase` para SSE de busca.
+
+    `route_label` em maiúsculas (ex.: 'WEB_SEARCH'); `kind` é o sufixo
+    (ex.: 'prepare', 'keepalive'). Retorna `web_search_prepare`.
+    """
+    if route_label is None:
+        route_label = ""
+    if kind is None:
+        kind = ""
+    return f"{str(route_label).lower()}_{str(kind)}"
+
+
+def build_search_prepare_message(source_label, idx: int, total: int) -> str:
+    """Mensagem canônica do status SSE 'Preparando busca'."""
+    return f"📚 Preparando busca {source_label} {idx}/{total}."
+
+
+def build_search_keepalive_message(source_label, query) -> str:
+    """Mensagem canônica do status SSE 'busca em andamento'."""
+    return f'⏳ Busca {source_label} por "{query}" ainda em andamento...'
+
+
 def safe_snapshot_stats(queue_obj) -> dict:
     """Wrapper defensivo para ``queue_obj.snapshot_stats()`` que jamais
     levanta exceção.
@@ -1209,6 +1267,11 @@ __all__ = [
     "extract_queue_failed_retry_index",
     "advance_health_ping_state",
     "build_unauthorized_payload",
+    "build_search_progress_extras",
+    "build_search_phase_label",
+    "build_search_prepare_message",
+    "build_search_keepalive_message",
+    "push_error_and_close_queue",
     "safe_snapshot_stats",
 ]
 
