@@ -225,7 +225,9 @@ _ensure("numpy")
 # ─────────────────────────────────────────────────────────────
 import time, json, logging, re, html as html_mod, requests, hashlib, shutil, os
 import inspect
+import threading
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from html.parser import HTMLParser
 from datetime import datetime
 
@@ -4204,6 +4206,7 @@ def analisar_prontuario(
     chat_id: str = None,
     contexto: str = "",
     id_atendimento: int | None = None,
+    browser_profile: str | None = None,
 ) -> dict:
     """
     chat_url / chat_id: se fornecidos, o browser.py retoma a conversa existente
@@ -4236,7 +4239,7 @@ def analisar_prontuario(
             {"role": "system", "content": buscar_prompt_db(id_atendimento=id_atendimento) or SYSTEM_PROMPT},
             {"role": "user",   "content": user_content},
         ],
-        "browser_profile": BROWSER_PROFILE,
+        "browser_profile": browser_profile or BROWSER_PROFILE,
     }
 
     # Retoma conversa existente se disponível
@@ -4951,7 +4954,7 @@ def _grafo_clinico_esta_generico(resultado: dict) -> bool:
     return len(nodes_relevantes) < 2
 
 
-def gerar_dados_auxiliares_llm(resultado: dict, chat_url: str = None, chat_id: str = None) -> dict:
+def gerar_dados_auxiliares_llm(resultado: dict, chat_url: str = None, chat_id: str = None, browser_profile: str | None = None) -> dict:
     """
     Pede à própria LLM, na mesma conversa do caso, um refinamento dos campos
     auxiliares mais sensíveis a especificidade semântica (grafo, alertas e
@@ -4997,7 +5000,7 @@ def gerar_dados_auxiliares_llm(resultado: dict, chat_url: str = None, chat_id: s
         "messages": [
             {"role": "user", "content": user_content},
         ],
-        "browser_profile": BROWSER_PROFILE,
+        "browser_profile": browser_profile or BROWSER_PROFILE,
     }
     if chat_url:
         payload["url"] = chat_url
@@ -5055,7 +5058,7 @@ def gerar_dados_auxiliares_llm(resultado: dict, chat_url: str = None, chat_id: s
         return resultado
 
 
-def gerar_queries_pesquisa_llm(resultado: dict, chat_url: str = None, chat_id: str = None) -> dict:
+def gerar_queries_pesquisa_llm(resultado: dict, chat_url: str = None, chat_id: str = None, browser_profile: str | None = None) -> dict:
     """
     Pede à própria LLM que proponha as queries/tópicos de pesquisa mais úteis
     para o paciente específico analisado.
@@ -5097,7 +5100,7 @@ def gerar_queries_pesquisa_llm(resultado: dict, chat_url: str = None, chat_id: s
         "messages": [
             {"role": "user", "content": user_content},
         ],
-        "browser_profile": BROWSER_PROFILE,
+        "browser_profile": browser_profile or BROWSER_PROFILE,
     }
 
     if chat_url:
@@ -5210,7 +5213,8 @@ Responda SOMENTE com um JSON válido no formato:
 
 
 def enriquecer_com_evidencias(resultado: dict, resultados_web: list,
-                               chat_url: str = None, chat_id: str = None) -> dict:
+                               chat_url: str = None, chat_id: str = None,
+                               browser_profile: str | None = None) -> dict:
     """
     Passo 2 do pipeline agêntico:
     Envia os resultados da busca web para a LLM (no mesmo chat) para
@@ -5284,7 +5288,7 @@ def enriquecer_com_evidencias(resultado: dict, resultados_web: list,
         "messages": [
             {"role": "user", "content": user_content},
         ],
-        "browser_profile": BROWSER_PROFILE,
+        "browser_profile": browser_profile or BROWSER_PROFILE,
     }
 
     # Retoma o mesmo chat para ter contexto da análise anterior
@@ -5443,7 +5447,7 @@ def enriquecer_com_evidencias(resultado: dict, resultados_web: list,
         return resultado
 
 
-def executar_busca_evidencias(resultado: dict, chat_url: str = None, chat_id: str = None) -> dict:
+def executar_busca_evidencias(resultado: dict, chat_url: str = None, chat_id: str = None, browser_profile: str | None = None) -> dict:
     """
     Pipeline completo de busca + enriquecimento:
       1. Pedir à LLM um plano estruturado com queries de UpToDate e web
@@ -5463,7 +5467,7 @@ def executar_busca_evidencias(resultado: dict, chat_url: str = None, chat_id: st
         )
         return total_items, tem_html
 
-    plano_pesquisa = gerar_queries_pesquisa_llm(resultado, chat_url=chat_url, chat_id=chat_id) or {}
+    plano_pesquisa = gerar_queries_pesquisa_llm(resultado, chat_url=chat_url, chat_id=chat_id, browser_profile=browser_profile) or {}
     search_queries = list(plano_pesquisa.get("search_queries") or [])
     uptodate_queries = list(plano_pesquisa.get("uptodate_queries") or [])
 
@@ -5507,7 +5511,7 @@ def executar_busca_evidencias(resultado: dict, chat_url: str = None, chat_id: st
         return resultado
 
     log.info("  📚 Enviando resultados para LLM enriquecer condutas...")
-    resultado = enriquecer_com_evidencias(resultado, resultados_busca, chat_url, chat_id)
+    resultado = enriquecer_com_evidencias(resultado, resultados_busca, chat_url, chat_id, browser_profile=browser_profile)
 
     return resultado
 
@@ -5537,29 +5541,49 @@ def _aguardar_intervalo_entre_analises(contexto: str = "próxima análise"):
 
 def processar_lote(pendentes: list):
     total = len(pendentes)
-    pacientes_verificados = set()   # evita checar o mesmo paciente várias vezes no lote
 
-    for i, row in enumerate(pendentes):
-        idat            = row["id"]
-        texto           = strip_html(row.get("consulta_conteudo") or "")
-        dtp             = row.get("datetime_prontuario_atual", "")
-        chat_id_prev    = row.get("chat_id_anterior")  or None
-        chat_url_prev   = row.get("chat_url_anterior") or None
+    # Perfis elegíveis para análises em paralelo (exclui "analisador", reservado ao pipeline).
+    # Ordem fixa: default primeiro, segunda_chance segundo.
+    _cfg_profiles = getattr(config, "CHROMIUM_PROFILES", None) or {}
+    _chat_profiles = [k for k in ("default", "segunda_chance") if k in _cfg_profiles]
+    if not _chat_profiles:
+        _chat_profiles = [BROWSER_PROFILE or "default"]
+    n_workers = len(_chat_profiles)
+
+    # Proteção de thread para o conjunto de pacientes já verificados.
+    pacientes_verificados: set = set()
+    _pv_lock = threading.Lock()
+
+    def _processar_registro(i: int, row: dict) -> None:
+        """Processa um registro completo de análise clínica em uma thread dedicada."""
+        # Pino de perfil por índice: distribui uniformemente entre os perfis elegíveis.
+        profile = _chat_profiles[i % n_workers]
+
+        idat         = row["id"]
+        texto        = strip_html(row.get("consulta_conteudo") or "")
+        dtp          = row.get("datetime_prontuario_atual", "")
+        chat_id_prev = row.get("chat_id_anterior")  or None
+        chat_url_prev= row.get("chat_url_anterior") or None
 
         eh_reanalise = bool(chat_url_prev)
         prefixo      = "♻️  Reanálise" if eh_reanalise else "▶"
-        log.info(f"{prefixo} ID={idat} | Paciente={row['id_paciente']} | {len(texto)} chars | prontuário: {dtp}")
+        log.info(f"{prefixo} ID={idat} | Paciente={row['id_paciente']} | {len(texto)} chars | prontuário: {dtp} | perfil={profile}")
         if eh_reanalise:
             log.info(f"   ↩️  Retomando chat anterior: {chat_url_prev}")
 
-        # Enfileira atendimentos antigos do mesmo paciente (1x por paciente por lote)
+        # Enfileira atendimentos antigos do mesmo paciente (1x por paciente por lote).
+        # Thread-safe: lock protege o set compartilhado.
         id_pac = str(row.get("id_paciente", ""))
-        if id_pac and id_pac not in pacientes_verificados:
-            pacientes_verificados.add(id_pac)
-            try:
-                enfileirar_atendimentos_antigos(id_pac)
-            except Exception as e:
-                log.warning(f"  ⚠️ Erro ao enfileirar atendimentos antigos: {e}")
+        if id_pac:
+            with _pv_lock:
+                ja_verificado = id_pac in pacientes_verificados
+                if not ja_verificado:
+                    pacientes_verificados.add(id_pac)
+            if not ja_verificado:
+                try:
+                    enfileirar_atendimentos_antigos(id_pac)
+                except Exception as e:
+                    log.warning(f"  ⚠️ Erro ao enfileirar atendimentos antigos: {e}")
 
         marcar_processando(row)
 
@@ -5573,7 +5597,6 @@ def processar_lote(pendentes: list):
             ).strip()
             maior_resumo = buscar_maior_resumo_texto_paciente(id_paciente, idat)
             resumo_fallback = _montar_resumo_fallback(maior_resumo, dt_evolucao, texto)
-
             salvar_resultado(idat, {
                 "resumo_texto": resumo_fallback,
                 "observacoes_gerais": "Registro curto: fallback sem chamada ao ChatGPT Simulator.",
@@ -5584,7 +5607,7 @@ def processar_lote(pendentes: list):
                 f"  ID={idat} sem conteúdo suficiente ({len(texto)} chars). "
                 f"Análise LLM pulada; resumo_fallback salvo ({len(resumo_fallback)} chars)."
             )
-            continue
+            return
 
         # Busca contexto clínico (paciente, profissional, hospital)
         try:
@@ -5597,13 +5620,19 @@ def processar_lote(pendentes: list):
 
         try:
             _aguardar_intervalo_entre_analises(f"ID={idat}")
-            resultado = analisar_prontuario(texto, chat_url=chat_url_prev, chat_id=chat_id_prev, contexto=contexto,  id_atendimento=idat)
+            resultado = analisar_prontuario(
+                texto, chat_url=chat_url_prev, chat_id=chat_id_prev,
+                contexto=contexto, id_atendimento=idat, browser_profile=profile,
+            )
 
             # Passo 2: Busca web + enriquecimento de condutas com evidências
             try:
                 chat_url_atual = resultado.get("_chat_url") or chat_url_prev
                 chat_id_atual  = resultado.get("_chat_id")  or chat_id_prev
-                resultado = executar_busca_evidencias(resultado, chat_url=chat_url_atual, chat_id=chat_id_atual)
+                resultado = executar_busca_evidencias(
+                    resultado, chat_url=chat_url_atual, chat_id=chat_id_atual,
+                    browser_profile=profile,
+                )
             except Exception as e:
                 log.warning(f"  ⚠️ Enriquecimento com evidências falhou (não fatal): {e}")
 
@@ -5611,13 +5640,16 @@ def processar_lote(pendentes: list):
                 if _grafo_clinico_esta_generico(resultado):
                     chat_url_aux = resultado.get("_chat_url") or chat_url_prev
                     chat_id_aux  = resultado.get("_chat_id") or chat_id_prev
-                    resultado = gerar_dados_auxiliares_llm(resultado, chat_url=chat_url_aux, chat_id=chat_id_aux)
+                    resultado = gerar_dados_auxiliares_llm(
+                        resultado, chat_url=chat_url_aux, chat_id=chat_id_aux,
+                        browser_profile=profile,
+                    )
             except Exception as e:
                 log.warning(f"  ⚠️ Refinamento auxiliar do grafo falhou (não fatal): {e}")
 
             salvar_resultado(idat, resultado)
             log.info(
-                f"  ✅ ID={idat} concluído | "
+                f"  ✅ ID={idat} concluído [{profile}] | "
                 f"{len(resultado.get('pontos_chave', []))} pontos-chave | "
                 f"{len(resultado.get('condutas_sugeridas', []))} condutas"
             )
@@ -5650,24 +5682,40 @@ def processar_lote(pendentes: list):
             salvar_erro(idat, str(rl))
             espera = LLM_RATE_LIMIT_RETRY_BASE_S
             log.warning(
-                f"  🚫 ID={idat} rate limit detectado: {rl}\n"
+                f"  🚫 ID={idat} rate limit detectado [{profile}]: {rl}\n"
                 f"     Aguardando {espera}s antes de continuar o lote..."
             )
-            if espera <= 0:
-                continue
-            try:
-                countdown(espera, "cooldown rate limit")
-            except (KeyboardInterrupt, SystemExit):
-                raise
-            except Exception:
-                time.sleep(espera)
+            if espera > 0:
+                try:
+                    countdown(espera, "cooldown rate limit")
+                except (KeyboardInterrupt, SystemExit):
+                    raise
+                except Exception:
+                    time.sleep(espera)
 
         except Exception as e:
             salvar_erro(idat, str(e))
-            log.error(f"  ❌ ID={idat} erro: {e}")
+            log.error(f"  ❌ ID={idat} erro [{profile}]: {e}")
 
-        # intervalo anti-rate-limit agora é aplicado no server.py para todo
-        # pedido Python (dividido pelo número de perfis ChatGPT ativos).
+    # Despacha os registros do lote com n_workers threads em paralelo.
+    # Cada thread usa um perfil Chromium distinto (índice % n_workers).
+    # O intervalo anti-rate-limit é enforçado no server.py por pedido Python,
+    # dividido pelo total de perfis — o stagger resultante é intencional e
+    # permite que as duas threads processem chats em perfis independentes.
+    log.info(f"🔀 Lote de {total} registro(s) | {n_workers} worker(s) | perfis: {_chat_profiles}")
+    with ThreadPoolExecutor(max_workers=n_workers) as executor:
+        futures = {
+            executor.submit(_processar_registro, i, row): row["id"]
+            for i, row in enumerate(pendentes)
+        }
+        for fut in as_completed(futures):
+            idat = futures[fut]
+            try:
+                fut.result()
+            except (KeyboardInterrupt, SystemExit):
+                raise
+            except Exception as e:
+                log.error(f"  ❌ ID={idat} exceção não capturada na thread: {e}")
 
 
 def atualizar_analise_compilada_paciente(id_paciente: str):
