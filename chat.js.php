@@ -3779,6 +3779,13 @@ if (isset($_GET['action']) && $_GET['action'] === 'proxy') {
             }
         }
         
+        // Na 1ª mensagem (sem chat_id nem url), o system prompt nunca chegaria ao
+        // Simulator porque a rota faz exit antes do bloco de injeção da linha ~3848.
+        // Por isso, prepend aqui sempre que for uma conversa nova.
+        if (empty($chat_id) && empty($url_context) && !empty(trim($active_system_prompt ?? ''))) {
+            $msg_content = trim($active_system_prompt) . "\n\n" . $msg_content;
+        }
+
         $payload = [
             "api_key" => $CHATGPT_VIA_API_KEY,
             "message" => $msg_content,
