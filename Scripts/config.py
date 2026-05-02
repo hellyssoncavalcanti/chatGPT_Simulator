@@ -164,6 +164,7 @@ DIRS = {
     "logs": os.path.join(BASE_DIR, "logs"),
     "profile": os.path.join(BASE_DIR, "chrome_profile"),
     "profile_analisador": os.path.join(BASE_DIR, "chrome_profile_analisador"),
+    "profile_segunda_chance": os.path.join(BASE_DIR, "chrome_profile_segunda_chance"),
     "temp": os.path.join(BASE_DIR, "temp"),
     "downloads": os.path.join(BASE_DIR, "downloads")
 }
@@ -171,9 +172,12 @@ DIRS = {
 # Perfis Chromium nomeados para seleção por request (ver browser.py / analisador).
 # Cliente da API pode enviar "browser_profile": "<chave>" no body; o browser.py
 # resolve para este mapa, caindo em "default" quando a chave não existe.
+# "default" e "segunda_chance" são alternados em round-robin para pedidos novos de CHAT
+# sem perfil explícito, evitando bater o rate-limit do perfil default.
 CHROMIUM_PROFILES = {
     "default": DIRS["profile"],
     "analisador": DIRS["profile_analisador"],
+    "segunda_chance": DIRS["profile_segunda_chance"],
 }
 
 CHATS_FILE = os.path.join(DIRS["db"], "history.json")
