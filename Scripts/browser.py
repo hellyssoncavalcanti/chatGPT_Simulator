@@ -52,6 +52,11 @@ from browser_predicates import (
     replace_inline_base64_payloads as _replace_inline_base64_payloads_impl,
     ensure_paste_wrappers as _ensure_paste_wrappers_impl,
 )
+try:
+    from error_catalog import format_reason as _format_rate_limit_reason
+except ImportError:
+    def _format_rate_limit_reason(text):  # type: ignore[misc]
+        return str(text or "")
 from markdownify import markdownify as md
 
 # ─────────────────────────────────────────────────────────────
@@ -894,7 +899,7 @@ async def _submit_prompt(page, q=None, timeout: float = 12.0) -> bool:
 async def _dismiss_rate_limit_modal_if_any(page, q=None):
     """Fecha modal de rate-limit que pode interceptar cliques no composer."""
     try:
-        handled = await page.evaluate("""() => {
+        result = await page.evaluate("""() => {
             const modal = document.querySelector('#modal-conversation-history-rate-limit, [data-testid="modal-conversation-history-rate-limit"]');
             if (!modal) return false;
             const buttons = Array.from(modal.querySelectorAll('button'));
@@ -903,13 +908,16 @@ async def _dismiss_rate_limit_modal_if_any(page, q=None):
                 return txt.includes('entendido') || txt.includes('ok') || txt.includes('fechar') || txt.includes('close');
             });
             if (target) {
+                const text = (modal.innerText || '').substring(0, 200);
                 target.click();
-                return true;
+                return text || true;
             }
             return false;
         }""")
-        if handled:
-            emit_log(q, "ℹ️ Modal de rate-limit detectado e fechado antes da digitação.")
+        if result is not False:
+            reason = _format_rate_limit_reason((result if isinstance(result, str) else "")[:200])
+            suffix = f" {reason}" if reason else ""
+            emit_log(q, f"ℹ️ Modal de rate-limit detectado e fechado antes da digitação.{suffix}")
             await asyncio.sleep(0.2)
             return
         await page.keyboard.press("Escape")
