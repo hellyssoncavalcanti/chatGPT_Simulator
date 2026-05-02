@@ -42,7 +42,7 @@ from collections import deque
 from flask import Flask, request, jsonify, Response, send_from_directory, stream_with_context, make_response
 from flask_cors import CORS
 import config
-from shared import browser_queue, get_file_info
+from shared import browser_queue
 from llm_providers.factory import get_provider as _get_llm_provider
 import storage
 import auth
@@ -82,7 +82,6 @@ from server_helpers import (
     find_expired_chat_ids as _find_expired_chat_ids_impl,
     extract_manual_whatsapp_reply_targets as _extract_manual_whatsapp_reply_targets_impl,
     format_manual_whatsapp_requester_suffix as _format_manual_whatsapp_requester_suffix_impl,
-    resolve_download_content_type as _resolve_download_content_type_impl,
     resolve_avatar_filename as _resolve_avatar_filename_impl,
     normalize_source_hint as _normalize_source_hint_impl,
     normalize_optional_text as _normalize_optional_text_impl,
@@ -102,10 +101,6 @@ from server_helpers import (
     format_requester_suffix as _format_requester_suffix_impl,
     format_origin_suffix as _format_origin_suffix_impl,
     safe_int as _safe_int_impl,
-    resolve_logs_tail_lines_limit as _resolve_logs_tail_lines_limit_impl,
-    parse_from_end_flag as _parse_from_end_flag_impl,
-    extract_queue_failed_limit as _extract_queue_failed_limit_impl,
-    extract_queue_failed_retry_index as _extract_queue_failed_retry_index_impl,
     advance_health_ping_state as _advance_health_ping_state_impl,
     build_unauthorized_payload as _build_unauthorized_payload_impl,
     safe_snapshot_stats as _safe_snapshot_stats_impl,
@@ -113,6 +108,8 @@ from server_helpers import (
 import error_catalog as _error_catalog
 from log_sanitizer import sanitize_mapping as _sanitize_audit_payload
 import threading
+from server_observabilidade import bp as _bp_observabilidade
+from server_recursos import bp as _bp_recursos
 try:
     from prometheus_client import Counter, Gauge, generate_latest, CONTENT_TYPE_LATEST
 except Exception:
@@ -308,6 +305,8 @@ app = Flask(__name__, static_folder=config.DIRS["frontend"])
 # Vazio = nenhuma origem cross-site (mas chamadas same-origin/API-key funcionam).
 CORS(app, resources={r"/*": {"origins": list(getattr(config, "CORS_ALLOWED_ORIGINS", []))}},
      supports_credentials=True)
+app.register_blueprint(_bp_observabilidade)
+app.register_blueprint(_bp_recursos)
 
 from security_state import SecurityState
 
@@ -992,93 +991,6 @@ def upload_avatar():
         except Exception as e:
             return jsonify({"success": False, "error": str(e)})
 
-@app.route("/api/user/avatar/<filename>")
-def get_avatar(filename):
-    return send_from_directory(config.DIRS["users"], filename)
-
-@app.route("/api/downloads/<file_id>")
-def serve_download(file_id):
-    """
-    Proxy sob demanda: busca o arquivo do ChatGPT via browser.py
-    (usando cookies/auth do Playwright) e faz streaming para o cliente.
-    Nenhum arquivo é armazenado permanentemente em disco.
-    """
-    info = get_file_info(file_id)
-    if not info:
-        return jsonify({"error": "Arquivo não registrado. O link pode ter expirado."}), 404
-
-    # Atalho: payload já capturado em memória pelo browser.py (sem roundtrip ao ChatGPT).
-    if info.get("payload_b64"):
-        raw_bytes = base64.b64decode(info["payload_b64"])
-        display_name = info.get("name") or file_id
-        content_type = _resolve_download_content_type_impl(
-            info.get("content_type"), display_name
-        )
-
-        resp = make_response(raw_bytes)
-        resp.headers['Content-Type'] = content_type
-        resp.headers['Content-Disposition'] = f'attachment; filename="{display_name}"'
-        resp.headers['Content-Length'] = len(raw_bytes)
-        resp.headers['Cache-Control'] = 'no-cache'
-        return resp
-
-    file_url = info["url"]
-    file_name = info["name"]
-
-    # Cria fila de resposta para esta requisição
-    response_queue = queue.Queue()
-
-    # Envia tarefa de download para browser.py
-    browser_queue.put({
-        "action": "DOWNLOAD_FILE",
-        "file_url": file_url,
-        "file_name": file_name,
-        "stream_queue": response_queue,
-    })
-
-    # Aguarda resposta do browser.py (timeout: 60s)
-    result_data = None
-    error_msg = None
-    deadline = time.time() + 60
-
-    while time.time() < deadline:
-        try:
-            raw = response_queue.get(timeout=2)
-            if raw is None:
-                break  # Sentinel: browser.py terminou
-            evt = json.loads(raw) if isinstance(raw, str) else raw
-            evt_type = evt.get("type", "")
-            content = evt.get("content", "")
-
-            if evt_type == "file_data":
-                result_data = content
-                break
-            elif evt_type == "error":
-                error_msg = content
-                break
-        except queue.Empty:
-            continue
-
-    if error_msg:
-        return jsonify({"error": error_msg}), 502
-
-    if not result_data:
-        return jsonify({"error": "Timeout ao baixar arquivo do ChatGPT."}), 504
-
-    # Decodifica dados base64 e envia ao cliente
-    raw_bytes = base64.b64decode(result_data["data_b64"])
-    display_name = result_data.get("name", file_name)
-    content_type = _resolve_download_content_type_impl(
-        result_data.get("content_type"), display_name
-    )
-
-    resp = make_response(raw_bytes)
-    resp.headers['Content-Type'] = content_type
-    resp.headers['Content-Disposition'] = f'attachment; filename="{display_name}"'
-    resp.headers['Content-Length'] = len(raw_bytes)
-    resp.headers['Cache-Control'] = 'no-cache'
-    return resp
-
 # --- ROTAS GERAIS ---
 
 # Endpoint de saúde para o Analisador de Prontuários (e outros serviços)
@@ -1104,115 +1016,6 @@ def health_check():
         log(f"🏥 Health check #{state['logged_ping_count']} (origem: {caller})")
 
     return jsonify({"status": "ok", "service": "ChatGPT Simulator"}), 200
-
-
-@app.route("/api/queue/status", methods=["GET"])
-def queue_status():
-    """
-    Observabilidade da fila interna server → browser.
-    Requer autenticação padrão (before_request/check_auth).
-    """
-    stats = _safe_snapshot_stats_impl(browser_queue)
-
-    return jsonify({
-        "success": True,
-        "queue": {
-            "qsize": int(browser_queue.qsize()),
-            **stats
-        }
-    }), 200
-
-
-@app.route("/api/queue/failed", methods=["GET"])
-def queue_failed():
-    """DLQ: lista tarefas que falharam no browser loop."""
-    limit = _extract_queue_failed_limit_impl(request.args.get("limit", 100))
-    items = browser_queue.list_failed(limit=limit) if hasattr(browser_queue, "list_failed") else []
-    return jsonify({"success": True, "failed": items, "count": len(items)}), 200
-
-
-@app.route("/api/queue/failed/retry", methods=["POST"])
-def queue_failed_retry():
-    """Reinsere item da DLQ na fila principal por índice."""
-    data = request.get_json(silent=True) or {}
-    idx = _extract_queue_failed_retry_index_impl(data)
-    if not hasattr(browser_queue, "retry_failed"):
-        return jsonify({"success": False, "error": "dlq_not_supported"}), 400
-    retried = browser_queue.retry_failed(idx)
-    if not retried:
-        return jsonify({"success": False, "error": "invalid_index"}), 404
-    return jsonify({"success": True, "task": retried}), 200
-
-
-@app.route("/api/logs/tail", methods=["GET"])
-def logs_tail():
-    """
-    Retorna as últimas linhas do log atual do simulator.
-    Ideal para polling leve no frontend (toast de observabilidade).
-    """
-    lines_limit = _resolve_logs_tail_lines_limit_impl(request.args.get("lines", 120))
-
-    path = getattr(config, "LOG_PATH", "")
-    if not path or not os.path.exists(path):
-        return jsonify({"success": False, "error": "log_not_found", "path": path}), 404
-
-    try:
-        with open(path, "rb") as f:
-            f.seek(0, os.SEEK_END)
-            file_size = f.tell()
-            chunk_size = 4096
-            data = b""
-            pos = file_size
-            while pos > 0 and data.count(b"\n") <= lines_limit:
-                read_size = min(chunk_size, pos)
-                pos -= read_size
-                f.seek(pos)
-                data = f.read(read_size) + data
-            text = data.decode("utf-8", errors="replace")
-            tail_lines = text.splitlines()[-lines_limit:]
-    except Exception as e:
-        return jsonify({"success": False, "error": str(e), "path": path}), 500
-
-    return jsonify({
-        "success": True,
-        "path": path,
-        "lines": tail_lines,
-        "line_count": len(tail_lines),
-    }), 200
-
-
-@app.route("/api/logs/stream", methods=["GET"])
-def logs_stream():
-    """
-    Stream SSE de logs para reduzir polling no frontend.
-    query:
-      - from_end=1|0 (default 1): inicia no fim do arquivo
-    """
-    path = getattr(config, "LOG_PATH", "")
-    if not path or not os.path.exists(path):
-        return jsonify({"success": False, "error": "log_not_found", "path": path}), 404
-
-    from_end = _parse_from_end_flag_impl(request.args.get("from_end", "1"))
-
-    @stream_with_context
-    def generate():
-        try:
-            with open(path, "r", encoding="utf-8", errors="replace") as f:
-                if from_end:
-                    f.seek(0, os.SEEK_END)
-                while True:
-                    line = f.readline()
-                    if line:
-                        yield _build_log_stream_line_sse_impl(line, path)
-                    else:
-                        yield _build_log_stream_ping_sse_impl()
-                        time.sleep(1.0)
-        except GeneratorExit:
-            return
-        except Exception as e:
-            yield _build_log_stream_error_sse_impl(e, path)
-
-    return Response(generate(), mimetype="text/event-stream")
 
 
 @app.route("/api/metrics", methods=["GET"])
@@ -2284,11 +2087,6 @@ document.getElementById('q')?.addEventListener('keydown', e => {{ if (e.key === 
 
     return jsonify(_build_web_search_test_no_response_payload_impl(query))
 
-
-@app.route('/robots.txt')
-def robots_txt():
-    # O mimetype "text/plain" garante que o navegador leia como texto puro
-    return Response("User-agent: *\nDisallow: /\n", mimetype="text/plain")
 
 # --- ROTA: ENVIAR RESPOSTA MANUAL AO PACIENTE VIA WhatsApp ---
 # Recebe mensagem do profissional/secretária e repassa ao
