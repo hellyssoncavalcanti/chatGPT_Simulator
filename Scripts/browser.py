@@ -95,6 +95,25 @@ def emit_log(q, msg):
     file_log("browser.py", f"[{sender}] {msg}")
 
 
+async def _save_error_html(page, label: str, chat_id: str = "") -> str | None:
+    """Salva o HTML renderizado da página em logs/html_dos_erros/ para diagnóstico de erros."""
+    try:
+        html_dir = os.path.join(config.DIRS["logs"], "html_dos_erros")
+        os.makedirs(html_dir, exist_ok=True)
+        ts        = time.strftime("%Y%m%d_%H%M%S")
+        safe_lbl  = re.sub(r"[^\w\-]", "_", label)[:40]
+        safe_chat = re.sub(r"[^\w\-]", "_", str(chat_id or ""))[:20]
+        suffix    = f"_{safe_chat}" if safe_chat else ""
+        filename  = f"{ts}_{safe_lbl}{suffix}.html"
+        filepath  = os.path.join(html_dir, filename)
+        html_content = await page.content()
+        with open(filepath, "w", encoding="utf-8") as fh:
+            fh.write(html_content)
+        return filepath
+    except Exception:
+        return None
+
+
 class RateLimitDetected(Exception):
     """Sinaliza que o ChatGPT exibiu banner/toast de rate-limit ou equivalente.
 
@@ -737,9 +756,11 @@ async def _submit_with_verification(page, baseline_state: dict | None = None, q=
                     if not force:
                         # Sem `force`, só clica se o botão estiver realmente
                         # habilitado — clicar com aria-disabled vira no-op em React.
-                        if not await candidate.is_visible():
+                        # timeout=2000: evita que is_visible/is_disabled bloqueiem
+                        # 30 s (default Playwright) quando a página está re-renderizando.
+                        if not await candidate.is_visible(timeout=2000):
                             continue
-                        if await candidate.is_disabled():
+                        if await candidate.is_disabled(timeout=2000):
                             continue
                     await candidate.click(timeout=1500, force=force)
                     return True
@@ -806,7 +827,10 @@ async def _submit_prompt(page, q=None, timeout: float = 12.0) -> bool:
                  f"ChatGPT converteu a cola em {state.get('attachmentCount')} anexo(s); enviando pelo botão.")
 
     if state.get("hasAttachments") or state.get("pasteAsAttachment"):
-        state = await _wait_for_submit_button_ready(page, q=q, timeout=max(8.0, timeout))
+        attach_count = state.get("attachmentCount") or 0
+        # Permite tempo extra proporcional ao número de anexos (mín 20s, +5s por anexo acima de 3)
+        attach_timeout = max(20.0, timeout, 5.0 + max(0, attach_count - 3) * 5.0)
+        state = await _wait_for_submit_button_ready(page, q=q, timeout=attach_timeout)
 
     return await _submit_with_verification(page, state, q=q)
 
@@ -2924,7 +2948,11 @@ async def watchdog_page(page, q, stop_event: asyncio.Event,
                     f"{max(1, int(max_consecutive_failures))}) — {e}",
                 )
                 continue
-            emit_event(q, "error", f"⏱️ Watchdog: aba não respondeu ({e}). Abortando.")
+            err_str = str(e) if str(e).strip() else type(e).__name__
+            emit_event(q, "error", f"⏱️ Watchdog: aba não respondeu ({err_str}). Abortando.")
+            saved = await _save_error_html(page, "watchdog_timeout")
+            if saved:
+                emit_log(q, f"📄 HTML salvo em: {saved}")
             stop_event.set()
             return
 
@@ -3554,6 +3582,11 @@ async def handle_chat_task(context, task, get_browser_for_profile=None):
                     break
                 except asyncio.TimeoutError:
                     emit_event(q, 'error', 'Timeout externo 660s — tarefa abortada.')
+                    if page:
+                        saved = await _save_error_html(page, "timeout_660s",
+                                                       task.get("chat_id", ""))
+                        if saved:
+                            emit_log(q, f"📄 HTML salvo em: {saved}")
                 except RateLimitDetected as rle:
                     can_switch_profile = (
                         (not switched_to_fallback)
@@ -3643,6 +3676,11 @@ async def handle_chat_task(context, task, get_browser_for_profile=None):
                         continue
                     emit_log(q, f'ERRO Chat: {e}')
                     emit_event(q, 'error', f'Falha no navegador: {str(e)}')
+                    if page:
+                        saved = await _save_error_html(page, "erro_chat",
+                                                       task.get("chat_id", ""))
+                        if saved:
+                            emit_log(q, f"📄 HTML salvo em: {saved}")
                     break
                 finally:
                     stop_event.set()

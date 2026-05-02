@@ -60,6 +60,11 @@ Cliente humano / PHP / analisador_prontuarios.py
 
 - **`Scripts/browser.py`**
   Motor de automação com Playwright. É responsável por abrir o ChatGPT, digitar/colar mensagens, anexar arquivos, sincronizar histórico, pesquisar no Google e manipular menus de contexto.
+  Correções recentes:
+  - **Watchdog — mensagem vazia**: `asyncio.TimeoutError.__str__()` retorna `""`, fazendo o log exibir `aba não respondeu ()`. Corrigido para exibir o nome da classe quando a descrição é vazia.
+  - **Snapshots HTML em erros**: função `_save_error_html()` salva o HTML renderizado em `logs/html_dos_erros/` ao detectar watchdog timeout, timeout 660 s ou erro genérico de chat.
+  - **`is_disabled()` sem timeout bloqueava 30 s**: chamadas `is_disabled()` e `is_visible()` agora usam `timeout=2000` ms, evitando que o Playwright aguarde 30 s (default) pela reestabilização da página após conversão de paste em anexos.
+  - **Timeout de submit proporcional a anexos**: quando o ChatGPT converte um bloco colado em múltiplos anexos, o tempo de espera pelo botão de envio é calculado como `max(20 s, 5 s + (n_anexos − 3) × 5 s)` — por exemplo, 70 s para 13 anexos em vez dos 12 s anteriores.
 
 - **`Scripts/shared.py`**
   Define a fila `browser_queue`, que desacopla o Flask do loop assíncrono do Playwright.
@@ -790,6 +795,7 @@ Além deste README completo, o refactor criou documentos segmentados em `docs/` 
 - `docs/agente_autonomo.md`
 - `docs/sync_github.md`
 - `docs/concurrency_per_profile.md`
+- `docs/prompt_monitoramento_logs.md` — prompt pronto para acionar o Claude Code em sessões de monitoramento de logs, com comandos de referência rápida e descrição de cada sistema monitorado.
 
 ## Integração com PHP/proxy externo
 
@@ -813,7 +819,8 @@ Pontos importantes dessa ponte PHP para outra LLM:
 - **`db/users/`** — usuários e avatares
 - **`certs/`** — certificado TLS autoassinado
 - **`chrome_profile/`** — perfil persistente do Chromium / estado do ChatGPT
-- **`logs/`** — logs de execução
+- **`logs/`** — logs de execução por sistema (um arquivo por sessão, prefixo = nome do processo)
+- **`logs/html_dos_erros/`** — snapshots HTML do Chromium capturados automaticamente quando erros críticos ocorrem no `browser.py` (watchdog timeout, erro geral de chat, timeout 660 s). Cada arquivo segue o padrão `YYYYMMDD_HHMMSS_<tipo_erro>[_<chat_id>].html` e pode ser aberto diretamente no navegador para diagnóstico visual.
 - **`temp/`** — arquivos temporários
 
 ---
@@ -837,6 +844,15 @@ Pontos importantes dessa ponte PHP para outra LLM:
 
 - **`Scripts\config.example.py`**
   Template versionado e limpo, usado para bootstrap em novos ambientes.
+
+- **`criar_pr.bat`** / **`Scripts/create_pr.ps1`**
+  Cria um Pull Request no GitHub com todas as alterações locais. Clona o repositório em pasta temporária, detecta diferenças em relação ao `main`, faz commit e push em uma branch `claude-fixes-<timestamp>` e abre o PR via API GitHub. Aceita título, corpo e nome da branch como argumentos opcionais; sem argumentos, gera tudo automaticamente.
+  ```
+  criar_pr.bat                          → PR automático
+  criar_pr.bat "meu título"             → título customizado
+  criar_pr.bat "título" "descrição"     → com body
+  criar_pr.bat "título" "desc" "branch" → tudo customizado
+  ```
 
 - **`abrir_cmd_nesta_pasta.bat`**
   Abre um CMD elevado com menu para executar os `.bat` do projeto.
@@ -1183,6 +1199,57 @@ Detecção de incidentes:
   o agente prioriza esse nível para reduzir falso-positivo.
 - Linhas informativas conhecidas do `sync_github` (ex.: branches sem commits
   novos) são ignoradas no classificador de incidentes.
+
+## Monitoramento de logs e diagnóstico
+
+### Scanner de logs (`Scripts/log_scanner.py`)
+
+Ferramenta que identifica o **log mais recente de cada sistema** e extrai apenas os trechos relevantes (erros, avisos, exceções), sem ler o arquivo inteiro. Projetada para diagnóstico eficiente e para consumo por LLMs (evita gastar tokens com linhas de log normais).
+
+```bash
+# Todos os sistemas
+python Scripts/log_scanner.py
+
+# Sistema específico
+python Scripts/log_scanner.py --systems simulator analisador_prontuarios
+
+# Mais contexto ao redor de cada ocorrência
+python Scripts/log_scanner.py --context 8
+
+# Salvar relatório em arquivo
+python Scripts/log_scanner.py --output logs/relatorio_erros.md
+```
+
+Sistemas monitorados automaticamente:
+
+| Prefixo                   | Processo                              |
+|---------------------------|---------------------------------------|
+| `simulator`               | ChatGPT Simulator (`main.py`)         |
+| `analisador_prontuarios`  | Analisador de prontuários             |
+| `auto_dev_agent`          | Agente autônomo de desenvolvimento    |
+| `cloudflared`             | Túnel Cloudflare                      |
+| `ddns-client`             | Atualização de DNS dinâmico           |
+| `sync_github`             | Sync automático com GitHub            |
+
+### Snapshots HTML de erros (`logs/html_dos_erros/`)
+
+O `browser.py` captura automaticamente o HTML renderizado da página do Chromium e salva em `logs/html_dos_erros/` nos seguintes eventos críticos:
+
+- **Watchdog timeout** — aba não responde ao heartbeat (`page.evaluate("1")`)
+- **Timeout externo 660 s** — tarefa de chat ultrapassa o limite total
+- **Erro genérico de chat** — qualquer exceção não recuperável no fluxo principal
+
+O nome de cada arquivo segue o padrão `YYYYMMDD_HHMMSS_<tipo>_<chat_id>.html`. Abrir no navegador mostra exatamente o estado visual do ChatGPT no momento da falha.
+
+### Prompt de monitoramento para Claude Code
+
+Para acionar uma sessão de revisão de logs com correção automática, envie ao Claude Code:
+
+> **Monitora os logs do projeto e corrija os erros encontrados.**
+
+O fluxo seguido é: rodar `log_scanner.py` → analisar apenas trechos extraídos → ler somente as linhas relevantes dos arquivos de código → aplicar correção mínima. Detalhes e comandos de referência em [`docs/prompt_monitoramento_logs.md`](docs/prompt_monitoramento_logs.md).
+
+---
 
 ## Documentação detalhada
 - [Arquitetura](docs/arquitetura.md)
