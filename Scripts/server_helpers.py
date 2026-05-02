@@ -716,10 +716,10 @@ def extract_manual_whatsapp_reply_targets(data):
     """Extrai (`phone`, `message`, `chat_id`, `id_paciente`, `id_atendimento`)
     do payload de `/api/send_manual_whatsapp_reply`.
 
-    Normaliza apenas `phone` e `message` via trim (mantém ``""`` como
-    sentinela de ausência — o caller valida `if not phone or not message`
-    para retornar HTTP 400). Demais campos são repassados sem mutação,
-    preservando o contrato histórico do downstream `acompanhamento_whatsapp.py`.
+    Normaliza `phone` e `message` para strings vazias quando ausentes.
+    Para `chat_id`, `id_paciente` e `id_atendimento`: preserva o tipo
+    original (int/None) mas aplica `.strip()` quando o valor é str
+    (idiom defensivo para payloads com espaços acidentais).
 
     Aceita qualquer objeto com `.get()`; entradas inválidas (None/sem `.get`)
     retornam todos os campos como ``""``/``None``.
@@ -727,14 +727,18 @@ def extract_manual_whatsapp_reply_targets(data):
     payload_get = getattr(data, "get", None)
     if payload_get is None:
         return ("", "", None, None, None)
+
+    def _strip_if_str(v):
+        return v.strip() if isinstance(v, str) else v
+
     phone = (payload_get("phone") or "").strip() if payload_get("phone") else ""
     message = (payload_get("message") or "").strip() if payload_get("message") else ""
     return (
         phone,
         message,
-        payload_get("chat_id"),
-        payload_get("id_paciente"),
-        payload_get("id_atendimento"),
+        _strip_if_str(payload_get("chat_id")),
+        _strip_if_str(payload_get("id_paciente")),
+        _strip_if_str(payload_get("id_atendimento")),
     )
 
 
@@ -817,147 +821,6 @@ def extract_source_hint(data, headers) -> str:
     return candidate or ""
 
 
-def normalize_source_hint(value) -> str:
-    """Normaliza `source_hint` para o formato canônico de classificação.
-
-    Contrato histórico: `str(value).strip().lower()` com fallback vazio
-    em qualquer exceção inesperada.
-    """
-    try:
-        return str(value or "").strip().lower()
-    except Exception:
-        return ""
-
-
-def build_active_chat_meta(stream_queue, is_analyzer: bool, *, now: Optional[float] = None) -> dict:
-    """Inicializa o entry de `ACTIVE_CHATS[chat_id]` no formato histórico."""
-    ts = float(now) if now is not None else time.time()
-    return {
-        "queue": stream_queue,
-        "status": "",
-        "markdown": "",
-        "finished": False,
-        "finished_at": None,
-        "last_event_at": ts,
-        "is_analyzer": bool(is_analyzer),
-    }
-
-
-def count_active_chats(active_chats, *, now: Optional[float] = None, stale_threshold_sec: int = 300) -> dict:
-    """Agrega métricas de chats ativos para `/api/metrics`."""
-    current = float(now) if now is not None else time.time()
-    stale_cutoff = current - max(0, int(stale_threshold_sec))
-    total = remote = analyzer = stale = 0
-    if not isinstance(active_chats, Mapping):
-        return {"total": 0, "remote": 0, "analyzer": 0, "stale_candidates": 0}
-    for meta in active_chats.values():
-        if not isinstance(meta, Mapping):
-            continue
-        if meta.get("finished"):
-            continue
-        total += 1
-        if meta.get("is_analyzer"):
-            analyzer += 1
-        else:
-            remote += 1
-        last_event = meta.get("last_event_at")
-        try:
-            if float(last_event) < stale_cutoff:
-                stale += 1
-        except Exception:
-            stale += 1
-    return {"total": total, "remote": remote, "analyzer": analyzer, "stale_candidates": stale}
-
-
-def count_unfinished_chats(active_chats) -> int:
-    """Conta entradas não-finalizadas em `ACTIVE_CHATS`."""
-    if not isinstance(active_chats, Mapping):
-        return 0
-    total = 0
-    for meta in active_chats.values():
-        if isinstance(meta, Mapping) and not meta.get("finished"):
-            total += 1
-    return total
-
-
-def find_expired_chat_ids(active_chats, cutoff_ts: float) -> List[str]:
-    """IDs finalizados cujo `finished_at` está abaixo de `cutoff_ts`."""
-    if not isinstance(active_chats, Mapping):
-        return []
-    out: List[str] = []
-    for chat_id, meta in active_chats.items():
-        if not isinstance(meta, Mapping):
-            continue
-        if not meta.get("finished"):
-            continue
-        finished_at = meta.get("finished_at")
-        try:
-            if finished_at is not None and float(finished_at) < float(cutoff_ts):
-                out.append(str(chat_id))
-        except Exception:
-            continue
-    return out
-
-
-def extract_manual_whatsapp_reply_targets(data) -> Tuple[str, str, str, str, str]:
-    """Extrai os campos da rota `/api/send_manual_whatsapp_reply`."""
-    payload_get = getattr(data, "get", None)
-    if payload_get is None:
-        return "", "", "", "", ""
-    phone = str(payload_get("phone", "") or "").strip()
-    message = str(payload_get("message", "") or "").strip()
-    chat_id = str(payload_get("chat_id", "") or "").strip()
-    id_paciente = str(payload_get("id_paciente", "") or "").strip()
-    id_atendimento = str(payload_get("id_atendimento", "") or "").strip()
-    return phone, message, chat_id, id_paciente, id_atendimento
-
-
-def format_manual_whatsapp_requester_suffix(nome_membro, id_membro) -> str:
-    """Sufixo legado da rota manual de WhatsApp: ` por \"nome\" (id=123)`."""
-    nome = normalize_optional_text(nome_membro)
-    ident = normalize_optional_text(id_membro)
-    if nome and ident:
-        return f' por "{nome}" (id={ident})'
-    if nome:
-        return f' por "{nome}"'
-    return ""
-
-
-def resolve_download_content_type(content_type, filename: str) -> str:
-    """Resolve content-type de download por header explícito ou extensão."""
-    explicit = str(content_type or "").strip()
-    if explicit:
-        return explicit
-    name = str(filename or "").strip().lower()
-    if name.endswith(".pdf"):
-        return "application/pdf"
-    if name.endswith(".txt"):
-        return "text/plain; charset=utf-8"
-    if name.endswith(".json"):
-        return "application/json"
-    if name.endswith(".csv"):
-        return "text/csv; charset=utf-8"
-    if name.endswith(".png"):
-        return "image/png"
-    if name.endswith(".jpg") or name.endswith(".jpeg"):
-        return "image/jpeg"
-    if name.endswith(".gif"):
-        return "image/gif"
-    if name.endswith(".webp"):
-        return "image/webp"
-    return "application/octet-stream"
-
-
-def resolve_avatar_filename(raw_filename, user) -> Tuple[Optional[str], Optional[str]]:
-    """Valida extensão de avatar e devolve nome final `<user>_avatar.<ext>`."""
-    filename = str(raw_filename or "").strip()
-    if not filename:
-        return None, "Arquivo sem nome."
-    ext = os.path.splitext(filename)[1].lower()
-    if ext not in {".jpg", ".jpeg", ".png", ".gif", ".webp"}:
-        return None, "Formato de imagem inválido. Use JPG, PNG, GIF ou WEBP."
-    return f"{user}_avatar{ext}", None
-
 
 def coalesce_origin_url(data, header_value: str = "") -> str:
     """Resolve a URL de origem efetiva do pedido `/v1/chat/completions`.
@@ -982,7 +845,7 @@ def coalesce_origin_url(data, header_value: str = "") -> str:
 
 def build_chat_id_event(chat_id) -> str:
     """Evento NDJSON canônico para anunciar `chat_id` no stream."""
-    return json.dumps({"type": "chat_id", "content": chat_id}, ensure_ascii=False)
+    return json.dumps({"type": "chat_id", "content": str(chat_id)}, ensure_ascii=False)
 
 
 def build_chat_meta_event(chat_id, url: str, chromium_profile: str = "") -> str:
@@ -1070,37 +933,6 @@ def build_log_stream_error_sse(error, path) -> str:
         ensure_ascii=False,
     )
     return f"event: error\ndata: {payload}\n\n"
-
-
-def build_chat_id_event(chat_id) -> str:
-    """JSON do evento `chat_id` emitido como primeira mensagem do stream
-    SSE/NDJSON de `/v1/chat/completions`.
-
-    Formato canônico: ``{"type": "chat_id", "content": "<id>"}``. NÃO
-    usa `ensure_ascii=False` (idiom histórico do call site preservado;
-    `chat_id` é UUID, então a representação ASCII é byte-equivalente).
-    """
-    return json.dumps({"type": "chat_id", "content": str(chat_id)})
-
-
-def build_chat_meta_event(chat_id, url, chromium_profile) -> str:
-    """JSON do evento `chat_meta` emitido logo após `chat_id` quando há
-    URL conhecida — comunica o frontend o estado inicial do chat.
-
-    Formato:
-    ``{"type": "chat_meta", "content": {"chat_id": ..., "url": ...,
-    "chromium_profile": ...}}``. `chromium_profile=None`/`""` é coercido
-    para string vazia (padrão histórico). NÃO usa `ensure_ascii=False`.
-    """
-    profile_value = chromium_profile or ""
-    return json.dumps({
-        "type": "chat_meta",
-        "content": {
-            "chat_id": chat_id,
-            "url": url,
-            "chromium_profile": profile_value,
-        },
-    })
 
 
 def build_search_result_event(content, **extras) -> str:

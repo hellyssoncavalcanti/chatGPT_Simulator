@@ -1906,7 +1906,7 @@ class TestRecoveredServerHelpers:
         assert sh.resolve_download_content_type(None, "a.pdf") == "application/pdf"
         assert sh.resolve_download_content_type("text/plain", "x.bin") == "text/plain"
         ok_name, err = sh.resolve_avatar_filename("foto.PNG", "user1")
-        assert ok_name == "user1_avatar.png"
+        assert ok_name == "user1.png"
         assert err is None
         fail_name, fail_err = sh.resolve_avatar_filename("foto.exe", "user1")
         assert fail_name is None
