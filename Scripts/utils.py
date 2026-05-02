@@ -723,7 +723,7 @@ def setup_frontend():
                 if (done) break;
                 buffer += decoder.decode(value, {stream: true});
                 let idx;
-                while ((idx = buffer.indexOf('\n')) >= 0) {
+                while ((idx = buffer.indexOf('\\n')) >= 0) {
                     const line = buffer.slice(0, idx).trim();
                     buffer = buffer.slice(idx + 1);
                     if (!line) continue;
