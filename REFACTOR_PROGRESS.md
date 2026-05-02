@@ -628,7 +628,7 @@ claude/continue-refactor-updates-wvOqd.
 Leia APENAS a seção "PONTO DE RETOMADA (última atualização em 2026-05-02
 unquadragies+)" em REFACTOR_PROGRESS.md — é autocontida.
 
-Estado atual: commit a confirmar após o push desta sessão.
+Estado atual: commit `185e222`.
 Suite offline: **775 passed em 18 arquivos**.
 Suite completa (CI): **777 passed** (excluindo test_server_api.py e
 test_browser_resolve_anchors.py que falham por requerer flask/cryptography).
