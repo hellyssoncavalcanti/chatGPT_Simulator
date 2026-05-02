@@ -207,7 +207,15 @@ facilitar auditoria e melhorar rastreabilidade:
 5. **CORS configurável via ambiente** (`SIMULATOR_CORS_ALLOWED_ORIGINS`) com
    `supports_credentials=True`;
 6. **Política de cookie de sessão configurável** (`secure`/`samesite`) por
-   variáveis de ambiente.
+   variáveis de ambiente;
+7. **Validação de payload** (`Scripts/payload_validators.py`) nos endpoints
+   críticos: limites de tamanho em `message` (100k chars), `password` (256 chars),
+   `url` (2048 chars), sanitização de `browser_profile` (alphanum + `-_`),
+   quota de `attachments` (20 itens), rejeição de 400 com mensagem clara antes
+   de qualquer processamento;
+8. **Correlation-ID ponta-a-ponta** (`Scripts/correlation.py`): lê
+   `X-Correlation-Id` do request ou gera UUID4-8hex; propaga para o payload
+   da fila de browser e aparece nos logs como `[cid:xxxx]`.
 
 ### Variáveis novas de segurança (config.py)
 
@@ -290,10 +298,14 @@ python3 -m pytest \
   tests/test_sync_dedup.py \
   tests/test_python_request_throttle.py \
   tests/test_web_search_throttle.py \
-  tests/test_error_scanner_helpers.py
+  tests/test_error_scanner_helpers.py \
+  tests/test_profile_concurrency.py \
+  tests/test_browser_log_sanitization.py \
+  tests/test_payload_validators.py \
+  tests/test_correlation.py
 ```
 
-Esperado: **775 passed**. (`tests/test_server_api.py` é excluído porque
+Esperado: **908 passed**. (`tests/test_server_api.py` é excluído porque
 exige `flask` e `cryptography` — roda no CI completo via o comando da
 seção anterior. `tests/test_storage.py` também roda no CI completo.)
 
@@ -318,6 +330,8 @@ seção anterior. `tests/test_storage.py` também roda no CI completo.)
 | `Scripts/python_request_throttle.py` | Classe `PythonRequestThrottle` — throttle global anti-rate-limit para requests Python com `begin`/`remaining_seconds`/`commit`/`snapshot`. | `tests/test_python_request_throttle.py` |
 | `Scripts/web_search_throttle.py` | Classe `WebSearchThrottle` — agendamento global de busca web com intervalo humano (`reserve_slot`/`snapshot`) e injeção de `now_func`/`rng_func` (`snapshot` inclui `age_seconds`). Import carregado no topo de `server.py` para evitar `NameError` no boot. | `tests/test_web_search_throttle.py` |
 | `Scripts/analisador_parsers.py` | Detecção de rate-limit em texto, strip/extract/normalize/parse JSON tolerante, heurística de truncamento, remoção de `<think>…</think>`, parser de fallback para queries de pesquisa com `max_queries` injetável. | `tests/test_analisador_parsers.py` |
+| `Scripts/payload_validators.py` | Validação de entrada para rotas críticas: `validate_login_request` (username/password com limites de tamanho), `validate_chat_request` (message, chat_id, url, browser_profile, attachments, stream, messages, source_hint) e `validate_sync_request` (url/chat_id obrigatório par, browser_profile sanitizado). Módulo puro; server.py importa via try/except defensivo. | `tests/test_payload_validators.py` |
+| `Scripts/correlation.py` | Suporte a Correlation-ID ponta-a-ponta: `extract_correlation_id` (lê `X-Correlation-Id` ou gera UUID4-8hex), `format_log_prefix` (prefixo `[cid:xxxx]` para logs), `inject_into_payload` (injeta sem mutar o original). Propagado em `chat_completions` e `api_sync`. | `tests/test_correlation.py` |
 
 Os callers (`server.py`, `browser.py`, `analisador_prontuarios.py`,
 `utils.py`) mantêm wrappers finos com as mesmas assinaturas originais —
@@ -593,24 +607,28 @@ O `browser.py` aceita tarefas com `action`:
 
 O sistema segue **uma única regra para todos os pedidos** (remotos e Python):
 
-### 1. Digitação realista
-Textos fora dos marcadores são enviados caractere a caractere por `type_realistic()`, com atrasos aleatórios pequenos para parecerem humanos.
+### 1. Cola por clipboard (padrão para tudo)
+Todo texto é colado via clipboard (`navigator.clipboard.writeText` + `Ctrl+V`). Isso acelera prompts longos e grandes blocos clínicos. Se o clipboard falhar, há fallback por injeção em chunks via JavaScript.
 
-Além do delay base, o fluxo agora inclui:
+### 2. Digitação realista — somente para perguntas
+Frases terminadas por `?` são digitadas caractere a caractere por `type_realistic()`, com atrasos aleatórios para parecerem humanas.
+
+Além do delay base, o fluxo inclui:
 - micro-pausas em pontuação (`. , ; : ! ?`);
 - pausas de hesitação ocasionais (com probabilidade baixa);
 - erros de digitação raros com correção imediata por `Backspace`.
 
 Esse comportamento é configurável por variáveis `SIMULATOR_HUMAN_TYPING_*` no `config.py` (copiado de `Scripts/config.example.py`).
 
-### 2. Cola por clipboard
-Blocos delimitados por:
-- `[INICIO_TEXTO_COLADO]`
-- `[FIM_TEXTO_COLADO]`
+### 3. Texto misto (perguntas no meio)
+Quando uma pergunta aparece no meio do texto, `smart_input()` divide o conteúdo em segmentos via `_split_by_questions()`:
+1. Cola o trecho anterior via clipboard;
+2. Digita a frase-pergunta realisticamente;
+3. Retorna à cola para o restante.
 
-são colados via clipboard (`navigator.clipboard.writeText` + `Ctrl+V`). Isso acelera prompts longos e grandes blocos clínicos. Se o clipboard falhar, há fallback por injeção em chunks.
+O ciclo se repete para cada `?` encontrado, independentemente da origem da mensagem.
 
-> **Importante:** não há mais regra diferente por origem (remoto vs Python) para decidir colar/digitar; o comportamento depende apenas dos marcadores.
+> **Nota:** os marcadores `[INICIO_TEXTO_COLADO]` / `[FIM_TEXTO_COLADO]` foram removidos do sistema. Referências legadas presentes em registros antigos do banco de dados são descartadas automaticamente na leitura.
 
 ---
 
@@ -1113,7 +1131,7 @@ cooldown para evitar loops agressivos de restart.
 | `AUTODEV_AGENT_REMOTE` | `origin` | Remote Git alvo do push |
 | `AUTODEV_AGENT_COMMIT_PREFIX` | `[auto-dev-agent]` | Prefixo da mensagem de commit |
 | `AUTODEV_AGENT_REUSE_CHAT` | `1` | Mantém a mesma conversa entre ciclos |
-| `AUTODEV_AGENT_USE_PASTE_MARKERS` | `1` | Encapsula mensagens em `[INICIO_TEXTO_COLADO]…[FIM_TEXTO_COLADO]` para que `browser.py` cole via Ctrl+V (rápido) em vez de digitar caractere a caractere |
+| `AUTODEV_AGENT_USE_PASTE_MARKERS` | *(removido)* | ~~Encapsula mensagens em marcadores de cola~~ — variável mantida por compatibilidade; não tem efeito. `browser.py` agora cola tudo automaticamente via clipboard, sem marcadores. |
 | `AUTODEV_AGENT_STARTUP_WAIT_SEC` | `30` | Espera inicial pelo Simulator (s) |
 | `AUTODEV_AGENT_HEALTH_RETRIES` | `2` | Quantidade de tentativas por health-check antes de marcar indisponível |
 | `AUTODEV_AGENT_HEALTH_RETRY_DELAY_SEC` | `2` | Intervalo entre tentativas de health-check (s) |
@@ -1124,24 +1142,17 @@ cooldown para evitar loops agressivos de restart.
 ### Envio rápido via paste (clipboard)
 
 Para **evitar a digitação realista caractere-a-caractere** do `browser.py`
-(que poderia levar minutos em prompts grandes), o agente **encapsula** cada
-mensagem enviada ao ChatGPT Simulator entre os marcadores:
+(que poderia levar minutos em prompts grandes), o agente envia mensagens
+diretamente sem encapsulamento adicional.
 
-```
-[INICIO_TEXTO_COLADO]…conteúdo da mensagem…[FIM_TEXTO_COLADO]
-```
+O `browser.py` agora **cola tudo via clipboard + Ctrl+V** por padrão, sem
+necessidade de marcadores. Apenas frases terminadas em `?` são digitadas
+realisticamente — o que raramente ocorre em mensagens do agente, que
+tipicamente não terminam em pergunta.
 
-O `browser.py` reconhece esses marcadores e injeta o bloco via
-**clipboard + Ctrl+V** (quase instantâneo). Assim:
-
-- Prompt do sistema é encapsulado;
-- Prompt do usuário (contexto + objetivo + código-fonte + feedback) também;
-- Texto fora dos marcadores continuaria sendo digitado realisticamente —
-  por isso o agente *sempre* encapsula todo o payload.
-
-Controle via `AUTODEV_AGENT_USE_PASTE_MARKERS` (default `1`).
-O encapsulamento é **idempotente**: se o texto já contiver os marcadores,
-eles não são duplicados.
+- Prompt do sistema e payload do agente são colados instantaneamente;
+- A variável `AUTODEV_AGENT_USE_PASTE_MARKERS` foi mantida por
+  compatibilidade, mas não tem efeito — pode ser ignorada.
 
 ### Contrato de resposta esperado do ChatGPT
 

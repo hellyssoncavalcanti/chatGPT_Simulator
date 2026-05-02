@@ -393,7 +393,7 @@ Coletadas em `2026-04-22` via `wc -l` / `grep -nE "def "`:
 
 ---
 
-## 🆕 PONTO DE RETOMADA (última atualização em 2026-05-02 sexquadragies)
+## 🆕 PONTO DE RETOMADA (última atualização em 2026-05-02 septuagies)
 
 > **Leia APENAS esta seção ao retomar em outro chat.** Ela é autocontida:
 > não é necessário reler seções anteriores a menos que haja dúvida sobre
@@ -402,8 +402,10 @@ Coletadas em `2026-04-22` via `wc -l` / `grep -nE "def "`:
 ### Estado atual (consolidado) — branch `claude/fix-rate-limit-interval-1vPbB`
 
 **Commits relevantes (mais recente → mais antigo):**
-- `2340738` — Extrair resolve_client_ip + payloads bloco chat_completions *(esta sessão)*
-- `070a37d` — Sanitizar fila SSE de log em browser.py (emit_log + _save_error_html) *(sessão anterior)*
+- `<COMMIT_HASH>` — payload_validators + correlation-id + README *(esta sessão)*
+- `bed9994` — docs: registrar commit 2340738 no PONTO DE RETOMADA
+- `2340738` — Extrair resolve_client_ip + payloads bloco chat_completions *(sessão anterior)*
+- `070a37d` — Sanitizar fila SSE de log em browser.py (emit_log + _save_error_html)
 - `a034d61` — Implementar concorrência por perfil e round-robin de profiles no browser
 - `185e222` — Auditar server.py para referências _impl indefinidas *(esta sessão)*
 - `6a3a3c5` — Corrigir duplicatas em server_helpers e restaurar suite para 698 testes *(root-commit do repo local)*
@@ -476,7 +478,7 @@ Coletadas em `2026-04-22` via `wc -l` / `grep -nE "def "`:
 - `1f3374b` — Extrair detecção de origem de request para módulo testável offline
 - `0c6216e` — docs: refinar backlog P0-P1-P2 com evidências concretas
 
-**Suite offline atual: 20 arquivos → 832 passed** (após sessão de 2026-05-02 sexquadragies — extração de helpers de chat_completions + correção de testes no-op + resolve_client_ip).
+**Suite offline atual: 22 arquivos → 908 passed** (após sessão de 2026-05-02 septuagies — payload_validators, correlation-id, README).
 
 O estado do repo local foi restaurado a partir da cópia de trabalho (histórico git reiniciado como root-commit `6a3a3c5`). As seguintes correções foram aplicadas em relação ao estado anterior da cópia de trabalho:
 - Removidas 9 definições duplicadas (linhas 820-959) de `server_helpers.py` que sobrescreviam as implementações corretas dos ciclos 31-43.
@@ -528,6 +530,8 @@ Esperado: **815 passed**. (NÃO usar `python -m pytest tests/` cru — `tests/te
 | `Scripts/analisador_parsers.py` | ~330 | `detect_rate_limit_preview` (matcher injetável), `build_rate_limit_error_message`, `strip_code_fences`, `extract_json_block`, `normalize_llm_json`, `parse_json_block`, `json_looks_incomplete` (heurística de truncamento), `decode_json_string_fragment`, `extract_visible_llm_markdown` (remove `<think>…</think>`), `extract_search_queries_fallback` (parser tolerante de queries com `max_queries` injetável). | `tests/test_analisador_parsers.py` (64) |
 | `Scripts/humanizer.py` | 124 | Módulo original (inalterado); testes ampliados com invariantes anti-robotização. | `tests/test_humanizer.py` (33) |
 | `Scripts/error_scanner_helpers.py` | ~210 | Helpers puros para `/api/errors/{known,scan,claude_fix}`: filtragem canônica de snippets (`is_unwanted_snippet`, constante `UNWANTED_SNIPPET_KEYS`), conversão de snippets/exceções em entradas (`build_scan_match_entry`, `build_scan_error_entry`), prompt do Claude Code (`build_claude_fix_prompt`), body do POST proxy (`build_claude_fix_request_body`), payloads de `/api/errors/known` (`build_known_errors_missing_payload`, `build_known_errors_loaded_payload`, `build_known_errors_error_payload`) e linhas NDJSON do stream claude_fix (`build_claude_fix_empty_stream_lines`, `build_claude_fix_status_line`, `build_claude_fix_error_line`, `build_claude_fix_finish_line`). | `tests/test_error_scanner_helpers.py` (53) |
+| `Scripts/payload_validators.py` | ~170 | `validate_login_request` (username/password + limites), `validate_chat_request` (message, chat_id, url, browser_profile, attachments, stream, messages, source_hint), `validate_sync_request` (url/chat_id obrigatório par, browser_profile sanitizado). Integrado em `login_route`, `chat_completions`, `api_sync` via import defensivo. | `tests/test_payload_validators.py` (56) |
+| `Scripts/correlation.py` | ~80 | `generate_correlation_id` (UUID4-8hex), `extract_correlation_id` (lê `X-Correlation-Id` ou gera), `format_log_prefix` (`[cid:xxxx]`), `inject_into_payload` (sem mutar o original). Propagado em `chat_completions` e `api_sync`. | `tests/test_correlation.py` (20) |
 | `Scripts/profile_concurrency.py` | ~45 | Classe `ProfileConcurrencyLimiter` (thread-safe, sem Flask/Playwright/config): `acquire(profile)`, `release(profile)` (idempotente), `active_count(profile)`, `snapshot()`. Normaliza `None`/`""` para `"default"`. Singleton `profile_concurrency_tracker` exportado via `shared.py`. Consumido por `browser.py` (asyncio) e `server.py` (métricas em `/api/metrics::profile_concurrency`). | `tests/test_profile_concurrency.py` (19) |
 
 ### Integrações já feitas (em caminho quente)
