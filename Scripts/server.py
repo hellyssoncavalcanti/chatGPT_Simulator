@@ -106,6 +106,20 @@ from server_helpers import (
     safe_snapshot_stats as _safe_snapshot_stats_impl,
 )
 import error_catalog as _error_catalog
+from error_scanner_helpers import (
+    is_unwanted_snippet as _is_unwanted_snippet_impl,
+    build_scan_match_entry as _build_scan_match_entry_impl,
+    build_scan_error_entry as _build_scan_error_entry_impl,
+    build_claude_fix_prompt as _build_claude_fix_prompt_impl,
+    build_claude_fix_request_body as _build_claude_fix_request_body_impl,
+    build_known_errors_missing_payload as _build_known_errors_missing_payload_impl,
+    build_known_errors_loaded_payload as _build_known_errors_loaded_payload_impl,
+    build_known_errors_error_payload as _build_known_errors_error_payload_impl,
+    build_claude_fix_empty_stream_lines as _build_claude_fix_empty_stream_lines_impl,
+    build_claude_fix_status_line as _build_claude_fix_status_line_impl,
+    build_claude_fix_error_line as _build_claude_fix_error_line_impl,
+    build_claude_fix_finish_line as _build_claude_fix_finish_line_impl,
+)
 from log_sanitizer import sanitize_mapping as _sanitize_audit_payload
 import threading
 from server_observabilidade import bp as _bp_observabilidade
@@ -1060,21 +1074,12 @@ def api_errors_known():
     from pathlib import Path as _Path
     json_path = _Path(__file__).resolve().parent / "erros_conhecidos.json"
     if not json_path.exists():
-        return jsonify({
-            "success": True, "entries": [], "count": 0,
-            "path": str(json_path), "missing": True
-        }), 200
+        return jsonify(_build_known_errors_missing_payload_impl(json_path)), 200
     try:
         data = json.loads(json_path.read_text(encoding="utf-8"))
-        entries = data.get("entries", []) or []
-        return jsonify({
-            "success": True,
-            "entries": entries,
-            "count": len(entries),
-            "version": data.get("version"),
-        }), 200
+        return jsonify(_build_known_errors_loaded_payload_impl(data)), 200
     except Exception as e:
-        return jsonify({"success": False, "error": str(e)}), 500
+        return jsonify(_build_known_errors_error_payload_impl(e)), 500
 
 
 @app.route("/api/errors/scan", methods=["GET"])
@@ -1118,22 +1123,12 @@ def api_errors_scan():
                 log_path, context=_CTX, max_matches=_MAX, known_errors=known
             )
         except Exception as e:
-            new_errors.append({
-                "system": system, "log_file": log_path.name,
-                "line_num": 0, "severity": "error",
-                "context": f"[scan_file error] {e}",
-            })
+            new_errors.append(_build_scan_error_entry_impl(system, log_path.name, e))
             continue
         for s in snippets:
-            if s.get("known_entry") or s.get("truncated") or s.get("read_error"):
+            if _is_unwanted_snippet_impl(s):
                 continue
-            new_errors.append({
-                "system": system,
-                "log_file": log_path.name,
-                "line_num": s.get("line_num"),
-                "severity": s.get("severity"),
-                "context": s.get("context", ""),
-            })
+            new_errors.append(_build_scan_match_entry_impl(system, log_path.name, s))
 
     return jsonify({
         "success": True,
@@ -1145,48 +1140,8 @@ def api_errors_scan():
 
 
 def _build_claude_fix_prompt(new_errors: list) -> str:
-    """Constrói o prompt enviado ao Claude Code para analisar+corrigir erros novos."""
-    head = [
-        "Você é Claude Code, assistente de desenvolvimento autônomo do projeto chatGPT_Simulator.",
-        "",
-        f"Foram detectados {len(new_errors)} erro(s) novo(s) nos logs do projeto, ainda NÃO registrados em Scripts/erros_conhecidos.json.",
-        "",
-        "TAREFA (execute na ordem, sem perguntar):",
-        "  1. Para cada erro abaixo, leia APENAS as linhas relevantes do código (use offset+limit). NUNCA leia arquivos .log inteiros.",
-        "  2. Identifique a causa-raiz e aplique a CORREÇÃO MÍNIMA necessária diretamente nos arquivos.",
-        "  3. Para cada erro tratado, registre no banco de erros conhecidos imediatamente após corrigir:",
-        "       python Scripts/log_scanner.py --add-known \"<trecho do log>\" --status fixed --description \"<o que era>\" --fix \"<o que foi feito>\" --files \"<Scripts/arquivo.py>\"",
-        "  4. Falsos positivos: registre com --status false_positive e --description \"<por que não é erro>\".",
-        "  5. Ao final de TODAS as correções:",
-        "       a. Crie UM commit consolidado com mensagem 'fix: corrige <N> erros detectados pelo log_scanner' (use HEREDOC para a mensagem).",
-        "       b. Faça push do commit para o remote.",
-        "       c. Abra um Pull Request no GitHub via `gh pr create` com:",
-        "          - título curto e descritivo",
-        "          - corpo listando cada correção (arquivo:linha → o que foi feito)",
-        "  6. Reporte ao final desta resposta:",
-        "       - URL do PR criado",
-        "       - lista de correções aplicadas (arquivo:linha)",
-        "       - erros sem correção (com motivo)",
-        "",
-        "REGRAS:",
-        "  - Não pergunte por confirmação — execute autonomamente.",
-        "  - Não modifique arquivos fora de Scripts/, frontend/ ou raiz do projeto.",
-        "  - Se um erro for irreproduzível ou exigir contexto externo, registre-o como suppressed/monitoring com explicação.",
-        "",
-        f"=== {len(new_errors)} ERRO(S) NOVO(S) ===",
-        "",
-    ]
-    for i, e in enumerate(new_errors, 1):
-        head.extend([
-            f"--- ERRO #{i}: [{e.get('severity', '?')}] {e.get('system', '')}:{e.get('line_num', '?')} ---",
-            f"Arquivo de log: logs/{e.get('log_file', '')}",
-            "Trecho do log:",
-            "```",
-            (e.get("context", "") or "").rstrip(),
-            "```",
-            "",
-        ])
-    return "\n".join(head)
+    """Wrapper fino sobre `error_scanner_helpers.build_claude_fix_prompt`."""
+    return _build_claude_fix_prompt_impl(new_errors)
 
 
 @app.route("/api/errors/claude_fix", methods=["POST", "GET"])
@@ -1221,24 +1176,14 @@ def api_errors_claude_fix():
             except Exception:
                 continue
             for s in snippets:
-                if s.get("known_entry") or s.get("truncated") or s.get("read_error"):
+                if _is_unwanted_snippet_impl(s):
                     continue
-                new_errors.append({
-                    "system": system,
-                    "log_file": log_path.name,
-                    "line_num": s.get("line_num"),
-                    "severity": s.get("severity"),
-                    "context": s.get("context", ""),
-                })
+                new_errors.append(_build_scan_match_entry_impl(system, log_path.name, s))
 
     if not new_errors:
         def _empty_stream():
-            yield json.dumps({
-                "type": "markdown",
-                "content": "✅ Nenhum erro novo encontrado para análise. "
-                           f"({len(known)} erro(s) conhecido(s) no banco)"
-            }) + "\n"
-            yield json.dumps({"type": "finish", "content": {}}) + "\n"
+            for ln in _build_claude_fix_empty_stream_lines_impl(len(known)):
+                yield ln
         return Response(_empty_stream(), mimetype="application/x-ndjson")
 
     prompt = _build_claude_fix_prompt(new_errors)
@@ -1250,17 +1195,12 @@ def api_errors_claude_fix():
         "AUTODEV_AGENT_CLAUDE_CODE_PROJECT", "chatGPT_Simulator"
     )
 
-    body = {
-        "api_key": config.API_KEY,
-        "model": "Claude Code",
-        "message": prompt,
-        "messages": [{"role": "user", "content": prompt}],
-        "stream": True,
-        "url": target_url,
-        "origin_url": target_url,
-        "claude_project": claude_project,
-        "request_source": "errors_monitor.py/claude_fix",
-    }
+    body = _build_claude_fix_request_body_impl(
+        api_key=config.API_KEY,
+        prompt=prompt,
+        target_url=target_url,
+        claude_project=claude_project,
+    )
 
     http_port = int(getattr(config, "PORT", 3002)) + 1
     completions_url = f"http://127.0.0.1:{http_port}/v1/chat/completions"
@@ -1275,10 +1215,7 @@ def api_errors_claude_fix():
 
     @stream_with_context
     def proxy():
-        yield json.dumps({
-            "type": "status",
-            "content": f"Enviando {len(new_errors)} erro(s) ao Claude Code..."
-        }) + "\n"
+        yield _build_claude_fix_status_line_impl(len(new_errors))
         try:
             with _req.post(
                 completions_url,
@@ -1295,11 +1232,8 @@ def api_errors_claude_fix():
                         continue
                     yield line + "\n"
         except Exception as e:
-            yield json.dumps({
-                "type": "error",
-                "content": f"Falha ao chamar Claude Code: {e}"
-            }) + "\n"
-            yield json.dumps({"type": "finish", "content": {}}) + "\n"
+            yield _build_claude_fix_error_line_impl(e)
+            yield _build_claude_fix_finish_line_impl()
 
     return Response(proxy(), mimetype="application/x-ndjson")
 

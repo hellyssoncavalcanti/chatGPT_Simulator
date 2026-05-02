@@ -472,7 +472,7 @@ Coletadas em `2026-04-22` via `wc -l` / `grep -nE "def "`:
 - `1f3374b` — Extrair detecção de origem de request para módulo testável offline
 - `0c6216e` — docs: refinar backlog P0-P1-P2 com evidências concretas
 
-**Suite offline atual: 17 arquivos → 698 passed**.
+**Suite offline atual: 18 arquivos → 751 passed** (após etapa 51 — extração de `error_scanner_helpers.py`).
 
 O estado do repo local foi restaurado a partir da cópia de trabalho (histórico git reiniciado como root-commit `6a3a3c5`). As seguintes correções foram aplicadas em relação ao estado anterior da cópia de trabalho:
 - Removidas 9 definições duplicadas (linhas 820-959) de `server_helpers.py` que sobrescreviam as implementações corretas dos ciclos 31-43.
@@ -500,9 +500,10 @@ python -m pytest \
   tests/test_analisador_parsers.py \
   tests/test_sync_dedup.py \
   tests/test_python_request_throttle.py \
-  tests/test_web_search_throttle.py
+  tests/test_web_search_throttle.py \
+  tests/test_error_scanner_helpers.py
 ```
-Esperado: **698 passed**. (NÃO usar `python -m pytest tests/` cru — `tests/test_server_api.py` e `tests/test_storage.py` falham por requerer `flask` / `cryptography` indisponíveis neste ambiente.)
+Esperado: **751 passed**. (NÃO usar `python -m pytest tests/` cru — `tests/test_server_api.py` e `tests/test_storage.py` falham por requerer `flask` / `cryptography` indisponíveis neste ambiente.)
 
 ### Mapa de módulos puros já criados
 
@@ -520,6 +521,7 @@ Esperado: **698 passed**. (NÃO usar `python -m pytest tests/` cru — `tests/te
 | `Scripts/web_search_throttle.py` | ~95 | Classe `WebSearchThrottle` (espaçamento global de buscas web: `reserve_slot` + `snapshot`, com `now_func` e `rng_func` injetáveis). `snapshot()` retorna `{last_started_at, last_interval_sec, age_seconds}` (clamp 0 quando boot ou clock retrógrado). | `tests/test_web_search_throttle.py` (15) |
 | `Scripts/analisador_parsers.py` | ~330 | `detect_rate_limit_preview` (matcher injetável), `build_rate_limit_error_message`, `strip_code_fences`, `extract_json_block`, `normalize_llm_json`, `parse_json_block`, `json_looks_incomplete` (heurística de truncamento), `decode_json_string_fragment`, `extract_visible_llm_markdown` (remove `<think>…</think>`), `extract_search_queries_fallback` (parser tolerante de queries com `max_queries` injetável). | `tests/test_analisador_parsers.py` (64) |
 | `Scripts/humanizer.py` | 124 | Módulo original (inalterado); testes ampliados com invariantes anti-robotização. | `tests/test_humanizer.py` (33) |
+| `Scripts/error_scanner_helpers.py` | ~210 | Helpers puros para `/api/errors/{known,scan,claude_fix}`: filtragem canônica de snippets (`is_unwanted_snippet`, constante `UNWANTED_SNIPPET_KEYS`), conversão de snippets/exceções em entradas (`build_scan_match_entry`, `build_scan_error_entry`), prompt do Claude Code (`build_claude_fix_prompt`), body do POST proxy (`build_claude_fix_request_body`), payloads de `/api/errors/known` (`build_known_errors_missing_payload`, `build_known_errors_loaded_payload`, `build_known_errors_error_payload`) e linhas NDJSON do stream claude_fix (`build_claude_fix_empty_stream_lines`, `build_claude_fix_status_line`, `build_claude_fix_error_line`, `build_claude_fix_finish_line`). | `tests/test_error_scanner_helpers.py` (53) |
 
 ### Integrações já feitas (em caminho quente)
 - `server.chat_completions` usa `request_source.is_analyzer_chat_request`, `server_helpers.combine_openai_messages`, `server_helpers.build_sender_label`, `server_helpers.wrap_paste_if_python_source`, `server_helpers.coalesce_origin_url`, `server_helpers.decode_attachment` (laço de anexos — IO/log preservados no call site), `server_helpers.resolve_browser_profile`, `server_helpers.resolve_chat_url` (sentinela `"None"` agora vira `None` — `storage.save_chat` e `browser.py:~4159` já eram defensivos contra "None" string, então a integração é byte-equivalente para todos os fluxos observáveis), `server_helpers.build_chat_task_payload` (substitui dict literal de 20 linhas), `server_helpers.build_queue_key` (no `_dispatch_chat_task`), `server_helpers.build_error_event` (2 sites em `_dispatch_chat_task`).
@@ -757,6 +759,23 @@ analisador_prontuarios.py, PARAR — não está no escopo destas opções.
   49. `895bfff`: `Scripts/auto_dev_agent.py` ajustado para alertar espera/cooldown apenas UMA vez e manter somente countdown inline durante o período de anti-rate-limit, removendo spam de status repetitivo no console. Ao sair da espera, o agente emite uma única mensagem de retomada (`Espera concluída`) e retorna ao fluxo normal de eventos. Suite offline preservada: **611 passed**.
 - **2026-04-27 (esta sessão, branch `claude/continue-refactor-updates-wvOqd`) — Hotfix de stream NDJSON (etapa 20):**
   50. `0b93625`: corrigido `NameError: _build_chat_id_event_impl is not defined` no generator de `/v1/chat/completions` (stream NDJSON). Reintroduzido helper puro `build_chat_id_event(chat_id)` em `Scripts/server_helpers.py`, exportado em `__all__`, importado como alias em `server.py` e integrado no primeiro `yield` do stream (`chat_id`). `tests/test_server_helpers.py` ganhou 2 casos novos (payload do helper + smoke de alias importado no server). Suite offline atualizada: **613 passed** em 17 arquivos.
+- **2026-05-02 (esta sessão, branch `claude/focused-einstein-HT0Xs`) — Lote P2 (modularização adicional): extração de `error_scanner_helpers`:**
+  51. Criado `Scripts/error_scanner_helpers.py` (módulo puro, sem `flask`/`playwright`/`config`) com 12 helpers cobrindo os 3 endpoints de `/api/errors/*`:
+      - **Filtragem/parse de snippets** (`is_unwanted_snippet`, `build_scan_match_entry`, `build_scan_error_entry` + constante `UNWANTED_SNIPPET_KEYS`) — elimina duplicação de filtro `known_entry/truncated/read_error` e dos dicts de match entre `api_errors_scan` e `api_errors_claude_fix`.
+      - **Prompt do Claude Code** (`build_claude_fix_prompt`) — substitui o antigo `_build_claude_fix_prompt` (40+ linhas inline) por wrapper fino. Aceita listas/iteráveis/None defensivamente.
+      - **Body de `/v1/chat/completions`** (`build_claude_fix_request_body`) — encapsula dict de 10 chaves do POST proxy.
+      - **Payloads de `/api/errors/known`** (`build_known_errors_missing_payload`, `build_known_errors_loaded_payload`, `build_known_errors_error_payload`) — padroniza shape para os 3 caminhos do endpoint (missing file, loaded ok, parse error).
+      - **Linhas NDJSON do stream claude_fix** (`build_claude_fix_empty_stream_lines`, `build_claude_fix_status_line`, `build_claude_fix_error_line`, `build_claude_fix_finish_line`) — substitui `json.dumps({...}) + "\n"` literais nos generators `_empty_stream` e `proxy` por wrappers finos. Frame de finish canônico passa a ser idempotente (sem duplicação).
+      `server.py` migrou:
+      - `api_errors_known`: 3 caminhos de retorno → wrappers finos.
+      - `api_errors_scan`: 2 sites de `new_errors.append({...})` → helpers + filtro padronizado.
+      - `_build_claude_fix_prompt`: virou wrapper 1-linha.
+      - `api_errors_claude_fix`: filtro de snippets, dict de body, gerador `_empty_stream` (2 yields) e `proxy` (3 yields) migrados para os helpers.
+      `tests/test_error_scanner_helpers.py` cobre todos os 12 helpers com **53 casos** (filtros, mapeamento de campos opcionais, fallback defensivo p/ não-Mapping, idempotência do finish, determinismo do prompt). Suite offline atualizada: **751 passed** em 18 arquivos.
+
+### Próxima opção recomendada (continuar nesta branch ou pedir aprovação para tocar `browser.py`)
+- **Continuar baixo risco**: auditar `chat_completions` (linhas 2150+) e `api_sync` (linhas 1450+) por idioms duplicados ainda não cobertos. Helpers candidatos: builders de payloads de erro/timeout em `chat_completions`, normalização de cabeçalhos `X-Forwarded-*` em `_client_ip`, filtros de query-string em `/api/web_search/test`.
+- **Alto risco (BLOQUEADO)**: Opção D (catálogo em `browser._dismiss_rate_limit_modal_if_any`) e Opção 9 (modularização do `server.py` por domínio Flask Blueprint). Ambas requerem aprovação explícita.
 
 
 
