@@ -811,8 +811,8 @@ function Merge-AllPullRequests {
         return
     }
 
-    # Evita merge duplicado quando houver PRs muito próximos (consecutivos) com mesmo título.
-    # Regra: para o mesmo título, se created_at diferir até 120s, mantém só o mais novo.
+    # Evita merge duplicado quando houver PRs muito proximos (consecutivos) com mesmo titulo.
+    # Regra: para o mesmo titulo, se created_at diferir ate 120s, mantem so o mais novo.
     $deduped = @()
     $duplicatesSkipped = 0
     $duplicateWindowSec = 120
@@ -831,7 +831,7 @@ function Merge-AllPullRequests {
             [datetimeoffset]$dt = [datetimeoffset]::MinValue
             if ([datetimeoffset]::TryParse([string]$item.created_at, [ref]$dt)) {
                 $parsable += [pscustomobject]@{
-                    pr = $item
+                    pr        = $item
                     createdAt = $dt
                 }
             } else {
@@ -839,55 +839,55 @@ function Merge-AllPullRequests {
             }
         }
 
-        # Sem created_at parseável não há base temporal segura: mantém todos.
+        # Sem created_at parseavel nao ha base temporal segura: mantem todos.
         if ($parsable.Count -eq 0) {
             $deduped += $items
             continue
         }
 
-        # Clusteriza por proximidade temporal (janela de 120s) e mantém só o PR mais novo por cluster.
+        # Clusteriza por proximidade temporal (janela de 120s) e mantem so o PR mais novo por cluster.
         $parsableSorted = @($parsable | Sort-Object -Property { $_.createdAt.ToUnixTimeSeconds() }, @{Expression = { $_.pr.number }; Ascending = $true })
-        $cluster = @()
+        $cluster   = @()
         $lastEpoch = $null
         foreach ($entry in $parsableSorted) {
             $currentEpoch = $entry.createdAt.ToUnixTimeSeconds()
             if ($null -eq $lastEpoch -or [math]::Abs($currentEpoch - $lastEpoch) -le $duplicateWindowSec) {
-                $cluster += $entry
-                $lastEpoch = $currentEpoch
+                $cluster   += $entry
+                $lastEpoch  = $currentEpoch
                 continue
             }
 
             $selected = @($cluster | Sort-Object -Property { $_.pr.number } -Descending)[0]
-            $deduped += $selected.pr
-            $skipped = @($cluster | Where-Object { $_.pr.number -ne $selected.pr.number })
+            $deduped  += $selected.pr
+            $skipped   = @($cluster | Where-Object { $_.pr.number -ne $selected.pr.number })
             if ($skipped.Count -gt 0) {
                 $duplicatesSkipped += $skipped.Count
                 $skippedNums = ($skipped | ForEach-Object { "#$($_.pr.number)" }) -join ', '
-                Write-Info ("Duplicidade detectada (mesmo título + proximidade temporal). Mantendo PR #{0} e ignorando {1}." -f $selected.pr.number, $skippedNums) -Color DarkGray
+                Write-Info ("Duplicidade detectada (mesmo titulo + proximidade temporal). Mantendo PR #{0} e ignorando {1}." -f $selected.pr.number, $skippedNums) -Color DarkGray
             }
 
-            $cluster = @($entry)
+            $cluster   = @($entry)
             $lastEpoch = $currentEpoch
         }
 
         if ($cluster.Count -gt 0) {
             $selected = @($cluster | Sort-Object -Property { $_.pr.number } -Descending)[0]
-            $deduped += $selected.pr
-            $skipped = @($cluster | Where-Object { $_.pr.number -ne $selected.pr.number })
+            $deduped  += $selected.pr
+            $skipped   = @($cluster | Where-Object { $_.pr.number -ne $selected.pr.number })
             if ($skipped.Count -gt 0) {
                 $duplicatesSkipped += $skipped.Count
                 $skippedNums = ($skipped | ForEach-Object { "#$($_.pr.number)" }) -join ', '
-                Write-Info ("Duplicidade detectada (mesmo título + proximidade temporal). Mantendo PR #{0} e ignorando {1}." -f $selected.pr.number, $skippedNums) -Color DarkGray
+                Write-Info ("Duplicidade detectada (mesmo titulo + proximidade temporal). Mantendo PR #{0} e ignorando {1}." -f $selected.pr.number, $skippedNums) -Color DarkGray
             }
         }
 
-        # Itens sem created_at parseável são mantidos para não haver falso positivo.
+        # Itens sem created_at parseavel sao mantidos para nao haver falso positivo.
         if ($nonParsable.Count -gt 0) {
             $deduped += $nonParsable
         }
     }
 
-    # Ordena do mais antigo ao mais novo para merge sequencial, já sem duplicatas
+    # Ordena do mais antigo ao mais novo para merge sequencial, ja sem duplicatas
     $ordered = @($deduped | Sort-Object -Property number)
     if ($duplicatesSkipped -gt 0) {
         Write-Info ("Encontrado(s) {0} PR(s) aberto(s), {1} duplicado(s) ignorado(s). Mergeando {2} PR(s)..." -f $prsArray.Count, $duplicatesSkipped, $ordered.Count)
@@ -902,7 +902,7 @@ function Merge-AllPullRequests {
         $createdAtLog = if ($pr.created_at) { $pr.created_at } else { 'sem created_at' }
         Write-Info ("Processando PR #{0} - {1} ({2})" -f $pr.number, $pr.title, $createdAtLog)
 
-        # Verificar se já está mergeado
+        # Verificar se ja esta mergeado
         try {
             $details = Invoke-GitHubApi -Uri "$($script:Config.apiBase)/pulls/$($pr.number)"
             if ($details.merged -eq $true) {
@@ -965,7 +965,6 @@ function Merge-AllPullRequests {
 
     Write-Ok ("Resumo PRs: $mergedCount mergeado(s), $failedCount com falha, $($ordered.Count) total.")
 }
-
 function Fetch-RepositoryMirror {
     Write-Section 'ATUALIZANDO ESPELHO DO REPOSITORIO'
 
@@ -977,9 +976,75 @@ function Fetch-RepositoryMirror {
     $mirrorPath = Join-Path $script:Config.tempDir ("repo_{0}" -f (Get-Date -Format 'yyyyMMdd_HHmmss'))
     $repoUrl = Get-RepoUrlForClone
     
-    Invoke-Git -Args @('clone', '--depth', '1', '--progress', '--branch', $script:Config.branch, $repoUrl, $mirrorPath) -ShowProgress -ProgressMessage "Baixando atualizacoes do repositório" | Out-Null
+    # Clone completo (sem --depth 1) para que `git log -- <arquivo>` possa
+    # responder, por arquivo, qual foi o ultimo commit/PR que o tocou. Essa
+    # informacao e usada por Sync-FilesFromMirror para decidir a direcao do
+    # sync sem cair no falso-positivo de "HEAD mais novo" quando o ultimo
+    # commit da branch nem sequer mexeu no arquivo em questao.
+    Invoke-Git -Args @('clone', '--progress', '--branch', $script:Config.branch, $repoUrl, $mirrorPath) -ShowProgress -ProgressMessage "Baixando atualizacoes do repositório" | Out-Null
     $script:RepoMirror = $mirrorPath
     Write-Ok ("Espelho atualizado em $mirrorPath")
+}
+
+function Push-LocalChangesToGitHub {
+    param(
+        [System.Collections.Generic.List[hashtable]]$FilesToUpload
+    )
+    Write-Section 'ENVIANDO ARQUIVOS LOCAIS PARA O GITHUB'
+
+    if (-not $script:Config.githubToken -or $script:GitHubAuthFailed) {
+        Write-Warn 'Token GitHub ausente ou invalido; upload local ignorado neste ciclo.'
+        return
+    }
+
+    if ($FilesToUpload.Count -eq 0) {
+        Write-Info 'Nenhum arquivo local para enviar ao GitHub.'
+        return
+    }
+
+    try {
+        Invoke-Git -Args @('config', 'user.name', 'AutoSync') -WorkingDirectory $script:RepoMirror | Out-Null
+        Invoke-Git -Args @('config', 'user.email', 'autosync@sync.local') -WorkingDirectory $script:RepoMirror | Out-Null
+
+        foreach ($item in $FilesToUpload) {
+            $mirrorPath = Join-Path $script:RepoMirror $item.RelativePath
+            $mirrorDir = Split-Path -Parent $mirrorPath
+            if (-not (Test-Path $mirrorDir)) {
+                New-Item -ItemType Directory -Path $mirrorDir -Force | Out-Null
+            }
+            Copy-Item -Path $item.LocalPath -Destination $mirrorPath -Force
+            Invoke-Git -Args @('add', '--', $item.RelPathGit) -WorkingDirectory $script:RepoMirror | Out-Null
+            Write-Info "Preparado para upload: $($item.RelativePath)"
+        }
+
+        $statusOutput = @(Invoke-Git -Args @('status', '--porcelain') -WorkingDirectory $script:RepoMirror -AllowFailure)
+        if ($statusOutput.Count -eq 0 -or -not ($statusOutput | Where-Object { $_ -match '\S' })) {
+            Write-Info 'Conteudo identico ao GitHub; nenhum commit necessario.'
+            return
+        }
+
+        $commitMsg = "Sync local->GitHub: $($FilesToUpload.Count) arquivo(s) [$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')]"
+        Invoke-Git -Args @('commit', '-m', $commitMsg) -WorkingDirectory $script:RepoMirror | Out-Null
+
+        $repoUrl = Get-RepoUrlForClone
+        Invoke-Git -Args @('push', $repoUrl, "HEAD:refs/heads/$($script:Config.branch)") -WorkingDirectory $script:RepoMirror -ShowProgress -ProgressMessage 'Enviando para o GitHub' | Out-Null
+
+        Write-Ok "Upload concluido: $($FilesToUpload.Count) arquivo(s) enviado(s) para branch '$($script:Config.branch)'."
+
+        # Sincroniza timestamps locais com o commit recem-criado para evitar re-upload no proximo ciclo
+        foreach ($item in $FilesToUpload) {
+            try {
+                $newGitDate = Invoke-Git -Args @('log', '-1', '--format=%cI', '--', $item.RelPathGit) -WorkingDirectory $script:RepoMirror
+                if ($newGitDate) {
+                    $parsedDate = [datetime]::Parse(($newGitDate | Select-Object -First 1).Trim())
+                    (Get-Item $item.LocalPath).LastWriteTime = $parsedDate
+                }
+            } catch {}
+        }
+    } catch {
+        Write-Warn "Falha ao enviar arquivos para o GitHub: $($_.Exception.Message)"
+        Write-Warn 'O sync de download continuara normalmente no proximo ciclo.'
+    }
 }
 
 function Test-IsProtectedPath([string]$RelativePath) {
@@ -1024,6 +1089,33 @@ function Get-FileHashSafe([string]$Path) {
     return (Get-FileHash -Path $Path -Algorithm SHA256).Hash
 }
 
+function Build-FileLastCommitDateMap {
+    # Mapeia cada caminho versionado -> datetime do commit mais recente que
+    # tocou aquele arquivo na branch atual. Como `git log` ja vem em ordem
+    # cronologica reversa, basta guardar a primeira ocorrencia de cada path.
+    # Os paths usam '/' (mesmo formato de `git ls-files` -- a comparacao no
+    # chamador e feita com $relPathGitRaw, ainda em forward slash).
+    $map = @{}
+    $output = @(Invoke-Git -Args @('log', '--format=COMMIT:%cI', '--name-only') -WorkingDirectory $script:RepoMirror -AllowFailure)
+    if (-not $output -or $output.Count -eq 0) {
+        return $map
+    }
+
+    $currentDate = $null
+    foreach ($line in $output) {
+        if ([string]::IsNullOrWhiteSpace($line)) { continue }
+        if ($line.StartsWith('COMMIT:')) {
+            $dateStr = $line.Substring(7).Trim()
+            try { $currentDate = [datetime]::Parse($dateStr) } catch { $currentDate = $null }
+            continue
+        }
+        if ($currentDate -and -not $map.ContainsKey($line)) {
+            $map[$line] = $currentDate
+        }
+    }
+    return $map
+}
+
 function Sync-FilesFromMirror {
     Write-Section 'SINCRONIZANDO ARQUIVOS'
 
@@ -1032,15 +1124,27 @@ function Sync-FilesFromMirror {
         throw 'Nenhum arquivo rastreado encontrado no espelho do repositório.'
     }
 
+    # Mapa por-arquivo do ultimo commit (PR) que tocou cada path. Substitui
+    # a comparacao antiga contra a data global do HEAD: agora um arquivo so
+    # e considerado "mais novo no GitHub" se houver de fato algum commit
+    # posterior ao mtime local que tenha alterado aquele arquivo.
+    $fileLastCommitDate = Build-FileLastCommitDateMap
+    if ($fileLastCommitDate.Count -gt 0) {
+        Write-Info ("Mapeados {0} arquivo(s) com data do ultimo commit que os alterou." -f $fileLastCommitDate.Count)
+    } else {
+        Write-Warn 'Nao foi possivel mapear data do ultimo commit por arquivo; fallback para upload quando local divergir.'
+    }
+
     $added = 0
     $updated = 0
     $unchanged = 0
     $protectedCount = 0
     $cacheIgnoredCount = 0
+    $toUpload = [System.Collections.Generic.List[hashtable]]::new()
 
     foreach ($relPathGitRaw in $gitFiles) {
         $relativePath = $relPathGitRaw.Trim('"').Replace('/', '\').Replace('\\', '\')
-        
+
         if (Test-IsProtectedPath -RelativePath $relativePath) {
             $protectedCount++
             $script:ProtectedFiles.Add($relativePath)
@@ -1062,41 +1166,69 @@ function Sync-FilesFromMirror {
             New-Item -ItemType Directory -Path $targetDir -Force | Out-Null
         }
 
-        $needsCopy = $false
         $isNew = -not (Test-Path $target)
         if ($isNew) {
-            $needsCopy = $true
-        } else {
-            $srcInfo = Get-Item $source
-            $dstInfo = Get-Item $target
-            if ($srcInfo.Length -ne $dstInfo.Length) {
-                $needsCopy = $true
-            } else {
-                $needsCopy = (Get-FileHashSafe $source) -ne (Get-FileHashSafe $target)
-            }
-        }
-
-        if ($needsCopy) {
+            # Arquivo novo vindo do GitHub: baixar sempre
             Copy-Item -Path $source -Destination $target -Force
             try {
                 $gitDate = Invoke-Git -Args @('log', '-1', '--format=%cI', '--', $relPathGitRaw) -WorkingDirectory $script:RepoMirror
                 if ($gitDate) {
-                    (Get-Item $target).LastWriteTime = [datetime]::Parse(($gitDate | Select-Object -First 1))
+                    (Get-Item $target).LastWriteTime = [datetime]::Parse(($gitDate | Select-Object -First 1).Trim())
                 }
             } catch {}
-
-            if ($isNew) {
-                $added++
-                $script:AddedFiles.Add($relativePath)
-                Write-Host "[NOVO] $relativePath" -ForegroundColor Green
-            } else {
-                $updated++
-                $script:UpdatedFiles.Add($relativePath)
-                Write-Host "[ATUALIZADO] $relativePath" -ForegroundColor Cyan
-            }
-        } else {
-            $unchanged++
+            $added++
+            $script:AddedFiles.Add($relativePath)
+            Write-Host "[NOVO] $relativePath" -ForegroundColor Green
+            continue
         }
+
+        # Detectar diferenca de conteudo via hash
+        $srcInfo = Get-Item $source
+        $dstInfo = Get-Item $target
+        $hashDiff = if ($srcInfo.Length -ne $dstInfo.Length) { $true } else { (Get-FileHashSafe $source) -ne (Get-FileHashSafe $target) }
+
+        if (-not $hashDiff) {
+            $unchanged++
+            continue
+        }
+
+        # Conteudo diferente: decidir direcao pelo ultimo commit que tocou
+        # ESTE arquivo especificamente. Se houve PR posterior ao mtime local
+        # que alterou o arquivo -> baixar do GitHub. Caso contrario -> o
+        # arquivo local e mais novo e deve ser enviado ao GitHub.
+        $localDate = $dstInfo.LastWriteTime
+        $localSec  = [datetime]::new($localDate.Year, $localDate.Month, $localDate.Day, $localDate.Hour, $localDate.Minute, $localDate.Second)
+
+        $fileCommitDate = $null
+        if ($fileLastCommitDate.ContainsKey($relPathGitRaw)) {
+            $fcd = $fileLastCommitDate[$relPathGitRaw]
+            $fileCommitDate = [datetime]::new($fcd.Year, $fcd.Month, $fcd.Day, $fcd.Hour, $fcd.Minute, $fcd.Second)
+        }
+
+        if ($fileCommitDate -eq $null -or $fileCommitDate -le $localSec) {
+            # Nenhum PR posterior ao mtime local tocou este arquivo -> upload local->GitHub
+            $toUpload.Add(@{ RelPathGit = $relPathGitRaw; LocalPath = $target; RelativePath = $relativePath })
+            $cmpInfo = if ($fileCommitDate) { "ultimo PR neste arquivo $($fileCommitDate.ToString('yyyy-MM-dd HH:mm:ss'))" } else { 'sem historico de commit para este arquivo' }
+            Write-Host "[LOCAL MAIS NOVO] $relativePath (local $($localSec.ToString('yyyy-MM-dd HH:mm:ss')); $cmpInfo)" -ForegroundColor Yellow
+            continue
+        }
+
+        # Existe ao menos um commit/PR posterior ao mtime local que alterou este arquivo: baixar do GitHub
+        Copy-Item -Path $source -Destination $target -Force
+        try {
+            $gitDate = Invoke-Git -Args @('log', '-1', '--format=%cI', '--', $relPathGitRaw) -WorkingDirectory $script:RepoMirror
+            if ($gitDate) {
+                (Get-Item $target).LastWriteTime = [datetime]::Parse(($gitDate | Select-Object -First 1).Trim())
+            }
+        } catch {}
+        $updated++
+        $script:UpdatedFiles.Add($relativePath)
+        Write-Host "[ATUALIZADO] $relativePath" -ForegroundColor Cyan
+    }
+
+    # Rota local -> GitHub: enviar arquivos locais mais novos
+    if ($toUpload.Count -gt 0) {
+        Push-LocalChangesToGitHub -FilesToUpload $toUpload
     }
 
     if ($added -gt 0 -or $updated -gt 0) {
@@ -1161,7 +1293,7 @@ function Sync-FilesFromMirror {
         }
     }
 
-    Write-Ok ("Resumo: $added novo(s), $updated atualizado(s), $unchanged inalterado(s), $protectedCount protegido(s), $cacheIgnoredCount cache ignorado(s)")
+    Write-Ok ("Resumo: $added novo(s) do GitHub, $updated atualizado(s) do GitHub, $($toUpload.Count) enviado(s) ao GitHub, $unchanged inalterado(s), $protectedCount protegido(s), $cacheIgnoredCount cache ignorado(s)")
 }
 
 function Sync-RemotePhpIfNeeded {
