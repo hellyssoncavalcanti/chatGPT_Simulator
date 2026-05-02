@@ -3781,16 +3781,15 @@ if (isset($_GET['action']) && $_GET['action'] === 'proxy') {
         
         // Na 1ª mensagem (sem chat_id nem url), o system prompt nunca chegaria ao
         // Simulator porque a rota faz exit antes do bloco de injeção da linha ~3848.
-        // Injeta DENTRO do bloco [INICIO_TEXTO_COLADO] para que browser.py cole tudo
-        // via clipboard de uma vez (fora do bloco seria typed char-a-char, causando
-        // submits precoces quando o texto é longo).
+        // chatgpt_ensure_text_wrapper encapsula apenas o trecho do DB, deixando o
+        // $date_format_rule e os marcadores INICIO/FIM_PROMPT_SISTEMA fora de qualquer
+        // bloco de paste. Para que browser.py cole tudo via clipboard (não digitando
+        // char-a-char), removemos quaisquer marcadores de paste internos e
+        // reencapsulamos o prompt inteiro em um único bloco antes do $msg_content.
         if (empty($chat_id) && empty($url_context) && !empty(trim($active_system_prompt ?? ''))) {
-            $sys = trim($active_system_prompt);
-            if (strpos($msg_content, '[INICIO_TEXTO_COLADO]') !== false) {
-                $msg_content = str_replace('[INICIO_TEXTO_COLADO]', '[INICIO_TEXTO_COLADO]' . "\n\n" . $sys . "\n\n", $msg_content);
-            } else {
-                $msg_content = $sys . "\n\n" . $msg_content;
-            }
+            $sys_clean = str_replace(['[INICIO_TEXTO_COLADO]', '[FIM_TEXTO_COLADO]'], '', trim($active_system_prompt));
+            $sys_block = '[INICIO_TEXTO_COLADO]' . "\n" . trim($sys_clean) . "\n" . '[FIM_TEXTO_COLADO]';
+            $msg_content = $sys_block . "\n\n" . $msg_content;
         }
 
         $payload = [
