@@ -393,7 +393,7 @@ Coletadas em `2026-04-22` via `wc -l` / `grep -nE "def "`:
 
 ---
 
-## 🆕 PONTO DE RETOMADA (última atualização em 2026-05-02 quinquadragies)
+## 🆕 PONTO DE RETOMADA (última atualização em 2026-05-02 sexquadragies)
 
 > **Leia APENAS esta seção ao retomar em outro chat.** Ela é autocontida:
 > não é necessário reler seções anteriores a menos que haja dúvida sobre
@@ -402,7 +402,8 @@ Coletadas em `2026-04-22` via `wc -l` / `grep -nE "def "`:
 ### Estado atual (consolidado) — branch `claude/fix-rate-limit-interval-1vPbB`
 
 **Commits relevantes (mais recente → mais antigo):**
-- `070a37d` — Sanitizar fila SSE de log em browser.py (emit_log + _save_error_html) *(esta sessão)*
+- `2340738` — Extrair resolve_client_ip + payloads bloco chat_completions *(esta sessão)*
+- `070a37d` — Sanitizar fila SSE de log em browser.py (emit_log + _save_error_html) *(sessão anterior)*
 - `a034d61` — Implementar concorrência por perfil e round-robin de profiles no browser
 - `185e222` — Auditar server.py para referências _impl indefinidas *(esta sessão)*
 - `6a3a3c5` — Corrigir duplicatas em server_helpers e restaurar suite para 698 testes *(root-commit do repo local)*
@@ -475,7 +476,7 @@ Coletadas em `2026-04-22` via `wc -l` / `grep -nE "def "`:
 - `1f3374b` — Extrair detecção de origem de request para módulo testável offline
 - `0c6216e` — docs: refinar backlog P0-P1-P2 com evidências concretas
 
-**Suite offline atual: 20 arquivos → 815 passed** (após sessão de 2026-05-02 quinquadragies — sanitização da fila SSE em browser.py).
+**Suite offline atual: 20 arquivos → 832 passed** (após sessão de 2026-05-02 sexquadragies — extração de helpers de chat_completions + correção de testes no-op + resolve_client_ip).
 
 O estado do repo local foi restaurado a partir da cópia de trabalho (histórico git reiniciado como root-commit `6a3a3c5`). As seguintes correções foram aplicadas em relação ao estado anterior da cópia de trabalho:
 - Removidas 9 definições duplicadas (linhas 820-959) de `server_helpers.py` que sobrescreviam as implementações corretas dos ciclos 31-43.
@@ -516,7 +517,7 @@ Esperado: **815 passed**. (NÃO usar `python -m pytest tests/` cru — `tests/te
 |---|---|---|---|
 | `Scripts/request_source.py` | ~60 | `is_python_chat_request`, `is_codex_chat_request`, `is_analyzer_chat_request` (detecta `analisador_prontuarios*` e token `analyzer`). | `tests/test_request_source.py` (15) |
 | `Scripts/error_catalog.py` | ~290 | 11 códigos + `classify_from_text` (PT-BR + EN) + `format_reason` (tag `[CODE] …` idempotente, fallback sem ruído para INTERNAL_ERROR). | `tests/test_error_catalog.py` (65) |
-| `Scripts/server_helpers.py` | ~860 | `format_wait_seconds`, `queue_status_payload`, `prune_old_attempts`, `count_active_chatgpt_profiles`, `combine_openai_messages`, `build_sender_label`, `wrap_paste_if_python_source`, `coalesce_origin_url`, `extract_source_hint`, `decode_attachment`, `resolve_chat_url` (com `case_insensitive=False` opcional), `resolve_browser_profile`, `normalize_optional_text`, `build_queue_key`, `build_chat_task_payload`, eventos SSE/NDJSON (`build_error_event`, `build_status_event`, `build_markdown_event`, `build_search_result_event`, `build_search_finish_event`, `build_chat_id_event`, `build_chat_meta_event`), `format_requester_suffix` / `format_origin_suffix`, `compute_python_request_interval`, `safe_int` / `safe_snapshot_stats`, `extract_requester_identity`, helpers de payload de manutenção (`resolve_lookup_origin_url`, `extract_chat_delete_local_targets`, `extract_delete_request_targets`, `extract_menu_url`, `extract_menu_execute_payload`), helpers de `/api/web_search/test` (`extract_web_search_test_params`, `build_web_search_test_task`, `build_web_search_test_stream_response`, `build_web_search_test_error_payload`, `build_web_search_test_timeout_payload`, `build_web_search_test_no_response_payload`, `build_web_search_test_terminal_response`), `extract_manual_whatsapp_reply_targets` + `format_manual_whatsapp_requester_suffix` (idiom legado), `resolve_download_content_type` (MIME por extensão), `resolve_avatar_filename` (whitelist), helpers de `ACTIVE_CHATS` (`count_active_chats`, `count_unfinished_chats`, `find_expired_chat_ids`, `build_active_chat_meta`, `mark_chat_finished` — sets finished/finished_at/last_event_at em meta), `normalize_source_hint`. | `tests/test_server_helpers.py` (279) |
+| `Scripts/server_helpers.py` | ~910 | `format_wait_seconds`, `queue_status_payload`, `prune_old_attempts`, `count_active_chatgpt_profiles`, `combine_openai_messages`, `build_sender_label`, `wrap_paste_if_python_source` (no-op — marcadores removidos do sistema), `coalesce_origin_url`, `extract_source_hint`, `decode_attachment`, `resolve_chat_url` (com `case_insensitive=False` opcional), `resolve_browser_profile`, `normalize_optional_text`, `build_queue_key`, `build_chat_task_payload`, eventos SSE/NDJSON (`build_error_event`, `build_status_event`, `build_markdown_event`, `build_search_result_event`, `build_search_finish_event`, `build_chat_id_event`, `build_chat_meta_event`), `format_requester_suffix` / `format_origin_suffix`, `compute_python_request_interval`, `safe_int` / `safe_snapshot_stats`, `extract_requester_identity`, helpers de payload de manutenção (`resolve_lookup_origin_url`, `extract_chat_delete_local_targets`, `extract_delete_request_targets`, `extract_menu_url`, `extract_menu_execute_payload`), helpers de `/api/web_search/test` (`extract_web_search_test_params`, `build_web_search_test_task`, `build_web_search_test_stream_response`, `build_web_search_test_error_payload`, `build_web_search_test_timeout_payload`, `build_web_search_test_no_response_payload`, `build_web_search_test_terminal_response`), `extract_manual_whatsapp_reply_targets` + `format_manual_whatsapp_requester_suffix` (idiom legado), `resolve_download_content_type` (MIME por extensão), `resolve_avatar_filename` (whitelist), helpers de `ACTIVE_CHATS` (`count_active_chats`, `count_unfinished_chats`, `find_expired_chat_ids`, `build_active_chat_meta`, `mark_chat_finished` — sets finished/finished_at/last_event_at em meta), `normalize_source_hint`, **`resolve_client_ip`** (pure: FF-header + remote_addr), **`build_chat_block_error_payload`** / **`build_chat_block_success_payload`** (payloads canônicos do modo bloco de chat_completions). | `tests/test_server_helpers.py` (296) |
 | `Scripts/sync_dedup.py` | ~95 | Classe `SyncDedup` (dedup de `/api/sync` na janela 120s, `try_acquire`/`release`/`active_count`/`snapshot`, `now_func` injetável). Constante `DEFAULT_DEDUP_WINDOW_SEC = 120`. | `tests/test_sync_dedup.py` (20) |
 | `Scripts/browser_predicates.py` | ~190 | `extract_task_sender`, `is_known_orphan_tab_url`, `response_looks_incomplete_json`, `response_requests_followup_actions`, `replace_inline_base64_payloads`. `ensure_paste_wrappers` mantida como no-op para compatibilidade (marcadores `[INICIO_TEXTO_COLADO]`/`[FIM_TEXTO_COLADO]` removidos do sistema). | `tests/test_browser_predicates.py` (38) |
 | `Scripts/log_sanitizer.py` | ~170 | `mask_api_key`, `mask_bearer_token`, `mask_session_cookie`, `mask_file_path`, `sanitize`, `sanitize_iter`, `sanitize_mapping`. | `tests/test_log_sanitizer.py` (31) |
@@ -596,6 +597,14 @@ Esperado: **815 passed**. (NÃO usar `python -m pytest tests/` cru — `tests/te
 4. Helper público e idempotente no módulo puro (ex.: `format_reason` em `error_catalog.py`) — permite chamada em dois pontos sem risco de duplicação.
 5. Exceções específicas do domínio (ex.: `ChatGPTRateLimitError`) permanecem no arquivo impuro; o módulo puro retorna preview/decisão e o wrapper monta a exceção.
 
+### Integrações desta sessão (2026-05-02 sexquadragies)
+- `server._client_ip` convertida para wrapper 1-liner sobre `_resolve_client_ip_impl` (X-Forwarded-For → primeiro IP da cadeia, fallback remote_addr).
+- Modo bloco de `chat_completions`: 3 sites de `{"success": False, "error": ..., "chat_id": ...}` migrados para `_build_chat_block_error_payload_impl`; payload de sucesso migrado para `_build_chat_block_success_payload_impl`.
+- Inconsistência corrigida: timeout do modo bloco (linha ~1862) agora usa `_mark_chat_finished_impl` em vez de assignment direto (`ACTIVE_CHATS[chat_id]['finished'] = True; finished_at = time.time()`).
+- 4 testes corrigidos para refletir o comportamento no-op de `wrap_paste_if_python_source` e `ensure_paste_wrappers` (marcadores removidos do sistema — `test_python_source_wraps_plain_text` → `test_python_source_returns_unchanged`, `test_already_wrapped_not_double_wrapped` → `test_already_wrapped_strips_markers`, `test_wraps_unmarked_text` → `test_unmarked_text_not_wrapped`, `test_partial_marker_is_wrapped` → `test_partial_marker_not_wrapped`).
+
+---
+
 ### Próximas opções (ordem recomendada por risco crescente)
 
 **1. ~~Extrair `_wait_python_request_interval_if_needed` completo em padrão B~~ (FEITO em 2026-04-26 novendecies, commit `0904fe9`)**
@@ -638,35 +647,31 @@ Leia APENAS a seção "PONTO DE RETOMADA (última atualização em 2026-05-02
 quinquadragies)" em REFACTOR_PROGRESS.md — é autocontida.
 
 Estado atual: commit `070a37d`.
-Suite offline: **815 passed em 20 arquivos**.
+Suite offline: **832 passed em 20 arquivos**.
 
-Concluído nesta sessão (2026-05-02 quinquadragies):
-- ~~Opção A (sanitizar logs de browser.py)~~ FEITA:
-  · Import defensivo de log_sanitizer.sanitize em browser.py.
-  · emit_log: sanitiza msg antes do q.put (cobre todos os callers).
-  · _save_error_html: sanitiza nos 4 pontos inline de q.put
-    (success HTML, screenshot fallback, ambos falharam, exceção).
-  · tests/test_browser_log_sanitization.py: 21 casos offline.
-- Arquivos faltantes no worktree restaurados da cópia local:
-  profile_concurrency.py, server_observabilidade.py, server_recursos.py,
-  server_usuario.py, server_admin.py, server_busca.py,
-  test_profile_concurrency.py.
+Concluído nesta sessão (2026-05-02 sexquadragies):
+- ~~Opção A (auditar chat_completions)~~ FEITA:
+  · resolve_client_ip (pure) + wrappers em _client_ip.
+  · build_chat_block_error_payload + build_chat_block_success_payload
+    em server_helpers; 3 sites de dict literal migrados em chat_completions.
+  · Inconsistência corrigida: timeout bloco agora usa _mark_chat_finished_impl.
+  · 4 testes no-op corrigidos (wrap_paste + ensure_paste_wrappers).
+  · 17 novos testes offline (TestResolveClientIp + TestChatBlockPayloads).
 
 Próximas opções (escolher UMA):
 
-**A. Auditar chat_completions por idioms duplicados** — builders de payloads
-   de erro/timeout/stream; normalização de cabeçalhos X-Forwarded-*
-   em _client_ip. Risco BAIXO.
-
-**B. Extrair helpers puros de analisador_prontuarios.py** — parsers e
+**A. Extrair helpers puros de analisador_prontuarios.py** — parsers e
    helpers adicionais ainda não cobertos por testes offline. Risco MÉDIO.
 
-**C. Modularização de browser.py por ações** (P2 #22) — requer plano de
+**B. Modularização de browser.py por ações** (P2 #22) — requer plano de
    design; toca async/Playwright. Risco ALTO.
+
+**C. Extração de helpers de api_sync** — `_url_info` / `_cid_info` e
+   normalização inline de campos; baixo valor mas zero risco. Risco BAIXO.
 
 Regras obrigatórias:
 (a) escolher UMA opção e executar do começo ao fim;
-(b) manter os 815 testes offline passando + eventuais novos;
+(b) manter os 832 testes offline passando + eventuais novos;
 (c) ANTES do commit/push final, ATUALIZAR esta seção com novo commit hash,
     contagem de testes e próxima opção;
 (d) commit com título em PT-BR no imperativo;
@@ -677,7 +682,7 @@ Se for prompt/dados extensos: colagem via clipboard.
 ```
 
 ### Checklist de "antes de terminar a sessão" (rodar sempre)
-- [ ] Suite offline passa: `python -m pytest tests/test_humanizer.py tests/test_shared_queue.py tests/test_selectors_smoke.py tests/test_request_source.py tests/test_error_catalog.py tests/test_server_helpers.py tests/test_browser_predicates.py tests/test_rate_limit_integration.py tests/test_log_sanitizer.py tests/test_analisador_rate_limit.py tests/test_audit_sanitization.py tests/test_security_state.py tests/test_chat_rate_limit_cooldown.py tests/test_analisador_parsers.py tests/test_sync_dedup.py tests/test_python_request_throttle.py tests/test_web_search_throttle.py tests/test_error_scanner_helpers.py tests/test_profile_concurrency.py tests/test_browser_log_sanitization.py` (esperado: **815 passed**).
+- [ ] Suite offline passa: `python -m pytest tests/test_humanizer.py tests/test_shared_queue.py tests/test_selectors_smoke.py tests/test_request_source.py tests/test_error_catalog.py tests/test_server_helpers.py tests/test_browser_predicates.py tests/test_rate_limit_integration.py tests/test_log_sanitizer.py tests/test_analisador_rate_limit.py tests/test_audit_sanitization.py tests/test_security_state.py tests/test_chat_rate_limit_cooldown.py tests/test_analisador_parsers.py tests/test_sync_dedup.py tests/test_python_request_throttle.py tests/test_web_search_throttle.py tests/test_error_scanner_helpers.py tests/test_profile_concurrency.py tests/test_browser_log_sanitization.py` (esperado: **832 passed**).
 - [ ] `python -c "import ast; ast.parse(open('Scripts/server.py', encoding='utf-8').read())"` OK.
 - [ ] `python -c "import ast; ast.parse(open('Scripts/browser.py', encoding='utf-8').read())"` OK.
 - [ ] `python -c "import ast; ast.parse(open('Scripts/analisador_prontuarios.py', encoding='utf-8').read())"` OK.
@@ -687,6 +692,7 @@ Se for prompt/dados extensos: colagem via clipboard.
 - [ ] `git status` limpo e último commit pushado para `origin/claude/fix-rate-limit-interval-1vPbB`.
 
 ### Histórico de sessões (para auditoria — NÃO precisa reler)
+- **2026-05-02 sexquadragies** — branch `claude/continue-refactor-updates-wvOqd`, `2340738`: Opção A (chat_completions) concluída — `resolve_client_ip` puro + wrapper em `_client_ip`; `build_chat_block_error_payload` / `build_chat_block_success_payload` para 3+1 sites de dict literal em modo bloco; timeout corrigido para usar `_mark_chat_finished_impl`; 4 testes no-op corrigidos. Suite offline: **832 passed em 20 arquivos** (+17 novos).
 - **2026-05-02 quinquadragies** — branch `claude/fix-rate-limit-interval-1vPbB`, `070a37d`: Opção A concluída — import defensivo de `log_sanitizer.sanitize` em `browser.py`; `emit_log` sanitiza antes do `q.put` (cobre todos os callers); `_save_error_html` sanitiza nos 4 pontos inline de `q.put` (HTML salvo, screenshot fallback, ambos falharam, exceção inesperada). `tests/test_browser_log_sanitization.py` (21 casos). Suite offline: **815 passed em 20 arquivos** (+21 novos).
 - **2026-04-22** (sessão original) — `1f3374b`: extração de `request_source.py`.
 - **2026-04-22 bis** — `0c6216e`: replanejamento, DoD refinados, sem código.

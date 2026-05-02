@@ -97,6 +97,9 @@ from server_helpers import (
     advance_health_ping_state as _advance_health_ping_state_impl,
     build_unauthorized_payload as _build_unauthorized_payload_impl,
     safe_snapshot_stats as _safe_snapshot_stats_impl,
+    resolve_client_ip as _resolve_client_ip_impl,
+    build_chat_block_error_payload as _build_chat_block_error_payload_impl,
+    build_chat_block_success_payload as _build_chat_block_success_payload_impl,
 )
 import error_catalog as _error_catalog
 from log_sanitizer import sanitize_mapping as _sanitize_audit_payload
@@ -343,10 +346,10 @@ def log(msg):
 
 
 def _client_ip() -> str:
-    fwd = request.headers.get("X-Forwarded-For", "").strip()
-    if fwd:
-        return fwd.split(",")[0].strip()
-    return (request.remote_addr or "unknown").strip()
+    return _resolve_client_ip_impl(
+        request.headers.get("X-Forwarded-For", ""),
+        request.remote_addr or "",
+    )
 
 
 def _audit_event(event_type: str, **extra):
@@ -1856,13 +1859,10 @@ def chat_completions():
                     raw_msg = stream_q.get(timeout=600)
                 except queue.Empty:
                     # [FIX SV1] queue.Empty era exceção não tratada → HTTP 500
-                    ACTIVE_CHATS[chat_id]['finished']    = True
-                    ACTIVE_CHATS[chat_id]['finished_at'] = time.time()
-                    return jsonify({
-                        "success": False,
-                        "error":   "Timeout: browser não respondeu em 600s.",
-                        "chat_id": chat_id
-                    })
+                    _mark_chat_finished_impl(ACTIVE_CHATS, chat_id, now=time.time())
+                    return jsonify(_build_chat_block_error_payload_impl(
+                        chat_id, "Timeout: browser não respondeu em 600s."
+                    ))
 
                 if raw_msg is None:
                     _mark_chat_finished_impl(ACTIVE_CHATS, chat_id, now=time.time())
@@ -1891,11 +1891,11 @@ def chat_completions():
                     if is_rate_limited:
                         _register_chat_rate_limit(retry_after, reason=err_msg)
                     _mark_chat_finished_impl(ACTIVE_CHATS, chat_id, now=time.time())
-                    return jsonify({"success": False, "error": msg['content'], "chat_id": chat_id})
+                    return jsonify(_build_chat_block_error_payload_impl(chat_id, msg['content']))
 
         except Exception as e:
             log(f"[ERRO] Modo block inesperado: {e}")
-            return jsonify({"success": False, "error": str(e), "chat_id": chat_id})
+            return jsonify(_build_chat_block_error_payload_impl(chat_id, str(e)))
 
         # Persiste no storage
         storage.append_message(chat_id, "user",      message)
@@ -1909,10 +1909,6 @@ def chat_completions():
             chromium_profile=final_chromium_profile or effective_browser_profile or "",
         )  # [FIX S3] passa [] — save_chat carrega e mescla internamente
 
-        return jsonify({
-            "success": True,
-            "chat_id": chat_id,
-            "html":    final_html,
-            "url":     final_url,
-            "title":   final_title
-        })
+        return jsonify(_build_chat_block_success_payload_impl(
+            chat_id, final_html, final_url, final_title
+        ))
