@@ -2220,3 +2220,54 @@ class TestSearchHelpersComposedEquivalence:
             result, query=query_str, index=idx, total=total, source=source_label,
         )
         assert new == legacy
+
+
+class TestPushErrorAndCloseQueue:
+    """Helper canônico para `_dispatch_chat_task` falhar e fechar o stream."""
+
+    def test_pushes_error_then_sentinel(self):
+        import queue as _queue
+        q = _queue.Queue()
+        sh.push_error_and_close_queue(q, "boom")
+        first = q.get_nowait()
+        second = q.get_nowait()
+        # Primeiro: SSE de erro byte-equivalente a build_error_event.
+        assert first == sh.build_error_event("boom")
+        # Segundo: sentinela None que fecha o consumer.
+        assert second is None
+        assert q.empty()
+
+    def test_works_with_any_put_method(self):
+        # Aceita qualquer objeto com .put — útil para mocks.
+        captured = []
+
+        class _FakeQ:
+            def put(self, item):
+                captured.append(item)
+
+        sh.push_error_and_close_queue(_FakeQ(), "x")
+        assert len(captured) == 2
+        assert captured[0] == sh.build_error_event("x")
+        assert captured[1] is None
+
+    def test_unicode_message_preserved(self):
+        import queue as _queue
+        q = _queue.Queue()
+        sh.push_error_and_close_queue(q, "Erro: timeout aguardando ç+á")
+        first = json.loads(q.get_nowait())
+        assert first["content"] == "Erro: timeout aguardando ç+á"
+        assert q.get_nowait() is None
+
+    def test_empty_message(self):
+        import queue as _queue
+        q = _queue.Queue()
+        sh.push_error_and_close_queue(q, "")
+        first = json.loads(q.get_nowait())
+        assert first == {"type": "error", "content": ""}
+        assert q.get_nowait() is None
+
+    def test_returns_none(self):
+        import queue as _queue
+        q = _queue.Queue()
+        result = sh.push_error_and_close_queue(q, "x")
+        assert result is None

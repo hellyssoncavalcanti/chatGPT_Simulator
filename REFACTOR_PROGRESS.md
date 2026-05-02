@@ -472,7 +472,7 @@ Coletadas em `2026-04-22` via `wc -l` / `grep -nE "def "`:
 - `1f3374b` — Extrair detecção de origem de request para módulo testável offline
 - `0c6216e` — docs: refinar backlog P0-P1-P2 com evidências concretas
 
-**Suite offline atual: 18 arquivos → 770 passed** (após etapa 52 — extração de helpers de progresso de busca em `server_helpers.py`).
+**Suite offline atual: 18 arquivos → 775 passed** (após etapa 53 — extração de `push_error_and_close_queue` em `server_helpers.py`).
 
 O estado do repo local foi restaurado a partir da cópia de trabalho (histórico git reiniciado como root-commit `6a3a3c5`). As seguintes correções foram aplicadas em relação ao estado anterior da cópia de trabalho:
 - Removidas 9 definições duplicadas (linhas 820-959) de `server_helpers.py` que sobrescreviam as implementações corretas dos ciclos 31-43.
@@ -503,7 +503,7 @@ python -m pytest \
   tests/test_web_search_throttle.py \
   tests/test_error_scanner_helpers.py
 ```
-Esperado: **770 passed**. (NÃO usar `python -m pytest tests/` cru — `tests/test_server_api.py` e `tests/test_storage.py` falham por requerer `flask` / `cryptography` indisponíveis neste ambiente.)
+Esperado: **775 passed**. (NÃO usar `python -m pytest tests/` cru — `tests/test_server_api.py` e `tests/test_storage.py` falham por requerer `flask` / `cryptography` indisponíveis neste ambiente.)
 
 ### Mapa de módulos puros já criados
 
@@ -784,6 +784,8 @@ analisador_prontuarios.py, PARAR — não está no escopo destas opções.
       - `build_search_prepare_message(source_label, idx, total)` — `"📚 Preparando busca {source} {idx}/{total}."`.
       - `build_search_keepalive_message(source_label, query)` — `'⏳ Busca {source} por "{query}" ainda em andamento...'`.
       `server.py` migrou os 3 yields do generator (status prepare, status keepalive, result event) para wrappers finos. Antes: 39 linhas de kwargs literais duplicados; agora: 21 linhas com helpers compostos. `tests/test_server_helpers.py` ganhou 4 classes novas (`TestBuildSearchProgressExtras`, `TestBuildSearchPhaseLabel`, `TestBuildSearchPrepareMessage`, `TestBuildSearchKeepaliveMessage`) + classe `TestSearchHelpersComposedEquivalence` que prova byte-equivalência da composição completa com o JSON literal histórico (3 cenários: prepare, keepalive, result). Suite offline atualizada: **770 passed** em 18 arquivos (+19 novos).
+- **2026-05-02 (esta sessão, branch `claude/focused-einstein-HT0Xs`) — Lote P2 ciclo seguinte: helper de fechamento de stream em `_dispatch_chat_task`:**
+  53. Extraído `push_error_and_close_queue(stream_queue, message)` em `Scripts/server_helpers.py` para o idiom canônico `stream_q.put(build_error_event(...)); stream_q.put(None)` que aparece nos 2 handlers de exceção de `_dispatch_chat_task` (TimeoutError e Exception genérica). Helper aceita qualquer objeto com método `.put` (Queue, mock, etc.) e mantém a ordem (erro primeiro, sentinela `None` depois) para garantir que o consumer leia o erro antes de fechar. `server.py` migrou os 2 sites para wrappers finos. `tests/test_server_helpers.py` ganhou classe `TestPushErrorAndCloseQueue` (+5 casos: ordem das mensagens, ducktype `_FakeQ`, unicode, mensagem vazia, retorno `None`). Suite offline atualizada: **775 passed** em 18 arquivos (+5 novos).
 
 
 

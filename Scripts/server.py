@@ -108,6 +108,7 @@ from server_helpers import (
     build_search_phase_label as _build_search_phase_label_impl,
     build_search_prepare_message as _build_search_prepare_message_impl,
     build_search_keepalive_message as _build_search_keepalive_message_impl,
+    push_error_and_close_queue as _push_error_and_close_queue_impl,
 )
 import error_catalog as _error_catalog
 from error_scanner_helpers import (
@@ -2219,15 +2220,15 @@ def chat_completions():
             )
             _get_llm_provider().dispatch_task(chat_task_payload)
         except TimeoutError as queue_timeout:
-            stream_q.put(_build_error_event_impl(
-                f"Timeout aguardando fila interna do servidor: {queue_timeout}"
-            ))
-            stream_q.put(None)
+            _push_error_and_close_queue_impl(
+                stream_q,
+                f"Timeout aguardando fila interna do servidor: {queue_timeout}",
+            )
         except Exception as dispatch_err:
-            stream_q.put(_build_error_event_impl(
-                f"Falha ao enfileirar tarefa no browser: {dispatch_err}"
-            ))
-            stream_q.put(None)
+            _push_error_and_close_queue_impl(
+                stream_q,
+                f"Falha ao enfileirar tarefa no browser: {dispatch_err}",
+            )
         finally:
             if slot_acquired:
                 _release_python_chat_slot(queue_key)

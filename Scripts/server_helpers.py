@@ -1119,6 +1119,19 @@ def build_unauthorized_payload() -> dict:
     return {"error": "Unauthorized"}
 
 
+def push_error_and_close_queue(stream_queue, message: str) -> None:
+    """Empurra um evento SSE de erro seguido do sentinela `None` que fecha
+    o stream para o consumer.
+
+    Idiom canônico do dispatcher de chat (`_dispatch_chat_task` em
+    `server.py`) para sinalizar falha e encerrar a sessão de stream sem
+    fazer o consumer esperar pelo timeout. Aceita qualquer fila com
+    método `.put(item)` (Queue, mock, etc.).
+    """
+    stream_queue.put(build_error_event(message))
+    stream_queue.put(None)
+
+
 def build_search_progress_extras(
     query, idx: int, total: int, source: str, *, phase=None,
 ) -> dict:
@@ -1258,6 +1271,7 @@ __all__ = [
     "build_search_phase_label",
     "build_search_prepare_message",
     "build_search_keepalive_message",
+    "push_error_and_close_queue",
     "safe_snapshot_stats",
 ]
 
