@@ -365,6 +365,13 @@ try:
 except Exception:  # pragma: no cover - defensivo
     _parsers = None
 
+try:
+    # Helpers puros: grafo clínico, erros esgotados, serialização compacta,
+    # resumo por paciente, strip HTML, detecção de erros de conexão LLM.
+    import analisador_helpers as _helpers
+except Exception:  # pragma: no cover - defensivo
+    _helpers = None
+
 
 def _aguardar_throttle_llm():
     """Espera o tempo restante do throttle antes de enviar a próxima mensagem ao ChatGPT."""
@@ -406,26 +413,19 @@ class ChatGPTRateLimitError(RuntimeError):
 
 
 def _is_llm_connection_error(exc: BaseException) -> bool:
-    """
-    Detecta erros transitórios de conexão/stream com o ChatGPT Simulator.
-    Inclui casos comuns quando o servidor reinicia durante uma análise.
-    """
+    """Detecta erros transitórios de conexão/stream com o ChatGPT Simulator."""
+    if _helpers is not None:
+        return _helpers.is_llm_connection_error(exc)
     if isinstance(exc, (requests.Timeout, requests.ConnectionError)):
         return True
     if isinstance(exc, (ConnectionResetError, BrokenPipeError, TimeoutError)):
         return True
-
     texto = str(exc or "").lower()
-    padroes = (
-        "connection reset",
-        "connection aborted",
-        "connection broken",
-        "remote end closed connection",
-        "forçado o cancelamento de uma conexão existente pelo host remoto",
-        "max retries exceeded",
+    return any(p in texto for p in (
+        "connection reset", "connection aborted", "connection broken",
+        "remote end closed connection", "max retries exceeded",
         "failed to establish a new connection",
-    )
-    return any(p in texto for p in padroes)
+    ))
 
 
 def _aguardar_reconexao_llm(espera: int, tentativa: int, exc: BaseException):
@@ -1591,58 +1591,20 @@ def _val_para_sql(val):
 
 def _normalizar_motivo_esgotado(erro_msg: str) -> str:
     """Extrai um motivo legível/agrupável a partir do erro acumulado do registro."""
+    if _helpers is not None:
+        return _helpers.normalize_esgotado_reason(erro_msg)
     texto = re.sub(r"\s+", " ", str(erro_msg or "")).strip(" |")
-    if not texto:
-        return "Sem mensagem de erro registrada"
-
-    partes = [p.strip() for p in texto.split("|") if p.strip()]
-    partes_validas = [
-        p for p in partes
-        if not p.startswith("[AUTO-RESET")
-        and not p.startswith("[AUTO-RESET-STARTUP")
-    ]
-    motivo = (partes_validas[-1] if partes_validas else partes[-1] if partes else texto).strip()
-    motivo = re.sub(r"\s+", " ", motivo)
-    motivo_lower = motivo.lower()
-
-    if "texto insuficiente após remoção de html" in motivo_lower:
-        return "Prontuário ficou insuficiente após limpeza/remoção de HTML."
-
-    if (
-        "simulador não retornou conteúdo markdown" in motivo_lower
-        or "llm não retornou conteúdo markdown" in motivo_lower
-    ):
-        return "LLM não retornou resposta final em markdown utilizável."
-
-    if (
-        "llm não retornou json válido" in motivo_lower
-        or "llm não retornou bloco json" in motivo_lower
-        or "expecting ',' delimiter" in motivo_lower
-        or "expecting property name enclosed in double quotes" in motivo_lower
-        or "unterminated string" in motivo_lower
-        or "invalid control character" in motivo_lower
-        or "extra data" in motivo_lower
-    ):
-        return "LLM retornou JSON inválido/malformado para o schema esperado."
-
-    if "api_exec recusou" in motivo_lower or "execute_sql recusou" in motivo_lower:
-        return "Falha de persistência/execução SQL ao salvar ou consultar a análise."
-
-    if "simulador retornou erro" in motivo_lower:
-        return "ChatGPT Simulator retornou erro durante a análise."
-
-    return motivo[:180] + ("..." if len(motivo) > 180 else "")
+    return texto[:180] if texto else "Sem mensagem de erro registrada"
 
 
 def _agrupar_motivos_esgotados(rows: list[dict]) -> list[dict]:
+    if _helpers is not None:
+        return _helpers.group_esgotado_reasons(rows)
     contador = Counter()
     for row in rows or []:
         motivo = _normalizar_motivo_esgotado((row or {}).get("erro_msg"))
         contador[motivo] += 1
-    return [
-        {"motivo": motivo, "total": total}
-        for motivo, total in contador.most_common(5)
-    ]
+    return [{"motivo": m, "total": t} for m, t in contador.most_common(5)]
 
 
 def buscar_pendentes() -> dict:
@@ -2197,44 +2159,13 @@ def buscar_maior_resumo_texto_paciente(id_paciente: str, id_atendimento_atual=No
 
 
 def _montar_resumo_fallback(maior_resumo: str, dt_consulta: str, texto_consulta: str) -> str:
-    """Monta resumo_fallback sem duplicar consulta do mesmo datetime.
-
-    - Se ``maior_resumo`` já contém uma linha "Consulta de <dt_consulta>: ..."
-      com o mesmo conteúdo → retorna ``maior_resumo`` inalterado.
-    - Se contém a mesma data mas com conteúdo diferente → substitui a linha.
-    - Se não contém → concatena no final.
-    """
+    """Monta resumo_fallback sem duplicar consulta do mesmo datetime."""
+    if _helpers is not None:
+        return _helpers.montar_resumo_fallback(maior_resumo, dt_consulta, texto_consulta)
     sufixo = f"Consulta de {dt_consulta}: {texto_consulta}".strip()
-
     if not maior_resumo:
         return sufixo
-
-    if not dt_consulta:
-        return f"{maior_resumo}\n{sufixo}".strip()
-
-    prefixo_dt = f"Consulta de {dt_consulta}:"
-    prefixo_dt_lower = prefixo_dt.lower()
-    linhas = maior_resumo.split("\n")
-    idx_encontrado = None
-
-    for idx, linha in enumerate(linhas):
-        if linha.strip().lower().startswith(prefixo_dt_lower):
-            idx_encontrado = idx
-            break
-
-    if idx_encontrado is None:
-        # Datetime não presente — concatena normalmente
-        return f"{maior_resumo}\n{sufixo}".strip()
-
-    # Datetime já existe — compara conteúdo
-    conteudo_existente = linhas[idx_encontrado].strip()[len(prefixo_dt):].strip()
-    if conteudo_existente == texto_consulta.strip():
-        # Mesmo conteúdo — nada a mudar
-        return maior_resumo
-
-    # Conteúdo mudou — substitui a linha
-    linhas[idx_encontrado] = sufixo
-    return "\n".join(linhas).strip()
+    return f"{maior_resumo}\n{sufixo}".strip()
 
 
 def corrigir_erros_texto_insuficiente_no_startup():
@@ -2307,31 +2238,31 @@ def corrigir_erros_texto_insuficiente_no_startup():
 
 
 def _stringify_compact(value) -> str:
+    if _helpers is not None:
+        return _helpers.stringify_compact(value)
     try:
         parsed = json.loads(value) if isinstance(value, str) else value
     except Exception:
         parsed = value
     if isinstance(parsed, list):
-        partes = []
-        for item in parsed:
-            if item in (None, "", [], {}):
-                continue
-            partes.append(json.dumps(item, ensure_ascii=False) if isinstance(item, (dict, list)) else str(item))
-        return "; ".join(partes)
+        return "; ".join(
+            json.dumps(i, ensure_ascii=False) if isinstance(i, (dict, list)) else str(i)
+            for i in parsed if i not in (None, "", [], {})
+        )
     if isinstance(parsed, dict):
         return json.dumps(parsed, ensure_ascii=False)
     return str(parsed or "").strip()
 
 
 def _valor_compilado_para_prompt(value, max_chars: int = 1200):
+    if _helpers is not None:
+        return _helpers.format_compiled_value_for_prompt(value, max_chars)
     try:
         parsed = json.loads(value) if isinstance(value, str) else value
     except Exception:
         parsed = value
-
     if isinstance(parsed, str):
-        texto = re.sub(r"\s+", " ", parsed).strip()
-        return texto[:max_chars]
+        return re.sub(r"\s+", " ", parsed).strip()[:max_chars]
     return parsed
 
 
@@ -2551,17 +2482,17 @@ def atualizar_analise_compilada_paciente(id_paciente: str):
 
 
 def _stringify_compact(value) -> str:
+    if _helpers is not None:
+        return _helpers.stringify_compact(value)
     try:
         parsed = json.loads(value) if isinstance(value, str) else value
     except Exception:
         parsed = value
     if isinstance(parsed, list):
-        partes = []
-        for item in parsed:
-            if item in (None, "", [], {}):
-                continue
-            partes.append(json.dumps(item, ensure_ascii=False) if isinstance(item, (dict, list)) else str(item))
-        return "; ".join(partes)
+        return "; ".join(
+            json.dumps(i, ensure_ascii=False) if isinstance(i, (dict, list)) else str(i)
+            for i in parsed if i not in (None, "", [], {})
+        )
     if isinstance(parsed, dict):
         return json.dumps(parsed, ensure_ascii=False)
     return str(parsed or "").strip()
@@ -2757,17 +2688,17 @@ def atualizar_analise_compilada_paciente(id_paciente: str):
 
 
 def _stringify_compact(value) -> str:
+    if _helpers is not None:
+        return _helpers.stringify_compact(value)
     try:
         parsed = json.loads(value) if isinstance(value, str) else value
     except Exception:
         parsed = value
     if isinstance(parsed, list):
-        partes = []
-        for item in parsed:
-            if item in (None, "", [], {}):
-                continue
-            partes.append(json.dumps(item, ensure_ascii=False) if isinstance(item, (dict, list)) else str(item))
-        return "; ".join(partes)
+        return "; ".join(
+            json.dumps(i, ensure_ascii=False) if isinstance(i, (dict, list)) else str(i)
+            for i in parsed if i not in (None, "", [], {})
+        )
     if isinstance(parsed, dict):
         return json.dumps(parsed, ensure_ascii=False)
     return str(parsed or "").strip()
@@ -2941,17 +2872,17 @@ def atualizar_analise_compilada_paciente(id_paciente: str):
 
 
 def _stringify_compact(value) -> str:
+    if _helpers is not None:
+        return _helpers.stringify_compact(value)
     try:
         parsed = json.loads(value) if isinstance(value, str) else value
     except Exception:
         parsed = value
     if isinstance(parsed, list):
-        partes = []
-        for item in parsed:
-            if item in (None, "", [], {}):
-                continue
-            partes.append(json.dumps(item, ensure_ascii=False) if isinstance(item, (dict, list)) else str(item))
-        return "; ".join(partes)
+        return "; ".join(
+            json.dumps(i, ensure_ascii=False) if isinstance(i, (dict, list)) else str(i)
+            for i in parsed if i not in (None, "", [], {})
+        )
     if isinstance(parsed, dict):
         return json.dumps(parsed, ensure_ascii=False)
     return str(parsed or "").strip()
@@ -3125,17 +3056,17 @@ def atualizar_analise_compilada_paciente(id_paciente: str):
 
 
 def _stringify_compact(value) -> str:
+    if _helpers is not None:
+        return _helpers.stringify_compact(value)
     try:
         parsed = json.loads(value) if isinstance(value, str) else value
     except Exception:
         parsed = value
     if isinstance(parsed, list):
-        partes = []
-        for item in parsed:
-            if item in (None, "", [], {}):
-                continue
-            partes.append(json.dumps(item, ensure_ascii=False) if isinstance(item, (dict, list)) else str(item))
-        return "; ".join(partes)
+        return "; ".join(
+            json.dumps(i, ensure_ascii=False) if isinstance(i, (dict, list)) else str(i)
+            for i in parsed if i not in (None, "", [], {})
+        )
     if isinstance(parsed, dict):
         return json.dumps(parsed, ensure_ascii=False)
     return str(parsed or "").strip()
@@ -3348,143 +3279,42 @@ def limpar_tabelas_complementares(id_atendimento: int):
 
 
 def _normalizar_node(nd: dict) -> dict:
-    """
-    Normaliza campos de um node do grafo clínico para o formato esperado pelo PHP:
-      id, tipo/node_tipo, valor/node_valor, normalizado/node_normalizado, contexto/node_contexto
-
-    A LLM pode retornar variantes em inglês, abreviadas, etc.
-    """
-    tipo_bruto = str(
-        nd.get("tipo") or nd.get("node_tipo") or nd.get("type") or nd.get("category") or ""
-    ).strip()
-    valor = str(
-        nd.get("valor") or nd.get("node_valor") or nd.get("value") or nd.get("label") or nd.get("name") or nd.get("nome") or ""
-    ).strip()
-    normalizado = str(
-        nd.get("normalizado") or nd.get("node_normalizado") or nd.get("normalized") or nd.get("normalised") or ""
-    ).strip()
-    contexto = str(
-        nd.get("contexto") or nd.get("node_contexto") or nd.get("context") or nd.get("description") or nd.get("descricao") or ""
-    ).strip()
-
-    tipo_alias = {
-        "patient": "paciente",
-        "paciente": "paciente",
-        "patient_name": "paciente",
-        "diagnosis": "diagnostico",
-        "diagnostico": "diagnostico",
-        "diagnóstico": "diagnostico",
-        "cid": "diagnostico",
-        "symptom": "sintoma",
-        "symptoms": "sintoma",
-        "sintoma": "sintoma",
-        "sinal": "sintoma",
-        "sign": "sintoma",
-        "medication": "medicamento",
-        "medicine": "medicamento",
-        "drug": "medicamento",
-        "medicamento": "medicamento",
-        "medicacao": "medicamento",
-        "medicação": "medicamento",
-        "therapy": "terapia",
-        "terapia": "terapia",
-        "exam": "exame",
-        "test": "exame",
-        "exame": "exame",
-        "gene": "gene",
-        "genetics": "gene",
-        "genetica": "gene",
-        "genética": "gene",
-        "behavior": "comportamento",
-        "behaviour": "comportamento",
-        "comportamento": "comportamento",
-        "conduct": "conduta",
-        "plan": "conduta",
-        "conduta": "conduta",
-        "risk": "risco",
-        "risco": "risco",
-        "pending": "pendencia",
-        "pendencia": "pendencia",
-        "pendência": "pendencia",
-    }
-    tipo = tipo_alias.get(tipo_bruto.lower(), tipo_bruto.lower())
-
-    if not normalizado and valor:
-        normalizado = re.sub(r"[^a-z0-9]+", "_", valor.lower()).strip("_")
-
-    campos_base = {
-        "id", "node_id", "tipo", "node_tipo", "type", "category",
-        "valor", "node_valor", "value", "label", "name", "nome",
-        "normalizado", "node_normalizado", "normalized", "normalised",
-        "contexto", "node_contexto", "context", "description", "descricao",
-    }
-    extras = []
-    for k, v in nd.items():
-        if k in campos_base or v in (None, "", [], {}):
-            continue
-        if isinstance(v, (dict, list)):
-            extras.append(f"{k}={json.dumps(v, ensure_ascii=False)}")
-        else:
-            extras.append(f"{k}={v}")
-    extras_txt = " | ".join(extras[:4])
-    if extras_txt:
-        contexto = f"{contexto} | {extras_txt}".strip(" |") if contexto else extras_txt
-
-    node_id = str(nd.get("id") or nd.get("node_id") or "").strip()
-    if not node_id and tipo and normalizado:
-        node_id = f"{tipo}_{normalizado[:80]}"
-
-    return {
-        "id":           node_id,
-        "tipo":         tipo,
-        "valor":        valor,
-        "normalizado":  normalizado,
-        "contexto":     contexto,
-    }
+    """Normaliza campos de um node do grafo clínico para o formato PHP."""
+    if _helpers is not None:
+        return _helpers.normalizar_node(nd)
+    return {"id": "", "tipo": str(nd.get("tipo") or "").lower(), "valor": str(nd.get("valor") or ""), "normalizado": "", "contexto": ""}
 
 
 def _normalizar_edge(ed: dict) -> dict:
-    """
-    Normaliza campos de uma edge do grafo clínico para o formato esperado pelo PHP:
-      node_origem, node_destino, relacao_tipo, relacao_contexto
-    """
+    """Normaliza campos de uma edge do grafo clínico para o formato PHP."""
+    if _helpers is not None:
+        return _helpers.normalizar_edge(ed)
     return {
-        "node_origem":      ed.get("node_origem") or ed.get("source") or ed.get("from") or ed.get("origem") or "",
-        "node_destino":     ed.get("node_destino") or ed.get("target") or ed.get("to") or ed.get("destino") or "",
-        "relacao_tipo":     ed.get("relacao_tipo") or ed.get("relation") or ed.get("type") or ed.get("tipo") or ed.get("relationship") or "",
-        "relacao_contexto": ed.get("relacao_contexto") or ed.get("contexto") or ed.get("context") or ed.get("description") or ed.get("descricao") or "",
+        "node_origem": ed.get("node_origem") or ed.get("source") or "",
+        "node_destino": ed.get("node_destino") or ed.get("target") or "",
+        "relacao_tipo": ed.get("relacao_tipo") or ed.get("relation") or "",
+        "relacao_contexto": ed.get("relacao_contexto") or ed.get("contexto") or "",
     }
 
 
 def _deduplicar_nodes_grafo(nodes: list) -> list:
-    dedup = {}
+    if _helpers is not None:
+        return _helpers.deduplicar_nodes_grafo(nodes)
+    seen: set = set()
+    result = []
     for node in nodes:
         if not isinstance(node, dict):
             continue
-        chave = (
-            str(node.get("tipo") or "").strip().lower(),
-            str(node.get("normalizado") or node.get("valor") or "").strip().lower(),
-        )
-        if not chave[1]:
-            continue
-        if chave not in dedup:
-            dedup[chave] = node
-            continue
-        existente = dedup[chave]
-        if not existente.get("id") and node.get("id"):
-            existente["id"] = node["id"]
-        if not existente.get("contexto") and node.get("contexto"):
-            existente["contexto"] = node["contexto"]
-        elif node.get("contexto") and node["contexto"] not in str(existente.get("contexto") or ""):
-            existente["contexto"] = f"{existente.get('contexto','')} | {node['contexto']}".strip(" |")
-    return list(dedup.values())
+        chave = (str(node.get("tipo") or "").lower(), str(node.get("normalizado") or node.get("valor") or "").lower())
+        if chave[1] and chave not in seen:
+            seen.add(chave)
+            result.append(node)
+    return result
 
 
 def _primeiro_node_representativo(nodes: list):
-    for tipo_prioritario in ("diagnostico", "medicamento", "terapia", "sintoma", "gene", "risco"):
-        for node in nodes:
-            if (node.get("tipo") or "").lower() == tipo_prioritario:
-                return node
+    if _helpers is not None:
+        return _helpers.primeiro_node_representativo(nodes)
     return nodes[0] if nodes else None
 
 
@@ -3683,13 +3513,17 @@ class _StripHTML(HTMLParser):
     def __init__(self):
         super().__init__()
         self._parts = []
+
     def handle_data(self, data):
         self._parts.append(data)
 
+
 def strip_html(raw: str) -> str:
+    if _helpers is not None:
+        return _helpers.strip_html(raw)
     p = _StripHTML()
     p.feed(html_mod.unescape(raw or ""))
-    return re.sub(r'\s{3,}', '\n\n', " ".join(p._parts)).strip()
+    return re.sub(r"\s{3,}", "\n\n", " ".join(p._parts)).strip()
 
 
 # ─────────────────────────────────────────────────────────────
@@ -5079,6 +4913,8 @@ SCHEMA OBRIGATÓRIO:
 
 
 def _ensure_list_local(val):
+    if _helpers is not None:
+        return _helpers.ensure_list(val)
     if val is None:
         return []
     if isinstance(val, list):
@@ -5093,6 +4929,8 @@ def _ensure_list_local(val):
 
 
 def _grafo_clinico_esta_generico(resultado: dict) -> bool:
+    if _helpers is not None:
+        return _helpers.is_grafo_generico(resultado)
     nodes = _ensure_list_local(
         resultado.get("grafo_clinico_nodes")
         or resultado.get("grafo_nodes")
@@ -5100,7 +4938,6 @@ def _grafo_clinico_esta_generico(resultado: dict) -> bool:
     )
     if not nodes:
         return True
-
     tipos_relevantes = {
         "diagnostico", "sintoma", "medicamento", "terapia",
         "exame", "pendencia", "risco", "gene", "comportamento",
