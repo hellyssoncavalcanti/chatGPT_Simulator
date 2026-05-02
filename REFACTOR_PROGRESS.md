@@ -548,7 +548,7 @@ Esperado: **775 passed**. (NÃO usar `python -m pytest tests/` cru — `tests/te
 - `api_sync()` emite `[🔄 SYNC] ⚠️ sync_in_progress` com `elapsed` e `retry_after` antes de retornar 409, e inclui `retry_after_seconds` / `elapsed_seconds` no JSON.
 
 ### Integrações pendentes (NÃO feitas)
-1. Catálogo em `browser._dismiss_rate_limit_modal_if_any` — último caminho que ainda usa string livre para rate-limit. **BLOQUEADO: requer aprovação do usuário** (toca `browser.py` async).
+1. ~~Catálogo em `browser._dismiss_rate_limit_modal_if_any`~~ — **FEITO** (2026-05-02, commit `d8762df`): JS captura `modal.innerText` antes de clicar; log usa `format_reason` com prefixo `[RATE_LIMIT]`; import defensivo com fallback `str()` se módulo ausente.
 2. Concorrência por `browser_profile` — **BLOQUEADO: requer aprovação do usuário** (toca `browser.py` async).
 3. **Integração inicial ChatGPT ↔ Gemini com pré-check de login no startup** — adicionar após as pendências acima, sem alterar a estrutura do refactor:
    - Gemini pode abrir no **`browser_profile=default`** (mesma diretriz de fallback já consolidada).
@@ -605,9 +605,8 @@ Esperado: **775 passed**. (NÃO usar `python -m pytest tests/` cru — `tests/te
 **5. ~~Expor snapshot de `WebSearchThrottle` em `/api/metrics` + gauge Prometheus~~ (FEITO em 2026-04-26 tervicies)**
 - `WebSearchThrottle.snapshot()` agora retorna `{last_started_at, last_interval_sec, age_seconds}` (clamp 0 quando boot ou clock retrógrado). `/api/metrics` ganha chave `web_search_throttle`; `/metrics` (Prometheus) ganha gauge `simulator_web_search_throttle_age_sec` atualizado em `_update_rate_limit_prom_gauges`. +3 testes em `TestSnapshot::test_snapshot_age_*`.
 
-**6. Integrar catálogo em `browser._dismiss_rate_limit_modal_if_any` (ALTO risco, BLOQUEADO)**
-- Último caminho que ainda usa string livre para rate-limit.
-- **BLOQUEADO**: toca `browser.py` async/Playwright → requer aprovação do usuário.
+**6. ~~Integrar catálogo em `browser._dismiss_rate_limit_modal_if_any`~~ (FEITO em 2026-05-02, commit `d8762df`)**
+- JS captura `modal.innerText` (até 200 chars) antes de clicar; Python usa `_format_rate_limit_reason` (import defensivo com fallback `str()`). Log: `ℹ️ Modal de rate-limit detectado e fechado antes da digitação. [RATE_LIMIT] …`.
 
 **7. Plano de concorrência por `browser_profile` (ALTO risco, BLOQUEADO)**
 - Entregável inicial: documento em `docs/concurrency_per_profile.md` (sem código) — **FEITO** em 2026-04-26 duovicies (`511d667`).
@@ -616,13 +615,10 @@ Esperado: **775 passed**. (NÃO usar `python -m pytest tests/` cru — `tests/te
 **8. ~~Auditar/cobrir endpoints menores ainda sem testes offline~~ (FEITO em 2026-04-26 quatervicies)**
 - Auditoria identificou 2 idioms duplicados; extraídos `safe_int(value, default)` e `safe_snapshot_stats(queue_obj)` em `server_helpers.py`. 5 sites migrados (`queue_status`, `queue_failed`, `queue_failed_retry`, `logs_tail`, `api_metrics`). +17 testes em `tests/test_server_helpers.py::TestSafeInt`/`TestSafeSnapshotStats` cobrindo coerções, fallback de exceção, ausência de método, valores `None`/`""`/`bool`/float, defaults negativos.
 
-**9. Modularização do `server.py` (P2 #21, MÉDIO risco) — PARCIALMENTE CONCLUÍDA**
-- Primeira fase entregue: Blueprints `server_observabilidade.py` (queue_*, logs_*) e
-  `server_recursos.py` (serve_download, get_avatar, robots_txt). 8 rotas movidas.
-  server.py: 2731 → 2529 linhas. Corrigido NameError latente em logs_stream.
-- Próxima fase (quando aprovada): auth parcial (logout, user_info, update_pass)
-  e busca (api_web_search_test) — requerem extração de check_auth para módulo compartilhado.
-  Rotas complexas (chat_completions, api_sync) permanecem em server.py.
+**9. ~~Modularização do `server.py` (P2 #21, MÉDIO risco)~~ — CONCLUÍDA (4 Blueprints)**
+- **Fase 1** (`d8762df`): `server_observabilidade.py` (queue_*, logs_*) + `server_recursos.py` (serve_download, get_avatar, robots_txt). 8 rotas. server.py: 2731 → 2529 linhas. Corrigido NameError latente em `logs_stream`.
+- **Fase 2** (esta sessão): `server_usuario.py` (logout, user_info, update_pass, upload_avatar) + `server_admin.py` (api_errors_known, api_errors_scan, api_errors_claude_fix). 7 rotas adicionais. Bloco completo `error_scanner_helpers` removido de server.py.
+- Rotas complexas (`chat_completions`, `api_sync`, `api_web_search_test`, `api_metrics`, `login`, `health_check`) permanecem em `server.py` — correto, pois usam estado interno (`_SECURITY_STATE`, `_audit_event`, `_is_ip_blocked`).
 
 ### Prompt de retomada (COPIAR EXATAMENTE EM NOVO CHAT)
 
@@ -632,32 +628,36 @@ claude/continue-refactor-updates-wvOqd.
 Leia APENAS a seção "PONTO DE RETOMADA (última atualização em 2026-05-02
 unquadragies+)" em REFACTOR_PROGRESS.md — é autocontida.
 
-Estado atual: commit `d8762df`.
-Suite offline: **700 passed em 17 arquivos**.
+Estado atual: commit `185e222`.
+Suite offline: **775 passed em 18 arquivos**.
+Suite completa (CI): **777 passed** (excluindo test_server_api.py e
+test_browser_resolve_anchors.py que falham por requerer flask/cryptography).
 
-Opção D (browser._dismiss_rate_limit_modal_if_any) foi CONCLUÍDA:
-- JS captura modal.innerText antes de clicar; log usa format_reason com
-  prefixo [RATE_LIMIT]; import defensivo com fallback str() se ausente.
-
-Opção 9 (modularização server.py) foi PARCIALMENTE CONCLUÍDA (fase 1):
-- Scripts/server_observabilidade.py: Blueprint com queue_status, queue_failed,
-  queue_failed_retry, logs_tail, logs_stream (corrigiu NameError latente).
-- Scripts/server_recursos.py: Blueprint com serve_download, get_avatar, robots_txt.
-- server.py: 2731 → 2529 linhas. 5 imports _impl exclusivos removidos.
+Concluído nesta sessão:
+- Opção D: browser._dismiss_rate_limit_modal_if_any integrada com format_reason.
+- Opção 9 (COMPLETA — 4 Blueprints Flask):
+  · server_observabilidade.py: queue_status, queue_failed, queue_failed_retry,
+    logs_tail, logs_stream (corrigiu NameError latente).
+  · server_recursos.py: serve_download, get_avatar, robots_txt.
+  · server_usuario.py: logout, user_info, update_pass, upload_avatar.
+  · server_admin.py: api_errors_known, api_errors_scan, api_errors_claude_fix.
+  15 rotas movidas no total. Bloco error_scanner_helpers removido de server.py.
+- test_error_scanner_helpers.py adicionado à suite offline (+53 testes).
+- README.md: seção de componentes atualizada com os 4 blueprints.
 
 Próximas opções (escolher UMA com aprovação):
 
-**9b. Fase 2 de modularização** (MÉDIO risco) — extrair check_auth para módulo
-   compartilhado e criar blueprints para auth parcial (logout/user_info/
-   update_pass) e busca (api_web_search_test). Requer aprovação explícita.
+**A. Modularizar busca** — extrair `api_web_search_test` para Blueprint, ou
+   extrair `_handle_browser_search_api` para server_helpers. Risco MÉDIO.
 
-**A. Log sanitizer em _audit_event** (ver backlog P1 #17) — integrar em
-   utils.file_log e _audit_event. Requer aprovação explícita.
+**B. Concorrência por browser_profile** — implementar limite de tarefas
+   simultâneas por perfil (doc em docs/concurrency_per_profile.md já existe).
+   Requer aprovação explícita (toca browser.py async).
 
 Regras obrigatórias:
 (a) escolher UMA opção e executar do começo ao fim;
 (b) NÃO tocar browser.py/analisador_prontuarios.py sem aprovação explícita;
-(c) manter os 700 testes offline passando + eventuais novos;
+(c) manter os 775 testes offline passando + eventuais novos;
 (d) ANTES do commit/push final, ATUALIZAR esta seção com novo commit hash,
     contagem de testes e próxima opção;
 (e) commit com título em PT-BR no imperativo;
@@ -668,7 +668,7 @@ de editar.
 ```
 
 ### Checklist de "antes de terminar a sessão" (rodar sempre)
-- [ ] Suite offline passa: `python -m pytest tests/test_humanizer.py tests/test_shared_queue.py tests/test_selectors_smoke.py tests/test_request_source.py tests/test_error_catalog.py tests/test_server_helpers.py tests/test_browser_predicates.py tests/test_rate_limit_integration.py tests/test_log_sanitizer.py tests/test_analisador_rate_limit.py tests/test_audit_sanitization.py tests/test_security_state.py tests/test_chat_rate_limit_cooldown.py tests/test_analisador_parsers.py tests/test_sync_dedup.py tests/test_python_request_throttle.py tests/test_web_search_throttle.py` (esperado: **700 passed**).
+- [ ] Suite offline passa: `python -m pytest tests/test_humanizer.py tests/test_shared_queue.py tests/test_selectors_smoke.py tests/test_request_source.py tests/test_error_catalog.py tests/test_server_helpers.py tests/test_browser_predicates.py tests/test_rate_limit_integration.py tests/test_log_sanitizer.py tests/test_analisador_rate_limit.py tests/test_audit_sanitization.py tests/test_security_state.py tests/test_chat_rate_limit_cooldown.py tests/test_analisador_parsers.py tests/test_sync_dedup.py tests/test_python_request_throttle.py tests/test_web_search_throttle.py tests/test_error_scanner_helpers.py` (esperado: **775 passed**).
 - [ ] `python3 -c "import ast; ast.parse(open('Scripts/server.py').read())"` OK.
 - [ ] `python3 -c "import ast; ast.parse(open('Scripts/browser.py').read())"` OK.
 - [ ] `python3 -c "import ast; ast.parse(open('Scripts/analisador_prontuarios.py').read())"` OK.
