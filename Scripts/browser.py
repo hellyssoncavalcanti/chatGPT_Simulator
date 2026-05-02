@@ -95,22 +95,75 @@ def emit_log(q, msg):
     file_log("browser.py", f"[{sender}] {msg}")
 
 
-async def _save_error_html(page, label: str, chat_id: str = "") -> str | None:
-    """Salva o HTML renderizado da página em logs/html_dos_erros/ para diagnóstico de erros."""
+async def _save_error_html(page, label: str, chat_id: str = "", q=None) -> str | None:
+    """Salva o HTML renderizado da página em logs/html_dos_erros/ para diagnóstico de erros.
+
+    Cria a pasta automaticamente se não existir. Tenta page.content() com timeout
+    de 10 s; se falhar, salva um screenshot JPEG como fallback.
+    Registra no log o resultado (sucesso ou motivo da falha) — nunca falha silenciosamente.
+    """
     try:
         html_dir = os.path.join(config.DIRS["logs"], "html_dos_erros")
         os.makedirs(html_dir, exist_ok=True)
+
         ts        = time.strftime("%Y%m%d_%H%M%S")
         safe_lbl  = re.sub(r"[^\w\-]", "_", label)[:40]
         safe_chat = re.sub(r"[^\w\-]", "_", str(chat_id or ""))[:20]
         suffix    = f"_{safe_chat}" if safe_chat else ""
-        filename  = f"{ts}_{safe_lbl}{suffix}.html"
-        filepath  = os.path.join(html_dir, filename)
-        html_content = await page.content()
-        with open(filepath, "w", encoding="utf-8") as fh:
-            fh.write(html_content)
-        return filepath
-    except Exception:
+
+        # ── Tenta capturar HTML ───────────────────────────────────────────────
+        html_content = None
+        html_exc     = None
+        try:
+            html_content = await asyncio.wait_for(page.content(), timeout=10.0)
+        except Exception as exc:
+            html_exc = exc
+
+        if html_content:
+            filepath = os.path.join(html_dir, f"{ts}_{safe_lbl}{suffix}.html")
+            with open(filepath, "w", encoding="utf-8") as fh:
+                fh.write(html_content)
+            msg = f"📄 HTML de erro salvo: {filepath}"
+            file_log("browser.py", msg)
+            if q:
+                q.put(json.dumps({"type": "log", "content": f"[browser.py] {msg}"}) + "\n")
+            return filepath
+
+        # ── Fallback: screenshot JPEG ─────────────────────────────────────────
+        scr_exc = None
+        try:
+            raw = await asyncio.wait_for(
+                page.screenshot(type="jpeg", quality=80, full_page=False), timeout=10.0
+            )
+            if raw:
+                filepath = os.path.join(html_dir, f"{ts}_{safe_lbl}{suffix}_fallback.jpg")
+                with open(filepath, "wb") as fh:
+                    fh.write(raw)
+                msg = (
+                    f"📄 Screenshot de erro salvo (HTML indisponível — {html_exc}): {filepath}"
+                )
+                file_log("browser.py", msg)
+                if q:
+                    q.put(json.dumps({"type": "log", "content": f"[browser.py] {msg}"}) + "\n")
+                return filepath
+        except Exception as exc:
+            scr_exc = exc
+
+        # ── Ambos falharam — registra o motivo ────────────────────────────────
+        msg = (
+            f"⚠️ Não foi possível salvar diagnóstico de erro '{label}': "
+            f"HTML={html_exc} | screenshot={scr_exc}"
+        )
+        file_log("browser.py", msg)
+        if q:
+            q.put(json.dumps({"type": "log", "content": f"[browser.py] {msg}"}) + "\n")
+        return None
+
+    except Exception as exc:
+        msg = f"⚠️ Erro inesperado em _save_error_html('{label}'): {exc}"
+        file_log("browser.py", msg)
+        if q:
+            q.put(json.dumps({"type": "log", "content": f"[browser.py] {msg}"}) + "\n")
         return None
 
 
@@ -1365,8 +1418,23 @@ async def _read_last_assistant_snapshot(page):
                     return !!txt || !!html;
                 }) || nodes[nodes.length - 1];
 
+            function resolveAnchors(node) {
+                if (!node) return '';
+                const clone = node.cloneNode(true);
+                const origAnchors = Array.from(node.querySelectorAll('a'));
+                const cloneAnchors = Array.from(clone.querySelectorAll('a'));
+                origAnchors.forEach((a, i) => {
+                    const ca = cloneAnchors[i];
+                    if (!ca) return;
+                    const href = a.href;
+                    if (href && href !== location.href && !href.startsWith('javascript:')) {
+                        ca.setAttribute('href', href);
+                    }
+                });
+                return clone.innerHTML;
+            }
             return {
-                html: preferred?.innerHTML || '',
+                html: resolveAnchors(preferred),
                 text: (preferred?.innerText || '').trim(),
             };
         }""")
@@ -1405,8 +1473,23 @@ async def _read_assistant_snapshot_after_baseline(page, baseline_count: int):
                         return !!txt || !!html;
                     }) || nodes[nodes.length - 1];
             }
+            function resolveAnchors(node) {
+                if (!node) return '';
+                const clone = node.cloneNode(true);
+                const origAnchors = Array.from(node.querySelectorAll('a'));
+                const cloneAnchors = Array.from(clone.querySelectorAll('a'));
+                origAnchors.forEach((a, i) => {
+                    const ca = cloneAnchors[i];
+                    if (!ca) return;
+                    const href = a.href;
+                    if (href && href !== location.href && !href.startsWith('javascript:')) {
+                        ca.setAttribute('href', href);
+                    }
+                });
+                return clone.innerHTML;
+            }
             return {
-                html: preferred?.innerHTML || '',
+                html: resolveAnchors(preferred),
                 text: (preferred?.innerText || '').trim(),
             };
         }""", int(max(0, baseline_count or 0)))
@@ -2160,6 +2243,24 @@ async def scrape_full_chat(page):
                 });
             }
 
+            // Helper: injeta href real (da propriedade DOM) em <a> sem atributo href,
+            // como os decorated-link do ChatGPT em tabelas com links de pacientes.
+            function resolveAnchors(node) {
+                if (!node) return '';
+                const clone = node.cloneNode(true);
+                const origAnchors = Array.from(node.querySelectorAll('a'));
+                const cloneAnchors = Array.from(clone.querySelectorAll('a'));
+                origAnchors.forEach((a, i) => {
+                    const ca = cloneAnchors[i];
+                    if (!ca) return;
+                    const href = a.href;
+                    if (href && href !== location.href && !href.startsWith('javascript:')) {
+                        ca.setAttribute('href', href);
+                    }
+                });
+                return clone.innerHTML;
+            }
+
             // ── Estratégia 1: div[data-message-author-role] (layout 2025+) ──
             const roleDivs = document.querySelectorAll('[data-message-author-role]');
             if (roleDivs.length > 0) {
@@ -2177,8 +2278,7 @@ async def scrape_full_chat(page):
                                  || el;
                     }
 
-                    let html = contentEl.innerHTML || '';
-                    html = stripButtonsKeepMedia(html);
+                    let html = stripButtonsKeepMedia(resolveAnchors(contentEl));
                     return { role, content: html, message_id: messageId };
                 }).filter(m => m.content && m.content.trim().length > 0);
             }
@@ -2203,8 +2303,7 @@ async def scrape_full_chat(page):
                     }
                     if (!contentEl) contentEl = art;
 
-                    let html = contentEl.innerHTML || '';
-                    html = stripButtonsKeepMedia(html);
+                    let html = stripButtonsKeepMedia(resolveAnchors(contentEl));
                     return { role, content: html, message_id: messageId };
                 }).filter(m => m.content && m.content.trim().length > 0);
             }
@@ -2226,8 +2325,7 @@ async def scrape_full_chat(page):
                                  || sec.querySelector('[data-message-author-role="user"]');
                     }
                     if (!contentEl) return null;
-                    let html = contentEl.innerHTML || '';
-                    html = stripButtonsKeepMedia(html);
+                    let html = stripButtonsKeepMedia(resolveAnchors(contentEl));
                     return { role, content: html, message_id: messageId };
                 }).filter(m => m && m.content && m.content.trim().length > 0);
             }
@@ -2579,6 +2677,21 @@ async def handle_sync_task(context, task):
                             return imgs.concat(anchors).join('');
                         });
                     }
+                    function resolveAnchors(node) {
+                        if (!node) return '';
+                        const clone = node.cloneNode(true);
+                        const origAnchors = Array.from(node.querySelectorAll('a'));
+                        const cloneAnchors = Array.from(clone.querySelectorAll('a'));
+                        origAnchors.forEach((a, i) => {
+                            const ca = cloneAnchors[i];
+                            if (!ca) return;
+                            const href = a.href;
+                            if (href && href !== location.href && !href.startsWith('javascript:')) {
+                                ca.setAttribute('href', href);
+                            }
+                        });
+                        return clone.innerHTML;
+                    }
                     const sections = document.querySelectorAll('section[data-turn]');
                     if (!sections.length) return [];
                     return Array.from(sections).map(sec => {
@@ -2593,8 +2706,7 @@ async def handle_sync_task(context, task):
                                      || sec.querySelector('[data-message-author-role="user"]');
                         }
                         if (!contentEl) return null;
-                        let html = contentEl.innerHTML || '';
-                        html = stripButtonsKeepMedia(html);
+                        let html = stripButtonsKeepMedia(resolveAnchors(contentEl));
                         return { role, content: html };
                     }).filter(m => m && m.content && m.content.trim().length > 0);
                 }""")
@@ -2950,7 +3062,7 @@ async def watchdog_page(page, q, stop_event: asyncio.Event,
                 continue
             err_str = str(e) if str(e).strip() else type(e).__name__
             emit_event(q, "error", f"⏱️ Watchdog: aba não respondeu ({err_str}). Abortando.")
-            saved = await _save_error_html(page, "watchdog_timeout")
+            saved = await _save_error_html(page, "watchdog_timeout", q=q)
             if saved:
                 emit_log(q, f"📄 HTML salvo em: {saved}")
             stop_event.set()
@@ -3584,7 +3696,7 @@ async def handle_chat_task(context, task, get_browser_for_profile=None):
                     emit_event(q, 'error', 'Timeout externo 660s — tarefa abortada.')
                     if page:
                         saved = await _save_error_html(page, "timeout_660s",
-                                                       task.get("chat_id", ""))
+                                                       task.get("chat_id", ""), q=q)
                         if saved:
                             emit_log(q, f"📄 HTML salvo em: {saved}")
                 except RateLimitDetected as rle:
@@ -3678,7 +3790,7 @@ async def handle_chat_task(context, task, get_browser_for_profile=None):
                     emit_event(q, 'error', f'Falha no navegador: {str(e)}')
                     if page:
                         saved = await _save_error_html(page, "erro_chat",
-                                                       task.get("chat_id", ""))
+                                                       task.get("chat_id", ""), q=q)
                         if saved:
                             emit_log(q, f"📄 HTML salvo em: {saved}")
                     break
