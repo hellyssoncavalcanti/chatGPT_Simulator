@@ -393,16 +393,17 @@ Coletadas em `2026-04-22` via `wc -l` / `grep -nE "def "`:
 
 ---
 
-## 🆕 PONTO DE RETOMADA (última atualização em 2026-05-02 unquadragies+)
+## 🆕 PONTO DE RETOMADA (última atualização em 2026-05-02 quinquadragies)
 
 > **Leia APENAS esta seção ao retomar em outro chat.** Ela é autocontida:
 > não é necessário reler seções anteriores a menos que haja dúvida sobre
 > detalhe específico. Seções históricas acima existem apenas para auditoria.
 
-### Estado atual (consolidado) — branch `claude/continue-refactor-updates-wvOqd`
+### Estado atual (consolidado) — branch `claude/fix-rate-limit-interval-1vPbB`
 
 **Commits relevantes (mais recente → mais antigo):**
-- `a034d61` — Implementar concorrência por perfil e round-robin de profiles no browser *(esta sessão)*
+- `070a37d` — Sanitizar fila SSE de log em browser.py (emit_log + _save_error_html) *(esta sessão)*
+- `a034d61` — Implementar concorrência por perfil e round-robin de profiles no browser
 - `185e222` — Auditar server.py para referências _impl indefinidas *(esta sessão)*
 - `6a3a3c5` — Corrigir duplicatas em server_helpers e restaurar suite para 698 testes *(root-commit do repo local)*
 - `4828ff8` — Extrair payload 401 canônico + autoflow sem pausas *(esta sessão, ciclo 44 / opção 2)*
@@ -474,7 +475,7 @@ Coletadas em `2026-04-22` via `wc -l` / `grep -nE "def "`:
 - `1f3374b` — Extrair detecção de origem de request para módulo testável offline
 - `0c6216e` — docs: refinar backlog P0-P1-P2 com evidências concretas
 
-**Suite offline atual: 19 arquivos → 794 passed** (após sessão de 2026-05-02 — concorrência por perfil + round-robin + Blueprint busca).
+**Suite offline atual: 20 arquivos → 815 passed** (após sessão de 2026-05-02 quinquadragies — sanitização da fila SSE em browser.py).
 
 O estado do repo local foi restaurado a partir da cópia de trabalho (histórico git reiniciado como root-commit `6a3a3c5`). As seguintes correções foram aplicadas em relação ao estado anterior da cópia de trabalho:
 - Removidas 9 definições duplicadas (linhas 820-959) de `server_helpers.py` que sobrescreviam as implementações corretas dos ciclos 31-43.
@@ -504,9 +505,10 @@ python -m pytest \
   tests/test_python_request_throttle.py \
   tests/test_web_search_throttle.py \
   tests/test_error_scanner_helpers.py \
-  tests/test_profile_concurrency.py
+  tests/test_profile_concurrency.py \
+  tests/test_browser_log_sanitization.py
 ```
-Esperado: **794 passed**. (NÃO usar `python -m pytest tests/` cru — `tests/test_server_api.py` e `tests/test_storage.py` falham por requerer `flask` / `cryptography` indisponíveis neste ambiente.)
+Esperado: **815 passed**. (NÃO usar `python -m pytest tests/` cru — `tests/test_server_api.py` e `tests/test_storage.py` falham por requerer `flask` / `cryptography` indisponíveis neste ambiente.)
 
 ### Mapa de módulos puros já criados
 
@@ -550,6 +552,8 @@ Esperado: **794 passed**. (NÃO usar `python -m pytest tests/` cru — `tests/te
 - `/metrics` (Prometheus) ganha 6 gauges: `simulator_chat_rate_limit_remaining_sec`, `simulator_chat_rate_limit_strikes`, `simulator_security_blocked_ips`, `simulator_security_tracked_login_ips`, `simulator_python_request_throttle_age_sec`, `simulator_web_search_throttle_age_sec`. Atualização centralizada em `_update_rate_limit_prom_gauges()`. Silencioso se `prometheus_client` ausente.
 - Filtro de log werkzeug (`No401AuthLog`) acrescenta sufixo explicativo ao 409 de `/api/sync` (dedup benigno 120s).
 - `api_sync()` emite `[🔄 SYNC] ⚠️ sync_in_progress` com `elapsed` e `retry_after` antes de retornar 409, e inclui `retry_after_seconds` / `elapsed_seconds` no JSON.
+- `browser.emit_log` aplica `log_sanitizer.sanitize` antes de `q.put(...)` — a mensagem que vai para a fila SSE do cliente é sanitizada (API keys, Bearer tokens, caminhos de usuário, session cookies). Import defensivo com fallback `str()`. `file_log("browser.py", ...)` já era sanitizado por `utils.log`.
+- `browser._save_error_html` aplica `log_sanitizer.sanitize` nos 4 pontos de `q.put(...)` inline (success HTML, screenshot fallback, ambos falharam, exceção inesperada). Mascaramento de filepath relevante (`C:\Users\<user>\...`, `/home/<user>/...`).
 
 ### Integrações pendentes (NÃO feitas)
 1. ~~Catálogo em `browser._dismiss_rate_limit_modal_if_any`~~ — **FEITO** (2026-05-02, commit `d8762df`): JS captura `modal.innerText` antes de clicar; log usa `format_reason` com prefixo `[RATE_LIMIT]`; import defensivo com fallback `str()` se módulo ausente.
@@ -629,29 +633,30 @@ Esperado: **794 passed**. (NÃO usar `python -m pytest tests/` cru — `tests/te
 
 ```
 Continue o refactor do /home/user/chatGPT_Simulator na branch
-claude/continue-refactor-updates-wvOqd.
+claude/fix-rate-limit-interval-1vPbB.
 Leia APENAS a seção "PONTO DE RETOMADA (última atualização em 2026-05-02
-unquadragies+)" em REFACTOR_PROGRESS.md — é autocontida.
+quinquadragies)" em REFACTOR_PROGRESS.md — é autocontida.
 
-Estado atual: commit `a034d61`.
-Suite offline: **794 passed em 19 arquivos**.
+Estado atual: commit `070a37d`.
+Suite offline: **815 passed em 20 arquivos**.
 
-Concluído nesta sessão:
-- Opção A (busca modularizada — 5º Blueprint): server_busca.py para
-  api_web_search_test; check_auth extraído para auth.py para evitar
-  import circular; ~290 linhas removidas de server.py.
-- Opção B (concorrência por browser_profile — COMPLETA):
-  · profile_concurrency.py: ProfileConcurrencyLimiter puro + 19 testes.
-  · shared.py: singleton profile_concurrency_tracker.
-  · browser.py: round-robin corrigido (tratar "default" como "sem preferência")
-    + asyncio Semaphore por perfil (_guarded wrapper).
-  · server.py: profile_concurrency em /api/metrics.
-- README.md e REFACTOR_PROGRESS.md atualizados.
+Concluído nesta sessão (2026-05-02 quinquadragies):
+- ~~Opção A (sanitizar logs de browser.py)~~ FEITA:
+  · Import defensivo de log_sanitizer.sanitize em browser.py.
+  · emit_log: sanitiza msg antes do q.put (cobre todos os callers).
+  · _save_error_html: sanitiza nos 4 pontos inline de q.put
+    (success HTML, screenshot fallback, ambos falharam, exceção).
+  · tests/test_browser_log_sanitization.py: 21 casos offline.
+- Arquivos faltantes no worktree restaurados da cópia local:
+  profile_concurrency.py, server_observabilidade.py, server_recursos.py,
+  server_usuario.py, server_admin.py, server_busca.py,
+  test_profile_concurrency.py.
 
-Próximas opções (escolher UMA com aprovação):
+Próximas opções (escolher UMA):
 
-**A. Lote P1: sanitizar logs de browser.py** — integrar log_sanitizer em
-   _save_error_html e outros pontos de log no browser. Risco BAIXO.
+**A. Auditar chat_completions por idioms duplicados** — builders de payloads
+   de erro/timeout/stream; normalização de cabeçalhos X-Forwarded-*
+   em _client_ip. Risco BAIXO.
 
 **B. Extrair helpers puros de analisador_prontuarios.py** — parsers e
    helpers adicionais ainda não cobertos por testes offline. Risco MÉDIO.
@@ -661,29 +666,28 @@ Próximas opções (escolher UMA com aprovação):
 
 Regras obrigatórias:
 (a) escolher UMA opção e executar do começo ao fim;
-(b) NÃO tocar browser.py/analisador_prontuarios.py sem aprovação explícita;
-(c) manter os 794 testes offline passando + eventuais novos;
-(d) ANTES do commit/push final, ATUALIZAR esta seção com novo commit hash,
+(b) manter os 815 testes offline passando + eventuais novos;
+(c) ANTES do commit/push final, ATUALIZAR esta seção com novo commit hash,
     contagem de testes e próxima opção;
-(e) commit com título em PT-BR no imperativo;
-(f) push para claude/continue-refactor-updates-wvOqd.
+(d) commit com título em PT-BR no imperativo;
+(e) push para claude/fix-rate-limit-interval-1vPbB.
 
-Se encontrar algo inesperado em server.py ou browser.py, PARAR e pedir
-confirmação antes de editar.
+Se browser.py envolver perguntas ao ChatGPT: realistic typing.
+Se for prompt/dados extensos: colagem via clipboard.
 ```
 
 ### Checklist de "antes de terminar a sessão" (rodar sempre)
-- [ ] Suite offline passa: `python -m pytest tests/test_humanizer.py tests/test_shared_queue.py tests/test_selectors_smoke.py tests/test_request_source.py tests/test_error_catalog.py tests/test_server_helpers.py tests/test_browser_predicates.py tests/test_rate_limit_integration.py tests/test_log_sanitizer.py tests/test_analisador_rate_limit.py tests/test_audit_sanitization.py tests/test_security_state.py tests/test_chat_rate_limit_cooldown.py tests/test_analisador_parsers.py tests/test_sync_dedup.py tests/test_python_request_throttle.py tests/test_web_search_throttle.py tests/test_error_scanner_helpers.py` (esperado: **775 passed**).
-- [ ] `python3 -c "import ast; ast.parse(open('Scripts/server.py').read())"` OK.
-- [ ] `python3 -c "import ast; ast.parse(open('Scripts/browser.py').read())"` OK.
-- [ ] `python3 -c "import ast; ast.parse(open('Scripts/analisador_prontuarios.py').read())"` OK.
-- [ ] `python3 -c "import ast; ast.parse(open('Scripts/utils.py').read())"` OK.
-- [ ] `python3 -c "import ast; ast.parse(open('Scripts/error_catalog.py').read())"` OK.
-- [ ] `python3 -c "import ast; ast.parse(open('Scripts/web_search_throttle.py').read())"` OK.
+- [ ] Suite offline passa: `python -m pytest tests/test_humanizer.py tests/test_shared_queue.py tests/test_selectors_smoke.py tests/test_request_source.py tests/test_error_catalog.py tests/test_server_helpers.py tests/test_browser_predicates.py tests/test_rate_limit_integration.py tests/test_log_sanitizer.py tests/test_analisador_rate_limit.py tests/test_audit_sanitization.py tests/test_security_state.py tests/test_chat_rate_limit_cooldown.py tests/test_analisador_parsers.py tests/test_sync_dedup.py tests/test_python_request_throttle.py tests/test_web_search_throttle.py tests/test_error_scanner_helpers.py tests/test_profile_concurrency.py tests/test_browser_log_sanitization.py` (esperado: **815 passed**).
+- [ ] `python -c "import ast; ast.parse(open('Scripts/server.py', encoding='utf-8').read())"` OK.
+- [ ] `python -c "import ast; ast.parse(open('Scripts/browser.py', encoding='utf-8').read())"` OK.
+- [ ] `python -c "import ast; ast.parse(open('Scripts/analisador_prontuarios.py', encoding='utf-8').read())"` OK.
+- [ ] `python -c "import ast; ast.parse(open('Scripts/utils.py', encoding='utf-8').read())"` OK.
+- [ ] `python -c "import ast; ast.parse(open('Scripts/error_catalog.py', encoding='utf-8').read())"` OK.
 - [ ] Seção "PONTO DE RETOMADA" atualizada com commits novos, contagem de testes, próxima opção.
-- [ ] `git status` limpo e último commit pushado para `origin/claude/continue-refactor-updates-wvOqd`.
+- [ ] `git status` limpo e último commit pushado para `origin/claude/fix-rate-limit-interval-1vPbB`.
 
 ### Histórico de sessões (para auditoria — NÃO precisa reler)
+- **2026-05-02 quinquadragies** — branch `claude/fix-rate-limit-interval-1vPbB`, `070a37d`: Opção A concluída — import defensivo de `log_sanitizer.sanitize` em `browser.py`; `emit_log` sanitiza antes do `q.put` (cobre todos os callers); `_save_error_html` sanitiza nos 4 pontos inline de `q.put` (HTML salvo, screenshot fallback, ambos falharam, exceção inesperada). `tests/test_browser_log_sanitization.py` (21 casos). Suite offline: **815 passed em 20 arquivos** (+21 novos).
 - **2026-04-22** (sessão original) — `1f3374b`: extração de `request_source.py`.
 - **2026-04-22 bis** — `0c6216e`: replanejamento, DoD refinados, sem código.
 - **2026-04-22 ter** — `3334bf6`: catálogo central de erros (Lote P0 passo 1).
@@ -782,9 +786,10 @@ confirmação antes de editar.
       - `api_errors_claude_fix`: filtro de snippets, dict de body, gerador `_empty_stream` (2 yields) e `proxy` (3 yields) migrados para os helpers.
       `tests/test_error_scanner_helpers.py` cobre todos os 12 helpers com **53 casos** (filtros, mapeamento de campos opcionais, fallback defensivo p/ não-Mapping, idempotência do finish, determinismo do prompt). Suite offline atualizada: **751 passed** em 18 arquivos.
 
-### Próxima opção recomendada (continuar nesta branch ou pedir aprovação para tocar `browser.py`)
-- **Continuar baixo risco**: auditar `chat_completions` (linhas 2150+) e `api_sync` (linhas 1450+) por idioms duplicados ainda não cobertos. Helpers candidatos: builders de payloads de erro/timeout em `chat_completions`, normalização de cabeçalhos `X-Forwarded-*` em `_client_ip`, filtros de query-string em `/api/web_search/test`.
-- **Alto risco (BLOQUEADO)**: Opção D (catálogo em `browser._dismiss_rate_limit_modal_if_any`) e Opção 9 (modularização do `server.py` por domínio Flask Blueprint). Ambas requerem aprovação explícita.
+### Próxima opção recomendada
+- **Continuar baixo risco (próximo recomendado)**: auditar `chat_completions` (linhas ~450+) e `api_sync` por idioms duplicados ainda não cobertos. Helpers candidatos: builders de payloads de erro/timeout/stream em `chat_completions`, normalização de cabeçalhos `X-Forwarded-*` em `_client_ip`.
+- **Médio risco**: Extrair helpers puros de `analisador_prontuarios.py` — parsers adicionais ainda não cobertos por testes offline.
+- **Alto risco (BLOQUEADO)**: Modularização de `browser.py` por ações (P2 #22) — requer plano de design; toca async/Playwright.
 
 - **2026-05-02 (esta sessão, branch `claude/focused-einstein-HT0Xs`) — Lote P2 ciclo seguinte: kwargs canônicos de busca:**
   52. Extraídos 4 helpers em `Scripts/server_helpers.py` para reduzir duplicação no `_handle_browser_search_api.generate()`:
