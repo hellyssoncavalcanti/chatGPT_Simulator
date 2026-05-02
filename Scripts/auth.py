@@ -125,6 +125,24 @@ def check_session(request):
         return row["username"] if row else None
 
 
+def check_auth(request) -> bool:
+    """Verifica autenticação via Bearer token, JSON api_key, query api_key ou session cookie.
+    Extrai a lógica de check_auth() de server.py para uso em blueprints sem import circular."""
+    auth_header = request.headers.get("Authorization")
+    if auth_header and auth_header.startswith("Bearer "):
+        key = auth_header.split(" ")[1]
+        if key == config.API_KEY:
+            return True
+    data = request.get_json(silent=True) or {}
+    if data.get("api_key") == config.API_KEY:
+        return True
+    if request.args.get("api_key") == config.API_KEY:
+        return True
+    if check_session(request):
+        return True
+    return False
+
+
 def logout(token):
     if not token:
         return
