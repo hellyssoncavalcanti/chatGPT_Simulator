@@ -180,19 +180,11 @@ function chatgpt_ensure_prompt_scope_schema($db) {
 }
 
 function chatgpt_ensure_text_wrapper($conteudo) {
-    $start = '[INICIO_TEXTO_COLADO]';
-    $end   = '[FIM_TEXTO_COLADO]';
     $txt = trim((string)$conteudo);
     if ($txt === '') return $txt;
-
-    $has_start = strpos($txt, $start) !== false;
-    $has_end = strpos($txt, $end) !== false;
-    $is_wrapped = preg_match('/^\s*\[INICIO_TEXTO_COLADO\]/', $txt) && preg_match('/\[FIM_TEXTO_COLADO\]\s*$/', $txt);
-    if ($has_start && $has_end && $is_wrapped) return $txt;
-
-    $txt = str_replace([$start, $end], '', $txt);
-    $txt = trim($txt);
-    return $start . "\n" . $txt . "\n" . $end;
+    // Remove marcadores legados, caso o conteúdo ainda os contenha
+    $txt = str_replace(['[INICIO_TEXTO_COLADO]', '[FIM_TEXTO_COLADO]'], '', $txt);
+    return trim($txt);
 }
 
 function chatgpt_extract_analisador_schema_section($prompt) {
@@ -3779,17 +3771,9 @@ if (isset($_GET['action']) && $_GET['action'] === 'proxy') {
             }
         }
         
-        // Na 1ª mensagem (sem chat_id nem url), o system prompt nunca chegaria ao
-        // Simulator porque a rota faz exit antes do bloco de injeção da linha ~3848.
-        // chatgpt_ensure_text_wrapper encapsula apenas o trecho do DB, deixando o
-        // $date_format_rule e os marcadores INICIO/FIM_PROMPT_SISTEMA fora de qualquer
-        // bloco de paste. Para que browser.py cole tudo via clipboard (não digitando
-        // char-a-char), removemos quaisquer marcadores de paste internos e
-        // reencapsulamos o prompt inteiro em um único bloco antes do $msg_content.
         if (empty($chat_id) && empty($url_context) && !empty(trim($active_system_prompt ?? ''))) {
             $sys_clean = str_replace(['[INICIO_TEXTO_COLADO]', '[FIM_TEXTO_COLADO]'], '', trim($active_system_prompt));
-            $sys_block = '[INICIO_TEXTO_COLADO]' . "\n" . trim($sys_clean) . "\n" . '[FIM_TEXTO_COLADO]';
-            $msg_content = $sys_block . "\n\n" . $msg_content;
+            $msg_content = trim($sys_clean) . "\n\n" . $msg_content;
         }
 
         $payload = [
@@ -5550,20 +5534,14 @@ Responder SOMENTE com o JSON.`;
                     if (m.role !== 'user') continue;
                     const c = m.content || '';
 
-                    // Mensagem de contexto SQL — tenta extrair o que vem após [FIM_TEXTO_COLADO]
-                    if (c.includes('[INICIO_TEXTO_COLADO]')) {
-                        const parts = c.split('[FIM_TEXTO_COLADO]');
-                        if (parts.length > 1) {
-                            const after = parts[parts.length - 1].trim();
-                            // Só aceita se for uma pergunta real, não o placeholder
-                            if (after && after !== 'Reexecução Manual' && !after.includes('RESULTADOS DAS CONSULTAS SQL')) {
-                                return after;
-                            }
-                        }
-                        continue; // era placeholder, tenta mensagens anteriores
+                    // Mensagem com contexto (SQL/pesquisa/página) — extrai após USER_SEP
+                    if (c.includes(USER_SEP)) {
+                        const after = c.split(USER_SEP).pop().trim();
+                        if (after && after !== 'Reexecução Manual') return after;
+                        continue;
                     }
 
-                    // Mensagem normal sem contexto SQL
+                    // Mensagem normal sem contexto
                     const plain = c.trim();
                     if (plain && !plain.includes('RESULTADOS DAS CONSULTAS SQL')) return plain;
                 }
@@ -7344,16 +7322,7 @@ Responder SOMENTE com o JSON.`;
             } else if (m.role === 'user') {
                 let display = m.content;
 
-                // 1. Remove bloco de contexto (original e versão markdownify-escaped \[FIM\_TEXTO\_COLADO\])
-                for (const endToken of ['[FIM_TEXTO_COLADO]', '\\[FIM\\_TEXTO\\_COLADO\\]']) {
-                    const idx = display.indexOf(endToken);
-                    if (idx !== -1) {
-                        display = display.slice(idx + endToken.length);
-                        break;
-                    }
-                }
-
-                // 2. Remove separador USER_SEP (fallback para mensagens locais sem bloco de contexto)
+                // Remove separador USER_SEP para mostrar apenas a pergunta do usuário
                 if (display.includes(USER_SEP)) {
                     display = display.split(USER_SEP).pop();
                 }
@@ -8752,14 +8721,8 @@ Responder SOMENTE com o JSON.`;
                     const q = c.split(USER_SEP).pop().trim();
                     if (q && q !== 'Reexecução Manual') return q;
                 }
-                // ✅ Método 2: após [FIM_TEXTO_COLADO] — remove USER_SEP residual se houver
-                if (c.includes('[FIM_TEXTO_COLADO]')) {
-                    let q = c.split('[FIM_TEXTO_COLADO]').pop().trim();
-                    if (q.startsWith(USER_SEP)) q = q.slice(USER_SEP.length).trim();
-                    if (q && q !== 'Reexecução Manual') return q;
-                }
-                // ✅ Método 3: mensagem simples sem bloco de contexto SQL
-                if (!c.includes('[INICIO_TEXTO_COLADO]') && !c.includes('RESULTADOS DAS CONSULTAS SQL')) {
+                // ✅ Método 2: mensagem simples sem bloco de contexto SQL
+                if (!c.includes('RESULTADOS DAS CONSULTAS SQL')) {
                     const q = c.trim();
                     if (q && q !== 'Reexecução Manual') return q;
                 }
@@ -9386,17 +9349,14 @@ Responder SOMENTE com o JSON.`;
     }
 
     function formatSearchResultsForLLM(searchData, originalQuestion) {
-        const sanitizePastedText = value => String(value || '')
-            .replaceAll('[INICIO_TEXTO_COLADO]', '')
-            .replaceAll('[FIM_TEXTO_COLADO]', '')
-            .trim();
+        const cleanText = value => String(value || '').trim();
 
         const results = searchData.results || [];
         const sections = results.map((r, i) => {
-            const lines = [`**Pesquisa ${i + 1}**: ${sanitizePastedText(r.query)}`, ''];
+            const lines = [`**Pesquisa ${i + 1}**: ${cleanText(r.query)}`, ''];
 
             if (!r.success) {
-                lines.push(`**Erro**: ${sanitizePastedText(r.error)}`);
+                lines.push(`**Erro**: ${cleanText(r.error)}`);
                 return lines.join('\n');
             }
 
@@ -9407,16 +9367,16 @@ Responder SOMENTE com o JSON.`;
             }
 
             items.forEach((item, j) => {
-                lines.push(`**Resultado ${j + 1}**: ${sanitizePastedText(item.title)}`);
-                lines.push(`URL: ${sanitizePastedText(item.url)}`);
-                if (item.snippet) lines.push(`Resumo: ${sanitizePastedText(item.snippet)}`);
+                lines.push(`**Resultado ${j + 1}**: ${cleanText(item.title)}`);
+                lines.push(`URL: ${cleanText(item.url)}`);
+                if (item.snippet) lines.push(`Resumo: ${cleanText(item.snippet)}`);
                 lines.push('');
             });
 
             return lines.join('\n').trimEnd();
         });
 
-        const pastedBlock = [
+        const contextBlock = [
             '### 🔍 RESULTADOS DA PESQUISA WEB ###',
             '⚠️ IMPORTANTE: Responda APENAS em Português do Brasil.',
             'Você solicitou pesquisas na web. Aqui estão os resultados:',
@@ -9426,7 +9386,7 @@ Responder SOMENTE com o JSON.`;
             sections.join('\n\n---\n\n')
         ].join('\n');
 
-        return `[INICIO_TEXTO_COLADO]\n${pastedBlock}\n[FIM_TEXTO_COLADO]\n\n[INICIO_TEXTO_COLADO]\nCom base nesses resultados, responda à **pergunta**:\n${sanitizePastedText(originalQuestion)}\n\nNa resposta final:\n- mostre as fontes com URL explícita\n- prefira links markdown clicáveis quando possível\n- se algum resultado não tiver URL, diga claramente que veio de item sem URL fornecida\n[FIM_TEXTO_COLADO]`;
+        return `${contextBlock}\n\nCom base nesses resultados, responda à **pergunta**:\n\nNa resposta final:\n- mostre as fontes com URL explícita\n- prefira links markdown clicáveis quando possível\n- se algum resultado não tiver URL, diga claramente que veio de item sem URL fornecida\n\n${USER_SEP}\n${cleanText(originalQuestion)}`;
     }
 
     async function detectAndExecuteSearch(responseText, originalQuestion, ui, depth = 0) {
@@ -9701,23 +9661,25 @@ Responder SOMENTE com o JSON.`;
         return JSON.stringify(data, null, 2);
     }
     function formatSQLResultsForLLM(sqlResults, originalQuestion, originalContext) {
-        const sanitizePastedText = value => String(value || '')
-            .replaceAll('[INICIO_TEXTO_COLADO]', '')
-            .replaceAll('[FIM_TEXTO_COLADO]', '')
-            .trim();
+        const cleanText = value => String(value || '').trim();
 
-        let formattedText = '[INICIO_TEXTO_COLADO]\n\n';
+        let formattedText = '';
 
         // Se já há contexto anterior (round de DESCRIBE), inclui sem repetir o header
         if (originalContext && originalContext.trim() !== '') {
-            // Remove delimitadores caso o originalContext já seja um bloco anterior
-            let cleanCtx = sanitizePastedText(originalContext);
+            // Remove marcadores legados e o USER_SEP do contexto anterior
+            let cleanCtx = cleanText(originalContext)
+                .replaceAll('[INICIO_TEXTO_COLADO]', '')
+                .replaceAll('[FIM_TEXTO_COLADO]', '');
 
             // Remove o rodapé "Com base nesses resultados..." do contexto anterior
-            // para não ficar duplicado (será adicionado no fim deste bloco)
             const rodapeMarker = 'Com base nesses resultados do banco de dados, responda à **pergunta**:';
             const rodapeIdx = cleanCtx.lastIndexOf(rodapeMarker);
             if (rodapeIdx !== -1) cleanCtx = cleanCtx.substring(0, rodapeIdx).trimEnd();
+
+            // Remove USER_SEP e tudo após ele (pergunta anterior)
+            const sepIdx = cleanCtx.lastIndexOf(USER_SEP);
+            if (sepIdx !== -1) cleanCtx = cleanCtx.substring(0, sepIdx).trimEnd();
 
             formattedText += cleanCtx + '\n\n---\n\n';
         }
@@ -9749,11 +9711,8 @@ Responder SOMENTE com o JSON.`;
             formattedText += '---\n\n';
         });
 
-        formattedText += '[FIM_TEXTO_COLADO]\n\n';
-        formattedText += '[INICIO_TEXTO_COLADO]\n';
         formattedText += 'Com base nesses resultados do banco de dados, responda à **pergunta**:\n\n';
-        formattedText += sanitizePastedText(originalQuestion) + '\n';
-        formattedText += '[FIM_TEXTO_COLADO]';
+        formattedText += `${USER_SEP}\n${cleanText(originalQuestion)}`;
 
         return formattedText;
     }
@@ -10036,7 +9995,7 @@ Responder SOMENTE com o JSON.`;
             promptFinal = userTxt || (attachments.length ? 'Analise o(s) arquivo(s) anexado(s).' : '');
         } else {
             const userPart = userTxt || (attachments.length ? 'Analise o(s) arquivo(s) anexado(s).' : '');
-            promptFinal = `[INICIO_TEXTO_COLADO]\n\nResponda em Português do Brasil.${speedHint}${languageInstruction}${sqlInstruction}${pageCtxStr && pageCtxStr.trim() !== '' ? `\n\n[DADOS DO PACIENTE E DO PROFISSIONAL QUE O ATENDEU]\n${pageCtxStr}` : ''}${ctx && ctx.trim() !== '' ? `\n\n[DADOS DE CONTEXTO]\n${ctx}` : ''}\n\n[FIM_TEXTO_COLADO]\n\n${USER_SEP}\n${userPart}`;
+            promptFinal = `Responda em Português do Brasil.${speedHint}${languageInstruction}${sqlInstruction}${pageCtxStr && pageCtxStr.trim() !== '' ? `\n\n[DADOS DO PACIENTE E DO PROFISSIONAL QUE O ATENDEU]\n${pageCtxStr}` : ''}${ctx && ctx.trim() !== '' ? `\n\n[DADOS DE CONTEXTO]\n${ctx}` : ''}\n\n${USER_SEP}\n${userPart}`;
         }
 
         state.messages.push({ role: 'user', content: promptFinal });
@@ -10726,21 +10685,19 @@ Responder SOMENTE com o JSON.`;
                 if (!pastedText) return;
                 e.preventDefault();
 
-                // ✅ Remove marcadores caso o usuário cole uma mensagem já encapsulada
                 pastedText = pastedText
                     .replaceAll('[INICIO_TEXTO_COLADO]', '')
                     .replaceAll('[FIM_TEXTO_COLADO]', '')
                     .trim();
 
-                const encapsulatedText = `\n[INICIO_TEXTO_COLADO]\n${pastedText}\n[FIM_TEXTO_COLADO]\n`;
                 const startPos = this.selectionStart;
                 const endPos   = this.selectionEnd;
                 this.value = this.value.substring(0, startPos) +
-                             encapsulatedText +
+                             pastedText +
                              this.value.substring(endPos, this.value.length);
-                this.selectionStart = this.selectionEnd = startPos + encapsulatedText.length;
+                this.selectionStart = this.selectionEnd = startPos + pastedText.length;
                 this.scrollTop = this.scrollHeight;
-                console.log(`%c📋 [CTRL+V] Texto encapsulado com sucesso (${pastedText.length} chars)`, "color: #9c27b0; font-weight: bold;");
+                console.log(`%c📋 [CTRL+V] Texto colado (${pastedText.length} chars)`, "color: #9c27b0; font-weight: bold;");
             });
         }
         const dropTargets = [document.getElementById('ow-window'), inputEl].filter(Boolean);

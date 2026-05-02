@@ -23,9 +23,9 @@
 #   STOP      — encerra o loop principal
 #
 # MECANISMO DE PASTE:
-#   Texto entre [INICIO_TEXTO_COLADO]...[FIM_TEXTO_COLADO] é colado via
-#   clipboard (Ctrl+V) — rápido como humano. Texto fora dos marcadores
-#   é digitado caractere a caractere via type_realistic().
+#   Todo texto é colado via clipboard (Ctrl+V) — rápido como humano.
+#   Exceção: frases terminadas com '?' são digitadas via type_realistic()
+#   para simular digitação realista de perguntas.
 # =============================================================================
 import asyncio
 import base64
@@ -966,8 +966,8 @@ async def smart_input(page, message, q=None, activityts=None):
         await page.click(selector, timeout=5000)
     await asyncio.sleep(0.3)
 
-    start_marker = "[INICIO_TEXTO_COLADO]"
-    end_marker   = "[FIM_TEXTO_COLADO]"
+    # Remove marcadores legados, caso o texto ainda os contenha
+    message = message.replace('[INICIO_TEXTO_COLADO]', '').replace('[FIM_TEXTO_COLADO]', '')
 
     async def _paste_clipboard(text, label='Colando'):
         """Cola texto via clipboard (Ctrl+V) -- rapido como um humano.
@@ -980,11 +980,9 @@ async def smart_input(page, message, q=None, activityts=None):
         if activityts:
             activityts[0] = time.time()
 
-        # Escreve o texto no clipboard via JS
         await page.evaluate("(t) => navigator.clipboard.writeText(t)", text)
         await asyncio.sleep(0.1)
 
-        # Foca o textarea e simula Ctrl+V
         ta_found = await page.evaluate("""
             () => {
                 const ta = document.getElementById('prompt-textarea')
@@ -1006,14 +1004,10 @@ async def smart_input(page, message, q=None, activityts=None):
         await page.keyboard.press('Control+V')
         await asyncio.sleep(0.3)
 
-        # Verifica se colou corretamente ou se o ChatGPT converteu a cola em anexo.
-        # A conversão para anexo pode demorar um instante, então faz polling com retry.
         state = await _get_composer_state(page)
         inserted = int(state.get('textLength') or 0)
 
         if inserted == 0:
-            # Texto não apareceu no textarea — pode ser conversão em anexo.
-            # Aguarda até 5s com polling para detectar o anexo criado automaticamente.
             for _retry in range(10):
                 if state.get('hasAttachments') or state.get('pasteAsAttachment'):
                     break
@@ -1022,8 +1016,6 @@ async def smart_input(page, message, q=None, activityts=None):
                 inserted = int(state.get('textLength') or 0)
                 if inserted > 0:
                     break
-                # Fallback: se o sendBtn está habilitado mas não há texto,
-                # o ChatGPT aceitou o conteúdo como anexo (mesmo sem detectar card)
                 if state.get('sendEnabled') and not state.get('textReady'):
                     emit_log(q, f"{label}: Send habilitado sem texto — provável anexo não detectado pelos seletores.")
                     state['hasAttachments'] = True
@@ -1039,84 +1031,114 @@ async def smart_input(page, message, q=None, activityts=None):
             emit_event(q, 'status', f'{label}: {total} chars via clipboard... 100%')
         return inserted
 
-    if start_marker in message and end_marker in message:
-        pattern = re.compile(
-            r'(\[INICIO_TEXTO_COLADO\].*?\[FIM_TEXTO_COLADO\])',
-            re.DOTALL
-        )
-        segments = pattern.split(message)
+    async def _paste_with_fallback(txt, label='Colando'):
+        """Cola txt via clipboard; se falhar, usa injeção JS em chunks."""
+        total = 0
+        try:
+            total = await _paste_clipboard(txt, label)
+        except Exception as clipboard_err:
+            emit_log(q, f'Clipboard falhou ({clipboard_err}), usando fallback por chunks...')
+            CHUNK_SIZE = 300
+            js_inject = """(text) => {
+                const ta = document.getElementById('prompt-textarea')
+                         || document.querySelector('#prompt-textarea');
+                if (!ta) throw new Error('prompt-textarea nao encontrado');
+                if (ta.isContentEditable) {
+                    ta.focus();
+                    const sel = window.getSelection();
+                    const range = document.createRange();
+                    range.selectNodeContents(ta);
+                    range.collapse(false);
+                    sel.removeAllRanges();
+                    sel.addRange(range);
+                    document.execCommand('insertText', false, text);
+                    return ta.innerText.length;
+                }
+                const setter = Object.getOwnPropertyDescriptor(
+                    window.HTMLTextAreaElement.prototype, 'value').set;
+                setter.call(ta, (ta.value || '') + text);
+                ta.dispatchEvent(new InputEvent('input', {
+                    bubbles: true, cancelable: true, inputType: 'insertText', data: text
+                }));
+                return ta.value.length;
+            }"""
+            total_chars = len(txt)
+            inserted_now = 0
+            while inserted_now < total_chars:
+                chunk = txt[inserted_now:inserted_now + CHUNK_SIZE]
+                await page.evaluate(js_inject, chunk)
+                inserted_now += len(chunk)
+                pct = int(inserted_now / total_chars * 100)
+                if q: emit_event(q, 'status', f'Colando (fallback)... {pct}%')
+                if activityts: activityts[0] = time.time()
+                await asyncio.sleep(0.08)
+            total = inserted_now
+        return total
 
-        for segment in segments:
-            if not segment:
-                continue
-            is_block = segment.startswith(start_marker) and segment.endswith(end_marker)
-            if is_block:
-                inner = segment[len(start_marker):-len(end_marker)]
-                if inner.strip():
-                    emit_log(q, f'Colando bloco ({len(inner)} chars)...')
-                    txt = inner.replace('\r\n', '\n').replace('\r', '\n')
-                    total = 0
-                    try:
-                        # Cola o bloco inteiro de uma vez via clipboard (Ctrl+V).
-                        # _paste_clipboard já detecta se o ChatGPT converteu em anexo.
-                        inserted_now = await _paste_clipboard(txt, 'Colando')
-                        total = inserted_now
-                    except Exception as clipboard_err:
-                        # Fallback: injeção JS direta em sub-blocos se clipboard falhar
-                        emit_log(q, f'Clipboard falhou ({clipboard_err}), usando fallback por chunks...')
-                        CHUNK_SIZE = 300
-                        js_inject = """(text) => {
-                            const ta = document.getElementById('prompt-textarea')
-                                     || document.querySelector('#prompt-textarea');
-                            if (!ta) throw new Error('prompt-textarea nao encontrado');
-                            if (ta.isContentEditable) {
-                                ta.focus();
-                                const sel = window.getSelection();
-                                const range = document.createRange();
-                                range.selectNodeContents(ta);
-                                range.collapse(false);
-                                sel.removeAllRanges();
-                                sel.addRange(range);
-                                document.execCommand('insertText', false, text);
-                                return ta.innerText.length;
-                            }
-                            const setter = Object.getOwnPropertyDescriptor(
-                                window.HTMLTextAreaElement.prototype, 'value').set;
-                            setter.call(ta, (ta.value || '') + text);
-                            ta.dispatchEvent(new InputEvent('input', {
-                                bubbles: true, cancelable: true, inputType: 'insertText', data: text
-                            }));
-                            return ta.value.length;
-                        }"""
-                        total_chars = len(txt)
-                        inserted_now = 0
-                        while inserted_now < total_chars:
-                            chunk = txt[inserted_now:inserted_now + CHUNK_SIZE]
-                            await page.evaluate(js_inject, chunk)
-                            inserted_now += len(chunk)
-                            pct = int(inserted_now / total_chars * 100)
-                            if q: emit_event(q, 'status', f'Colando (fallback)... {pct}%')
-                            if activityts: activityts[0] = time.time()
-                            await asyncio.sleep(0.08)
-                        total = inserted_now
-                    expected_len = len(txt)
-                    state_after_paste = await _get_composer_state(page)
-                    if total < expected_len * 0.9 and not state_after_paste.get('hasAttachments') and not state_after_paste.get('sendEnabled'):
-                        emit_log(q, f'Aviso: colados {total} de ~{len(inner)} chars')
-                    elif state_after_paste.get('hasAttachments'):
-                        emit_log(q,
-                                 f"Bloco aceito como anexo(s): {state_after_paste.get('attachmentCount', '?')} item(ns).")
-                    elif total < expected_len * 0.9 and state_after_paste.get('sendEnabled'):
-                        emit_log(q,
-                                 f"Bloco aceito (send habilitado, provavel anexo): {total} de ~{len(inner)} chars")
-                    await asyncio.sleep(0.3)
+    def _split_by_questions(text):
+        """Divide o texto em [(modo, trecho), ...].
+        Frases terminadas com '?' são digitadas (mode='type').
+        Todo o restante é colado via clipboard (mode='paste')."""
+        result = []
+        raw_parts = re.split(r'(\?)', text)
+        chunks = []
+        i = 0
+        while i < len(raw_parts):
+            if i + 1 < len(raw_parts) and raw_parts[i + 1] == '?':
+                chunks.append(raw_parts[i] + '?')
+                i += 2
             else:
-                if segment.strip():
-                    if activityts:
-                        activityts[0] = time.time()
-                    await type_realistic(page, segment, q, delay_scale=typing_delay_scale)
-    else:
-        await type_realistic(page, message, q, delay_scale=typing_delay_scale)
+                if raw_parts[i]:
+                    chunks.append(raw_parts[i])
+                i += 1
+
+        pending_paste = ''
+        for chunk in chunks:
+            if not chunk:
+                continue
+            if chunk.endswith('?'):
+                body = chunk[:-1]
+                # Localiza o último limite de sentença antes do '?'
+                m = re.search(r'(?:[.!?][ \t]+|\n)(?=[^\n.!?]*$)', body)
+                if m:
+                    pre_text = body[:m.end()]
+                    question = body[m.end():] + '?'
+                else:
+                    pre_text = ''
+                    question = chunk
+                pending_paste += pre_text
+                if pending_paste:
+                    result.append(('paste', pending_paste))
+                    pending_paste = ''
+                result.append(('type', question))
+            else:
+                pending_paste += chunk
+        if pending_paste:
+            result.append(('paste', pending_paste))
+        return result
+
+    for mode, text in _split_by_questions(message):
+        if not text:
+            continue
+        txt = text.replace('\r\n', '\n').replace('\r', '\n')
+        if mode == 'paste':
+            if not txt.strip():
+                continue
+            emit_log(q, f'Colando ({len(txt)} chars)...')
+            total = await _paste_with_fallback(txt)
+            expected_len = len(txt)
+            state_after = await _get_composer_state(page)
+            if total < expected_len * 0.9 and not state_after.get('hasAttachments') and not state_after.get('sendEnabled'):
+                emit_log(q, f'Aviso: colados {total} de ~{expected_len} chars')
+            elif state_after.get('hasAttachments'):
+                emit_log(q, f"Bloco aceito como anexo(s): {state_after.get('attachmentCount', '?')} item(ns).")
+            elif total < expected_len * 0.9 and state_after.get('sendEnabled'):
+                emit_log(q, f"Bloco aceito (send habilitado, provavel anexo): {total} de ~{expected_len} chars")
+            await asyncio.sleep(0.3)
+        else:
+            if activityts:
+                activityts[0] = time.time()
+            await type_realistic(page, txt, q, delay_scale=typing_delay_scale)
 
 
 async def type_realistic(page, text, q=None, delay_scale: float = 1.0):
@@ -4230,11 +4252,7 @@ async def _codex_select_repo(page, q, repo: str) -> bool:
 
 
 async def _codex_paste_message(page, composer_selector: str, message: str, q, activityts):
-    """Cola a mensagem no composer do Codex via clipboard.
-
-    Reutiliza os mesmos marcadores [INICIO_TEXTO_COLADO]...[FIM_TEXTO_COLADO]
-    enviados pelo agente (apenas descarta os marcadores antes de colar).
-    """
+    """Cola a mensagem no composer do Codex via clipboard."""
     codex_reasoning_prefix = (
         "SYSTEM MODE: PERMANENT MAX REASONING\n\n"
         "Use maximum reasoning effort (xhigh).\n"
@@ -4257,13 +4275,7 @@ async def _codex_paste_message(page, composer_selector: str, message: str, q, ac
         "- Consider failures\n"
         "- Consider performance"
     )
-    start_marker = "[INICIO_TEXTO_COLADO]"
-    end_marker = "[FIM_TEXTO_COLADO]"
-    text = message or ""
-    if start_marker in text and end_marker in text:
-        i = text.find(start_marker) + len(start_marker)
-        j = text.rfind(end_marker)
-        text = text[i:j]
+    text = (message or "").replace('[INICIO_TEXTO_COLADO]', '').replace('[FIM_TEXTO_COLADO]', '')
     text = text.replace('\r\n', '\n').replace('\r', '\n')
 
     # Injeta prefixo de raciocínio máximo para qualquer pedido enviado ao Codex,
@@ -4718,20 +4730,8 @@ async def _claude_pick_project(page, q, project: str) -> bool:
 
 
 async def _claude_paste_message(page, composer_selector: str, message: str, q, activityts):
-    """Cola a mensagem no composer do Claude Code via clipboard (Ctrl+V).
-
-    Reaproveita a lógica do Codex: descarta os marcadores [INICIO_TEXTO_COLADO]
-    /[FIM_TEXTO_COLADO] (já não fazem sentido após chegar aqui) e injeta o
-    texto em chunks via clipboard, com fallback para execCommand quando
-    `navigator.clipboard.writeText` falhar (ex.: foco perdido).
-    """
-    start_marker = "[INICIO_TEXTO_COLADO]"
-    end_marker = "[FIM_TEXTO_COLADO]"
-    text = message or ""
-    if start_marker in text and end_marker in text:
-        i = text.find(start_marker) + len(start_marker)
-        j = text.rfind(end_marker)
-        text = text[i:j]
+    """Cola a mensagem no composer do Claude Code via clipboard (Ctrl+V)."""
+    text = (message or "").replace('[INICIO_TEXTO_COLADO]', '').replace('[FIM_TEXTO_COLADO]', '')
     text = text.replace('\r\n', '\n').replace('\r', '\n')
 
     try:
