@@ -101,6 +101,27 @@ from server_helpers import (
     build_chat_block_error_payload as _build_chat_block_error_payload_impl,
     build_chat_block_success_payload as _build_chat_block_success_payload_impl,
 )
+try:
+    from payload_validators import (
+        validate_login_request as _validate_login_request,
+        validate_chat_request as _validate_chat_request,
+        validate_sync_request as _validate_sync_request,
+    )
+except ImportError:
+    def _validate_login_request(d): return (True, [])
+    def _validate_chat_request(d): return (True, [])
+    def _validate_sync_request(d): return (True, [])
+
+try:
+    from correlation import (
+        extract_correlation_id as _extract_correlation_id,
+        format_log_prefix as _format_cid_prefix,
+        inject_into_payload as _inject_correlation_id,
+    )
+except ImportError:
+    def _extract_correlation_id(h, fallback=None): return fallback or "0000"
+    def _format_cid_prefix(cid): return ""
+    def _inject_correlation_id(p, cid): return p
 import error_catalog as _error_catalog
 from log_sanitizer import sanitize_mapping as _sanitize_audit_payload
 import threading
@@ -905,6 +926,9 @@ def after_request_audit(response):
 @app.route("/login", methods=["POST"])
 def login_route():
     data = request.get_json() or {}
+    valid, val_errors = _validate_login_request(data)
+    if not valid:
+        return jsonify({"success": False, "error": val_errors[0]}), 400
     ip = _client_ip()
     blocked, remaining_block, block_reason = _is_ip_blocked(ip)
     if blocked:
@@ -1145,6 +1169,12 @@ def api_sync():
         return jsonify(_build_unauthorized_payload_impl()), 401
 
     data = request.get_json() or {}
+    valid, val_errors = _validate_sync_request(data)
+    if not valid:
+        return jsonify({"success": False, "error": val_errors[0]}), 400
+
+    correlation_id = _extract_correlation_id(request.headers)
+
     url     = data.get("url")
     chat_id = data.get("chat_id")
     stream  = data.get("stream", False)
@@ -1542,6 +1572,11 @@ def chat_completions():
         return jsonify(_build_unauthorized_payload_impl()), 401
 
     data = request.get_json() or {}
+    valid, val_errors = _validate_chat_request(data)
+    if not valid:
+        return jsonify({"success": False, "error": val_errors[0], "validation_errors": val_errors}), 400
+
+    correlation_id = _extract_correlation_id(request.headers)
 
     # --- 1. CAPTURA DO CHAT_ID ---
     chat_id = data.get("chat_id")
@@ -1557,11 +1592,12 @@ def chat_completions():
     sender_label = _build_sender_label_impl(source_hint, is_analyzer)
     _origem = _format_origin_suffix_impl(is_analyzer, source_hint)
 
+    _cid = _format_cid_prefix(correlation_id)
     if chat_id:
-        print(f"\n[📡 SERVIDOR] Requisição remota recebida{_quem}{_origem}! Continuando Chat ID: {chat_id}")
+        print(f"\n[📡 SERVIDOR]{_cid} Requisição remota recebida{_quem}{_origem}! Continuando Chat ID: {chat_id}")
     else:
         chat_id = str(uuid.uuid4())
-        print(f"\n[📡 SERVIDOR] Novo pedido remoto{_quem}{_origem}. Gerando Chat ID: {chat_id}")
+        print(f"\n[📡 SERVIDOR]{_cid} Novo pedido remoto{_quem}{_origem}. Gerando Chat ID: {chat_id}")
 
     # Tenta pegar a mensagem única (string)
     message = data.get("message", "")
@@ -1657,6 +1693,7 @@ def chat_completions():
         # ou chave inválida → fallback para "default" (perfil compartilhado).
         effective_browser_profile=effective_browser_profile,
     )
+    chat_task_payload = _inject_correlation_id(chat_task_payload, correlation_id)
 
     def _dispatch_chat_task():
         queue_key = _build_queue_key_impl(chat_id)
