@@ -82,7 +82,6 @@ from server_helpers import (
     find_expired_chat_ids as _find_expired_chat_ids_impl,
     extract_manual_whatsapp_reply_targets as _extract_manual_whatsapp_reply_targets_impl,
     format_manual_whatsapp_requester_suffix as _format_manual_whatsapp_requester_suffix_impl,
-    resolve_avatar_filename as _resolve_avatar_filename_impl,
     normalize_source_hint as _normalize_source_hint_impl,
     normalize_optional_text as _normalize_optional_text_impl,
     extract_requester_identity as _extract_requester_identity_impl,
@@ -104,31 +103,14 @@ from server_helpers import (
     advance_health_ping_state as _advance_health_ping_state_impl,
     build_unauthorized_payload as _build_unauthorized_payload_impl,
     safe_snapshot_stats as _safe_snapshot_stats_impl,
-    build_search_progress_extras as _build_search_progress_extras_impl,
-    build_search_phase_label as _build_search_phase_label_impl,
-    build_search_prepare_message as _build_search_prepare_message_impl,
-    build_search_keepalive_message as _build_search_keepalive_message_impl,
-    push_error_and_close_queue as _push_error_and_close_queue_impl,
 )
 import error_catalog as _error_catalog
-from error_scanner_helpers import (
-    is_unwanted_snippet as _is_unwanted_snippet_impl,
-    build_scan_match_entry as _build_scan_match_entry_impl,
-    build_scan_error_entry as _build_scan_error_entry_impl,
-    build_claude_fix_prompt as _build_claude_fix_prompt_impl,
-    build_claude_fix_request_body as _build_claude_fix_request_body_impl,
-    build_known_errors_missing_payload as _build_known_errors_missing_payload_impl,
-    build_known_errors_loaded_payload as _build_known_errors_loaded_payload_impl,
-    build_known_errors_error_payload as _build_known_errors_error_payload_impl,
-    build_claude_fix_empty_stream_lines as _build_claude_fix_empty_stream_lines_impl,
-    build_claude_fix_status_line as _build_claude_fix_status_line_impl,
-    build_claude_fix_error_line as _build_claude_fix_error_line_impl,
-    build_claude_fix_finish_line as _build_claude_fix_finish_line_impl,
-)
 from log_sanitizer import sanitize_mapping as _sanitize_audit_payload
 import threading
 from server_observabilidade import bp as _bp_observabilidade
 from server_recursos import bp as _bp_recursos
+from server_usuario import bp as _bp_usuario
+from server_admin import bp as _bp_admin
 try:
     from prometheus_client import Counter, Gauge, generate_latest, CONTENT_TYPE_LATEST
 except Exception:
@@ -313,12 +295,6 @@ class No401AuthLog(logging.Filter):
         return True
 logging.getLogger("werkzeug").addFilter(No401AuthLog())
 
-try:
-    from PIL import Image
-    HAS_PIL = True
-except ImportError:
-    HAS_PIL = False
-
 app = Flask(__name__, static_folder=config.DIRS["frontend"])
 # CORS: apenas origens explicitamente configuradas em config.CORS_ALLOWED_ORIGINS.
 # Vazio = nenhuma origem cross-site (mas chamadas same-origin/API-key funcionam).
@@ -326,6 +302,8 @@ CORS(app, resources={r"/*": {"origins": list(getattr(config, "CORS_ALLOWED_ORIGI
      supports_credentials=True)
 app.register_blueprint(_bp_observabilidade)
 app.register_blueprint(_bp_recursos)
+app.register_blueprint(_bp_usuario)
+app.register_blueprint(_bp_admin)
 
 from security_state import SecurityState
 
@@ -962,53 +940,6 @@ def login_route():
     _audit_event("login_failed", username=(data.get("username") or "")[:80])
     return jsonify({"success": False, "error": "Credenciais inválidas"}), 401
 
-@app.route("/logout", methods=["POST"])
-def logout_route():
-    token = request.cookies.get('session_token')
-    auth.logout(token)
-    resp = jsonify({"success": True})
-    resp.set_cookie('session_token', '', expires=0)
-    return resp
-
-@app.route("/api/user/info", methods=["GET"])
-def user_info():
-    token = request.cookies.get('session_token')
-    info = auth.get_user_info(token)
-    if info: return jsonify(info)
-    return jsonify({"error": "No session"}), 401
-
-@app.route("/api/user/update_password", methods=["POST"])
-def update_pass():
-    data = request.get_json() or {}
-    user = auth.check_session(request)
-    if user and auth.change_password(user, data.get("new_password")):
-        return jsonify({"success": True})
-    return jsonify({"success": False})
-
-@app.route("/api/user/upload_avatar", methods=["POST"])
-def upload_avatar():
-    user = auth.check_session(request)
-    if not user: return jsonify({"success": False}), 401
-    if 'file' not in request.files: return jsonify({"success": False})
-    file = request.files['file']
-    if file.filename == '': return jsonify({"success": False})
-    if file:
-        filename, err = _resolve_avatar_filename_impl(file.filename, user)
-        if err:
-            return jsonify({"success": False, "error": err})
-        save_path = os.path.join(config.DIRS["users"], filename)
-        try:
-            if HAS_PIL:
-                img = Image.open(file)
-                img.thumbnail((150, 150))
-                if img.mode in ("RGBA", "P"): img = img.convert("RGB")
-                img.save(save_path, quality=85, optimize=True)
-            else:
-                file.save(save_path)
-            auth.update_avatar(user, filename)
-            return jsonify({"success": True, "avatar": filename})
-        except Exception as e:
-            return jsonify({"success": False, "error": str(e)})
 
 # --- ROTAS GERAIS ---
 
@@ -1068,179 +999,6 @@ def api_metrics():
     }
     return jsonify({"success": True, "metrics": metrics}), 200
 
-
-@app.route("/api/errors/known", methods=["GET"])
-def api_errors_known():
-    """
-    Retorna a lista de erros conhecidos (Scripts/erros_conhecidos.json).
-    Endpoint LEVE para polling do toast de monitor de erros — apenas leitura
-    de arquivo JSON, sem execução do scanner.
-    """
-    from pathlib import Path as _Path
-    json_path = _Path(__file__).resolve().parent / "erros_conhecidos.json"
-    if not json_path.exists():
-        return jsonify(_build_known_errors_missing_payload_impl(json_path)), 200
-    try:
-        data = json.loads(json_path.read_text(encoding="utf-8"))
-        return jsonify(_build_known_errors_loaded_payload_impl(data)), 200
-    except Exception as e:
-        return jsonify(_build_known_errors_error_payload_impl(e)), 500
-
-
-@app.route("/api/errors/scan", methods=["GET"])
-def api_errors_scan():
-    """
-    Executa o log_scanner programaticamente e retorna apenas erros NOVOS
-    (não casados com erros_conhecidos.json).
-    Endpoint PESADO: deve ser chamado apenas sob demanda do usuário (botão).
-    """
-    from pathlib import Path as _Path
-    try:
-        from log_scanner import (
-            get_latest_logs, scan_file, load_known_errors,
-            CONTEXT_LINES as _CTX, MAX_MATCHES as _MAX,
-        )
-    except Exception as e:
-        return jsonify({
-            "success": False,
-            "error": f"log_scanner indisponível: {e}"
-        }), 500
-
-    logs_dir = _Path(__file__).resolve().parent.parent / "logs"
-    if not logs_dir.exists():
-        return jsonify({
-            "success": False, "error": "logs_dir_not_found",
-            "path": str(logs_dir)
-        }), 404
-
-    try:
-        known = load_known_errors()
-        all_logs = get_latest_logs(logs_dir)
-    except Exception as e:
-        return jsonify({"success": False, "error": str(e)}), 500
-
-    new_errors = []
-    scanned = []
-    for system, log_path in all_logs.items():
-        scanned.append(system)
-        try:
-            snippets = scan_file(
-                log_path, context=_CTX, max_matches=_MAX, known_errors=known
-            )
-        except Exception as e:
-            new_errors.append(_build_scan_error_entry_impl(system, log_path.name, e))
-            continue
-        for s in snippets:
-            if _is_unwanted_snippet_impl(s):
-                continue
-            new_errors.append(_build_scan_match_entry_impl(system, log_path.name, s))
-
-    return jsonify({
-        "success": True,
-        "new_errors": new_errors,
-        "count": len(new_errors),
-        "scanned_systems": scanned,
-        "known_count": len(known),
-    }), 200
-
-
-def _build_claude_fix_prompt(new_errors: list) -> str:
-    """Wrapper fino sobre `error_scanner_helpers.build_claude_fix_prompt`."""
-    return _build_claude_fix_prompt_impl(new_errors)
-
-
-@app.route("/api/errors/claude_fix", methods=["POST", "GET"])
-def api_errors_claude_fix():
-    """
-    Encaminha os erros novos detectados pelo log_scanner ao Claude Code
-    (https://claude.ai/code) via /v1/chat/completions, instruindo-o a
-    aplicar correções e abrir um PR no GitHub.
-    Retorna o stream NDJSON do Claude em tempo real.
-    """
-    from pathlib import Path as _Path
-    try:
-        from log_scanner import (
-            get_latest_logs, scan_file, load_known_errors,
-            CONTEXT_LINES as _CTX, MAX_MATCHES as _MAX,
-        )
-    except Exception as e:
-        return jsonify({
-            "success": False,
-            "error": f"log_scanner indisponível: {e}",
-        }), 500
-
-    logs_dir = _Path(__file__).resolve().parent.parent / "logs"
-    known = load_known_errors() if logs_dir.exists() else []
-    new_errors = []
-    if logs_dir.exists():
-        for system, log_path in get_latest_logs(logs_dir).items():
-            try:
-                snippets = scan_file(
-                    log_path, context=_CTX, max_matches=_MAX, known_errors=known
-                )
-            except Exception:
-                continue
-            for s in snippets:
-                if _is_unwanted_snippet_impl(s):
-                    continue
-                new_errors.append(_build_scan_match_entry_impl(system, log_path.name, s))
-
-    if not new_errors:
-        def _empty_stream():
-            for ln in _build_claude_fix_empty_stream_lines_impl(len(known)):
-                yield ln
-        return Response(_empty_stream(), mimetype="application/x-ndjson")
-
-    prompt = _build_claude_fix_prompt(new_errors)
-
-    target_url = os.environ.get(
-        "AUTODEV_AGENT_CLAUDE_CODE_URL", "https://claude.ai/code"
-    )
-    claude_project = os.environ.get(
-        "AUTODEV_AGENT_CLAUDE_CODE_PROJECT", "chatGPT_Simulator"
-    )
-
-    body = _build_claude_fix_request_body_impl(
-        api_key=config.API_KEY,
-        prompt=prompt,
-        target_url=target_url,
-        claude_project=claude_project,
-    )
-
-    http_port = int(getattr(config, "PORT", 3002)) + 1
-    completions_url = f"http://127.0.0.1:{http_port}/v1/chat/completions"
-
-    try:
-        import requests as _req  # noqa: PLC0415
-    except Exception as e:
-        return jsonify({
-            "success": False,
-            "error": f"módulo 'requests' indisponível: {e}"
-        }), 500
-
-    @stream_with_context
-    def proxy():
-        yield _build_claude_fix_status_line_impl(len(new_errors))
-        try:
-            with _req.post(
-                completions_url,
-                json=body,
-                stream=True,
-                timeout=900,
-                headers={"Authorization": f"Bearer {config.API_KEY}"},
-            ) as r:
-                for raw in r.iter_lines(decode_unicode=True):
-                    if raw is None:
-                        continue
-                    line = raw.strip()
-                    if not line:
-                        continue
-                    yield line + "\n"
-        except Exception as e:
-            yield _build_claude_fix_error_line_impl(e)
-            yield _build_claude_fix_finish_line_impl()
-
-    return Response(proxy(), mimetype="application/x-ndjson")
 
 
 @app.route("/metrics", methods=["GET"])
@@ -1648,11 +1406,12 @@ def _handle_browser_search_api(execute_fn, *, route_label, source_label):
 
             for idx, query_str in enumerate(queries, start=1):
                 yield _build_status_event_impl(
-                    _build_search_prepare_message_impl(source_label, idx, len(queries)),
-                    **_build_search_progress_extras_impl(
-                        query_str, idx, len(queries), source_label,
-                        phase=_build_search_phase_label_impl(route_label, "prepare"),
-                    ),
+                    f'📚 Preparando busca {source_label} {idx}/{len(queries)}.',
+                    query=query_str,
+                    index=idx,
+                    total=len(queries),
+                    phase=f'{route_label.lower()}_prepare',
+                    source=source_label,
                 ) + "\n"
 
                 progress_q = queue.Queue()
@@ -1668,11 +1427,12 @@ def _handle_browser_search_api(execute_fn, *, route_label, source_label):
                         item = progress_q.get(timeout=15)
                     except queue.Empty:
                         yield _build_status_event_impl(
-                            _build_search_keepalive_message_impl(source_label, query_str),
-                            **_build_search_progress_extras_impl(
-                                query_str, idx, len(queries), source_label,
-                                phase=_build_search_phase_label_impl(route_label, "keepalive"),
-                            ),
+                            f'⏳ Busca {source_label} por "{query_str}" ainda em andamento...',
+                            query=query_str,
+                            index=idx,
+                            total=len(queries),
+                            phase=f'{route_label.lower()}_keepalive',
+                            source=source_label,
                         ) + "\n"
                         continue
 
@@ -1681,9 +1441,10 @@ def _handle_browser_search_api(execute_fn, *, route_label, source_label):
                         all_results.append(result)
                         yield _build_search_result_event_impl(
                             result,
-                            **_build_search_progress_extras_impl(
-                                query_str, idx, len(queries), source_label,
-                            ),
+                            query=query_str,
+                            index=idx,
+                            total=len(queries),
+                            source=source_label,
                         ) + "\n"
                         break
 
@@ -2220,15 +1981,15 @@ def chat_completions():
             )
             _get_llm_provider().dispatch_task(chat_task_payload)
         except TimeoutError as queue_timeout:
-            _push_error_and_close_queue_impl(
-                stream_q,
-                f"Timeout aguardando fila interna do servidor: {queue_timeout}",
-            )
+            stream_q.put(_build_error_event_impl(
+                f"Timeout aguardando fila interna do servidor: {queue_timeout}"
+            ))
+            stream_q.put(None)
         except Exception as dispatch_err:
-            _push_error_and_close_queue_impl(
-                stream_q,
-                f"Falha ao enfileirar tarefa no browser: {dispatch_err}",
-            )
+            stream_q.put(_build_error_event_impl(
+                f"Falha ao enfileirar tarefa no browser: {dispatch_err}"
+            ))
+            stream_q.put(None)
         finally:
             if slot_acquired:
                 _release_python_chat_slot(queue_key)
