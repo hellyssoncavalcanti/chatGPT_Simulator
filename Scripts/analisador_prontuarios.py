@@ -3696,7 +3696,7 @@ def strip_html(raw: str) -> str:
 # CAMADA LLM — chama o simulador local
 # ─────────────────────────────────────────────────────────────
 #================================================SYSTEM_PROMPT = INICIO ===============================================
-SYSTEM_PROMPT = """[INICIO_TEXTO_COLADO]
+SYSTEM_PROMPT = """
 
 Você é um assistente médico especializado em análise de prontuários clínicos.
 
@@ -4240,8 +4240,6 @@ FORMATO DO JSON
 }
 
 Responder SOMENTE com o JSON.
-
-[FIM_TEXTO_COLADO]
 """
 #================================================SYSTEM_PROMPT = FIM ===============================================
 
@@ -4313,10 +4311,10 @@ REGRA OBRIGATÓRIA (DOSE-ALVO E RETORNO):
                 rows = []
         if rows and rows[0].get("conteudo"):
             conteudo = rows[0]["conteudo"]
-            if "[INICIO_TEXTO_COLADO]" not in conteudo:
-                conteudo = "[INICIO_TEXTO_COLADO]" + conteudo + "[FIM_TEXTO_COLADO]"
+            # Remove marcadores legados, caso o conteúdo do banco ainda os contenha
+            conteudo = conteudo.replace("[INICIO_TEXTO_COLADO]", "").replace("[FIM_TEXTO_COLADO]", "")
             if "REGRA OBRIGATÓRIA (DOSE-ALVO E RETORNO)" not in conteudo:
-                conteudo = conteudo.replace("[FIM_TEXTO_COLADO]", regra_dose_alvo + "\n[FIM_TEXTO_COLADO]")
+                conteudo = conteudo.rstrip() + "\n" + regra_dose_alvo
             log.info("Prompt do analisador carregado do banco (chatgpt_prompts).")
             return conteudo
         log.info("Prompt do analisador nao encontrado no banco - usando prompt local.")
@@ -4392,10 +4390,9 @@ def analisar_prontuario(
         )
 
     user_content = (
-        f"[INICIO_TEXTO_COLADO]Analise esta evolução clínica:\n\n"
+        f"Analise esta evolução clínica:\n\n"
         f"{bloco_contexto}"
         f"---\n{texto[:12000]}\n---\n"
-        f"[FIM_TEXTO_COLADO]"
     )
 
     payload = {
@@ -5152,11 +5149,9 @@ def gerar_dados_auxiliares_llm(resultado: dict, chat_url: str = None, chat_id: s
         return resultado
 
     user_content = (
-        f"[INICIO_TEXTO_COLADO]\n"
         f"{PROMPT_AUXILIAR_GRAFO_V18}\n\n"
         f"CASO CLÍNICO ESTRUTURADO (JSON):\n"
         f"{json.dumps(contexto_auxiliar, ensure_ascii=False, indent=2)}\n"
-        f"[FIM_TEXTO_COLADO]"
     )
 
     payload = {
@@ -5254,11 +5249,9 @@ def gerar_queries_pesquisa_llm(resultado: dict, chat_url: str = None, chat_id: s
         return {"search_queries": [], "uptodate_queries": []}
 
     user_content = (
-        f"[INICIO_TEXTO_COLADO]\n"
         f"{PROMPT_GERAR_PESQUISA}\n\n"
         f"CASO CLÍNICO ESTRUTURADO (JSON):\n"
         f"{json.dumps(contexto_pesquisa, ensure_ascii=False, indent=2)}\n"
-        f"[FIM_TEXTO_COLADO]"
     )
 
     payload = {
@@ -5436,7 +5429,6 @@ def enriquecer_com_evidencias(resultado: dict, resultados_web: list,
         resumo_caso += f"Resumo clínico: {str(resumo)[:500]}\n"
 
     user_content = (
-        f"[INICIO_TEXTO_COLADO]\n"
         f"{PROMPT_ENRIQUECIMENTO}\n\n"
         f"══════════════════════════════════════\n"
         f"CASO CLÍNICO\n"
@@ -5447,7 +5439,6 @@ def enriquecer_com_evidencias(resultado: dict, resultados_web: list,
         f"══════════════════════════════════════\n"
         f"{texto_busca}\n"
         f"══════════════════════════════════════\n"
-        f"[FIM_TEXTO_COLADO]"
     )
 
     payload = {

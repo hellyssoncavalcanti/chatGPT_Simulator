@@ -171,16 +171,9 @@ PASTE_END_MARKER = "[FIM_TEXTO_COLADO]"
 
 
 def ensure_paste_wrappers(text: str) -> tuple[str, bool]:
-    """Envolve `text` nos marcadores de texto colado se ainda não estiverem lá.
-
-    Retorna `(texto, foi_envolvido?)`. Strings em branco não são envolvidas.
-    """
+    """Retorna o texto sem modificação. Mantido por compatibilidade."""
     content = str(text or "")
-    if not content.strip():
-        return content, False
-    if PASTE_START_MARKER in content and PASTE_END_MARKER in content:
-        return content, False
-    return f"{PASTE_START_MARKER}{content}{PASTE_END_MARKER}", True
+    return content, False
 
 
 __all__ = [

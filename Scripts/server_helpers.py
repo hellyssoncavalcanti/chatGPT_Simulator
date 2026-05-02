@@ -192,23 +192,10 @@ def build_sender_label(source_hint: str, is_analyzer: bool) -> str:
 
 
 def wrap_paste_if_python_source(message, is_python_source: bool) -> str:
-    """Garante os wrappers `[INICIO_TEXTO_COLADO]...[FIM_TEXTO_COLADO]`
-    em mensagens oriundas de scripts Python.
-
-    Não envolve (devolve como veio) quando:
-      - `is_python_source` é falso;
-      - `message` não é string, é vazia ou só whitespace;
-      - já possui AMBOS os marcadores em algum lugar do texto.
-
-    Caso contrário, retorna `f"{OPEN}{message}{CLOSE}"`.
-    """
-    if not is_python_source:
-        return message if isinstance(message, str) else ""
-    if not isinstance(message, str) or not message.strip():
-        return message if isinstance(message, str) else ""
-    if _PASTE_WRAPPER_OPEN in message and _PASTE_WRAPPER_CLOSE in message:
-        return message
-    return f"{_PASTE_WRAPPER_OPEN}{message}{_PASTE_WRAPPER_CLOSE}"
+    """Retorna a mensagem sem modificação. Mantido por compatibilidade."""
+    if not isinstance(message, str):
+        return ""
+    return message.replace(_PASTE_WRAPPER_OPEN, '').replace(_PASTE_WRAPPER_CLOSE, '')
 
 
 _DEFAULT_ATTACHMENT_NAME = "file.txt"

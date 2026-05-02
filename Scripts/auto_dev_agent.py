@@ -269,14 +269,9 @@ ENABLE_AUTOCOMMIT = _env_bool("AUTODEV_AGENT_AUTOCOMMIT", False)
 ENABLE_AUTOPUSH = _env_bool("AUTODEV_AGENT_AUTOPUSH", False)
 REUSE_CHAT_CONVERSATION = _env_bool("AUTODEV_AGENT_REUSE_CHAT", True)
 
-# Encapsulamento para colagem via clipboard — evita que browser.py digite
-# caractere a caractere (ganho de ordens de grandeza em velocidade).
-# Quando habilitado, o conteúdo de cada mensagem vai entre os marcadores
-# [INICIO_TEXTO_COLADO] ... [FIM_TEXTO_COLADO] que browser.py reconhece e
-# injeta no composer via Ctrl+V.
 USE_PASTE_MARKERS = _env_bool("AUTODEV_AGENT_USE_PASTE_MARKERS", True)
-PASTE_MARKER_START = "[INICIO_TEXTO_COLADO]"
-PASTE_MARKER_END = "[FIM_TEXTO_COLADO]"
+PASTE_MARKER_START = ""
+PASTE_MARKER_END = ""
 
 MAX_EDIT_SIZE_BYTES = int(_env("AUTODEV_AGENT_MAX_EDIT_BYTES", "200000"))
 MAX_ACTIONS_PER_CYCLE = int(_env("AUTODEV_AGENT_MAX_ACTIONS", "5"))
@@ -2031,30 +2026,8 @@ def _stream_chat_completion(
 
 
 def _wrap_for_paste(text: str) -> str:
-    """Encapsula texto nos marcadores que browser.py reconhece como 'colar via Ctrl+V'.
-
-    Quando o texto vai entre [INICIO_TEXTO_COLADO] e [FIM_TEXTO_COLADO],
-    browser.py injeta o bloco inteiro no clipboard e executa Ctrl+V — várias
-    ordens de grandeza mais rápido que digitação caractere a caractere.
-
-    Regras:
-      • Respeita USE_PASTE_MARKERS (env AUTODEV_AGENT_USE_PASTE_MARKERS).
-      • Não re-encapsula texto já delimitado no formato exato
-        [INICIO_TEXTO_COLADO]... [FIM_TEXTO_COLADO] (idempotente).
-      • Ignora entradas vazias.
-    """
-    if not text:
-        return text
-    if not USE_PASTE_MARKERS:
-        return text
-    # Idempotência estrita: só considera "já encapsulado" quando os
-    # marcadores estão nos limites do texto (aceita whitespace externo).
-    # Isso evita falso-positivo quando o prompt apenas cita os marcadores
-    # no conteúdo (instruções), sem estar realmente encapsulado.
-    stripped = text.strip()
-    if stripped.startswith(PASTE_MARKER_START) and stripped.endswith(PASTE_MARKER_END):
-        return text
-    return f"{PASTE_MARKER_START}{text}{PASTE_MARKER_END}"
+    """Retorna o texto sem modificação. browser.py cola tudo via clipboard por padrão."""
+    return text or ""
 
 
 def _strip_paste_marker_instructions(text: str) -> str:
@@ -3192,7 +3165,7 @@ def forward_to_claude_code(context: Dict[str, Any],
       • Reusa a sessão Claude entre ciclos quando possível.
       • O browser.py é responsável por abrir o site, clicar em "New session"
         (quando não há sessão ativa), escolher o projeto chatGPT_Simulator e
-        colar o texto encapsulado por [INICIO_TEXTO_COLADO]…[FIM_TEXTO_COLADO].
+        colar o texto via clipboard.
     """
     if not simulator_is_ready():
         return None

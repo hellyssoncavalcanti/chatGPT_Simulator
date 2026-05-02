@@ -1733,8 +1733,7 @@ def build_forward_prompt(
         "- Entregue **somente** a mensagem final ao responsável"
     )
 
-    core = "\n".join(parts)
-    return f"[INICIO_TEXTO_COLADO]\n{core}\n[FIM_TEXTO_COLADO]"
+    return "\n".join(parts)
 
 def _sanitize_simulator_answer(text: str) -> str:
     """Remove artefatos de status de pensamento que vazam para a resposta final."""

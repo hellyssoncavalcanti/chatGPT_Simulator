@@ -1575,8 +1575,6 @@ def chat_completions():
     is_codex_request = _is_codex_chat_request(source_hint_norm, data.get("url"), origin_url)
     use_python_queue = bool(is_python_source and not is_codex_request)
 
-    # Todos os pedidos oriundos de scripts Python devem usar encapsulamento de
-    # texto colado para evitar typing realista (lento) no browser.py.
     message = _wrap_paste_if_python_source_impl(message, is_python_source)
 
     # --- 2. PROCESSAMENTO DE ANEXOS ---
