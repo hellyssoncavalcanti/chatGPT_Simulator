@@ -1257,6 +1257,100 @@ def api_metrics():
     return jsonify({"success": True, "metrics": metrics}), 200
 
 
+@app.route("/api/errors/known", methods=["GET"])
+def api_errors_known():
+    """
+    Retorna a lista de erros conhecidos (Scripts/erros_conhecidos.json).
+    Endpoint LEVE para polling do toast de monitor de erros — apenas leitura
+    de arquivo JSON, sem execução do scanner.
+    """
+    from pathlib import Path as _Path
+    json_path = _Path(__file__).resolve().parent / "erros_conhecidos.json"
+    if not json_path.exists():
+        return jsonify({
+            "success": True, "entries": [], "count": 0,
+            "path": str(json_path), "missing": True
+        }), 200
+    try:
+        data = json.loads(json_path.read_text(encoding="utf-8"))
+        entries = data.get("entries", []) or []
+        return jsonify({
+            "success": True,
+            "entries": entries,
+            "count": len(entries),
+            "version": data.get("version"),
+        }), 200
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route("/api/errors/scan", methods=["GET"])
+def api_errors_scan():
+    """
+    Executa o log_scanner programaticamente e retorna apenas erros NOVOS
+    (não casados com erros_conhecidos.json).
+    Endpoint PESADO: deve ser chamado apenas sob demanda do usuário (botão).
+    """
+    from pathlib import Path as _Path
+    try:
+        from log_scanner import (
+            get_latest_logs, scan_file, load_known_errors,
+            CONTEXT_LINES as _CTX, MAX_MATCHES as _MAX,
+        )
+    except Exception as e:
+        return jsonify({
+            "success": False,
+            "error": f"log_scanner indisponível: {e}"
+        }), 500
+
+    logs_dir = _Path(__file__).resolve().parent.parent / "logs"
+    if not logs_dir.exists():
+        return jsonify({
+            "success": False, "error": "logs_dir_not_found",
+            "path": str(logs_dir)
+        }), 404
+
+    try:
+        known = load_known_errors()
+        all_logs = get_latest_logs(logs_dir)
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+    new_errors = []
+    scanned = []
+    for system, log_path in all_logs.items():
+        scanned.append(system)
+        try:
+            snippets = scan_file(
+                log_path, context=_CTX, max_matches=_MAX, known_errors=known
+            )
+        except Exception as e:
+            new_errors.append({
+                "system": system, "log_file": log_path.name,
+                "line_num": 0, "severity": "error",
+                "context": f"[scan_file error] {e}",
+            })
+            continue
+        for s in snippets:
+            if s.get("known_entry") or s.get("truncated") or s.get("read_error"):
+                continue
+            new_errors.append({
+                "system": system,
+                "log_file": log_path.name,
+                "line_num": s.get("line_num"),
+                "severity": s.get("severity"),
+                "context": s.get("context", ""),
+            })
+
+    return jsonify({
+        "success": True,
+        "new_errors": new_errors,
+        "count": len(new_errors),
+        "scanned_systems": scanned,
+        "known_count": len(known),
+    }), 200
+
+
 @app.route("/metrics", methods=["GET"])
 def prometheus_metrics():
     """Endpoint Prometheus text exposition."""

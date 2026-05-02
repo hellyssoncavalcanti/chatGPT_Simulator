@@ -1426,8 +1426,23 @@ async def _read_last_assistant_snapshot(page):
                 origAnchors.forEach((a, i) => {
                     const ca = cloneAnchors[i];
                     if (!ca) return;
-                    const href = a.href;
-                    if (href && href !== location.href && !href.startsWith('javascript:')) {
+                    let href = a.href;
+                    if (!href || href === location.href) {
+                        const fk = Object.keys(a).find(k =>
+                            k.startsWith('__reactFiber') || k.startsWith('__reactInternalInstance')
+                        );
+                        if (fk) {
+                            let fiber = a[fk]; let depth = 0;
+                            while (fiber && !href && depth < 10) {
+                                const p = fiber.memoizedProps || fiber.pendingProps || {};
+                                if (p.href && typeof p.href === 'string' &&
+                                    p.href.startsWith('http') && p.href !== location.href)
+                                    href = p.href;
+                                fiber = fiber.return; depth++;
+                            }
+                        }
+                    }
+                    if (href && href !== '' && href !== location.href && !href.startsWith('javascript:')) {
                         ca.setAttribute('href', href);
                     }
                 });
@@ -1481,8 +1496,23 @@ async def _read_assistant_snapshot_after_baseline(page, baseline_count: int):
                 origAnchors.forEach((a, i) => {
                     const ca = cloneAnchors[i];
                     if (!ca) return;
-                    const href = a.href;
-                    if (href && href !== location.href && !href.startsWith('javascript:')) {
+                    let href = a.href;
+                    if (!href || href === location.href) {
+                        const fk = Object.keys(a).find(k =>
+                            k.startsWith('__reactFiber') || k.startsWith('__reactInternalInstance')
+                        );
+                        if (fk) {
+                            let fiber = a[fk]; let depth = 0;
+                            while (fiber && !href && depth < 10) {
+                                const p = fiber.memoizedProps || fiber.pendingProps || {};
+                                if (p.href && typeof p.href === 'string' &&
+                                    p.href.startsWith('http') && p.href !== location.href)
+                                    href = p.href;
+                                fiber = fiber.return; depth++;
+                            }
+                        }
+                    }
+                    if (href && href !== '' && href !== location.href && !href.startsWith('javascript:')) {
                         ca.setAttribute('href', href);
                     }
                 });
@@ -2253,8 +2283,23 @@ async def scrape_full_chat(page):
                 origAnchors.forEach((a, i) => {
                     const ca = cloneAnchors[i];
                     if (!ca) return;
-                    const href = a.href;
-                    if (href && href !== location.href && !href.startsWith('javascript:')) {
+                    let href = a.href;
+                    if (!href || href === location.href) {
+                        const fk = Object.keys(a).find(k =>
+                            k.startsWith('__reactFiber') || k.startsWith('__reactInternalInstance')
+                        );
+                        if (fk) {
+                            let fiber = a[fk]; let depth = 0;
+                            while (fiber && !href && depth < 10) {
+                                const p = fiber.memoizedProps || fiber.pendingProps || {};
+                                if (p.href && typeof p.href === 'string' &&
+                                    p.href.startsWith('http') && p.href !== location.href)
+                                    href = p.href;
+                                fiber = fiber.return; depth++;
+                            }
+                        }
+                    }
+                    if (href && href !== '' && href !== location.href && !href.startsWith('javascript:')) {
                         ca.setAttribute('href', href);
                     }
                 });
@@ -2685,8 +2730,23 @@ async def handle_sync_task(context, task):
                         origAnchors.forEach((a, i) => {
                             const ca = cloneAnchors[i];
                             if (!ca) return;
-                            const href = a.href;
-                            if (href && href !== location.href && !href.startsWith('javascript:')) {
+                            let href = a.href;
+                            if (!href || href === location.href) {
+                                const fk = Object.keys(a).find(k =>
+                                    k.startsWith('__reactFiber') || k.startsWith('__reactInternalInstance')
+                                );
+                                if (fk) {
+                                    let fiber = a[fk]; let depth = 0;
+                                    while (fiber && !href && depth < 10) {
+                                        const p = fiber.memoizedProps || fiber.pendingProps || {};
+                                        if (p.href && typeof p.href === 'string' &&
+                                            p.href.startsWith('http') && p.href !== location.href)
+                                            href = p.href;
+                                        fiber = fiber.return; depth++;
+                                    }
+                                }
+                            }
+                            if (href && href !== '' && href !== location.href && !href.startsWith('javascript:')) {
                                 ca.setAttribute('href', href);
                             }
                         });

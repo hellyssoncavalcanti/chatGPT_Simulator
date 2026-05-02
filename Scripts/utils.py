@@ -247,6 +247,22 @@ def setup_frontend():
     .monitor-tab.active { background: #343541; color: #fff; font-weight: 700; }
     .monitor-panel { display: none; }
     .monitor-panel.active { display: block; }
+    #errorsMonitorOverlay .api-tab { flex: 1; text-align: center; padding: 10px 8px; cursor: pointer; font-size: 0.9rem; color: #c9c9cf; background: transparent; border: none; border-bottom: 2px solid transparent; transition: 0.2s; }
+    #errorsMonitorOverlay .api-tab.active { background: #343541; color: #fff; font-weight: 700; border-bottom: 2px solid #19c37d; }
+    #errorsMonitorOverlay .api-tab:hover:not(.active) { background: #2a2b32; }
+    #errorsMonitorOverlay .api-panel { display: none; }
+    #errorsMonitorOverlay .api-panel.active { display: block; }
+    #errorsMonitorOverlay .errors-body { max-height: 65vh; overflow-y: auto; padding: 4px; font-size: 0.88rem; line-height: 1.5; color: #d8d8d8; }
+    .err-entry { border-left: 3px solid #888; padding: 8px 10px; margin-bottom: 8px; background: #2a2b32; border-radius: 4px; }
+    .err-entry .err-id { font-weight: bold; font-size: 0.82rem; }
+    .err-entry .err-pattern { font-size: 0.72rem; color: #aaa; margin: 4px 0; font-family: monospace; word-break: break-all; }
+    .err-entry .err-desc { font-size: 0.78rem; color: #d8d8d8; }
+    .err-entry .err-fix { font-size: 0.74rem; color: #19c37d; margin-top: 4px; }
+    .err-entry .err-files { font-size: 0.7rem; color: #888; margin-top: 4px; }
+    .err-entry .err-context { font-size: 0.72rem; color: #d8d8d8; margin: 4px 0 0; white-space: pre-wrap; font-family: monospace; max-height: 140px; overflow: auto; background: #1c1d22; padding: 6px; border-radius: 3px; }
+    .err-scan-btn { margin: 16px auto 8px; display: block; background: #19c37d; border: none; padding: 10px 20px; border-radius: 5px; color: white; cursor: pointer; font-weight: bold; }
+    .err-scan-btn:disabled { background: #555; cursor: not-allowed; }
+    .err-scan-btn:hover:not(:disabled) { background: #15a369; }
     .monitor-meta { color: #9aa0aa; font-size: 0.78rem; margin-bottom: 8px; font-family: 'Segoe UI', sans-serif; }
     .simple-modal { background: #202123; border: 1px solid #444; border-radius: 8px; padding: 20px; width: 300px; max-width: 90%; color: #ececf1; display: flex; flex-direction: column; gap: 15px; box-shadow: 0 10px 25px rgba(0,0,0,0.5); }
     .simple-modal h3 { margin: 0; font-size: 1.1rem; }
@@ -288,6 +304,7 @@ def setup_frontend():
         <div class="user-option" onclick="openApiModal()">Guia de API</div>
         <div class="user-option" onclick="openQueueMonitorToast()">Status da Fila</div>
         <div class="user-option" onclick="openLogMonitorToast()">Log em tempo real</div>
+        <div class="user-option" onclick="openErrorsModal()">Monitor de Erros</div>
         <div class="user-option" style="color:#ff6b6b" onclick="doLogout()">Sair</div>
     </div>
 </div>
@@ -382,6 +399,29 @@ def setup_frontend():
         <div class="monitor-body" id="metricsMonitorBody">Carregando...</div>
     </div>
 </div>
+<div id="errorsMonitorOverlay" class="share-overlay">
+    <div class="popover" style="max-width: 900px;">
+        <div class="share-header">
+            <h2>🛡️ Monitor de Erros</h2>
+            <button class="share-close" onclick="closeErrorsModal()">✖</button>
+        </div>
+        <div class="monitor-tabs" style="background:#1d1e24;">
+            <div class="api-tab active" data-tab="known" onclick="switchApiTab('known')">✅ Conhecidos (<span id="errorsKnownCount">0</span>)</div>
+            <div class="api-tab" data-tab="new" onclick="switchApiTab('new')">🆕 Novos (<span id="errorsNewCount">0</span>)</div>
+        </div>
+        <div class="share-content" style="padding: 16px 20px; background:#171717;">
+            <div class="api-panel active" data-tab="known">
+                <div id="errorsKnownBody" class="errors-body">Carregando...</div>
+            </div>
+            <div class="api-panel" data-tab="new">
+                <div id="errorsNewBody" class="errors-body">
+                    <button id="errorsScanBtn" class="err-scan-btn" onclick="runErrorsScan()">🔍 Verificar se há novos erros</button>
+                    <div id="errorsScanStatus" style="text-align:left;"><em style="color:#888">Clique acima para escanear os logs em busca de erros novos.</em></div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
 <input type="text" id="hiddenCopyInput" style="position:absolute; left:-9999px; opacity:0;">
 
 <script>
@@ -409,6 +449,7 @@ def setup_frontend():
     let pendingAction = null; 
     let queueMonitorTimer = null;
     let logMonitorTimer = null;
+    let errorsMonitorTimer = null;
 
     function setStatus(text) {
         const el = document.getElementById('statusFloat');
@@ -431,6 +472,14 @@ def setup_frontend():
         if (id === 'logMonitorToast' && logMonitorTimer) {
             clearInterval(logMonitorTimer);
             logMonitorTimer = null;
+        }
+    }
+
+    function closeErrorsModal() {
+        document.getElementById('errorsMonitorOverlay')?.classList.remove('visible');
+        if (errorsMonitorTimer) {
+            clearInterval(errorsMonitorTimer);
+            errorsMonitorTimer = null;
         }
     }
 
@@ -545,6 +594,117 @@ def setup_frontend():
         metricsPanel.classList.toggle('active', !isLog);
     }
 
+    // --- ERRORS MONITOR ---
+    function _escapeHtmlErr(s) {
+        return String(s == null ? '' : s).replace(/[&<>"']/g, c => (
+            {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]
+        ));
+    }
+
+    function _renderKnownEntry(e) {
+        const colors = {
+            fixed: '#19c37d',
+            false_positive: '#888',
+            historico_db: '#888',
+            suppressed: '#e6a23c',
+            monitoring: '#e6a23c'
+        };
+        const color = colors[e.status] || '#aaa';
+        const files = (e.files_changed || []).join(', ');
+        const fixHtml = e.fix_summary
+            ? `<div class="err-fix">✓ ${_escapeHtmlErr(e.fix_summary)}</div>`
+            : (e.action ? `<div class="err-fix" style="color:#e6a23c;">→ ${_escapeHtmlErr(e.action)}</div>` : '');
+        const filesHtml = files ? `<div class="err-files">📂 ${_escapeHtmlErr(files)}</div>` : '';
+        return `
+          <div class="err-entry" style="border-left-color: ${color};">
+            <div class="err-id" style="color: ${color};">[${_escapeHtmlErr(e.status || '?')}] ${_escapeHtmlErr(e.id || '')}</div>
+            <div class="err-pattern">pattern: ${_escapeHtmlErr(e.pattern || '')}</div>
+            <div class="err-desc">${_escapeHtmlErr(e.description || '')}</div>
+            ${fixHtml}
+            ${filesHtml}
+          </div>
+        `;
+    }
+
+    function openErrorsModal() {
+        document.getElementById('userDropdown').classList.remove('visible');
+        const el = document.getElementById('errorsMonitorOverlay');
+        el.classList.add('visible');
+        switchApiTab('known');
+
+        const renderKnown = async () => {
+            const body = document.getElementById('errorsKnownBody');
+            const countEl = document.getElementById('errorsKnownCount');
+            try {
+                const res = await fetch('/api/errors/known');
+                const json = await res.json();
+                if (!json.success) {
+                    body.innerHTML = `<span style="color:#f56c6c">Falha: ${_escapeHtmlErr(json.error || 'erro desconhecido')}</span>`;
+                    return;
+                }
+                const entries = json.entries || [];
+                countEl.innerText = entries.length;
+                if (entries.length === 0) {
+                    body.innerHTML = '<em style="color:#888">Nenhum erro conhecido cadastrado.</em>';
+                    return;
+                }
+                body.innerHTML = entries.map(_renderKnownEntry).join('');
+            } catch (e) {
+                body.innerHTML = `<span style="color:#f56c6c">Erro ao consultar erros conhecidos: ${_escapeHtmlErr(String(e))}</span>`;
+            }
+        };
+
+        renderKnown();
+        if (errorsMonitorTimer) clearInterval(errorsMonitorTimer);
+        errorsMonitorTimer = setInterval(renderKnown, 5000);
+    }
+
+    async function runErrorsScan() {
+        const btn = document.getElementById('errorsScanBtn');
+        const status = document.getElementById('errorsScanStatus');
+        const countEl = document.getElementById('errorsNewCount');
+        btn.disabled = true;
+        const originalLabel = btn.innerText;
+        btn.innerText = '⏳ Escaneando logs...';
+        status.innerHTML = '<em style="color:#aaa">Aguarde, executando log_scanner...</em>';
+        try {
+            const res = await fetch('/api/errors/scan');
+            const json = await res.json();
+            if (!json.success) {
+                status.innerHTML = `<span style="color:#f56c6c">Falha: ${_escapeHtmlErr(json.error || 'erro desconhecido')}</span>`;
+                return;
+            }
+            const errs = json.new_errors || [];
+            countEl.innerText = errs.length;
+            const sysList = (json.scanned_systems || []).join(', ') || '(nenhum)';
+            if (errs.length === 0) {
+                status.innerHTML = `
+                  <div style="color:#19c37d; padding:8px 0;">✅ Nenhum erro novo encontrado.</div>
+                  <div style="font-size:0.72rem; color:#888;">Sistemas escaneados: ${_escapeHtmlErr(sysList)}</div>
+                  <div style="font-size:0.72rem; color:#888;">Erros conhecidos no banco: ${json.known_count || 0}</div>
+                `;
+                return;
+            }
+            const items = errs.map(e => `
+              <div class="err-entry" style="border-left-color: #f56c6c;">
+                <div class="err-id" style="color:#f56c6c;">[${_escapeHtmlErr(e.severity || '?')}] ${_escapeHtmlErr(e.system || '')}:${e.line_num || '?'}</div>
+                <div class="err-files">📄 ${_escapeHtmlErr(e.log_file || '')}</div>
+                <pre class="err-context">${_escapeHtmlErr(e.context || '')}</pre>
+              </div>
+            `).join('');
+            status.innerHTML = `
+              <div style="color:#e6a23c; margin:8px 0;">⚠️ ${errs.length} erro(s) novo(s) encontrado(s):</div>
+              ${items}
+              <div style="font-size:0.72rem; color:#888; margin-top:8px;">Sistemas: ${_escapeHtmlErr(sysList)}</div>
+            `;
+        } catch (e) {
+            status.innerHTML = `<span style="color:#f56c6c">Erro: ${_escapeHtmlErr(String(e))}</span>`;
+        } finally {
+            btn.disabled = false;
+            btn.innerText = originalLabel.startsWith('🔍') ? '🔍 Verificar novamente' : originalLabel;
+        }
+    }
+
     // --- LOGIN ---
     async function doLogin() {
         const u = document.getElementById('loginUser').value;
@@ -622,9 +782,23 @@ def setup_frontend():
     }
     
     // --- LÓGICA DE ABAS DA API ---
-    window.switchApiTab = function(evt, paneId) {
-        document.querySelectorAll('.api-tab').forEach(t => t.classList.remove('active'));
-        document.querySelectorAll('.api-pane').forEach(p => p.classList.remove('active'));
+    // Polimórfica:
+    //   switchApiTab(evt, paneId)  → apiModal (original)
+    //   switchApiTab('known'|'new') → errorsMonitorOverlay (Monitor de Erros)
+    window.switchApiTab = function(arg1, arg2) {
+        if (typeof arg1 === 'string') {
+            const tabKey = arg1;
+            document.querySelectorAll('#errorsMonitorOverlay .api-tab').forEach(t => {
+                t.classList.toggle('active', t.dataset.tab === tabKey);
+            });
+            document.querySelectorAll('#errorsMonitorOverlay .api-panel').forEach(p => {
+                p.classList.toggle('active', p.dataset.tab === tabKey);
+            });
+            return;
+        }
+        const evt = arg1, paneId = arg2;
+        document.querySelectorAll('#apiModal .api-tab').forEach(t => t.classList.remove('active'));
+        document.querySelectorAll('#apiModal .api-pane').forEach(p => p.classList.remove('active'));
         evt.currentTarget.classList.add('active');
         document.getElementById(paneId).classList.add('active');
     };
