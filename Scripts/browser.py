@@ -1106,6 +1106,10 @@ async def smart_input(page, message, q=None, activityts=None):
 
 
 async def type_realistic(page, text, q=None, delay_scale: float = 1.0):
+    # \r sozinho ou em \r\n chegaria ao keyboard.type('\r'), que o Playwright
+    # interpreta como tecla Return — submetendo o formulário do ChatGPT.
+    # Normaliza antes do loop, igual ao que _paste_clipboard já faz.
+    text = text.replace('\r\n', '\n').replace('\r', '\n')
     total = len(text)
     last_status_time = time.time()
     typo_count = 0
