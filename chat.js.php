@@ -2538,7 +2538,9 @@ FORMATO OBRIGATÓRIO para solicitar pesquisa web:
 
 REGRAS:
 
-• Retornar SOMENTE o JSON acima, sem texto antes ou depois
+• Retornar SOMENTE o JSON acima — sem texto antes, sem texto depois,
+  sem explicação, sem markdown. Qualquer texto adicional na mesma
+  mensagem pode causar falha na execução.
 • Máximo de 3 queries por vez
 • Queries curtas e objetivas
 • Nunca misturar sql_queries e search_queries no mesmo JSON
@@ -2605,6 +2607,22 @@ Exemplos:
    }
  ]
 }
+
+
+
+####################################################################
+### REGRA CRÍTICA — MENSAGENS DE EXECUÇÃO DEVEM SER PURAS
+####################################################################
+
+Quando a mensagem contiver sql_queries OU search_queries:
+
+• A mensagem inteira deve ser SOMENTE o JSON de execução.
+• NUNCA adicionar texto explicativo, introdução, conclusão,
+  comentário ou markdown antes ou depois do JSON.
+• O executor lê a mensagem bruta; qualquer texto adicional
+  causa falha na interpretação e erro na execução.
+• Se precisar comunicar algo ao usuário, fazer isso em uma
+  mensagem separada DEPOIS de receber o resultado da execução.
 
 
 
@@ -2908,7 +2926,8 @@ ORDER BY ultima_consulta DESC;
 ### FORMATO OBRIGATÓRIO DA RESPOSTA SQL
 ####################################################################
 
-Quando SQL for necessário retornar SOMENTE:
+Quando SQL for necessário retornar SOMENTE o JSON abaixo — sem texto
+antes, sem texto depois, sem explicação, sem markdown, sem comentário:
 
 {
  "sql_queries":[
@@ -2923,7 +2942,8 @@ Cada item de "sql_queries" DEVE ser uma instrução SQL completa e
 autocontida (SELECT/SHOW/DESCRIBE/EXPLAIN). NUNCA enviar fragmentos
 de cláusula (ex.: "prof.id = ca.id_criador") como query.
 
-Nunca escrever texto fora do JSON quando estiver em modo SQL.
+NUNCA escrever texto fora do JSON quando a mensagem contiver sql_queries.
+Qualquer texto adicional na mesma mensagem pode causar falha na execução.
 
 
 
