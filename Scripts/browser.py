@@ -3786,9 +3786,11 @@ async def handle_chat_task(context, task, get_browser_for_profile=None):
         active_context = context
         active_profile_key = str(task.get("_resolved_browser_profile_key") or "default").strip() or "default"
         active_profile_dirname = str(task.get("_resolved_chromium_profile_dirname") or "").strip()
-        fallback_profile_key = str(task.get("_fallback_browser_profile_key") or "").strip()
-        fallback_profile_dirname = str(task.get("_fallback_chromium_profile_dirname") or "").strip()
-        switched_to_fallback = False
+        # Rastreia perfis já tentados nesta tarefa — proteção anti-loop no failover
+        # bilateral de rate-limit (default↔segunda_chance). Cada perfil é tentado
+        # no máximo uma vez; quando todos os elegíveis estão esgotados, o erro é
+        # propagado ao cliente em vez de entrar em loop.
+        tried_profiles: set[str] = {active_profile_key}
         async def _resume_stream_after_reopen(probe_page, initial_markdown: str) -> str:
             """Retoma streaming de uma resposta já iniciada após reabrir a aba."""
             current = (initial_markdown or "").strip()
@@ -3855,36 +3857,47 @@ async def handle_chat_task(context, task, get_browser_for_profile=None):
                         if saved:
                             emit_log(q, f"📄 HTML salvo em: {saved}")
                 except RateLimitDetected as rle:
-                    can_switch_profile = (
-                        (not switched_to_fallback)
-                        and active_profile_key == "default"
-                        and bool(fallback_profile_key)
-                        and callable(get_browser_for_profile)
+                    # Failover bilateral: default↔segunda_chance.
+                    # next_key é o primeiro perfil elegível ainda não tentado nesta
+                    # tarefa; tried_profiles impede que o mesmo perfil seja tentado
+                    # duas vezes, garantindo terminação sem loop infinito.
+                    _rl_profiles = getattr(config, "CHROMIUM_PROFILES", None) or {}
+                    next_key = next(
+                        (k for k in ("default", "segunda_chance")
+                         if k in _rl_profiles and k not in tried_profiles),
+                        ""
                     )
+                    next_dir = _rl_profiles.get(next_key, "")
+                    can_switch_profile = bool(next_key) and callable(get_browser_for_profile)
                     if can_switch_profile:
+                        prev_key = active_profile_key
+                        tried_profiles.add(prev_key)
                         emit_log(
                             q,
-                            "⛔ Rate-limit no perfil default. "
-                            f"Tentando automaticamente o perfil '{fallback_profile_key}'."
+                            f"⛔ Rate-limit no perfil '{prev_key}'. "
+                            f"Tentando automaticamente o perfil '{next_key}'."
                         )
-                        emit_event(q, "status", f"Rate-limit no perfil default; trocando para '{fallback_profile_key}'...")
-                        switched_to_fallback = True
-                        active_profile_key = fallback_profile_key
-                        if fallback_profile_dirname:
-                            active_profile_dirname = fallback_profile_dirname
-                        task["browser_profile"] = fallback_profile_key
-                        task["_resolved_browser_profile_key"] = fallback_profile_key
+                        emit_event(q, "status", f"Rate-limit em '{prev_key}'; trocando para '{next_key}'...")
+                        active_profile_key = next_key
+                        try:
+                            active_profile_dirname = (
+                                os.path.basename(os.path.normpath(str(next_dir))) or next_key
+                            )
+                        except Exception:
+                            active_profile_dirname = next_key
+                        task["browser_profile"] = next_key
+                        task["_resolved_browser_profile_key"] = next_key
                         task["_resolved_chromium_profile_dirname"] = active_profile_dirname
-                        # URL de chat anterior normalmente pertence ao perfil default.
-                        # Ao trocar de perfil, inicia novo chat para evitar 404/Unauthorized.
+                        # URL do chat anterior pertence ao perfil anterior — inicia
+                        # novo chat no perfil destino para evitar 404/Unauthorized.
                         task["url"] = None
                         try:
-                            active_context = await get_browser_for_profile(fallback_profile_key)
+                            active_context = await get_browser_for_profile(next_key)
                         except Exception as switch_err:
                             emit_event(
                                 q,
                                 "error",
-                                f"Rate-limit no default e falha ao alternar para perfil '{fallback_profile_key}': {switch_err}",
+                                f"Rate-limit em '{prev_key}' e falha ao abrir perfil '{next_key}': {switch_err}",
                             )
                             break
                         if attempt < max_attempts:
@@ -5797,13 +5810,6 @@ async def browser_loop_async():
                 pass
             return str(profile_key or "").strip() or "default"
 
-        def _get_rate_limit_fallback_profile() -> tuple[str, str]:
-            profiles = getattr(config, "CHROMIUM_PROFILES", None) or {}
-            candidate = "segunda_chance"
-            if candidate in profiles:
-                return candidate, profiles[candidate]
-            return "", ""
-
         def _choose_profile_for_new_chat(explicit_profile: str | None, task: dict) -> str | None:
             nonlocal chat_profile_rr_index
             # "default" é tratado como "sem preferência explícita" — permite
@@ -5867,13 +5873,6 @@ async def browser_loop_async():
                     profile_key, profile_dir = _resolve_profile_dir(task.get('browser_profile'))
                     task["_resolved_browser_profile_key"] = profile_key
                     task["_resolved_chromium_profile_dirname"] = _profile_dirname(profile_key, profile_dir)
-                    fb_key, fb_dir = _get_rate_limit_fallback_profile()
-                    if fb_key and fb_dir and fb_key != profile_key:
-                        task["_fallback_browser_profile_key"] = fb_key
-                        task["_fallback_chromium_profile_dirname"] = _profile_dirname(fb_key, fb_dir)
-                    else:
-                        task["_fallback_browser_profile_key"] = ""
-                        task["_fallback_chromium_profile_dirname"] = ""
                     browser = await get_browser_for(profile_key, profile_dir)
                     await cleanup_known_orphan_tabs(browser)
 
