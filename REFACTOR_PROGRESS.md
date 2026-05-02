@@ -338,7 +338,7 @@ Coletadas em `2026-04-22` via `wc -l` / `grep -nE "def "`:
 
 ### Entregue nesta sessão (quater)
 1. `Scripts/server_helpers.py` (+tests, 29 casos) — `format_wait_seconds`, `queue_status_payload`, `prune_old_attempts` (com ganchos `now`/`now_func`), `count_active_chatgpt_profiles` (recebe mapa por argumento; wrapper em `server.py` é quem lê `config.CHROMIUM_PROFILES`). Commit `c5c45dc`.
-2. `Scripts/browser_predicates.py` (+tests, 38 casos) — `extract_task_sender`, `is_known_orphan_tab_url`, `response_looks_incomplete_json`, `response_requests_followup_actions`, `replace_inline_base64_payloads`, `ensure_paste_wrappers`. Regexes preservadas byte-a-byte. Commit `e6a9cc2`.
+2. `Scripts/browser_predicates.py` (+tests, 38 casos) — `extract_task_sender`, `is_known_orphan_tab_url`, `response_looks_incomplete_json`, `response_requests_followup_actions`, `replace_inline_base64_payloads`, `ensure_paste_wrappers` (posterior ao commit: no-op — marcadores removidos do sistema; mantida por compatibilidade). Regexes preservadas byte-a-byte. Commit `e6a9cc2`.
 3. `tests/test_humanizer.py` ampliado (+15 casos) — invariantes anti-robotização: variância mínima em 200 amostras (≥5 valores distintos com 3 casas decimais, ≤5% delays consecutivos idênticos), piso de pausa em pontuação, determinismo via `random.seed`, normalização de swap `min>max` sem rebaixar piso, typos sempre de `DEFAULT_NEARBY_KEYS`, janela de hesitação respeitada. Commit `c676cbc`.
 4. Integração drop-in — `server._extract_rate_limit_details` agora delega a classificação heurística para `error_catalog.classify_from_text(...) == RATE_LIMIT`, removendo o string-match ad-hoc do caminho quente. Contrato `(is_rate_limited, message, retry_after)` preservado. `tests/test_rate_limit_integration.py` (+18 casos) replica a lógica offline (server.py continua precisando de Flask para import). Commit `3646da1`.
 
@@ -393,16 +393,18 @@ Coletadas em `2026-04-22` via `wc -l` / `grep -nE "def "`:
 
 ---
 
-## 🆕 PONTO DE RETOMADA (última atualização em 2026-05-02 unquadragies+)
+## 🆕 PONTO DE RETOMADA (última atualização em 2026-05-02 sexquadragies)
 
 > **Leia APENAS esta seção ao retomar em outro chat.** Ela é autocontida:
 > não é necessário reler seções anteriores a menos que haja dúvida sobre
 > detalhe específico. Seções históricas acima existem apenas para auditoria.
 
-### Estado atual (consolidado) — branch `claude/continue-refactor-updates-wvOqd`
+### Estado atual (consolidado) — branch `claude/fix-rate-limit-interval-1vPbB`
 
 **Commits relevantes (mais recente → mais antigo):**
-- `a034d61` — Implementar concorrência por perfil e round-robin de profiles no browser *(esta sessão)*
+- `<COMMIT_HASH>` — Extrair resolve_client_ip + payloads bloco chat_completions *(esta sessão)*
+- `070a37d` — Sanitizar fila SSE de log em browser.py (emit_log + _save_error_html) *(sessão anterior)*
+- `a034d61` — Implementar concorrência por perfil e round-robin de profiles no browser
 - `185e222` — Auditar server.py para referências _impl indefinidas *(esta sessão)*
 - `6a3a3c5` — Corrigir duplicatas em server_helpers e restaurar suite para 698 testes *(root-commit do repo local)*
 - `4828ff8` — Extrair payload 401 canônico + autoflow sem pausas *(esta sessão, ciclo 44 / opção 2)*
@@ -474,7 +476,7 @@ Coletadas em `2026-04-22` via `wc -l` / `grep -nE "def "`:
 - `1f3374b` — Extrair detecção de origem de request para módulo testável offline
 - `0c6216e` — docs: refinar backlog P0-P1-P2 com evidências concretas
 
-**Suite offline atual: 19 arquivos → 794 passed** (após sessão de 2026-05-02 — concorrência por perfil + round-robin + Blueprint busca).
+**Suite offline atual: 20 arquivos → 832 passed** (após sessão de 2026-05-02 sexquadragies — extração de helpers de chat_completions + correção de testes no-op + resolve_client_ip).
 
 O estado do repo local foi restaurado a partir da cópia de trabalho (histórico git reiniciado como root-commit `6a3a3c5`). As seguintes correções foram aplicadas em relação ao estado anterior da cópia de trabalho:
 - Removidas 9 definições duplicadas (linhas 820-959) de `server_helpers.py` que sobrescreviam as implementações corretas dos ciclos 31-43.
@@ -504,9 +506,10 @@ python -m pytest \
   tests/test_python_request_throttle.py \
   tests/test_web_search_throttle.py \
   tests/test_error_scanner_helpers.py \
-  tests/test_profile_concurrency.py
+  tests/test_profile_concurrency.py \
+  tests/test_browser_log_sanitization.py
 ```
-Esperado: **794 passed**. (NÃO usar `python -m pytest tests/` cru — `tests/test_server_api.py` e `tests/test_storage.py` falham por requerer `flask` / `cryptography` indisponíveis neste ambiente.)
+Esperado: **815 passed**. (NÃO usar `python -m pytest tests/` cru — `tests/test_server_api.py` e `tests/test_storage.py` falham por requerer `flask` / `cryptography` indisponíveis neste ambiente.)
 
 ### Mapa de módulos puros já criados
 
@@ -514,9 +517,9 @@ Esperado: **794 passed**. (NÃO usar `python -m pytest tests/` cru — `tests/te
 |---|---|---|---|
 | `Scripts/request_source.py` | ~60 | `is_python_chat_request`, `is_codex_chat_request`, `is_analyzer_chat_request` (detecta `analisador_prontuarios*` e token `analyzer`). | `tests/test_request_source.py` (15) |
 | `Scripts/error_catalog.py` | ~290 | 11 códigos + `classify_from_text` (PT-BR + EN) + `format_reason` (tag `[CODE] …` idempotente, fallback sem ruído para INTERNAL_ERROR). | `tests/test_error_catalog.py` (65) |
-| `Scripts/server_helpers.py` | ~860 | `format_wait_seconds`, `queue_status_payload`, `prune_old_attempts`, `count_active_chatgpt_profiles`, `combine_openai_messages`, `build_sender_label`, `wrap_paste_if_python_source`, `coalesce_origin_url`, `extract_source_hint`, `decode_attachment`, `resolve_chat_url` (com `case_insensitive=False` opcional), `resolve_browser_profile`, `normalize_optional_text`, `build_queue_key`, `build_chat_task_payload`, eventos SSE/NDJSON (`build_error_event`, `build_status_event`, `build_markdown_event`, `build_search_result_event`, `build_search_finish_event`, `build_chat_id_event`, `build_chat_meta_event`), `format_requester_suffix` / `format_origin_suffix`, `compute_python_request_interval`, `safe_int` / `safe_snapshot_stats`, `extract_requester_identity`, helpers de payload de manutenção (`resolve_lookup_origin_url`, `extract_chat_delete_local_targets`, `extract_delete_request_targets`, `extract_menu_url`, `extract_menu_execute_payload`), helpers de `/api/web_search/test` (`extract_web_search_test_params`, `build_web_search_test_task`, `build_web_search_test_stream_response`, `build_web_search_test_error_payload`, `build_web_search_test_timeout_payload`, `build_web_search_test_no_response_payload`, `build_web_search_test_terminal_response`), `extract_manual_whatsapp_reply_targets` + `format_manual_whatsapp_requester_suffix` (idiom legado), `resolve_download_content_type` (MIME por extensão), `resolve_avatar_filename` (whitelist), helpers de `ACTIVE_CHATS` (`count_active_chats`, `count_unfinished_chats`, `find_expired_chat_ids`, `build_active_chat_meta`, `mark_chat_finished` — sets finished/finished_at/last_event_at em meta), `normalize_source_hint`. | `tests/test_server_helpers.py` (279) |
+| `Scripts/server_helpers.py` | ~910 | `format_wait_seconds`, `queue_status_payload`, `prune_old_attempts`, `count_active_chatgpt_profiles`, `combine_openai_messages`, `build_sender_label`, `wrap_paste_if_python_source` (no-op — marcadores removidos do sistema), `coalesce_origin_url`, `extract_source_hint`, `decode_attachment`, `resolve_chat_url` (com `case_insensitive=False` opcional), `resolve_browser_profile`, `normalize_optional_text`, `build_queue_key`, `build_chat_task_payload`, eventos SSE/NDJSON (`build_error_event`, `build_status_event`, `build_markdown_event`, `build_search_result_event`, `build_search_finish_event`, `build_chat_id_event`, `build_chat_meta_event`), `format_requester_suffix` / `format_origin_suffix`, `compute_python_request_interval`, `safe_int` / `safe_snapshot_stats`, `extract_requester_identity`, helpers de payload de manutenção (`resolve_lookup_origin_url`, `extract_chat_delete_local_targets`, `extract_delete_request_targets`, `extract_menu_url`, `extract_menu_execute_payload`), helpers de `/api/web_search/test` (`extract_web_search_test_params`, `build_web_search_test_task`, `build_web_search_test_stream_response`, `build_web_search_test_error_payload`, `build_web_search_test_timeout_payload`, `build_web_search_test_no_response_payload`, `build_web_search_test_terminal_response`), `extract_manual_whatsapp_reply_targets` + `format_manual_whatsapp_requester_suffix` (idiom legado), `resolve_download_content_type` (MIME por extensão), `resolve_avatar_filename` (whitelist), helpers de `ACTIVE_CHATS` (`count_active_chats`, `count_unfinished_chats`, `find_expired_chat_ids`, `build_active_chat_meta`, `mark_chat_finished` — sets finished/finished_at/last_event_at em meta), `normalize_source_hint`, **`resolve_client_ip`** (pure: FF-header + remote_addr), **`build_chat_block_error_payload`** / **`build_chat_block_success_payload`** (payloads canônicos do modo bloco de chat_completions). | `tests/test_server_helpers.py` (296) |
 | `Scripts/sync_dedup.py` | ~95 | Classe `SyncDedup` (dedup de `/api/sync` na janela 120s, `try_acquire`/`release`/`active_count`/`snapshot`, `now_func` injetável). Constante `DEFAULT_DEDUP_WINDOW_SEC = 120`. | `tests/test_sync_dedup.py` (20) |
-| `Scripts/browser_predicates.py` | ~180 | `extract_task_sender`, `is_known_orphan_tab_url`, `response_looks_incomplete_json`, `response_requests_followup_actions`, `replace_inline_base64_payloads`, `ensure_paste_wrappers`. | `tests/test_browser_predicates.py` (38) |
+| `Scripts/browser_predicates.py` | ~190 | `extract_task_sender`, `is_known_orphan_tab_url`, `response_looks_incomplete_json`, `response_requests_followup_actions`, `replace_inline_base64_payloads`. `ensure_paste_wrappers` mantida como no-op para compatibilidade (marcadores `[INICIO_TEXTO_COLADO]`/`[FIM_TEXTO_COLADO]` removidos do sistema). | `tests/test_browser_predicates.py` (38) |
 | `Scripts/log_sanitizer.py` | ~170 | `mask_api_key`, `mask_bearer_token`, `mask_session_cookie`, `mask_file_path`, `sanitize`, `sanitize_iter`, `sanitize_mapping`. | `tests/test_log_sanitizer.py` (31) |
 | `Scripts/security_state.py` | ~120 | Classe `SecurityState` (rate-limit per-(ip,key), brute-force de login, expiração automática, `now_func` injetável). | `tests/test_security_state.py` (14) |
 | `Scripts/chat_rate_limit_cooldown.py` | ~100 | Classe `ChatRateLimitCooldown` (cooldown global com backoff exponencial 2^strikes, clamp em `max_cooldown_sec`, `now_func` injetável). | `tests/test_chat_rate_limit_cooldown.py` (20) |
@@ -550,6 +553,8 @@ Esperado: **794 passed**. (NÃO usar `python -m pytest tests/` cru — `tests/te
 - `/metrics` (Prometheus) ganha 6 gauges: `simulator_chat_rate_limit_remaining_sec`, `simulator_chat_rate_limit_strikes`, `simulator_security_blocked_ips`, `simulator_security_tracked_login_ips`, `simulator_python_request_throttle_age_sec`, `simulator_web_search_throttle_age_sec`. Atualização centralizada em `_update_rate_limit_prom_gauges()`. Silencioso se `prometheus_client` ausente.
 - Filtro de log werkzeug (`No401AuthLog`) acrescenta sufixo explicativo ao 409 de `/api/sync` (dedup benigno 120s).
 - `api_sync()` emite `[🔄 SYNC] ⚠️ sync_in_progress` com `elapsed` e `retry_after` antes de retornar 409, e inclui `retry_after_seconds` / `elapsed_seconds` no JSON.
+- `browser.emit_log` aplica `log_sanitizer.sanitize` antes de `q.put(...)` — a mensagem que vai para a fila SSE do cliente é sanitizada (API keys, Bearer tokens, caminhos de usuário, session cookies). Import defensivo com fallback `str()`. `file_log("browser.py", ...)` já era sanitizado por `utils.log`.
+- `browser._save_error_html` aplica `log_sanitizer.sanitize` nos 4 pontos de `q.put(...)` inline (success HTML, screenshot fallback, ambos falharam, exceção inesperada). Mascaramento de filepath relevante (`C:\Users\<user>\...`, `/home/<user>/...`).
 
 ### Integrações pendentes (NÃO feitas)
 1. ~~Catálogo em `browser._dismiss_rate_limit_modal_if_any`~~ — **FEITO** (2026-05-02, commit `d8762df`): JS captura `modal.innerText` antes de clicar; log usa `format_reason` com prefixo `[RATE_LIMIT]`; import defensivo com fallback `str()` se módulo ausente.
@@ -592,6 +597,14 @@ Esperado: **794 passed**. (NÃO usar `python -m pytest tests/` cru — `tests/te
 4. Helper público e idempotente no módulo puro (ex.: `format_reason` em `error_catalog.py`) — permite chamada em dois pontos sem risco de duplicação.
 5. Exceções específicas do domínio (ex.: `ChatGPTRateLimitError`) permanecem no arquivo impuro; o módulo puro retorna preview/decisão e o wrapper monta a exceção.
 
+### Integrações desta sessão (2026-05-02 sexquadragies)
+- `server._client_ip` convertida para wrapper 1-liner sobre `_resolve_client_ip_impl` (X-Forwarded-For → primeiro IP da cadeia, fallback remote_addr).
+- Modo bloco de `chat_completions`: 3 sites de `{"success": False, "error": ..., "chat_id": ...}` migrados para `_build_chat_block_error_payload_impl`; payload de sucesso migrado para `_build_chat_block_success_payload_impl`.
+- Inconsistência corrigida: timeout do modo bloco (linha ~1862) agora usa `_mark_chat_finished_impl` em vez de assignment direto (`ACTIVE_CHATS[chat_id]['finished'] = True; finished_at = time.time()`).
+- 4 testes corrigidos para refletir o comportamento no-op de `wrap_paste_if_python_source` e `ensure_paste_wrappers` (marcadores removidos do sistema — `test_python_source_wraps_plain_text` → `test_python_source_returns_unchanged`, `test_already_wrapped_not_double_wrapped` → `test_already_wrapped_strips_markers`, `test_wraps_unmarked_text` → `test_unmarked_text_not_wrapped`, `test_partial_marker_is_wrapped` → `test_partial_marker_not_wrapped`).
+
+---
+
 ### Próximas opções (ordem recomendada por risco crescente)
 
 **1. ~~Extrair `_wait_python_request_interval_if_needed` completo em padrão B~~ (FEITO em 2026-04-26 novendecies, commit `0904fe9`)**
@@ -629,61 +642,58 @@ Esperado: **794 passed**. (NÃO usar `python -m pytest tests/` cru — `tests/te
 
 ```
 Continue o refactor do /home/user/chatGPT_Simulator na branch
-claude/continue-refactor-updates-wvOqd.
+claude/fix-rate-limit-interval-1vPbB.
 Leia APENAS a seção "PONTO DE RETOMADA (última atualização em 2026-05-02
-unquadragies+)" em REFACTOR_PROGRESS.md — é autocontida.
+quinquadragies)" em REFACTOR_PROGRESS.md — é autocontida.
 
-Estado atual: commit `a034d61`.
-Suite offline: **794 passed em 19 arquivos**.
+Estado atual: commit `070a37d`.
+Suite offline: **832 passed em 20 arquivos**.
 
-Concluído nesta sessão:
-- Opção A (busca modularizada — 5º Blueprint): server_busca.py para
-  api_web_search_test; check_auth extraído para auth.py para evitar
-  import circular; ~290 linhas removidas de server.py.
-- Opção B (concorrência por browser_profile — COMPLETA):
-  · profile_concurrency.py: ProfileConcurrencyLimiter puro + 19 testes.
-  · shared.py: singleton profile_concurrency_tracker.
-  · browser.py: round-robin corrigido (tratar "default" como "sem preferência")
-    + asyncio Semaphore por perfil (_guarded wrapper).
-  · server.py: profile_concurrency em /api/metrics.
-- README.md e REFACTOR_PROGRESS.md atualizados.
+Concluído nesta sessão (2026-05-02 sexquadragies):
+- ~~Opção A (auditar chat_completions)~~ FEITA:
+  · resolve_client_ip (pure) + wrappers em _client_ip.
+  · build_chat_block_error_payload + build_chat_block_success_payload
+    em server_helpers; 3 sites de dict literal migrados em chat_completions.
+  · Inconsistência corrigida: timeout bloco agora usa _mark_chat_finished_impl.
+  · 4 testes no-op corrigidos (wrap_paste + ensure_paste_wrappers).
+  · 17 novos testes offline (TestResolveClientIp + TestChatBlockPayloads).
 
-Próximas opções (escolher UMA com aprovação):
+Próximas opções (escolher UMA):
 
-**A. Lote P1: sanitizar logs de browser.py** — integrar log_sanitizer em
-   _save_error_html e outros pontos de log no browser. Risco BAIXO.
-
-**B. Extrair helpers puros de analisador_prontuarios.py** — parsers e
+**A. Extrair helpers puros de analisador_prontuarios.py** — parsers e
    helpers adicionais ainda não cobertos por testes offline. Risco MÉDIO.
 
-**C. Modularização de browser.py por ações** (P2 #22) — requer plano de
+**B. Modularização de browser.py por ações** (P2 #22) — requer plano de
    design; toca async/Playwright. Risco ALTO.
+
+**C. Extração de helpers de api_sync** — `_url_info` / `_cid_info` e
+   normalização inline de campos; baixo valor mas zero risco. Risco BAIXO.
 
 Regras obrigatórias:
 (a) escolher UMA opção e executar do começo ao fim;
-(b) NÃO tocar browser.py/analisador_prontuarios.py sem aprovação explícita;
-(c) manter os 794 testes offline passando + eventuais novos;
-(d) ANTES do commit/push final, ATUALIZAR esta seção com novo commit hash,
+(b) manter os 832 testes offline passando + eventuais novos;
+(c) ANTES do commit/push final, ATUALIZAR esta seção com novo commit hash,
     contagem de testes e próxima opção;
-(e) commit com título em PT-BR no imperativo;
-(f) push para claude/continue-refactor-updates-wvOqd.
+(d) commit com título em PT-BR no imperativo;
+(e) push para claude/fix-rate-limit-interval-1vPbB.
 
-Se encontrar algo inesperado em server.py ou browser.py, PARAR e pedir
-confirmação antes de editar.
+Se browser.py envolver perguntas ao ChatGPT: realistic typing.
+Se for prompt/dados extensos: colagem via clipboard.
 ```
 
 ### Checklist de "antes de terminar a sessão" (rodar sempre)
-- [ ] Suite offline passa: `python -m pytest tests/test_humanizer.py tests/test_shared_queue.py tests/test_selectors_smoke.py tests/test_request_source.py tests/test_error_catalog.py tests/test_server_helpers.py tests/test_browser_predicates.py tests/test_rate_limit_integration.py tests/test_log_sanitizer.py tests/test_analisador_rate_limit.py tests/test_audit_sanitization.py tests/test_security_state.py tests/test_chat_rate_limit_cooldown.py tests/test_analisador_parsers.py tests/test_sync_dedup.py tests/test_python_request_throttle.py tests/test_web_search_throttle.py tests/test_error_scanner_helpers.py` (esperado: **775 passed**).
-- [ ] `python3 -c "import ast; ast.parse(open('Scripts/server.py').read())"` OK.
-- [ ] `python3 -c "import ast; ast.parse(open('Scripts/browser.py').read())"` OK.
-- [ ] `python3 -c "import ast; ast.parse(open('Scripts/analisador_prontuarios.py').read())"` OK.
-- [ ] `python3 -c "import ast; ast.parse(open('Scripts/utils.py').read())"` OK.
-- [ ] `python3 -c "import ast; ast.parse(open('Scripts/error_catalog.py').read())"` OK.
-- [ ] `python3 -c "import ast; ast.parse(open('Scripts/web_search_throttle.py').read())"` OK.
+- [ ] Suite offline passa: `python -m pytest tests/test_humanizer.py tests/test_shared_queue.py tests/test_selectors_smoke.py tests/test_request_source.py tests/test_error_catalog.py tests/test_server_helpers.py tests/test_browser_predicates.py tests/test_rate_limit_integration.py tests/test_log_sanitizer.py tests/test_analisador_rate_limit.py tests/test_audit_sanitization.py tests/test_security_state.py tests/test_chat_rate_limit_cooldown.py tests/test_analisador_parsers.py tests/test_sync_dedup.py tests/test_python_request_throttle.py tests/test_web_search_throttle.py tests/test_error_scanner_helpers.py tests/test_profile_concurrency.py tests/test_browser_log_sanitization.py` (esperado: **832 passed**).
+- [ ] `python -c "import ast; ast.parse(open('Scripts/server.py', encoding='utf-8').read())"` OK.
+- [ ] `python -c "import ast; ast.parse(open('Scripts/browser.py', encoding='utf-8').read())"` OK.
+- [ ] `python -c "import ast; ast.parse(open('Scripts/analisador_prontuarios.py', encoding='utf-8').read())"` OK.
+- [ ] `python -c "import ast; ast.parse(open('Scripts/utils.py', encoding='utf-8').read())"` OK.
+- [ ] `python -c "import ast; ast.parse(open('Scripts/error_catalog.py', encoding='utf-8').read())"` OK.
 - [ ] Seção "PONTO DE RETOMADA" atualizada com commits novos, contagem de testes, próxima opção.
-- [ ] `git status` limpo e último commit pushado para `origin/claude/continue-refactor-updates-wvOqd`.
+- [ ] `git status` limpo e último commit pushado para `origin/claude/fix-rate-limit-interval-1vPbB`.
 
 ### Histórico de sessões (para auditoria — NÃO precisa reler)
+- **2026-05-02 sexquadragies** — branch `claude/fix-rate-limit-interval-1vPbB`, `<COMMIT_HASH>`: Opção A (chat_completions) concluída — `resolve_client_ip` puro + wrapper em `_client_ip`; `build_chat_block_error_payload` / `build_chat_block_success_payload` para 3+1 sites de dict literal em modo bloco; timeout corrigido para usar `_mark_chat_finished_impl`; 4 testes no-op corrigidos. Suite offline: **832 passed em 20 arquivos** (+17 novos).
+- **2026-05-02 quinquadragies** — branch `claude/fix-rate-limit-interval-1vPbB`, `070a37d`: Opção A concluída — import defensivo de `log_sanitizer.sanitize` em `browser.py`; `emit_log` sanitiza antes do `q.put` (cobre todos os callers); `_save_error_html` sanitiza nos 4 pontos inline de `q.put` (HTML salvo, screenshot fallback, ambos falharam, exceção inesperada). `tests/test_browser_log_sanitization.py` (21 casos). Suite offline: **815 passed em 20 arquivos** (+21 novos).
 - **2026-04-22** (sessão original) — `1f3374b`: extração de `request_source.py`.
 - **2026-04-22 bis** — `0c6216e`: replanejamento, DoD refinados, sem código.
 - **2026-04-22 ter** — `3334bf6`: catálogo central de erros (Lote P0 passo 1).
@@ -782,9 +792,10 @@ confirmação antes de editar.
       - `api_errors_claude_fix`: filtro de snippets, dict de body, gerador `_empty_stream` (2 yields) e `proxy` (3 yields) migrados para os helpers.
       `tests/test_error_scanner_helpers.py` cobre todos os 12 helpers com **53 casos** (filtros, mapeamento de campos opcionais, fallback defensivo p/ não-Mapping, idempotência do finish, determinismo do prompt). Suite offline atualizada: **751 passed** em 18 arquivos.
 
-### Próxima opção recomendada (continuar nesta branch ou pedir aprovação para tocar `browser.py`)
-- **Continuar baixo risco**: auditar `chat_completions` (linhas 2150+) e `api_sync` (linhas 1450+) por idioms duplicados ainda não cobertos. Helpers candidatos: builders de payloads de erro/timeout em `chat_completions`, normalização de cabeçalhos `X-Forwarded-*` em `_client_ip`, filtros de query-string em `/api/web_search/test`.
-- **Alto risco (BLOQUEADO)**: Opção D (catálogo em `browser._dismiss_rate_limit_modal_if_any`) e Opção 9 (modularização do `server.py` por domínio Flask Blueprint). Ambas requerem aprovação explícita.
+### Próxima opção recomendada
+- **Continuar baixo risco (próximo recomendado)**: auditar `chat_completions` (linhas ~450+) e `api_sync` por idioms duplicados ainda não cobertos. Helpers candidatos: builders de payloads de erro/timeout/stream em `chat_completions`, normalização de cabeçalhos `X-Forwarded-*` em `_client_ip`.
+- **Médio risco**: Extrair helpers puros de `analisador_prontuarios.py` — parsers adicionais ainda não cobertos por testes offline.
+- **Alto risco (BLOQUEADO)**: Modularização de `browser.py` por ações (P2 #22) — requer plano de design; toca async/Playwright.
 
 - **2026-05-02 (esta sessão, branch `claude/focused-einstein-HT0Xs`) — Lote P2 ciclo seguinte: kwargs canônicos de busca:**
   52. Extraídos 4 helpers em `Scripts/server_helpers.py` para reduzir duplicação no `_handle_browser_search_api.generate()`:
@@ -795,6 +806,17 @@ confirmação antes de editar.
       `server.py` migrou os 3 yields do generator (status prepare, status keepalive, result event) para wrappers finos. Antes: 39 linhas de kwargs literais duplicados; agora: 21 linhas com helpers compostos. `tests/test_server_helpers.py` ganhou 4 classes novas (`TestBuildSearchProgressExtras`, `TestBuildSearchPhaseLabel`, `TestBuildSearchPrepareMessage`, `TestBuildSearchKeepaliveMessage`) + classe `TestSearchHelpersComposedEquivalence` que prova byte-equivalência da composição completa com o JSON literal histórico (3 cenários: prepare, keepalive, result). Suite offline atualizada: **770 passed** em 18 arquivos (+19 novos).
 - **2026-05-02 (esta sessão, branch `claude/focused-einstein-HT0Xs`) — Lote P2 ciclo seguinte: helper de fechamento de stream em `_dispatch_chat_task`:**
   53. Extraído `push_error_and_close_queue(stream_queue, message)` em `Scripts/server_helpers.py` para o idiom canônico `stream_q.put(build_error_event(...)); stream_q.put(None)` que aparece nos 2 handlers de exceção de `_dispatch_chat_task` (TimeoutError e Exception genérica). Helper aceita qualquer objeto com método `.put` (Queue, mock, etc.) e mantém a ordem (erro primeiro, sentinela `None` depois) para garantir que o consumer leia o erro antes de fechar. `server.py` migrou os 2 sites para wrappers finos. `tests/test_server_helpers.py` ganhou classe `TestPushErrorAndCloseQueue` (+5 casos: ordem das mensagens, ducktype `_FakeQ`, unicode, mensagem vazia, retorno `None`). Suite offline atualizada: **775 passed** em 18 arquivos (+5 novos).
+- **2026-05-02 (esta sessão, branch `claude/continue-refactor-updates-wvOqd`) — Remoção do sistema de marcadores de cola:**
+  54. Removidos os marcadores `[INICIO_TEXTO_COLADO]` / `[FIM_TEXTO_COLADO]` de todo o sistema. Arquivos alterados:
+      - `Scripts/browser.py`: `smart_input()` reescrito com `_split_by_questions()` — cola tudo via clipboard por padrão; detecta frases terminadas em `?` e as digita realisticamente; suporta perguntas no meio do texto (cola → digita → cola). `_codex_paste_message()` e `_claude_paste_message()` apenas descartam marcadores legados.
+      - `chat.js.php`: `chatgpt_ensure_text_wrapper()` convertida de wrapper para strip-legado; `formatSQLResultsForLLM()` e `formatSearchResultsForLLM()` usam `USER_SEP = "### PERGUNTA ###"` como único separador; extração de última pergunta (`getLastUserQuestion`, `_extractQ`) baseada exclusivamente em `USER_SEP`.
+      - `Scripts/server_helpers.py`: `wrap_paste_if_python_source()` convertida em strip-legado + pass-through.
+      - `Scripts/browser_predicates.py`: `ensure_paste_wrappers()` convertida em no-op (retorna `(content, False)`).
+      - `Scripts/server.py`: comentário obsoleto sobre encapsulamento removido.
+      - `Scripts/auto_dev_agent.py`: `USE_PASTE_MARKERS`, `PASTE_MARKER_START`, `PASTE_MARKER_END` esvaziados; `_wrap_for_paste()` é no-op.
+      - `Scripts/analisador_prontuarios.py`: marcadores removidos de `SYSTEM_PROMPT`, `buscar_prompt_db()` e 4 strings `user_content`.
+      - `Scripts/acompanhamento_whatsapp.py`: return value sem encapsulamento.
+      - `README.md` e `REFACTOR_PROGRESS.md` atualizados.
 
 
 

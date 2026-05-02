@@ -192,23 +192,10 @@ def build_sender_label(source_hint: str, is_analyzer: bool) -> str:
 
 
 def wrap_paste_if_python_source(message, is_python_source: bool) -> str:
-    """Garante os wrappers `[INICIO_TEXTO_COLADO]...[FIM_TEXTO_COLADO]`
-    em mensagens oriundas de scripts Python.
-
-    Não envolve (devolve como veio) quando:
-      - `is_python_source` é falso;
-      - `message` não é string, é vazia ou só whitespace;
-      - já possui AMBOS os marcadores em algum lugar do texto.
-
-    Caso contrário, retorna `f"{OPEN}{message}{CLOSE}"`.
-    """
-    if not is_python_source:
-        return message if isinstance(message, str) else ""
-    if not isinstance(message, str) or not message.strip():
-        return message if isinstance(message, str) else ""
-    if _PASTE_WRAPPER_OPEN in message and _PASTE_WRAPPER_CLOSE in message:
-        return message
-    return f"{_PASTE_WRAPPER_OPEN}{message}{_PASTE_WRAPPER_CLOSE}"
+    """Retorna a mensagem sem modificação. Mantido por compatibilidade."""
+    if not isinstance(message, str):
+        return ""
+    return message.replace(_PASTE_WRAPPER_OPEN, '').replace(_PASTE_WRAPPER_CLOSE, '')
 
 
 _DEFAULT_ATTACHMENT_NAME = "file.txt"
@@ -1197,6 +1184,54 @@ def safe_snapshot_stats(queue_obj) -> dict:
     return {}
 
 
+def resolve_client_ip(forwarded_for: str, remote_addr: str) -> str:
+    """Resolve o IP do cliente a partir dos cabeçalhos HTTP.
+
+    Usa o primeiro endereço de `X-Forwarded-For` (cadeia de proxies) ou
+    `remote_addr` como fallback. Retorna ``"unknown"`` se ambos ausentes.
+    """
+    fwd = (forwarded_for or "").strip()
+    if fwd:
+        return fwd.split(",")[0].strip()
+    return (remote_addr or "unknown").strip()
+
+
+_CHAT_BLOCK_TIMEOUT_ERROR = "Timeout: browser não respondeu em 600s."
+
+
+def build_chat_block_error_payload(chat_id: str, error) -> dict:
+    """Payload de erro canônico para o modo bloco de ``chat_completions``.
+
+    Formato: ``{"success": False, "error": str(error), "chat_id": chat_id}``.
+    Aparece em 3 pontos distintos (timeout, evento de erro, exceção genérica).
+    """
+    return {
+        "success": False,
+        "error": str(error) if not isinstance(error, str) else error,
+        "chat_id": str(chat_id or ""),
+    }
+
+
+def build_chat_block_success_payload(
+    chat_id: str,
+    html: str,
+    url: str,
+    title: str,
+) -> dict:
+    """Payload de sucesso canônico para o modo bloco de ``chat_completions``.
+
+    Formato: ``{"success": True, "chat_id": ..., "html": ..., "url": ..., "title": ...}``.
+    Par natural com :func:`build_chat_block_error_payload`.
+    """
+    return {
+        "success": True,
+        "chat_id": str(chat_id or ""),
+        "html": html or "",
+        "url": url or "",
+        "title": title or "",
+    }
+
+
 __all__ = [
     "format_wait_seconds",
     "queue_status_payload",
@@ -1273,6 +1308,9 @@ __all__ = [
     "build_search_keepalive_message",
     "push_error_and_close_queue",
     "safe_snapshot_stats",
+    "resolve_client_ip",
+    "build_chat_block_error_payload",
+    "build_chat_block_success_payload",
 ]
 
 

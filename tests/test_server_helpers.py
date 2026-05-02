@@ -273,13 +273,15 @@ class TestWrapPasteIfPythonSource:
         assert sh.wrap_paste_if_python_source("texto qualquer", False) == "texto qualquer"
         assert sh.wrap_paste_if_python_source("", False) == ""
 
-    def test_python_source_wraps_plain_text(self):
+    def test_python_source_returns_unchanged(self):
+        # Após remoção dos marcadores do sistema, a função é no-op.
         out = sh.wrap_paste_if_python_source("analise isto", True)
-        assert out == "[INICIO_TEXTO_COLADO]analise isto[FIM_TEXTO_COLADO]"
+        assert out == "analise isto"
 
-    def test_already_wrapped_not_double_wrapped(self):
+    def test_already_wrapped_strips_markers(self):
+        # Texto com marcadores legados tem os marcadores removidos.
         already = "[INICIO_TEXTO_COLADO]x[FIM_TEXTO_COLADO]"
-        assert sh.wrap_paste_if_python_source(already, True) == already
+        assert sh.wrap_paste_if_python_source(already, True) == "x"
 
     def test_whitespace_only_is_not_wrapped(self):
         assert sh.wrap_paste_if_python_source("", True) == ""
@@ -2271,3 +2273,90 @@ class TestPushErrorAndCloseQueue:
         q = _queue.Queue()
         result = sh.push_error_and_close_queue(q, "x")
         assert result is None
+
+
+# ─────────────────────────────────────────────────────────
+# resolve_client_ip
+# ─────────────────────────────────────────────────────────
+class TestResolveClientIp:
+    def test_forwarded_for_single(self):
+        assert sh.resolve_client_ip("1.2.3.4", "9.9.9.9") == "1.2.3.4"
+
+    def test_forwarded_for_chain_first_wins(self):
+        # Proxies acrescentam ao final — o primeiro é o cliente original.
+        assert sh.resolve_client_ip("1.1.1.1, 2.2.2.2, 3.3.3.3", "0.0.0.0") == "1.1.1.1"
+
+    def test_forwarded_for_whitespace_stripped(self):
+        assert sh.resolve_client_ip("  10.0.0.1  ", "9.9.9.9") == "10.0.0.1"
+
+    def test_empty_forwarded_falls_back_to_remote_addr(self):
+        assert sh.resolve_client_ip("", "5.6.7.8") == "5.6.7.8"
+
+    def test_none_forwarded_falls_back_to_remote_addr(self):
+        assert sh.resolve_client_ip(None, "5.6.7.8") == "5.6.7.8"
+
+    def test_both_absent_returns_unknown(self):
+        assert sh.resolve_client_ip("", "") == "unknown"
+        assert sh.resolve_client_ip(None, None) == "unknown"
+
+    def test_remote_addr_whitespace_stripped(self):
+        assert sh.resolve_client_ip("", "  192.168.1.1  ") == "192.168.1.1"
+
+
+# ─────────────────────────────────────────────────────────
+# build_chat_block_error_payload / build_chat_block_success_payload
+# ─────────────────────────────────────────────────────────
+class TestChatBlockPayloads:
+    # --- error payload ---
+    def test_error_basic_shape(self):
+        p = sh.build_chat_block_error_payload("abc-123", "algo deu errado")
+        assert p == {"success": False, "error": "algo deu errado", "chat_id": "abc-123"}
+
+    def test_error_success_is_false(self):
+        p = sh.build_chat_block_error_payload("x", "err")
+        assert p["success"] is False
+
+    def test_error_converts_exception_to_str(self):
+        exc = ValueError("falha interna")
+        p = sh.build_chat_block_error_payload("id1", exc)
+        assert isinstance(p["error"], str)
+        assert "falha interna" in p["error"]
+
+    def test_error_timeout_message(self):
+        p = sh.build_chat_block_error_payload("t1", sh._CHAT_BLOCK_TIMEOUT_ERROR)
+        assert "600s" in p["error"]
+
+    def test_error_none_chat_id_coerced(self):
+        p = sh.build_chat_block_error_payload(None, "e")
+        assert p["chat_id"] == ""
+
+    def test_error_preserves_empty_error_string(self):
+        p = sh.build_chat_block_error_payload("id", "")
+        assert p["error"] == ""
+
+    # --- success payload ---
+    def test_success_basic_shape(self):
+        p = sh.build_chat_block_success_payload("id2", "<b>oi</b>", "https://chat.com", "Meu Chat")
+        assert p == {
+            "success": True,
+            "chat_id": "id2",
+            "html": "<b>oi</b>",
+            "url": "https://chat.com",
+            "title": "Meu Chat",
+        }
+
+    def test_success_is_true(self):
+        p = sh.build_chat_block_success_payload("x", "", "", "")
+        assert p["success"] is True
+
+    def test_success_none_fields_coerced_to_empty_string(self):
+        p = sh.build_chat_block_success_payload(None, None, None, None)
+        assert p["chat_id"] == ""
+        assert p["html"] == ""
+        assert p["url"] == ""
+        assert p["title"] == ""
+
+    def test_error_and_success_never_share_success_value(self):
+        err = sh.build_chat_block_error_payload("id", "err")
+        ok = sh.build_chat_block_success_payload("id", "h", "u", "t")
+        assert err["success"] is not ok["success"]

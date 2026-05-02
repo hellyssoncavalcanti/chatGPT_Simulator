@@ -152,11 +152,11 @@ class TestReplaceInlineBase64Payloads:
 
 
 class TestEnsurePasteWrappers:
-    def test_wraps_unmarked_text(self):
+    def test_unmarked_text_not_wrapped(self):
+        # Após remoção dos marcadores do sistema, ensure_paste_wrappers é no-op.
         out, wrapped = bp.ensure_paste_wrappers("hello")
-        assert wrapped is True
-        assert out.startswith(bp.PASTE_START_MARKER)
-        assert out.endswith(bp.PASTE_END_MARKER)
+        assert wrapped is False
+        assert out == "hello"
 
     def test_already_wrapped_untouched(self):
         already = f"{bp.PASTE_START_MARKER}x{bp.PASTE_END_MARKER}"
@@ -175,11 +175,11 @@ class TestEnsurePasteWrappers:
         assert wrapped is False
         assert out == ""
 
-    def test_partial_marker_is_wrapped(self):
-        # Apenas o marcador de início não conta como "já envolvido".
+    def test_partial_marker_not_wrapped(self):
+        # Após remoção dos marcadores, texto com marcador parcial passa sem modificação.
         out, wrapped = bp.ensure_paste_wrappers(f"{bp.PASTE_START_MARKER}abc")
-        assert wrapped is True
-        assert out.count(bp.PASTE_START_MARKER) == 2
+        assert wrapped is False
+        assert bp.PASTE_START_MARKER in out
 
     def test_preserves_unicode(self):
         out, _ = bp.ensure_paste_wrappers("olá 😀")
