@@ -1067,20 +1067,10 @@ def serve_download(file_id):
 
     # Decodifica dados base64 e envia ao cliente
     raw_bytes = base64.b64decode(result_data["data_b64"])
-    content_type = result_data.get("content_type", "application/octet-stream")
     display_name = result_data.get("name", file_name)
-
-    # Extensão → mime fallback
-    ext = os.path.splitext(display_name)[1].lower().lstrip('.')
-    mime_map = {
-        'xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-        'xls': 'application/vnd.ms-excel', 'csv': 'text/csv',
-        'pdf': 'application/pdf', 'png': 'image/png',
-        'jpg': 'image/jpeg', 'jpeg': 'image/jpeg',
-        'zip': 'application/zip', 'json': 'application/json',
-    }
-    if content_type == 'application/octet-stream' and ext in mime_map:
-        content_type = mime_map[ext]
+    content_type = _resolve_download_content_type_impl(
+        result_data.get("content_type"), display_name
+    )
 
     resp = make_response(raw_bytes)
     resp.headers['Content-Type'] = content_type

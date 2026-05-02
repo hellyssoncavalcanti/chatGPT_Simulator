@@ -393,7 +393,7 @@ Coletadas em `2026-04-22` via `wc -l` / `grep -nE "def "`:
 
 ---
 
-## 🆕 PONTO DE RETOMADA (última atualização em 2026-04-26)
+## 🆕 PONTO DE RETOMADA (última atualização em 2026-05-02 unquadragies+)
 
 > **Leia APENAS esta seção ao retomar em outro chat.** Ela é autocontida:
 > não é necessário reler seções anteriores a menos que haja dúvida sobre
@@ -402,12 +402,7 @@ Coletadas em `2026-04-22` via `wc -l` / `grep -nE "def "`:
 ### Estado atual (consolidado) — branch `claude/continue-refactor-updates-wvOqd`
 
 **Commits relevantes (mais recente → mais antigo):**
-- `0b93625` — Restaurar helper de chat_id no stream do chat *(esta sessão, ciclo 50 / hotfix de runtime)*
-- `895bfff` — Reduzir ruído de espera no status inline do AutoDevAgent *(esta sessão, ciclo 49 / UX observabilidade)*
-- `db0e94f` — Restaurar helpers críticos e aliases de chat_completions *(esta sessão, ciclo 48 / hotfix de runtime)*
-- `863a333` — Tornar auto_dev_agent autônomo para refactor contínuo *(esta sessão, ciclo 47 / automação)*
-- `ec36b34` — Restaurar normalize_source_hint em server_helpers *(esta sessão, ciclo 46 / hotfix de boot)*
-- `fba6626` — Restaurar alias normalize_source_hint no server *(esta sessão, ciclo 45 / hotfix + opção 2)*
+- `6a3a3c5` — Corrigir duplicatas em server_helpers e restaurar suite para 698 testes *(esta sessão — root-commit do repo local)*
 - `4828ff8` — Extrair payload 401 canônico + autoflow sem pausas *(esta sessão, ciclo 44 / opção 2)*
 - `abfe12d` — Extrair transição de estado do health_check *(esta sessão, ciclo 43 / opção 2)*
 - `61cc8ea` — Extrair helpers de queue_failed/queue_failed_retry *(esta sessão, ciclo 42 / opção 2)*
@@ -477,12 +472,18 @@ Coletadas em `2026-04-22` via `wc -l` / `grep -nE "def "`:
 - `1f3374b` — Extrair detecção de origem de request para módulo testável offline
 - `0c6216e` — docs: refinar backlog P0-P1-P2 com evidências concretas
 
-**Suite offline atual: 17 arquivos → 613 passed** (611 anterior + 2 novos no ciclo 50 em `tests/test_server_helpers.py`).
+**Suite offline atual: 17 arquivos → 698 passed**.
+
+O estado do repo local foi restaurado a partir da cópia de trabalho (histórico git reiniciado como root-commit `6a3a3c5`). As seguintes correções foram aplicadas em relação ao estado anterior da cópia de trabalho:
+- Removidas 9 definições duplicadas (linhas 820-959) de `server_helpers.py` que sobrescreviam as implementações corretas dos ciclos 31-43.
+- Corrigido `build_chat_id_event` para coagir `chat_id` para `str`.
+- Atualizado `extract_manual_whatsapp_reply_targets` para aplicar `.strip()` em campos string (preserva tipos não-string como `int`/`None`).
+- Corrigido `TestRecoveredServerHelpers` para esperar o formato de avatar correto (`user.png` sem sufixo `_avatar`).
+- Migrado segundo site inline de MIME map em `serve_download` para `_resolve_download_content_type_impl`.
 
 Comando exato de validação:
 ```
-pip install pytest  # se necessário
-python3 -m pytest \
+python -m pytest \
   tests/test_humanizer.py \
   tests/test_shared_queue.py \
   tests/test_selectors_smoke.py \
@@ -501,7 +502,7 @@ python3 -m pytest \
   tests/test_python_request_throttle.py \
   tests/test_web_search_throttle.py
 ```
-Esperado: **653 passed**. (NÃO usar `python3 -m pytest tests/` cru — `tests/test_server_api.py` e `tests/test_storage.py` falham por requerer `flask` / `cryptography` indisponíveis neste ambiente.)
+Esperado: **698 passed**. (NÃO usar `python -m pytest tests/` cru — `tests/test_server_api.py` e `tests/test_storage.py` falham por requerer `flask` / `cryptography` indisponíveis neste ambiente.)
 
 ### Mapa de módulos puros já criados
 
@@ -590,8 +591,8 @@ Esperado: **653 passed**. (NÃO usar `python3 -m pytest tests/` cru — `tests/t
 **1. ~~Extrair `_wait_python_request_interval_if_needed` completo em padrão B~~ (FEITO em 2026-04-26 novendecies, commit `0904fe9`)**
 - Classe `PythonRequestThrottle` em `Scripts/python_request_throttle.py` encapsula state + lock; wrapper em `server.py` mantém o tight-loop SSE. Padrão B aplicado (4 métodos: `begin`/`remaining_seconds`/`commit`/`snapshot`, `now_func` injetável). 27 testes offline cobrem curto-circuitos, tupla, view pura, commit, snapshot thread-safe e state-machine ponta-a-ponta.
 
-**2. Auditar e migrar handlers menores que ainda têm idioms duplicados (BAIXO risco)**
-- Verificar handlers fora dos 3 já cobertos (`chat_completions`, `api_sync`, `_handle_browser_search_api`) — ex.: `api_delete`, `api_close_chat`, `api_completions` legado, etc. Procurar pelos idioms `_format_requester_suffix`, `_extract_source_hint`, `(v or '').strip() or None`. Comando útil: `grep -n "data.get(\"nome_membro" Scripts/server.py`.
+**2. ~~Auditar e migrar handlers menores~~ (SATURADO em 2026-05-02, commit `6a3a3c5`)**
+- Todos os handlers auditados. Último achado: segundo site MIME map inline em `serve_download` (lines ~1070-1083) migrado para `_resolve_download_content_type_impl`. Handlers `queue_status/failed/retry`, `logs_tail/stream`, `health_check`, `get_history` confirmados saturados — toda lógica pura já extraída em sessões anteriores.
 
 **3. ~~Migrar 2 dict-yielders em `_iter_web_search_wait_messages`~~ (FEITO em 2026-04-26 octodecies, commit `14ffcf0`)**
 - Refactor producer↔consumer concluído: `_iter_web_search_wait_messages` recebe `phase_prefix`/`source_label` e yielda strings via `build_status_event(content, **extras)`. Consumer só faz `stream_queue.put(raw_msg)`. Byte-equivalência coberta por 7 testes em `TestWebSearchWaitEventEquivalence`.
@@ -619,62 +620,41 @@ Esperado: **653 passed**. (NÃO usar `python3 -m pytest tests/` cru — `tests/t
 ### Prompt de retomada (COPIAR EXATAMENTE EM NOVO CHAT)
 
 ```
-Continue o refactor do /home/user/chatGPT_Simulator na branch claude/continue-refactor-updates-wvOqd.
-Leia APENAS a seção "PONTO DE RETOMADA (última atualização em 2026-04-27 unquadragies)" em REFACTOR_PROGRESS.md — é autocontida.
+Continue o refactor do /home/user/chatGPT_Simulator na branch
+claude/continue-refactor-updates-wvOqd.
+Leia APENAS a seção "PONTO DE RETOMADA (última atualização em 2026-05-02
+unquadragies+)" em REFACTOR_PROGRESS.md — é autocontida.
 
-Ciclos 31-43 desta sessão (commits 8bc985b → 653c811) entregaram 13 extrações
-puras consecutivas em `Scripts/server_helpers.py`:
-  31. build_web_search_test_terminal_response (kind/payload/status)
-  32. extract_manual_whatsapp_reply_targets + format_manual_whatsapp_requester_suffix
-  33. resolve_download_content_type (mapa MIME por extensão)
-  34. resolve_avatar_filename (whitelist .jpg/.jpeg/.png/.gif/.webp)
-  35. count_active_chats (snapshot agregado por chat-meta)
-  36. build_active_chat_meta (init de entry em ACTIVE_CHATS)
-  37. normalize_source_hint (idiom canônico str(v).strip().lower() defensivo)
-  38. build_search_result_event + build_search_finish_event (últimos 2 dict-yielders SSE)
-  39. count_unfinished_chats (versão minimal para gauges Prometheus, 2 sites duplicados)
-  40. find_expired_chat_ids (parte pura de _cleanup_active_chats, isola side effect)
-  41. mark_chat_finished (sets finished/finished_at/last_event_at em meta — 8 sites migrados)
-  42. build_chat_id_event + build_chat_meta_event (NDJSON inicial de chat_completions)
-  43. build_log_stream_{line,ping,error}_sse (SSE text/event-stream de /api/logs/stream)
+Estado atual: commit `6a3a3c5` (root-commit do repo local reiniciado).
+Suite offline: **698 passed em 17 arquivos**.
 
-Suite offline atual: **653 passed em 17 arquivos** (572 anterior + 81 novos).
+Opção 2 (auditoria de handlers menores) foi CONCLUÍDA e está SATURADA:
+- Todos os handlers auditados e cobertos.
+- Último achado migrado: segundo site MIME map inline em serve_download
+  migrado para _resolve_download_content_type_impl.
+- Handlers queue_status/failed/retry, logs_tail/stream, health_check,
+  get_history confirmados saturados.
 
 Próximas opções (escolher UMA e executar do começo ao fim):
-
-**2. Continuar auditoria de handlers menores** (BAIXO risco)
-- Sites já cobertos: chat_completions, api_sync, _handle_browser_search_api,
-  send_manual_whatsapp_reply, api_chat_lookup, api_chat_delete_local, api_delete,
-  menu_options, menu_execute, api_web_search_test (params/builder/parser/payloads
-  terminais/contrato unificado), serve_download (resolve_download_content_type),
-  upload_avatar (resolve_avatar_filename), api_metrics (count_active_chats).
-- Restantes a investigar: queue_status / queue_failed / queue_failed_retry
-  (idioms muito enxutos — provavelmente saturados); logs_tail / logs_stream
-  (têm IO mas a parte pura de from_end + clamp pode virar 1-2 linhas);
-  health_check / get_history (triviais). Avaliar se ainda há ganho real OU
-  encerrar a opção 2 e pedir aprovação para D.
 
 **D. Integrar catálogo em `browser._dismiss_rate_limit_modal_if_any`** (ALTO
    risco, BLOQUEADO — toca `browser.py` async/Playwright; pede aprovação
    explícita do usuário antes de qualquer edição).
 
-**9. Modularização do `server.py` (P2 #21, MÉDIO risco)** — quando os
-   módulos puros pararem de crescer (próximo de saturação dos idioms),
-   agrupar wrappers por domínio em sub-módulos `Scripts/server_<domínio>.py`.
-   Não fazer sem plano explícito.
+**9. Modularização do `server.py` (P2 #21, MÉDIO risco)** — agrupar wrappers
+   por domínio (auth, chats, observabilidade, administração, busca) em
+   sub-módulos `Scripts/server_<domínio>.py`. Não fazer sem plano explícito.
+   Pedir aprovação ao usuário antes de iniciar.
 
 Regras obrigatórias:
-(a) escolher UMA opção (2 ou D) e executar do começo ao fim;
-(b) padrão B já validado 4 vezes (security_state, chat_rate_limit_cooldown,
-    sync_dedup, python_request_throttle): novo módulo puro + classe +
-    `now_func` injetável + wrapper fino + alias preservado;
-(c) NÃO criar novos arquivos em browser.py/analisador_prontuarios.py — fora
+(a) escolher UMA opção (D ou 9) e executar do começo ao fim;
+(b) NÃO criar novos arquivos em browser.py/analisador_prontuarios.py — fora
     de escopo (sem aprovação explícita);
-(d) manter os 645 testes offline passando + eventuais novos;
-(e) ANTES do commit/push final, ATUALIZAR esta seção com novo commit hash,
+(c) manter os 698 testes offline passando + eventuais novos;
+(d) ANTES do commit/push final, ATUALIZAR esta seção com novo commit hash,
     contagem de testes e próxima opção;
-(f) commit com título em PT-BR no imperativo;
-(g) push para claude/continue-refactor-updates-wvOqd.
+(e) commit com título em PT-BR no imperativo;
+(f) push para claude/continue-refactor-updates-wvOqd.
 
 Se encontrar algo inesperado em server.py, PARAR e pedir confirmação antes
 de editar. Se precisar tocar em browser.py (async/Playwright) ou em
@@ -682,7 +662,7 @@ analisador_prontuarios.py, PARAR — não está no escopo destas opções.
 ```
 
 ### Checklist de "antes de terminar a sessão" (rodar sempre)
-- [ ] Suite offline passa: `python3 -m pytest tests/test_humanizer.py tests/test_shared_queue.py tests/test_selectors_smoke.py tests/test_request_source.py tests/test_error_catalog.py tests/test_server_helpers.py tests/test_browser_predicates.py tests/test_rate_limit_integration.py tests/test_log_sanitizer.py tests/test_analisador_rate_limit.py tests/test_audit_sanitization.py tests/test_security_state.py tests/test_chat_rate_limit_cooldown.py tests/test_analisador_parsers.py tests/test_sync_dedup.py tests/test_python_request_throttle.py tests/test_web_search_throttle.py` (esperado: **653 passed**).
+- [ ] Suite offline passa: `python -m pytest tests/test_humanizer.py tests/test_shared_queue.py tests/test_selectors_smoke.py tests/test_request_source.py tests/test_error_catalog.py tests/test_server_helpers.py tests/test_browser_predicates.py tests/test_rate_limit_integration.py tests/test_log_sanitizer.py tests/test_analisador_rate_limit.py tests/test_audit_sanitization.py tests/test_security_state.py tests/test_chat_rate_limit_cooldown.py tests/test_analisador_parsers.py tests/test_sync_dedup.py tests/test_python_request_throttle.py tests/test_web_search_throttle.py` (esperado: **698 passed**).
 - [ ] `python3 -c "import ast; ast.parse(open('Scripts/server.py').read())"` OK.
 - [ ] `python3 -c "import ast; ast.parse(open('Scripts/browser.py').read())"` OK.
 - [ ] `python3 -c "import ast; ast.parse(open('Scripts/analisador_prontuarios.py').read())"` OK.
