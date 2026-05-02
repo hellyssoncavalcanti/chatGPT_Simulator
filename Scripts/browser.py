@@ -73,6 +73,9 @@ MAX_TABS = 5
 tab_semaphore = asyncio.Semaphore(MAX_TABS)
 
 SCREENSHOT_STREAM_INTERVAL_SEC = 2.0
+
+# Regex para links markdown: [texto](https://...)
+_MARKDOWN_LINK_RE = re.compile(r'\[([^\]]+)\]\((https?://[^\s)]+)\)')
 SCREENSHOT_STREAM_JPEG_QUALITY = 45
 SCREENSHOT_STREAM_MAX_BYTES = 300_000
 SCREENSHOT_STREAM_LOG_MIN_DELTA_KB = 3.0
@@ -1442,6 +1445,12 @@ async def _read_last_assistant_snapshot(page):
                             }
                         }
                     }
+                    // Strategy 3: window._chatgpt_link_map (from /backend-api/conversation/ JSON)
+                    if (!href || href === '' || href === location.href) {
+                        const lm = window._chatgpt_link_map || {};
+                        const txt = (a.innerText || a.textContent || '').replace(/\\s+/g, ' ').trim();
+                        if (txt && lm[txt]) href = lm[txt];
+                    }
                     if (href && href !== '' && href !== location.href && !href.startsWith('javascript:')) {
                         ca.setAttribute('href', href);
                     }
@@ -1511,6 +1520,12 @@ async def _read_assistant_snapshot_after_baseline(page, baseline_count: int):
                                 fiber = fiber.return; depth++;
                             }
                         }
+                    }
+                    // Strategy 3: window._chatgpt_link_map (from /backend-api/conversation/ JSON)
+                    if (!href || href === '' || href === location.href) {
+                        const lm = window._chatgpt_link_map || {};
+                        const txt = (a.innerText || a.textContent || '').replace(/\\s+/g, ' ').trim();
+                        if (txt && lm[txt]) href = lm[txt];
                     }
                     if (href && href !== '' && href !== location.href && !href.startsWith('javascript:')) {
                         ca.setAttribute('href', href);
@@ -1786,6 +1801,7 @@ def _install_conversation_file_capture(page, q=None):
     """
     try:
         page._captured_files = []
+        page._captured_links = {}   # {link_text: url} extraído do JSON da conversa
         seen_ids = set()
 
         def _maybe_add(file_id: str, name: str, url: str = "", message_id: str = ""):
@@ -1853,6 +1869,14 @@ def _install_conversation_file_capture(page, q=None):
                                             url="",
                                             message_id=str(msg.get("id") or "")
                                         )
+                                # Extrai links markdown [texto](url) de mensagens do assistant
+                                elif isinstance(part, str):
+                                    role = (msg.get("author") or {}).get("role", "")
+                                    if role == "assistant":
+                                        for txt, lnk in _MARKDOWN_LINK_RE.findall(part):
+                                            txt = txt.strip()
+                                            if txt and lnk:
+                                                page._captured_links[txt] = lnk
                 # Caso 2: GET /backend-api/files/<id>/download → JSON com {download_url, file_name}
                 elif "/backend-api/files/" in url and "/download" in url:
                     try:
@@ -1896,6 +1920,22 @@ def _install_conversation_file_capture(page, q=None):
         page.on("response", lambda resp: asyncio.create_task(_on_response(resp)))
     except Exception as e:
         emit_log(q, f"⚠️ Falha ao instalar captura de conversa: {e}")
+
+
+async def _inject_link_map_to_page(page) -> None:
+    """
+    Injeta window._chatgpt_link_map na página com os links markdown capturados
+    da API (/backend-api/conversation/), para uso por resolveAnchors() como
+    Strategy 3 (fallback quando a.href e React fiber não têm a URL).
+    """
+    link_map = getattr(page, '_captured_links', {})
+    if not link_map:
+        return
+    try:
+        import json as _json
+        await page.evaluate(f"window._chatgpt_link_map = {_json.dumps(link_map, ensure_ascii=False)}")
+    except Exception:
+        pass
 
 
 async def _register_captured_files(page, q=None):
@@ -2299,6 +2339,12 @@ async def scrape_full_chat(page):
                             }
                         }
                     }
+                    // Strategy 3: window._chatgpt_link_map (from /backend-api/conversation/ JSON)
+                    if (!href || href === '' || href === location.href) {
+                        const lm = window._chatgpt_link_map || {};
+                        const txt = (a.innerText || a.textContent || '').replace(/\\s+/g, ' ').trim();
+                        if (txt && lm[txt]) href = lm[txt];
+                    }
                     if (href && href !== '' && href !== location.href && !href.startsWith('javascript:')) {
                         ca.setAttribute('href', href);
                     }
@@ -2687,6 +2733,9 @@ async def handle_sync_task(context, task):
         await page.evaluate(JS_SCROLL)
         await asyncio.sleep(1)
 
+        # Injeta o mapa de links capturado da API antes de scrapar o DOM
+        await _inject_link_map_to_page(page)
+
         # Scrape principal
         msgs = await scrape_full_chat(page)
 
@@ -2745,6 +2794,12 @@ async def handle_sync_task(context, task):
                                         fiber = fiber.return; depth++;
                                     }
                                 }
+                            }
+                            // Strategy 3: window._chatgpt_link_map (from /backend-api/conversation/ JSON)
+                            if (!href || href === '' || href === location.href) {
+                                const lm = window._chatgpt_link_map || {};
+                                const txt = (a.innerText || a.textContent || '').replace(/\\s+/g, ' ').trim();
+                                if (txt && lm[txt]) href = lm[txt];
                             }
                             if (href && href !== '' && href !== location.href && !href.startsWith('javascript:')) {
                                 ca.setAttribute('href', href);
@@ -5100,6 +5155,9 @@ async def handle_chat_task_inner(task, page, q, stop_event: asyncio.Event, activ
         raise RuntimeError('Watchdog sinalizou falha após carregamento da página.')
 
     await _clear_input(page, q)
+
+    # Injeta mapa de links do histórico antes de capturar baseline
+    await _inject_link_map_to_page(page)
 
     # Baseline da última resposta já existente no chat ANTES de enviar a nova pergunta.
     # Isso evita vazar resposta antiga (ex.: pergunta manual do desenvolvedor) como se
